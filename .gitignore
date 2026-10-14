@@ -1,0 +1,29 @@
+# Google Drive / Windows
+desktop.ini
+.tmp.drivedownload/
+.tmp.driveupload/
+Icon?
+Thumbs.db
+ehthumbs.db
+$RECYCLE.BIN/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Maya
+*.swatches
+incrementalSave/
+*.mayaSwatches
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Test output
+tests/_out/
