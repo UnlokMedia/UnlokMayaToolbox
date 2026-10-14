@@ -263,6 +263,45 @@ def main():
     cmds.viewLookAt("persp", position=(0, 4.5, 0))
     snap("08_thatch_back.png")
 
+    # --- Smart UDIM panel: pick root, scan, edit, pre-process
+    cmds.file(new=True, force=True)
+    window = getattr(__main__, ns["REGISTRY_KEY"])["window"]
+    udim = [p for p in window.panels() if p.TOOL_NAME == "Smart UDIM"][0]
+    window.tabs.setCurrentIndex([window.tabs.tabText(i) for i in range(window.tabs.count())].index("UV"))
+    house = cmds.group(empty=True, name="house_GRP")
+    for wing in ("westWing_GRP", "eastWing_GRP"):
+        grp = cmds.group(empty=True, name=wing, parent=house)
+        for i, nm in enumerate(("woodGreen_C_beam%04d_GEP", "glassClear_F_window%04d_GEP", "brickRed_B_wall%04d_GES")):
+            node = cmds.polyCube(name=nm % (i + 1))[0]
+            cmds.parent(node, grp)
+    bad = cmds.parent(cmds.polyCylinder(name="pipe_final", sx=8, sc=0)[0], house)[0]
+    cmds.select(house)
+    udim.pick_root()
+    udim.from_groups.setValue(True)
+    udim.scan()
+    pump()
+    sections = [udim.tree.topLevelItem(i).text(0) for i in range(udim.tree.topLevelItemCount())]
+    check("Smart UDIM scan fills the tree", sorted(sections) == ["eastWing", "house", "westWing"],
+          "%s | %s" % (sections, udim.status.text()))
+    first = udim.tree.topLevelItem(0)
+    mat_item = first.child(0)
+    mat_item.setText(udim.COL_TD, "150")
+    pump()
+    udim.refresh()
+    tds = [udim.tree.topLevelItem(0).child(i).text(udim.COL_TD) for i in range(udim.tree.topLevelItem(0).childCount())]
+    check("editing TD % in the tree renames the set", "150" in tds, str(tds))
+    listed = {udim.naming_list.topLevelItem(i).text(0): udim.naming_list.topLevelItem(i).text(1)
+              for i in range(udim.naming_list.topLevelItemCount())}
+    check("naming hand-off lists the bad name (and soft issues like glassClear)",
+          "pipe_final" in listed and "suffix" in listed["pipe_final"]
+          and all("glassClear" in k for k in listed if k != "pipe_final"), str(listed))
+    udim.run_preprocess()
+    cats = [udim.report_tree.topLevelItem(i).text(0) for i in range(udim.report_tree.topLevelItemCount())]
+    check("pre-process report shows n-gons", any("N-gons" in c for c in cats), "%s | %s" % (cats, udim.status.text()))
+    udim.naming_section.header.setChecked(True)
+    pump()
+    window.grab().save(os.path.join(OUT, "09_smart_udim_panel.png"))
+
     # --- re-paste replaces the window cleanly
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), {"__name__": "__main__", "__file__": TOOLBOX})

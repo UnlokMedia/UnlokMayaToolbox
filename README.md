@@ -84,6 +84,40 @@ eave) is ignored automatically.
 - Live tweaks don't fill your undo queue. **Bake cannot be undone with
   Ctrl+Z**: delete the baked group instead, or tick *Keep live system* first.
 
+### UV > Smart UDIM (in progress)
+
+Organises an asset for UDIM layout by **section** (one band of UDIM rows,
+e.g. west wing / east wing) and **material group**, at consistent texel
+density. The actual layout is still being built; see
+[docs/smart-udim-plan.md](docs/smart-udim-plan.md). Available now:
+
+1. **Pick the root:** select the asset's top group (e.g. `house_GRP`) and
+   press **Use Selected Group**.
+2. **Scan:** sorts every mesh into sections and material groups.
+   - **Material groups:** come from the UnlokRenamer naming
+     (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). Meshes whose names
+     don't follow it fall back to their assigned Maya material, per face.
+   - **Sections:** tick *New sections from top-level groups* to make each
+     child group (e.g. `westWing_GRP`) its own section.
+   - **Re-scanning:** only sorts new meshes; existing groups are kept.
+3. **Edit:** use the tree, or the sets themselves.
+   - **Groups are plain Maya sets:** `house_smartUDIM_SET` contains
+     `westWing_UDS`, which contains `td100_woodGreen`. Rename a set to
+     `td150_woodGreen` to give it 150% texel density, or add `_stack` to
+     stack identical shells. You can make sets by hand too.
+   - **In the tree:** double-click **TD %** to edit it, tick **Stack**,
+     **Assign Selection** to move meshes or faces between groups, **New
+     Group / New Section**, and **Move Up / Down** to set the section order.
+4. **Naming issues:** lists meshes whose names break the convention, so you
+   can fix them in UnlokRenamer and re-scan.
+5. **Pre-process:**
+   - **Fixes:** lamina faces, non-manifold geometry and zero-area faces.
+   - **Warns:** about n-gons (they're left alone) and flipped UV faces.
+   - **Lists for skipping:** meshes with missing UVs, faces without UVs, and
+     instanced meshes.
+
+Every Smart UDIM action is a single Ctrl+Z.
+
 ## How it stays fast
 
 The live preview is a single `instancer` node whose point data is written
@@ -97,6 +131,11 @@ created when you bake.
 - `tests/test_toolbox.py`: headless engine and bake tests:
   ```bash
   "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_toolbox.py
+  ```
+- `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
+  assignment, pre-process, undo):
+  ```bash
+  "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_smart_udim.py
   ```
 - `tests/gui_smoke.py`: runs inside a real Maya session (opens the window,
   draws strokes through the viewport, saves screenshots to `tests/_out`).

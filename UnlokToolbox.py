@@ -13,16 +13,22 @@ Modeling
     Path Scatter  - draw a path on any surface and scatter / array objects
                     along it (presets or your own meshes), with rows, stagger,
                     randomness and bake to instances, copies or one mesh.
+UV
+    Smart UDIM    - sort an asset into UDIM sections and material groups
+                    (plain Maya sets, UnlokRenamer naming), clean geometry
+                    and report UV problems before layout.
 """
 
 import functools
 import json
 import math
 import random
+import re
 import time
 import traceback
 
 import maya.cmds as cmds
+import maya.mel as mel
 import maya.api.OpenMaya as om
 import maya.api.OpenMayaUI as omui
 import maya.OpenMaya as om1
@@ -2348,12 +2354,1464 @@ class PathScatterPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Smart UDIM - naming (UnlokRenamer convention)
+# =============================================================================
+# Copied from UnlokRenamer (src/unlok_renamer/ui.py) so this file stays
+# self-contained. Keep these lists and helpers in sync with UnlokRenamer.
+
+UR_MATERIALS = [
+    "stone", "brick", "plastic", "metal", "wood", "bone", "paint",
+    "rock", "skin", "scales", "grass", "glass", "fabric", "rubber",
+    "leather", "ceramic", "concrete", "default"
+]
+
+UR_COLORS = [
+    "Default", "Red", "Blue", "Green", "Yellow", "White", "Black",
+    "Grey", "Gray", "Cream", "Pink", "Brown", "Orange", "Purple",
+    "Tan", "Beige", "Gold", "Silver"
+]
+
+UR_SUFFIXES = [
+    "GES", "GEP", "PLY",
+    "GED", "GEV", "GEN", "GEC",
+    "NRB", "CRV", "BLS", "GEO",
+    "GRP"
+]
+
+
+def ur_split_material_color(material_color):
+    """'paintGrey' -> ('paint', 'Grey'); (None, None) if unparseable."""
+    for color in sorted(UR_COLORS, key=len, reverse=True):
+        if material_color.endswith(color):
+            material = material_color[:-len(color)]
+            if material:
+                return material, color
+    return None, None
+
+
+def ur_base_suffix_of(token):
+    """'GEP' -> ('GEP', ''), 'GEP1' -> ('GEP', '1'), unknown -> (None, '')."""
+    match = re.match(r'^([A-Za-z]+)(\d*)$', token)
+    if match and match.group(1) in UR_SUFFIXES:
+        return match.group(1), match.group(2)
+    return None, ''
+
+
+def material_key_from_name(name):
+    """Material key from a convention name, plus any naming issue.
+
+    'woodGreen_C_beam0001_GEP' -> ('woodGreen', None)
+    'steelRusty_C_beam_GEP'    -> ('steelRusty', "unrecognised material/colour 'steelRusty'")
+    'pCube1'                   -> (None, 'no recognised suffix (GES, GEP, ...)')
+
+    A key with an issue is still used for grouping; a None key means the
+    name can't be used, so the caller falls back to shaders.
+    """
+    short = name.split("|")[-1].split(":")[-1]
+    parts = short.split("_")
+    if len(parts) < 2:
+        return None, "no recognised suffix (GES, GEP, ...)"
+    base, digits = ur_base_suffix_of(parts[-1])
+    if base is None:
+        return None, "no recognised suffix (GES, GEP, ...)"
+    if len(parts) < 3:
+        return None, "missing parts (expected material_pos_desc_SUFFIX)"
+    token = parts[0]
+    if not re.match(r'^[a-z][A-Za-z0-9]*$', token):
+        return None, "material token '%s' isn't materialColour (e.g. woodGreen)" % token
+    material, _ = ur_split_material_color(token)
+    if material is None and token not in UR_MATERIALS:
+        return token, "unrecognised material/colour '%s'" % token
+    if digits:
+        return token, "suffix variant '%s' (should be '%s')" % (parts[-1], base)
+    return token, None
+
+
+def sanitize_key(text):
+    """Turn a shader/group name into a single camelCase token for set names."""
+    text = text.split("|")[-1].split(":")[-1]
+    parts = [p for p in re.split(r'[^A-Za-z0-9]+', text) if p]
+    if not parts:
+        return "default"
+    key = parts[0][:1].lower() + parts[0][1:] + "".join(p[:1].upper() + p[1:] for p in parts[1:])
+    if key[0].isdigit():
+        key = "m" + key
+    return key
+
+
+# =============================================================================
+# Smart UDIM - selection-set data model
+# =============================================================================
+#
+#   <asset>_smartUDIM_SET            root (one per root group)
+#     <section>_UDS                  section, e.g. td80_westWing_UDS
+#       td100_woodGreen_c085_stack   material group: meshes and/or faces
+#
+# The *name* is what users edit (outside the tool too), so on every scan the
+# td / stack values are read from the name and mirrored to attributes;
+# coverage (c###) is tool-owned and written from the attribute. Extra
+# all-digit tokens (_2, _3) only keep Maya names unique and are ignored.
+
+UDIM_ROLE = "unlokUdimRole"
+UDIM_KEY = "unlokUdimKey"
+UDIM_TD = "unlokUdimTd"
+UDIM_COV = "unlokUdimCov"
+UDIM_STACK = "unlokUdimStack"
+UDIM_ORDER = "unlokUdimOrder"
+UDIM_SOURCE = "unlokUdimSource"
+UDIM_GROUP = "unlokUdimGroup"
+
+SECTION_SUFFIX = "UDS"
+ROOT_SUFFIX = "smartUDIM_SET"
+
+
+def parse_group_name(name):
+    """Parse a section or material set name.
+
+    'td100_woodGreen_c085_stack' -> {'key': 'woodGreen', 'td': 100.0, 'cov': 85.0, 'stack': True}
+    'td80_westWing_UDS'          -> {'key': 'westWing', 'td': 80.0, 'cov': None, 'stack': False}
+    'woodGreen_2'                -> {'key': 'woodGreen', 'td': None, 'cov': None, 'stack': False}
+    """
+    short = name.split("|")[-1].split(":")[-1]
+    td = cov = None
+    stack = False
+    key_parts = []
+    for token in short.split("_"):
+        if not token:
+            continue
+        m_td = re.match(r'^td(\d+(?:\.\d+)?)$', token)
+        m_cov = re.match(r'^c(\d+(?:\.\d+)?)$', token)
+        if m_td:
+            td = float(m_td.group(1))
+        elif m_cov:
+            cov = float(m_cov.group(1))
+        elif token.lower() == "stack":
+            stack = True
+        elif token.isdigit() or token in (SECTION_SUFFIX, "SET", "smartUDIM"):
+            continue
+        else:
+            key_parts.append(token)
+    return {"key": "_".join(key_parts) or None, "td": td, "cov": cov, "stack": stack}
+
+
+def compose_material_set_name(key, td=100.0, cov=None, stack=False):
+    parts = ["td%s" % _num_token(td), key]
+    if cov is not None and cov >= 0:
+        parts.append("c%03d" % int(round(cov)))
+    if stack:
+        parts.append("stack")
+    return "_".join(parts)
+
+
+def compose_section_set_name(key, td=100.0):
+    parts = [] if abs(td - 100.0) < 1e-6 else ["td%s" % _num_token(td)]
+    return "_".join(parts + [key, SECTION_SUFFIX])
+
+
+def _num_token(value):
+    value = float(value)
+    return str(int(round(value))) if abs(value - round(value)) < 1e-6 else ("%g" % value)
+
+
+def _unique_set_name(wanted, current=None):
+    """Maya names are global; add _2, _3... ourselves rather than letting Maya
+    glue digits onto a value token (td100_woodGreen_c0851)."""
+    if current is not None and current.split("|")[-1] == wanted:
+        return wanted
+    if not cmds.objExists(wanted):
+        return wanted
+    i = 2
+    while cmds.objExists("%s_%d" % (wanted, i)) and "%s_%d" % (wanted, i) != current:
+        i += 1
+    return "%s_%d" % (wanted, i)
+
+
+def _add_set_attrs(node, role):
+    def add(ln, **kw):
+        if not cmds.attributeQuery(ln, node=node, exists=True):
+            cmds.addAttr(node, longName=ln, **kw)
+    add(UDIM_ROLE, dataType="string")
+    cmds.setAttr(node + "." + UDIM_ROLE, role, type="string")
+    add(UDIM_KEY, dataType="string")
+    if role in ("section", "material"):
+        add(UDIM_TD, attributeType="double", defaultValue=100.0)
+    if role == "material":
+        add(UDIM_COV, attributeType="double", defaultValue=-1.0)
+        add(UDIM_STACK, attributeType="bool", defaultValue=False)
+        add(UDIM_SOURCE, dataType="string")
+    if role == "section":
+        add(UDIM_ORDER, attributeType="long", defaultValue=0)
+    if role in ("root", "section"):
+        add(UDIM_GROUP, attributeType="message")
+
+
+def _base_name(node):
+    """Set name without the _2 / _3 we add to keep names unique."""
+    return re.sub(r'_\d+$', "", node.split("|")[-1])
+
+
+def set_role(node):
+    if not node or not cmds.objExists(node) or cmds.nodeType(node) != "objectSet":
+        return None
+    if cmds.attributeQuery(UDIM_ROLE, node=node, exists=True):
+        return cmds.getAttr(node + "." + UDIM_ROLE) or None
+    return None
+
+
+def _get(node, attr, default=None):
+    if cmds.attributeQuery(attr, node=node, exists=True):
+        value = cmds.getAttr(node + "." + attr)
+        return default if value is None else value
+    return default
+
+
+def _child_sets(node):
+    return [m for m in (cmds.sets(node, q=True) or []) if cmds.nodeType(m) == "objectSet"]
+
+
+def _linked_group(node):
+    if not cmds.attributeQuery(UDIM_GROUP, node=node, exists=True):
+        return None
+    conns = cmds.listConnections(node + "." + UDIM_GROUP, source=True, destination=False) or []
+    return long_name(conns[0]) if conns else None
+
+
+class UndoChunk(object):
+    """Group a tool action into a single Ctrl+Z step."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        cmds.undoInfo(openChunk=True, chunkName=self.name)
+        return self
+
+    def __exit__(self, *exc):
+        cmds.undoInfo(closeChunk=True)
+        return False
+
+
+def face_ranges(indices):
+    """[0,1,2,5,7,8] -> ['f[0:2]', 'f[5]', 'f[7:8]']"""
+    out = []
+    idx = sorted(set(indices))
+    i = 0
+    while i < len(idx):
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1:
+            j += 1
+        out.append("f[%d]" % idx[i] if i == j else "f[%d:%d]" % (idx[i], idx[j]))
+        i = j + 1
+    return out
+
+
+def _parse_face_spec(comp):
+    """'f[0:3]' -> [0, 1, 2, 3]; non-face components -> None."""
+    m = re.match(r'^f\[(\d+)(?::(\d+))?\]$', comp)
+    if not m:
+        return None
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) else a
+    return list(range(a, b + 1))
+
+
+def expand_members(set_node):
+    """{transform long name: None (whole object) or set(face indices)} for
+    the mesh members of a set; plus a list of members that aren't meshes."""
+    out = {}
+    odd = []
+    for member in cmds.ls(cmds.sets(set_node, q=True) or [], long=True) or []:
+        if cmds.objExists(member) and "." not in member and cmds.nodeType(member) == "objectSet":
+            continue
+        node, _, comp = member.partition(".")
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if not cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
+            odd.append(member)
+            continue
+        if not comp:
+            out[node] = None
+            continue
+        faces = _parse_face_spec(comp)
+        if faces is None:
+            odd.append(member)
+            continue
+        if out.get(node, set()) is None:
+            continue  # already whole
+        out.setdefault(node, set()).update(faces)
+    return out, odd
+
+
+def shader_face_groups(transform):
+    """{shaderKey: face indices or None (all faces)} using the mesh's
+    per-face shading assignment."""
+    shapes = cmds.listRelatives(transform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+    if not shapes:
+        return {}
+    dag = get_dag_path(shapes[0])
+    fn = om.MFnMesh(dag)
+    try:
+        shaders, ids = fn.getConnectedShaders(dag.instanceNumber())
+    except RuntimeError:
+        return {"default": None}
+    keys = []
+    for i in range(len(shaders)):
+        sg = om.MFnDependencyNode(shaders[i]).name()
+        mats = cmds.listConnections(sg + ".surfaceShader", source=True, destination=False) or []
+        keys.append(sanitize_key(mats[0] if mats else sg))
+    groups = {}
+    for face, sid in enumerate(ids):
+        key = keys[sid] if 0 <= sid < len(keys) else "default"
+        groups.setdefault(key, []).append(face)
+    if len(groups) == 1:
+        return {list(groups)[0]: None}
+    return groups
+
+
+MATERIAL_SOURCES = ("Name, then shader", "Shader only", "Name only")
+
+
+class SmartUdimAsset(object):
+    """One Smart UDIM setup: a root set tied to a root group of geometry."""
+
+    def __init__(self, root_set):
+        self.uuid = cmds.ls(root_set, uuid=True)[0]
+
+    # ----------------------------------------------------------- lookups
+    @classmethod
+    def all(cls):
+        out = []
+        for node in cmds.ls(type="objectSet") or []:
+            if set_role(node) == "root":
+                out.append(cls(node))
+        return out
+
+    @classmethod
+    def for_group(cls, group, create=True):
+        group = long_name(group)
+        for asset in cls.all():
+            if asset.root_group() == group:
+                return asset
+        if not create:
+            return None
+        base = short_name(group)
+        base = re.sub(r'_(GRP|grp)$', "", base) or base
+        name = _unique_set_name("%s_%s" % (sanitize_key(base), ROOT_SUFFIX))
+        root = cmds.sets(empty=True, name=name)
+        _add_set_attrs(root, "root")
+        cmds.connectAttr(group + ".message", root + "." + UDIM_GROUP, force=True)
+        return cls(root)
+
+    def root_set(self):
+        found = cmds.ls(self.uuid) or []
+        return found[0] if found else None
+
+    def exists(self):
+        return self.root_set() is not None
+
+    def root_group(self):
+        root = self.root_set()
+        return _linked_group(root) if root else None
+
+    def name(self):
+        return self.root_set() or ""
+
+    def sections(self):
+        root = self.root_set()
+        if not root:
+            return []
+        secs = [s for s in _child_sets(root) if set_role(s) in ("section", None)]
+        return sorted(secs, key=lambda s: (_get(s, UDIM_ORDER, 0), s))
+
+    def materials(self, section):
+        return sorted(m for m in _child_sets(section) if set_role(m) in ("material", None))
+
+    def all_material_sets(self):
+        out = []
+        for sec in self.sections():
+            out.extend(self.materials(sec))
+        return out
+
+    def meshes(self):
+        """(meshes, instanced): non-intermediate mesh transforms under the
+        root group, and the instanced ones (skipped)."""
+        group = self.root_group()
+        if not group:
+            return [], []
+        meshes, instanced = [], []
+        for shape in cmds.listRelatives(group, allDescendents=True, type="mesh", fullPath=True,
+                                        noIntermediate=True) or []:
+            xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
+            if len(cmds.ls(shape, allPaths=True) or []) > 1:
+                if xform not in instanced:
+                    instanced.append(xform)
+            elif xform not in meshes:
+                meshes.append(xform)
+        if cmds.listRelatives(group, shapes=True, type="mesh", noIntermediate=True) and group not in meshes:
+            meshes.insert(0, group)
+        return meshes, instanced
+
+    # ------------------------------------------------------------ editing
+    def create_section(self, key, group=None, td=100.0):
+        root = self.root_set()
+        key = sanitize_key(key)
+        node = cmds.sets(empty=True, name=_unique_set_name(compose_section_set_name(key, td)))
+        _add_set_attrs(node, "section")
+        cmds.setAttr(node + "." + UDIM_KEY, key, type="string")
+        cmds.setAttr(node + "." + UDIM_TD, td)
+        orders = [_get(s, UDIM_ORDER, 0) for s in self.sections()]
+        cmds.setAttr(node + "." + UDIM_ORDER, (max(orders) + 1) if orders else 0)
+        if group:
+            cmds.connectAttr(group + ".message", node + "." + UDIM_GROUP, force=True)
+        cmds.sets(node, add=root)
+        return node
+
+    def material_set(self, section, key, source="manual", create=True):
+        for m in self.materials(section):
+            if (_get(m, UDIM_KEY) or parse_group_name(m)["key"]) == key:
+                return m
+        if not create:
+            return None
+        node = cmds.sets(empty=True, name=_unique_set_name(compose_material_set_name(key)))
+        _add_set_attrs(node, "material")
+        cmds.setAttr(node + "." + UDIM_KEY, key, type="string")
+        cmds.setAttr(node + "." + UDIM_SOURCE, source, type="string")
+        cmds.sets(node, add=section)
+        return node
+
+    def sync_names(self):
+        """Read user-editable values (td, stack) from names, mirror them to
+        attributes, and normalise every name (coverage, unique suffixes)."""
+        for sec in self.sections():
+            if set_role(sec) is None:
+                _add_set_attrs(sec, "section")
+            parsed = parse_group_name(sec)
+            key = parsed["key"] or _get(sec, UDIM_KEY) or "section"
+            td = parsed["td"] if parsed["td"] is not None else 100.0
+            cmds.setAttr(sec + "." + UDIM_KEY, key, type="string")
+            cmds.setAttr(sec + "." + UDIM_TD, td)
+            wanted = compose_section_set_name(key, td)
+            if _base_name(sec) != wanted:
+                sec = cmds.rename(sec, _unique_set_name(wanted, sec))
+            for mat in self.materials(sec):
+                if set_role(mat) is None:
+                    _add_set_attrs(mat, "material")
+                    cmds.setAttr(mat + "." + UDIM_SOURCE, "manual", type="string")
+                parsed = parse_group_name(mat)
+                key = parsed["key"] or _get(mat, UDIM_KEY) or "default"
+                td = parsed["td"] if parsed["td"] is not None else 100.0
+                cmds.setAttr(mat + "." + UDIM_KEY, key, type="string")
+                cmds.setAttr(mat + "." + UDIM_TD, td)
+                cmds.setAttr(mat + "." + UDIM_STACK, bool(parsed["stack"]))
+                cov = _get(mat, UDIM_COV, -1.0)
+                wanted = compose_material_set_name(key, td, cov if cov >= 0 else None, parsed["stack"])
+                if _base_name(mat) != wanted:
+                    cmds.rename(mat, _unique_set_name(wanted, mat))
+
+    def set_group_values(self, node, td=None, stack=None):
+        role = set_role(node)
+        with UndoChunk("Smart UDIM edit"):
+            if td is not None:
+                cmds.setAttr(node + "." + UDIM_TD, float(td))
+            if stack is not None and role == "material":
+                cmds.setAttr(node + "." + UDIM_STACK, bool(stack))
+            key = _get(node, UDIM_KEY) or parse_group_name(node)["key"]
+            if role == "section":
+                wanted = compose_section_set_name(key, _get(node, UDIM_TD, 100.0))
+            else:
+                cov = _get(node, UDIM_COV, -1.0)
+                wanted = compose_material_set_name(key, _get(node, UDIM_TD, 100.0), cov if cov >= 0 else None,
+                                                   _get(node, UDIM_STACK, False))
+            return cmds.rename(node, _unique_set_name(wanted, node))
+
+    def move_section(self, section, step):
+        secs = self.sections()
+        if section not in secs:
+            return
+        i = secs.index(section)
+        j = clamp(i + step, 0, len(secs) - 1)
+        if i == j:
+            return
+        secs.insert(j, secs.pop(i))
+        with UndoChunk("Smart UDIM reorder"):
+            for order, sec in enumerate(secs):
+                cmds.setAttr(sec + "." + UDIM_ORDER, order)
+
+    # ---------------------------------------------------------- membership
+    def assignments(self):
+        """{transform: [(material set, faces or None)]} over all material sets."""
+        out = {}
+        for mat in self.all_material_sets():
+            members, _ = expand_members(mat)
+            for xform, faces in members.items():
+                out.setdefault(xform, []).append((mat, faces))
+        return out
+
+    def _remove_items(self, items):
+        """Take meshes / faces out of every material set of this asset.
+        items = {transform: faces or None}."""
+        for mat in self.all_material_sets():
+            members, _ = expand_members(mat)
+            for xform, faces in items.items():
+                if xform not in members:
+                    continue
+                current = members[xform]
+                if faces is None:
+                    if current is None:
+                        shapes = cmds.listRelatives(xform, shapes=True, fullPath=True) or []
+                        cmds.sets([xform] + shapes, remove=mat)
+                    else:
+                        cmds.sets(["%s.%s" % (xform, r) for r in face_ranges(current)], remove=mat)
+                    continue
+                if current is None:
+                    total = cmds.polyEvaluate(xform, face=True)
+                    keep = set(range(total)) - set(faces)
+                    cmds.sets(xform, remove=mat)
+                    if keep:
+                        cmds.sets(["%s.%s" % (xform, r) for r in face_ranges(keep)], add=mat)
+                else:
+                    gone = set(faces) & current
+                    if gone:
+                        cmds.sets(["%s.%s" % (xform, r) for r in face_ranges(gone)], remove=mat)
+
+    def assign(self, items, material_set):
+        """Move meshes / faces into material_set (exclusively)."""
+        with UndoChunk("Smart UDIM assign"):
+            self._remove_items(items)
+            self._add_items(items, material_set)
+
+    @staticmethod
+    def _add_items(items, material_set):
+        whole = [x for x, f in items.items() if f is None]
+        comps = []
+        for x, f in items.items():
+            if f is not None:
+                comps.extend("%s.%s" % (x, r) for r in face_ranges(f))
+        if whole:
+            cmds.sets(whole, add=material_set)
+        if comps:
+            cmds.sets(comps, add=material_set)
+
+    # ----------------------------------------------------------------- read
+    def read(self):
+        """Snapshot for the UI (no scene changes)."""
+        meshes, instanced = self.meshes()
+        sections = []
+        for sec in self.sections():
+            mats = []
+            for mat in self.materials(sec):
+                members, odd = expand_members(mat)
+                mats.append({
+                    "set": mat,
+                    "key": _get(mat, UDIM_KEY) or parse_group_name(mat)["key"],
+                    "td": _get(mat, UDIM_TD, parse_group_name(mat)["td"] or 100.0),
+                    "cov": _get(mat, UDIM_COV, -1.0),
+                    "stack": bool(_get(mat, UDIM_STACK, parse_group_name(mat)["stack"])),
+                    "objects": len(members),
+                    "partial": sum(1 for f in members.values() if f is not None),
+                    "odd": odd,
+                    "source": _get(mat, UDIM_SOURCE, "manual"),
+                })
+            sections.append({
+                "set": sec,
+                "key": _get(sec, UDIM_KEY) or parse_group_name(sec)["key"],
+                "td": _get(sec, UDIM_TD, parse_group_name(sec)["td"] or 100.0),
+                "group": _linked_group(sec),
+                "materials": mats,
+            })
+        naming = []
+        for xform in meshes:
+            key, issue = material_key_from_name(xform)
+            if issue:
+                naming.append({"node": xform, "reason": issue, "usable": key is not None})
+        assigned = self.assignments()
+        unassigned = [m for m in meshes if m not in assigned]
+        overlaps = self.overlaps(assigned)
+        return {"root": self.root_set(), "group": self.root_group(), "sections": sections,
+                "meshes": meshes, "instanced": instanced, "naming": naming,
+                "unassigned": unassigned, "overlaps": overlaps}
+
+    @staticmethod
+    def overlaps(assigned):
+        """[(transform, [sets...])] where a mesh/face is in two material sets."""
+        out = []
+        for xform, entries in assigned.items():
+            if len(entries) < 2:
+                continue
+            seen = set()
+            clash = False
+            for _, faces in entries:
+                if faces is None:
+                    clash = True
+                    break
+                if seen & faces:
+                    clash = True
+                    break
+                seen |= faces
+            if clash:
+                out.append((xform, [m for m, _ in entries]))
+        return out
+
+    # ----------------------------------------------------------------- scan
+    def scan(self, material_source="Name, then shader", sections_from_groups=False):
+        """Build / refresh the sets for everything under the root group.
+
+        Existing assignments are respected; only new or unassigned
+        meshes / faces get sorted into sections and material sets.
+        Returns a summary dict.
+        """
+        group = self.root_group()
+        if not group or not cmds.objExists(group):
+            raise RuntimeError("The root group for %s no longer exists." % self.name())
+        added = 0
+        with UndoChunk("Smart UDIM scan"), PreserveSelection():
+            meshes, instanced = self.meshes()
+            if not self.sections():
+                self._create_default_sections(group, meshes, sections_from_groups)
+            assigned = self.assignments()
+            sections = self.sections()
+            section_groups = [(s, _linked_group(s)) for s in sections]
+            batches = {}  # material set -> {transform: faces or None}
+            for xform in meshes:
+                current = assigned.get(xform, [])
+                if any(f is None for _, f in current):
+                    continue
+                taken = set()
+                for _, f in current:
+                    taken |= f
+                section = self._section_for(xform, section_groups) or sections[0]
+                for key, faces, source in self._material_split(xform, material_source):
+                    if faces is None and taken:
+                        total = cmds.polyEvaluate(xform, face=True)
+                        faces = set(range(total)) - taken
+                    elif faces is not None:
+                        faces = set(faces) - taken
+                    if faces is not None and not faces:
+                        continue
+                    mat = self.material_set(section, key, source=source)
+                    batches.setdefault(mat, {})[xform] = faces
+                    added += 1
+            for mat, items in batches.items():
+                self._add_items(items, mat)
+            self.sync_names()
+        return {"added": added, "meshes": len(meshes), "instanced": len(instanced)}
+
+    def _create_default_sections(self, group, meshes, from_groups):
+        if from_groups:
+            children = cmds.listRelatives(group, children=True, type="transform", fullPath=True) or []
+            # Only groups become sections; meshes sitting directly under the
+            # root go to a section named after the root.
+            children = [c for c in children if not cmds.listRelatives(c, shapes=True)]
+            made = 0
+            for child in children:
+                if any(m.startswith(child + "|") for m in meshes):
+                    base = re.sub(r'_\d*_?(GRP|grp)$', "", short_name(child)) or short_name(child)
+                    self.create_section(base, group=child)
+                    made += 1
+            loose = [m for m in meshes if not any(m.startswith(c + "|") for c in children)]
+            if made and not loose:
+                return
+        base = re.sub(r'_\d*_?(GRP|grp)$', "", short_name(group)) or short_name(group)
+        self.create_section(base, group=group)
+
+    @staticmethod
+    def _section_for(xform, section_groups):
+        best, depth = None, -1
+        for sec, grp in section_groups:
+            if grp and (xform == grp or xform.startswith(grp + "|")) and grp.count("|") > depth:
+                best, depth = sec, grp.count("|")
+        return best
+
+    @staticmethod
+    def _material_split(xform, material_source):
+        """[(key, faces or None, source)] for one mesh."""
+        if material_source != "Shader only":
+            key, _ = material_key_from_name(xform)
+            if key:
+                return [(key, None, "name")]
+            if material_source == "Name only":
+                return [("default", None, "name")]
+        return [(k, f, "shader") for k, f in shader_face_groups(xform).items()]
+
+
+# =============================================================================
+# Smart UDIM - pre-process
+# =============================================================================
+
+def _cleanup_args(lamina, nonmanifold, zero_area, select_only=False):
+    """Arguments for Maya's polyCleanupArgList (version 4)."""
+    return [
+        "0",                         # [0] all meshes: no, use selection
+        # [1] operation. The script's header says "select only (0/1)", but its
+        # code treats 1 as "clean up" and 2 as "select matching only".
+        "2" if select_only else "1",
+        "1",                         # [2] keep construction history
+        "0", "0", "0", "0", "0",     # [3-7] no triangulation of any kind
+        "1" if zero_area else "0",   # [8] zero-area faces
+        "1e-05",                     # [9] face area tolerance
+        "0", "1e-05",                # [10-11] zero-length edges: off
+        "0", "1e-05",                # [12-13] zero UV area: off
+        "0",                         # [14] unshare UVs: off
+        "2" if nonmanifold else "-1",  # [15] non-manifold, without conforming normals
+        "1" if lamina else "0",      # [16] lamina faces
+        "0",                         # [17] invalid components: off
+    ]
+
+
+def _run_cleanup(meshes, lamina, nonmanifold, zero_area, select_only=False):
+    if not meshes:
+        return []
+    cmds.select(meshes, replace=True)
+    args = _cleanup_args(lamina, nonmanifold, zero_area, select_only)
+    mel.eval('polyCleanupArgList 4 {%s}' % ",".join('"%s"' % a for a in args))
+    return cmds.ls(selection=True, long=True, flatten=False) or []
+
+
+def _faces_by_mesh(components):
+    """Group selected components by mesh transform -> count of faces."""
+    out = {}
+    for comp in components:
+        node, _, spec = comp.partition(".")
+        if not spec.startswith("f["):
+            continue  # nothing found leaves whole meshes selected
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        faces = _parse_face_spec(spec) if spec else None
+        out[node] = out.get(node, 0) + (len(faces) if faces else 1)
+    return out
+
+
+def detect_geometry_issues(meshes):
+    """{category: {transform: count}} for lamina, non-manifold, zero-area, n-gons."""
+    issues = {"lamina": {}, "nonmanifold": {}, "zeroarea": {}, "ngons": {}}
+    for xform in meshes:
+        lam = cmds.polyInfo(xform, laminaFaces=True) or []
+        if lam:
+            issues["lamina"][xform] = len(cmds.ls(lam, flatten=True))
+        nm = (cmds.polyInfo(xform, nonManifoldVertices=True) or []) + \
+             (cmds.polyInfo(xform, nonManifoldEdges=True) or [])
+        if nm:
+            issues["nonmanifold"][xform] = len(cmds.ls(nm, flatten=True))
+        shapes = cmds.listRelatives(xform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+        if shapes:
+            counts, _ = om.MFnMesh(get_dag_path(shapes[0])).getVertices()
+            ngons = sum(1 for c in counts if c > 4)
+            if ngons:
+                issues["ngons"][xform] = ngons
+    with PreserveSelection():
+        zero = _run_cleanup(meshes, False, False, True, select_only=True)
+    issues["zeroarea"] = {k: v for k, v in _faces_by_mesh(zero).items() if k in meshes}
+    return issues
+
+
+def detect_uv_issues(meshes, uv_set="map1"):
+    """{category: {transform: count}} for missing UVs, faces without UVs and
+    flipped UV faces. Meshes with missing UVs get skipped by layout."""
+    issues = {"no_uvs": {}, "faces_without_uvs": {}, "flipped": {}, "no_uv_set": {}}
+    for xform in meshes:
+        shapes = cmds.listRelatives(xform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+        if not shapes:
+            continue
+        fn = om.MFnMesh(get_dag_path(shapes[0]))
+        if uv_set not in fn.getUVSetNames():
+            issues["no_uv_set"][xform] = 1
+            continue
+        if fn.numUVs(uv_set) == 0:
+            issues["no_uvs"][xform] = fn.numPolygons
+            continue
+        counts, ids = fn.getAssignedUVs(uv_set)
+        missing = sum(1 for c in counts if c == 0)
+        if missing:
+            issues["faces_without_uvs"][xform] = missing
+        us, vs = fn.getUVs(uv_set)
+        flipped = 0
+        k = 0
+        for c in counts:
+            if c >= 3:
+                area = 0.0
+                for i in range(c):
+                    a = ids[k + i]
+                    b = ids[k + (i + 1) % c]
+                    area += us[a] * vs[b] - us[b] * vs[a]
+                if area < -1e-12:
+                    flipped += 1
+            k += c
+        if flipped:
+            issues["flipped"][xform] = flipped
+    return issues
+
+
+PREPROCESS_LABELS = {
+    "lamina": ("Lamina faces", "fixed"),
+    "nonmanifold": ("Non-manifold geometry", "fixed"),
+    "zeroarea": ("Zero-area faces", "fixed"),
+    "ngons": ("N-gons (left as they are)", "warn"),
+    "no_uv_set": ("Missing UV set (skipped)", "skip"),
+    "no_uvs": ("No UVs (skipped)", "skip"),
+    "faces_without_uvs": ("Faces without UVs (skipped)", "skip"),
+    "flipped": ("Flipped UV faces", "warn"),
+    "instanced": ("Instanced meshes (skipped)", "skip"),
+    "remaining": ("Couldn't be fixed automatically", "warn"),
+}
+
+
+def preprocess(meshes, instanced=(), fix_lamina=True, fix_nonmanifold=True, fix_zero_area=True, uv_set="map1"):
+    """Clean the geometry layout cares about and report UV problems.
+
+    Returns {category: {transform: count}}. Everything it does (including
+    the selection juggling Maya's cleanup needs) is one Ctrl+Z.
+    """
+    with UndoChunk("Smart UDIM pre-process"), PreserveSelection():
+        return _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set)
+
+
+def _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set):
+    report = {}
+    before = detect_geometry_issues(meshes)
+    to_fix = set()
+    for cat, on in (("lamina", fix_lamina), ("nonmanifold", fix_nonmanifold), ("zeroarea", fix_zero_area)):
+        if on and before[cat]:
+            report[cat] = dict(before[cat])
+            to_fix.update(before[cat])
+    if to_fix:
+        _run_cleanup(sorted(to_fix), fix_lamina, fix_nonmanifold, fix_zero_area)
+        after = detect_geometry_issues(sorted(to_fix))
+        remaining = {}
+        for cat, on in (("lamina", fix_lamina), ("nonmanifold", fix_nonmanifold), ("zeroarea", fix_zero_area)):
+            if on:
+                for xform, n in after[cat].items():
+                    remaining[xform] = remaining.get(xform, 0) + n
+        if remaining:
+            report["remaining"] = remaining
+    if before["ngons"]:
+        report["ngons"] = before["ngons"]
+    for cat, items in detect_uv_issues(meshes, uv_set).items():
+        if items:
+            report[cat] = items
+    if instanced:
+        report["instanced"] = {x: 1 for x in instanced}
+    return report
+
+
+def skipped_meshes(report):
+    out = set()
+    for cat in ("no_uv_set", "no_uvs", "faces_without_uvs", "instanced"):
+        out.update(report.get(cat, {}))
+    return out
+
+
+# =============================================================================
+# Smart UDIM - panel
+# =============================================================================
+
+def selection_items():
+    """Current scene selection as {mesh transform: None (whole) or face set}."""
+    items = {}
+    sel = cmds.ls(selection=True, long=True, flatten=False) or []
+    comps = [s for s in sel if "." in s]
+    for node in [s for s in sel if "." not in s]:
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
+            items[node] = None
+    if comps:
+        for face in cmds.ls(cmds.polyListComponentConversion(comps, toFace=True) or [], long=True) or []:
+            node, _, spec = face.partition(".")
+            if cmds.objectType(node, isAType="shape"):
+                node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+            faces = _parse_face_spec(spec)
+            if faces is None or items.get(node, set()) is None:
+                continue
+            items.setdefault(node, set()).update(faces)
+    return items
+
+
+def _unlok_renamer_available():
+    try:
+        import importlib.util
+        return importlib.util.find_spec("unlok_renamer") is not None
+    except Exception:
+        return False
+
+
+LEVEL_COLORS = {"fixed": "#6fbf73", "warn": "#e0b050", "skip": "#e07a5f", "info": "#a8a8a8"}
+
+
+class SmartUdimPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Smart UDIM"
+    TOOL_TIP = "Organise geometry into UDIM sections and material groups, clean it and check its UVs."
+
+    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK = range(5)
+
+    def __init__(self, parent=None):
+        super(SmartUdimPanel, self).__init__(parent)
+        self.asset = None
+        self.snapshot = None
+        self.report = {}
+        self._jobs = []
+        self._populating = False
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(60)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._build()
+        self._install_jobs()
+        assets = SmartUdimAsset.all() if maya_main_window() is not None else []
+        if len(assets) == 1:
+            self.set_asset(assets[0])
+        else:
+            self.refresh()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QGridLayout(top)
+        tl.setContentsMargins(6, 6, 6, 0)
+        tl.setSpacing(4)
+        self.root_label = QtWidgets.QLabel()
+        self.root_label.setWordWrap(True)
+        pick = QtWidgets.QPushButton("Use Selected Group")
+        pick.setToolTip("Select the top group of the asset (e.g. house_GRP), then press this.")
+        pick.clicked.connect(lambda *_: self.pick_root())
+        tl.addWidget(QtWidgets.QLabel("Root"), 0, 0)
+        tl.addWidget(self.root_label, 0, 1)
+        tl.addWidget(pick, 0, 2)
+        self.source_combo = ComboField(MATERIAL_SOURCES)
+        self.source_combo.setToolTip("Where material groups come from for meshes that aren't in a group yet.\n"
+                                     "Name: the UnlokRenamer convention (woodGreen_C_beam0001_GEP).\n"
+                                     "Shader: the Maya material assigned to each face.")
+        tl.addWidget(QtWidgets.QLabel("Materials from"), 1, 0)
+        tl.addWidget(self.source_combo, 1, 1, 1, 2)
+        self.from_groups = CheckField("New sections from top-level groups")
+        self.from_groups.setToolTip("On the first scan, each child group of the root (e.g. westWing_GRP) "
+                                    "becomes its own section / row of UDIMs.")
+        tl.addWidget(self.from_groups, 2, 1, 1, 2)
+        self.scan_btn = primary_button("Scan")
+        self.scan_btn.setToolTip("Sort every mesh under the root into sections and material groups. "
+                                 "Existing groups are kept; only new meshes get sorted. One Ctrl+Z undoes it.")
+        self.scan_btn.clicked.connect(lambda *_: self.scan())
+        tl.addWidget(self.scan_btn, 3, 0, 1, 3)
+        tl.setColumnStretch(1, 1)
+        outer.addWidget(top)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(6, 0, 6, 6)
+        bl.setSpacing(2)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        # --- sections & materials
+        sec = Section("Sections && material groups")
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack"])
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.tree.setMinimumHeight(220)
+        self.tree.setRootIsDecorated(True)
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(self.COL_NAME, QtWidgets.QHeaderView.Stretch)
+        for col in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeToContents)
+        self.tree.setToolTip("Double-click TD % to change texel density. Tick Stack to stack identical shells.\n"
+                             "These are ordinary Maya sets: renaming them (e.g. td150_woodGreen) works too.")
+        self.tree.itemChanged.connect(self._item_changed)
+        self.tree.itemDoubleClicked.connect(self._item_double_clicked)
+        sec.add_full(self.tree)
+        row = QtWidgets.QGridLayout()
+        row.setSpacing(3)
+        buttons = [
+            ("Select", "Select the meshes / faces in the highlighted groups.", self.select_members),
+            ("Assign Selection", "Move the selected meshes / faces into the highlighted material group.",
+             self.assign_selection),
+            ("New Group", "Make a material group in the highlighted section from the selected meshes / faces.",
+             self.new_group),
+            ("New Section", "Make a new section (row of UDIMs); selected meshes move into it.", self.new_section),
+            ("Move Up", "Lay this section out earlier (lower rows).", lambda: self.move_section(-1)),
+            ("Move Down", "Lay this section out later (higher rows).", lambda: self.move_section(1)),
+        ]
+        for i, (text, tip, fn) in enumerate(buttons):
+            b = QtWidgets.QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda *_, f=fn: f())
+            row.addWidget(b, i // 3, i % 3)
+        wrap = QtWidgets.QWidget()
+        wrap.setLayout(row)
+        sec.add_full(wrap)
+        self.tree_hint = hint_label("")
+        sec.add_full(self.tree_hint)
+        bl.addWidget(sec)
+
+        # --- naming hand-off
+        sec = Section("Naming issues (UnlokRenamer)", expanded=False)
+        self.naming_section = sec
+        self.naming_list = QtWidgets.QTreeWidget()
+        self.naming_list.setColumnCount(2)
+        self.naming_list.setHeaderLabels(["Mesh", "Problem"])
+        self.naming_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.naming_list.setMinimumHeight(140)
+        self.naming_list.itemSelectionChanged.connect(self._naming_selected)
+        sec.add_full(self.naming_list)
+        nrow = QtWidgets.QHBoxLayout()
+        sel_all = QtWidgets.QPushButton("Select All")
+        sel_all.clicked.connect(lambda *_: self._select_nodes([n["node"] for n in (self.snapshot or {}).get("naming", [])]))
+        self.renamer_btn = QtWidgets.QPushButton("Open UnlokRenamer")
+        self.renamer_btn.clicked.connect(lambda *_: self.open_renamer())
+        nrow.addWidget(sel_all)
+        nrow.addWidget(self.renamer_btn)
+        nwrap = QtWidgets.QWidget()
+        nwrap.setLayout(nrow)
+        sec.add_full(nwrap)
+        sec.add_full(hint_label("Meshes whose names don't follow the convention. Unusable names fall back to "
+                                "shader-based groups; fix them in UnlokRenamer (Sanity Checks) and re-scan."))
+        bl.addWidget(sec)
+
+        # --- pre-process
+        sec = Section("Pre-process")
+        self.fix_lamina = CheckField("Fix lamina faces")
+        self.fix_nonmanifold = CheckField("Fix non-manifold geometry")
+        self.fix_zero = CheckField("Remove zero-area faces")
+        for w in (self.fix_lamina, self.fix_nonmanifold, self.fix_zero):
+            w.setValue(True)
+            sec.add_full(w)
+        self.uv_set = QtWidgets.QLineEdit("map1")
+        self.uv_set.setToolTip("UV set to check (and later lay out from).")
+        sec.add_row("UV set", self.uv_set)
+        run = primary_button("Run Pre-process")
+        run.setToolTip("Fix geometry that breaks UV layout and report UV problems. N-gons are only reported. "
+                       "One Ctrl+Z undoes the fixes.")
+        run.clicked.connect(lambda *_: self.run_preprocess())
+        sec.add_full(run)
+        self.report_tree = QtWidgets.QTreeWidget()
+        self.report_tree.setColumnCount(2)
+        self.report_tree.setHeaderLabels(["Check", "Count"])
+        self.report_tree.setMinimumHeight(160)
+        self.report_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.report_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.report_tree.header().setStretchLastSection(False)
+        self.report_tree.itemSelectionChanged.connect(self._report_selected)
+        sec.add_full(self.report_tree)
+        bl.addWidget(sec)
+        bl.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(6, 0, 6, 6)
+        outer.addWidget(self.status)
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def _asset(self):
+        if self.asset is not None and not self.asset.exists():
+            self.asset = None
+        return self.asset
+
+    def set_asset(self, asset):
+        self.asset = asset
+        self.report = {}
+        self._fill_report()
+        self.refresh()
+
+    @ui_safe
+    def refresh(self):
+        asset = self._asset()
+        if asset is None or not asset.root_group():
+            self.snapshot = None
+            self.root_label.setText('<span style="color:#8c8c8c">Pick the asset\'s top group</span>')
+            self._fill_tree()
+            self._fill_naming()
+            if not self.status.text():
+                self.set_status("Select the asset's top group and press 'Use Selected Group'.")
+            return
+        self.snapshot = asset.read()
+        self.root_label.setText("<b>%s</b> &nbsp;<span style='color:#8c8c8c'>(%s)</span>" % (
+            short_name(self.snapshot["group"]), asset.name()))
+        self._fill_tree()
+        self._fill_naming()
+
+    # ============================================================ trees
+    def _fill_tree(self):
+        self._populating = True
+        try:
+            expanded = set()
+            for i in range(self.tree.topLevelItemCount()):
+                it = self.tree.topLevelItem(i)
+                if it.isExpanded():
+                    expanded.add(it.data(0, QtCore.Qt.UserRole))
+            self.tree.clear()
+            snap = self.snapshot
+            if not snap:
+                self.tree_hint.setText("")
+                return
+            bold = QtGui.QFont()
+            bold.setBold(True)
+            for sec in snap["sections"]:
+                total = sum(m["objects"] for m in sec["materials"])
+                sitem = QtWidgets.QTreeWidgetItem([sec["key"], _num_token(sec["td"]), "", str(total), ""])
+                sitem.setData(0, QtCore.Qt.UserRole, sec["set"])
+                sitem.setToolTip(0, "%s\nSection: becomes its own band of UDIM rows%s" % (
+                    sec["set"], ("\nGroup: " + short_name(sec["group"])) if sec["group"] else ""))
+                sitem.setFont(0, bold)
+                sitem.setFlags(sitem.flags() | QtCore.Qt.ItemIsEditable)
+                self.tree.addTopLevelItem(sitem)
+                for mat in sec["materials"]:
+                    items = str(mat["objects"]) + (" (%d partial)" % mat["partial"] if mat["partial"] else "")
+                    cov = "%d%%" % round(mat["cov"]) if mat["cov"] >= 0 else "-"
+                    mitem = QtWidgets.QTreeWidgetItem([mat["key"], _num_token(mat["td"]), cov, items, ""])
+                    mitem.setData(0, QtCore.Qt.UserRole, mat["set"])
+                    mitem.setToolTip(0, "%s\nfrom %s" % (mat["set"], mat["source"]))
+                    mitem.setFlags(mitem.flags() | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
+                    mitem.setCheckState(self.COL_STACK, QtCore.Qt.Checked if mat["stack"] else QtCore.Qt.Unchecked)
+                    if mat["odd"]:
+                        mitem.setForeground(self.COL_ITEMS, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["warn"])))
+                        mitem.setToolTip(self.COL_ITEMS, "Has non-face members that layout ignores: %s" %
+                                         ", ".join(mat["odd"][:5]))
+                    sitem.addChild(mitem)
+                sitem.setExpanded(not expanded or sec["set"] in expanded)
+            notes = []
+            if snap["unassigned"]:
+                notes.append("%d mesh(es) not in any group yet; press Scan." % len(snap["unassigned"]))
+            if snap["overlaps"]:
+                notes.append("%d mesh(es) are in more than one group: %s" % (
+                    len(snap["overlaps"]), ", ".join(short_name(x) for x, _ in snap["overlaps"][:4])))
+            if snap["instanced"]:
+                notes.append("%d instanced mesh(es) skipped." % len(snap["instanced"]))
+            self.tree_hint.setText("  ".join(notes))
+        finally:
+            self._populating = False
+
+    def _fill_naming(self):
+        self.naming_list.clear()
+        naming = (self.snapshot or {}).get("naming", [])
+        for entry in naming:
+            item = QtWidgets.QTreeWidgetItem([short_name(entry["node"]), entry["reason"]])
+            item.setData(0, QtCore.Qt.UserRole, entry["node"])
+            item.setToolTip(0, entry["node"])
+            color = LEVEL_COLORS["warn"] if entry["usable"] else LEVEL_COLORS["skip"]
+            item.setForeground(1, QtGui.QBrush(QtGui.QColor(color)))
+            self.naming_list.addTopLevelItem(item)
+        self.naming_section.header.setText("Naming issues (UnlokRenamer)%s" % (
+            "  -  %d" % len(naming) if naming else ""))
+        available = _unlok_renamer_available()
+        self.renamer_btn.setEnabled(available)
+        self.renamer_btn.setToolTip("Open UnlokRenamer to fix these names." if available else
+                                    "UnlokRenamer isn't loaded in this Maya session.")
+
+    def _fill_report(self):
+        self.report_tree.clear()
+        for cat, items in sorted(self.report.items(), key=lambda kv: list(PREPROCESS_LABELS).index(kv[0])
+                                 if kv[0] in PREPROCESS_LABELS else 99):
+            label, level = PREPROCESS_LABELS.get(cat, (cat, "info"))
+            top = QtWidgets.QTreeWidgetItem([label, str(sum(items.values()))])
+            top.setForeground(0, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS[level])))
+            top.setData(0, QtCore.Qt.UserRole, list(items))
+            for node, count in sorted(items.items()):
+                child = QtWidgets.QTreeWidgetItem([short_name(node), str(count)])
+                child.setData(0, QtCore.Qt.UserRole, [node])
+                child.setToolTip(0, node)
+                top.addChild(child)
+            self.report_tree.addTopLevelItem(top)
+
+    def _selected_sets(self):
+        return [it.data(0, QtCore.Qt.UserRole) for it in self.tree.selectedItems()]
+
+    def _selected_role(self, role):
+        return [s for s in self._selected_sets() if s and cmds.objExists(s) and set_role(s) == role]
+
+    # ======================================================== edits
+    def _item_changed(self, item, column):
+        if self._populating:
+            return
+        self._apply_item_edit(item, column)
+
+    @ui_safe
+    def _apply_item_edit(self, item, column):
+        asset = self._asset()
+        node = item.data(0, QtCore.Qt.UserRole)
+        if asset is None or not node or not cmds.objExists(node):
+            return
+        if column == self.COL_TD:
+            try:
+                td = float(item.text(self.COL_TD).replace("%", "").strip())
+            except ValueError:
+                self.set_status("TD % must be a number, e.g. 150.", level="warn")
+                self._refresh_timer.start()
+                return
+            if td <= 0:
+                self.set_status("TD % must be above 0.", level="warn")
+                self._refresh_timer.start()
+                return
+            asset.set_group_values(node, td=td)
+        elif column == self.COL_STACK and set_role(node) == "material":
+            asset.set_group_values(node, stack=item.checkState(self.COL_STACK) == QtCore.Qt.Checked)
+        elif column == self.COL_NAME:
+            key = sanitize_key(item.text(self.COL_NAME))
+            cmds.setAttr(node + "." + UDIM_KEY, key, type="string")
+            with UndoChunk("Smart UDIM rename"):
+                renamed = cmds.rename(node, _unique_set_name(
+                    compose_section_set_name(key, _get(node, UDIM_TD, 100.0)) if set_role(node) == "section"
+                    else compose_material_set_name(key, _get(node, UDIM_TD, 100.0),
+                                                   _get(node, UDIM_COV, -1.0) if _get(node, UDIM_COV, -1.0) >= 0
+                                                   else None, _get(node, UDIM_STACK, False)), node))
+            self.set_status("Renamed to %s" % renamed)
+        self._refresh_timer.start()
+
+    def _item_double_clicked(self, item, column):
+        if column in (self.COL_TD, self.COL_NAME):
+            self.tree.editItem(item, column)
+
+    # ======================================================== actions
+    @ui_safe
+    def pick_root(self):
+        sel = cmds.ls(selection=True, long=True, type="transform") or []
+        if len(sel) != 1:
+            self.set_status("Select exactly one group (the asset's top group).", level="warn")
+            return
+        if not cmds.listRelatives(sel[0], allDescendents=True, type="mesh"):
+            self.set_status("%s has no meshes under it." % short_name(sel[0]), level="warn")
+            return
+        with UndoChunk("Smart UDIM root"):
+            asset = SmartUdimAsset.for_group(sel[0])
+        self.set_asset(asset)
+        self.set_status("Root set to %s. Press Scan to sort its meshes into groups." % short_name(sel[0]))
+
+    @ui_safe
+    def scan(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            t0 = time.time()
+            result = asset.scan(self.source_combo.value(), self.from_groups.value())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.refresh()
+        naming = len(self.snapshot["naming"]) if self.snapshot else 0
+        self.set_status("Scanned %d meshes in %.2fs: %d newly grouped%s." % (
+            result["meshes"], time.time() - t0, result["added"],
+            (", %d naming issue(s) (see below)" % naming) if naming else ""))
+
+    @ui_safe
+    def select_members(self):
+        members = []
+        for s in self._selected_sets():
+            if s and cmds.objExists(s):
+                if set_role(s) == "section":
+                    for m in self._asset().materials(s):
+                        members.extend(cmds.sets(m, q=True) or [])
+                else:
+                    members.extend(cmds.sets(s, q=True) or [])
+        members = [m for m in members if cmds.objExists(m) and cmds.nodeType(m.split(".")[0]) != "objectSet"]
+        if members:
+            cmds.select(members, replace=True)
+        else:
+            cmds.select(clear=True)
+        self.set_status("Selected %d item(s)." % len(members))
+
+    @ui_safe
+    def assign_selection(self):
+        asset = self._asset()
+        targets = self._selected_role("material")
+        if asset is None or len(targets) != 1:
+            self.set_status("Highlight one material group in the list first.", level="warn")
+            return
+        items = self._items_in_root(selection_items())
+        if not items:
+            self.set_status("Select meshes or faces (under the root) to assign.", level="warn")
+            return
+        asset.assign(items, targets[0])
+        self.refresh()
+        self.set_status("Moved %d mesh(es) into %s." % (len(items), targets[0]))
+
+    @ui_safe
+    def new_group(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        sections = self._selected_role("section") or [
+            p for p in (self._parent_section(s) for s in self._selected_role("material")) if p]
+        if not sections:
+            secs = asset.sections()
+            if len(secs) != 1:
+                self.set_status("Highlight the section the new group belongs to.", level="warn")
+                return
+            sections = secs
+        items = self._items_in_root(selection_items())
+        default = "newMaterial"
+        if items:
+            key, _ = material_key_from_name(list(items)[0])
+            default = key or default
+        key, ok = QtWidgets.QInputDialog.getText(self, "New material group", "Material name (e.g. woodGreen):",
+                                                 text=default)
+        if not ok or not key.strip():
+            return
+        key = sanitize_key(key)
+        with UndoChunk("Smart UDIM new group"):
+            mat = asset.material_set(sections[0], key, source="manual")
+            if items:
+                asset._remove_items(items)
+                asset._add_items(items, mat)
+        self.refresh()
+        self.set_status("Group %s ready%s." % (mat, (" with %d mesh(es)" % len(items)) if items else ""))
+
+    @ui_safe
+    def new_section(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        key, ok = QtWidgets.QInputDialog.getText(self, "New section", "Section name (e.g. westWing):")
+        if not ok or not key.strip():
+            return
+        items = self._items_in_root(selection_items())
+        with UndoChunk("Smart UDIM new section"):
+            sec = asset.create_section(key)
+            if items:
+                asset._remove_items(items)
+                batches = {}
+                for xform, faces in items.items():
+                    for mkey, mfaces, source in asset._material_split(xform, self.source_combo.value()):
+                        if faces is not None:
+                            mfaces = set(faces) if mfaces is None else (set(mfaces) & set(faces))
+                            if not mfaces:
+                                continue
+                        mat = asset.material_set(sec, mkey, source=source)
+                        batches.setdefault(mat, {})[xform] = mfaces
+                for mat, its in batches.items():
+                    asset._add_items(its, mat)
+        self.refresh()
+        self.set_status("Section %s made%s." % (sec, (" with %d mesh(es)" % len(items)) if items else ""))
+
+    @ui_safe
+    def move_section(self, step):
+        asset = self._asset()
+        secs = self._selected_role("section")
+        if asset is None or len(secs) != 1:
+            self.set_status("Highlight one section to move.", level="warn")
+            return
+        asset.move_section(secs[0], step)
+        self.refresh()
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            it.setSelected(it.data(0, QtCore.Qt.UserRole) == secs[0])
+
+    @ui_safe
+    def run_preprocess(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        meshes, instanced = asset.meshes()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            t0 = time.time()
+            self.report = preprocess(meshes, instanced, self.fix_lamina.value(), self.fix_nonmanifold.value(),
+                                     self.fix_zero.value(), self.uv_set.text().strip() or "map1")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._fill_report()
+        self.refresh()
+        fixed = sum(sum(self.report.get(c, {}).values()) for c in ("lamina", "nonmanifold", "zeroarea"))
+        skipped = len(skipped_meshes(self.report))
+        warn = sum(len(self.report.get(c, {})) for c in ("ngons", "flipped", "remaining"))
+        level = "warn" if (skipped or warn) else "info"
+        self.set_status("Pre-process on %d meshes in %.2fs: %d problem(s) fixed, %d mesh(es) will be skipped, "
+                        "%d with warnings." % (len(meshes), time.time() - t0, fixed, skipped, warn), level=level)
+
+    @ui_safe
+    def open_renamer(self):
+        import unlok_renamer
+        unlok_renamer.main()
+
+    # ======================================================== helpers
+    def _parent_section(self, material_set):
+        asset = self._asset()
+        for sec in asset.sections() if asset else []:
+            if material_set in asset.materials(sec):
+                return sec
+        return None
+
+    def _items_in_root(self, items):
+        group = self._asset().root_group() if self._asset() else None
+        if not group:
+            return {}
+        return {x: f for x, f in items.items() if x == group or x.startswith(group + "|")}
+
+    def _select_nodes(self, nodes):
+        nodes = [n for n in nodes if cmds.objExists(n)]
+        if nodes:
+            cmds.select(nodes, replace=True)
+
+    def _naming_selected(self):
+        try:
+            self._select_nodes([it.data(0, QtCore.Qt.UserRole) for it in self.naming_list.selectedItems()])
+        except Exception:
+            traceback.print_exc()
+
+    def _report_selected(self):
+        try:
+            nodes = []
+            for it in self.report_tree.selectedItems():
+                nodes.extend(it.data(0, QtCore.Qt.UserRole) or [])
+            self._select_nodes(nodes)
+        except Exception:
+            traceback.print_exc()
+
+    # ======================================================= scene events
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        refresh = lambda: self._refresh_timer.start()  # noqa: E731
+        self._jobs = [
+            cmds.scriptJob(event=["Undo", refresh]),
+            cmds.scriptJob(event=["Redo", refresh]),
+            cmds.scriptJob(event=["NewSceneOpened", self._on_scene_changed]),
+            cmds.scriptJob(event=["SceneOpened", self._on_scene_changed]),
+        ]
+        _registry()["jobs"].extend(self._jobs)
+
+    def _on_scene_changed(self):
+        try:
+            assets = SmartUdimAsset.all()
+            self.set_asset(assets[0] if len(assets) == 1 else None)
+        except Exception:
+            traceback.print_exc()
+
+    def shutdown(self):
+        self._refresh_timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
     ("Modeling", [PathScatterPanel]),
+    ("UV", [SmartUdimPanel]),
 ]
 
 

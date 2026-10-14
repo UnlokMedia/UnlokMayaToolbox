@@ -13,6 +13,15 @@
   script jobs and callbacks on close and on re-paste (`_registry()` in
   `__main__`).
 
+## Context
+- **Film pipeline.** Don't add game-only features such as lightmap UVs,
+  tiling or trim-sheet UVs, or engine export.
+- **Naming convention:** comes from the UnlokRenamer repository
+  (`../../UnlokRenamer/build`), which is reference only and must never be
+  edited.
+- **Upcoming tool:** Smart UDIM. The plan and its decisions are in
+  `docs/smart-udim-plan.md`.
+
 ## Architecture
 - Tools are QWidget panels registered in `TOOL_REGISTRY` (category tab ->
   panel classes). Each panel needs `TOOL_NAME`, `TOOL_TIP` and `shutdown()`.
@@ -40,6 +49,19 @@
 - `RECIPES` holds one-click presets (overrides on `PS_DEFAULTS`). The user's
   benchmark jobs are roof shingles and a messy thatch/straw roof.
 
+- **Smart UDIM** (UV tab):
+  - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
+    then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
+  - **Who owns which values:** names are what users edit, so `sync_names()`
+    reads `td` and `stack` from names into attributes, and writes the
+    tool-owned coverage back into the name.
+  - **Unique names:** Maya set names are global, so we add `_2` and `_3`
+    ourselves. Parsing ignores all-digit tokens.
+  - **Undo:** every scene edit runs inside `UndoChunk`, so it's undoable,
+    unlike Path Scatter's live preview.
+  - **Status:** milestones 1-2 are done; the plan is in
+    `docs/smart-udim-plan.md`.
+
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
   does not return a tuple.
@@ -52,6 +74,14 @@
 - Duplicating several instances together keeps them instanced to each other.
 - `MFnMesh.copy` does not carry shading. Use `copy_shading()` (handles
   per-face assignments).
+- `polyCleanupArgList` argument [1]: the script's header says "select
+  only (0/1)", but its code uses **1 = clean up** and **2 = select only**.
+- Maya 2024+'s default material is `standardSurface1`, not `lambert1`.
+  Don't hard-code either.
+- `cmds.instance` puts the new instance at the world root, not under the
+  original's parent.
+- Selection changes made after an undo chunk closes become separate Ctrl+Z
+  steps. Put detection, the fix and any re-checks inside one `UndoChunk`.
 - mayapy standalone has a QGuiApplication, so QWidgets can't be built
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
 
