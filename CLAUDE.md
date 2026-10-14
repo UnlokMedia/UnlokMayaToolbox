@@ -7,6 +7,9 @@
   numpy, no reading or writing files at runtime, no `userSetup`/module install.
 - **Target Maya 2023** (Python 3.9, PySide2). Keep 3.9 syntax (no `match`,
   no `X | Y` types). PySide6 fallback import exists for 2025+.
+- **Pure ASCII source.** Use `\uXXXX` escapes for symbols. Real non-ASCII
+  characters get garbled by tools that read the file with Windows' default
+  encoding (a test enforces this).
 - **Stability over features.** The user is replacing MASH because it lags
   and crashes. Every UI callback goes through `ui_safe`. Never touch the
   scene from inside Maya API callbacks (only queue a QTimer). Clean up
@@ -33,6 +36,39 @@
   nodes is about 1 ms each, which is too slow for live updates. Only bake
   creates them.
 - Live edits run inside `NoUndo` so slider drags don't flood the undo queue.
+- **Speed (Path Scatter compute):**
+  - **Cached stages:** compute runs in two stages, cached on the
+    `PathScatterSystem` instance. `_place` (curve sampling, surface snapping,
+    frames) only reruns when placement settings change. `_finish`
+    (scale/rotation) is cheap.
+  - **When rotation and scale count as placement:** in Fit to Size they change
+    spacing, so there they are placement keys (`_placement_key`).
+  - **Invalidation:** `invalidate()` runs on input changes (set_paths,
+    surfaces, sources, proxies, presets, and the panel's dirty callbacks).
+  - **Surface queries:** use `_SurfaceQuery` (`MMeshIntersector`, ~3 us),
+    never `MFnMesh.getClosestPointAndNormal` (~200 us, brute force). The
+    intersector answers in object space, so normals go through the inverse
+    transpose.
+  - **Randoms:** per-item randoms come from `_rand12` (splitmix64), not
+    `random.Random` per item.
+  - **Measuring:** `tests/bench_scatter.py`.
+- **Bakes:**
+  - **Combined Mesh:** built in one `MFnMesh.create`, copying UVs, hard edges
+    (mapped as face + edge-in-face slots) and per-face shading. It's about
+    50x faster than `polyUnite`, which is superlinear. Above 3M points it
+    falls back to copies + polyUnite.
+  - **Copies:** shaders are assigned with one batched `MDGModifier`.
+  - **Instances:** real DAG instances are quadratic inside Maya (each new
+    instance gets slower; unshaded too), so the panel warns above 1,500
+    and offers Copies or Combined.
+- **The instancer's `inputPoints` isn't saved with the scene** (not
+  storable; a dynamic arrayAttrs attribute doesn't serialise either), so
+  `restore_scatter_previews()` rebuilds every live scatter when the
+  toolbox opens and on SceneOpened.
+- **UI pattern:** each tool panel has a `ToolHeader`, a `NextBanner`
+  ("NEXT: the one thing to do now", updated by `_update_guidance()`) and
+  numbered `StepCard`s (todo / current / done). Advanced options go in
+  collapsed `Section`s inside step cards.
 - Stroke preview must stay cheap per mouse move:
   - One preview curve (1,024 CVs, never saved, hidden in the Outliner) is made
     when Draw Path starts, and only its CVs are moved through the API.
@@ -82,11 +118,15 @@
   original's parent.
 - Selection changes made after an undo chunk closes become separate Ctrl+Z
   steps. Put detection, the fix and any re-checks inside one `UndoChunk`.
+- Keeping OpenMaya objects (MObject, MPlug, data) across `file -new` or
+  `file -open` and then using them hard-crashes Maya. Re-resolve after
+  scene changes.
 - mayapy standalone has a QGuiApplication, so QWidgets can't be built
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
 
 ## Testing
 Maya 2024 and 2025 are installed locally (no 2023). Run
-`mayapy tests/test_toolbox.py` for the engine. For the UI, launch GUI Maya
+`mayapy tests/test_toolbox.py` and `tests/test_smart_udim.py` for the
+engines, and `tests/bench_scatter.py [--profile]` for speed. For the UI, launch GUI Maya
 with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
 the output folder.

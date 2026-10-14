@@ -95,6 +95,9 @@ def main():
     panel = window.panels()[0]
     PSS = ns["PathScatterSystem"]
     check("window opens", window.isVisible())
+    check("fresh panel says what to do first", "Draw Path" in panel.next_banner.text.text(),
+          panel.next_banner.text.text())
+    window.grab().save(os.path.join(OUT, "00_path_scatter_start.png"))
 
     cmds.file(new=True, force=True)
     house, left, right = build_roof()
@@ -131,6 +134,10 @@ def main():
     count = system.last_count
     check("shingle grid builds", count > 80, "%d items in %.0f ms (%s)" % (count, ms, panel.status.text()))
     snap("01_shingles_one_side.png")
+    window.grab().save(os.path.join(OUT, "03b_path_scatter_live.png"))
+    check("guidance: drawing instructions while drawing, Bake is the current step",
+          panel.next_banner.tag.text() == "DRAWING" and panel.step_bake.state == "current",
+          panel.next_banner.text.text())
 
     # --- Ctrl+stroke adds a second path on the other slab (seen from behind)
     cmds.setAttr("persp.translate", 18, 13, -15)
@@ -153,6 +160,8 @@ def main():
     check("shift-stroke replaces with a single straight path", len(system.paths()) == 1)
     panel.toggle_draw()
     check("draw tool deactivates", not ns["SurfacePathDrawer"].is_active())
+    check("guidance points at Bake once drawing stops", "Bake" in panel.next_banner.text.text(),
+          panel.next_banner.text.text())
 
     # --- heavy-ish preview timing
     panel.set_settings(dict(panel.settings(), rows=40, row_spacing=-0.1, size_x=0.1, size_z=0.1, gap=0.0))
@@ -298,7 +307,6 @@ def main():
     udim.run_preprocess()
     cats = [udim.report_tree.topLevelItem(i).text(0) for i in range(udim.report_tree.topLevelItemCount())]
     check("pre-process report shows n-gons", any("N-gons" in c for c in cats), "%s | %s" % (cats, udim.status.text()))
-    udim.naming_section.header.setChecked(True)
     pump()
     window.grab().save(os.path.join(OUT, "09_smart_udim_panel.png"))
 

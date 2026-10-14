@@ -56,11 +56,19 @@ def instancer_matrices(inst):
     return [[mats[i](r, c) for r in range(4) for c in range(4)] for i in range(mats.length())]
 
 
+def om_edge_smooth(shape, edge):
+    sel = om.MSelectionList()
+    sel.add(shape)
+    return om.MFnMesh(sel.getDagPath(0)).isEdgeSmooth(edge)
+
+
 def close(a, b, tol=1e-3):
     return all(abs(x - y) < tol for x, y in zip(a, b))
 
 
 def run():
+    raw = open(TOOLBOX, "rb").read()
+    check("toolbox file is pure ASCII (safe however it's loaded or pasted)", all(b < 128 for b in raw))
     tb = load_toolbox()
     PSS = tb["PathScatterSystem"]
     D = dict(tb["PS_DEFAULTS"])
@@ -190,6 +198,79 @@ def run():
     out = system.bake(dict(D, bake_mode="Combined Mesh"))
     check("bake combined: single mesh", cmds.nodeType(cmds.listRelatives(out, shapes=True, fullPath=True)[0]) == "mesh"
           and cmds.polyEvaluate(out, vertex=True) == 80, str(cmds.polyEvaluate(out, vertex=True)))
+
+    # --- caching never changes results
+    cmds.file(new=True, force=True)
+    roof = cmds.polyPlane(w=12, h=8, sx=12, sy=8, name="roof")[0]
+    cmds.rotate(-30, 0, 0, roof)
+    cmds.makeIdentity(roof, apply=True)
+    eave = cmds.curve(degree=1, point=[(-5, 0, 3), (5, 0, 3)])
+    system = PSS.create(D)
+    system.set_paths([eave])
+    system.set_surfaces([roof])
+    s = dict(D, rows=4, row_spacing=-0.4, rand_rot_y=20, rand_scale_min=0.8, rand_scale_max=1.2, rand_side=0.1,
+             dist_mode="Spacing", spacing=1.0)  # in Fit to Size, rotation changes spacing (placement)
+    system.rebuild(s)  # builds the source proxy
+    cached_a = [list(m) for _, m in system.compute(s)[0]]
+    s2 = dict(s, rot_z=15.0)
+    cached_b = [list(m) for _, m in system.compute(s2)[0]]
+    system.invalidate()
+    cold_b = [list(m) for _, m in system.compute(s2)[0]]
+    check("cached rebuild == cold rebuild", cached_b == cold_b and cached_a != cached_b, "%d items" % len(cold_b))
+    before = system._cache.get(("placement", system._placement_key(s2), 1))
+    system.compute(dict(s2, rot_x=30.0))
+    check("rotation change reuses cached placement",
+          system._cache.get(("placement", system._placement_key(s2), 1)) is before and before is not None)
+    cmds.move(0, 1, 0, roof + ".vtx[*]", relative=True)
+    system.invalidate()
+    moved = [list(m) for _, m in system.compute(s2)[0]]
+    # roof raised 1 unit; items snap to the closest point on a 30 degree slope, so they rise ~0.75
+    check("invalidate picks up moved geometry", 0.6 < moved[0][13] - cold_b[0][13] < 1.01,
+          "%.3f -> %.3f" % (cold_b[0][13], moved[0][13]))
+
+    # --- combined mesh keeps materials, hard edges and UVs
+    cmds.file(new=True, force=True)
+    part = cmds.polyCube(w=1, h=0.2, d=0.5, name="part")[0]
+    red = cmds.shadingNode("lambert", asShader=True, name="redPart")
+    red_sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name="redPartSG")
+    cmds.connectAttr(red + ".outColor", red_sg + ".surfaceShader")
+    cmds.sets(part + ".f[1]", edit=True, forceElement=red_sg)
+    curve = straight_curve()
+    system = PSS.create(D)
+    system.set_paths([curve])
+    system.set_sources([part])
+    s = dict(D, source_type="Mesh", dist_mode="Count", count=5)
+    system.rebuild(s)
+    out = system.bake(dict(s, bake_mode="Combined Mesh"))
+    shape = cmds.listRelatives(out, shapes=True, fullPath=True)[0]
+    red_faces = cmds.ls(cmds.sets(red_sg, q=True) or [], flatten=True)
+    hard = [e for e in range(cmds.polyEvaluate(out, edge=True))
+            if not cmds.polyInfo("%s.e[%d]" % (out, e), edgeToVertex=True) is None and
+            not om_edge_smooth(shape, e)]
+    check("combined mesh: one shape, all faces", cmds.polyEvaluate(out, face=True) == 30, str(cmds.polyEvaluate(out, face=True)))
+    check("combined mesh: per-face material kept", len([f for f in red_faces if out.split("|")[-1] in f]) == 5,
+          str(red_faces[:6]))
+    check("combined mesh: hard edges kept", len(hard) == 60, "%d hard of %d" % (len(hard), cmds.polyEvaluate(out, edge=True)))
+    check("combined mesh: UVs kept", cmds.polyEvaluate(out, uvcoord=True) == 5 * cmds.polyEvaluate(part, uvcoord=True))
+
+    # --- live previews come back after reopening the scene
+    cmds.file(new=True, force=True)
+    curve = straight_curve()
+    system = PSS.create(D)
+    system.set_paths([curve])
+    system.rebuild(D)
+    path = os.path.join(os.environ.get("TEMP", HERE), "unlok_restore_test.ma")
+    cmds.file(rename=path)
+    cmds.file(save=True, type="mayaAscii", force=True)
+    cmds.file(new=True, force=True)
+    cmds.file(path, open=True, force=True)
+    root = PSS.all_roots()[0]
+    inst = PSS(cmds.ls(root, uuid=True)[0]).instancer()
+    check("reopened scene: preview empty before restore", len(instancer_matrices(inst)) == 0)
+    restored = tb["restore_scatter_previews"]()
+    check("restore_scatter_previews rebuilds it", restored == 1 and len(instancer_matrices(inst)) == 10,
+          str(len(instancer_matrices(inst))))
+    os.remove(path)
 
     # delete system keeps user curve, deletes drawn ones
     system = PSS.create(D)

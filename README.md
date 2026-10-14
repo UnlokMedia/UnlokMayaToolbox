@@ -65,7 +65,7 @@ length, so strands run down the slope. Twelve overlapping rows with *Row lift*
 build up the layers, while random tilt, fan (*Rotate Y +/-*), stretch, side
 jitter and *Skip %* make it messy. Want it shaggier? Raise *Rotate X +/-*
 and *Offset side +/-*. Thicker? Lower *Spacing*. A full roof of about 5,500
-strands rebuilds in roughly 0.3 s.
+strands rebuilds in about 0.2 s, and rotation tweaks take about 0.06 s.
 
 **Drawing tips:** a stroke follows whatever mesh is under the cursor, so you
 can cross several pieces. If you have meshes selected when you press Draw
@@ -83,6 +83,14 @@ eave) is ignored automatically.
   scene doesn't matter, and the tool never moves or changes them.
 - Live tweaks don't fill your undo queue. **Bake cannot be undone with
   Ctrl+Z**: delete the baked group instead, or tick *Keep live system* first.
+- **Bake modes for big counts:**
+  - **Combined Mesh** is the fastest (about 0.4 s for 6,000 pieces). It
+    keeps UVs, hard edges and per-face materials.
+  - **Copies** is quick too.
+  - **Instances** gets slow beyond a couple of thousand, because Maya itself
+    slows down per instance. The tool warns you and offers the faster modes.
+- Live scatters rebuild their preview when you open a scene with the toolbox
+  open, or when you open the toolbox.
 
 ### UV > Smart UDIM (in progress)
 
@@ -120,10 +128,24 @@ Every Smart UDIM action is a single Ctrl+Z.
 
 ## How it stays fast
 
-The live preview is a single `instancer` node whose point data is written
-directly from Python. There is no MASH network and no per-item nodes, so even
-tens of thousands of items update in milliseconds. Real geometry is only
-created when you bake.
+- **Preview:** the live preview is a single `instancer` node whose point data
+  is written directly from Python. There is no MASH network and there are no
+  per-item nodes.
+- **Surface snapping:** uses Maya's accelerated mesh intersector, about 60x
+  faster than the plain closest-point query.
+- **Caching:** placement (path sampling and snapping) is cached, so rotation
+  and scale tweaks don't redo it.
+- **Bakes:** Combined Mesh is built in a single API call instead of
+  `polyUnite`.
+
+Measured on Maya 2024 (`tests/bench_scatter.py`):
+
+| Case | Before | Now |
+| --- | --- | --- |
+| Thatch roof, ~5,900 strands, rebuild | 2.7 s | ~0.2 s |
+| Same, after changing a rotation | 2.7 s | ~0.06 s |
+| 20,000-item array, rebuild | 0.43 s | ~0.2-0.3 s |
+| Bake 5,900 pieces to Combined Mesh | 17 s | ~0.4 s |
 
 ## Development
 
@@ -141,6 +163,9 @@ created when you bake.
   draws strokes through the viewport, saves screenshots to `tests/_out`).
   Set `UNLOK_TEST_DIR` to the `tests` folder (and `UNLOK_TEST_QUIT=1` to close
   Maya afterwards), then launch `maya.exe -script tests/run_gui_smoke.mel`.
+- `tests/bench_scatter.py`: Path Scatter rebuild and bake timings
+  (`--profile` prints the hot functions, `--quick` skips the slow
+  Instances bake).
 - `tests/gui_draw_bench.py`: measures how responsive path drawing is (time
   per mouse move in a busy scene). Launch it the same way with
   `tests/run_gui_draw_bench.mel`.

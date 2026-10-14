@@ -277,6 +277,10 @@ class PathScatterSystem(object):
     def __init__(self, uuid):
         self.uuid = uuid
         self.last_count = 0
+        self._cache = {}
+        self._preset_state = None
+        self._pushed = None
+        self._pushed_boxes = None
 
     # ------------------------------------------------------------------ lookup
     @classmethod
@@ -415,6 +419,7 @@ class PathScatterSystem(object):
     # ---------------------------------------------------------------- inputs
     def set_paths(self, curves, add=False):
         """Assign path curves. Replaced curves that the tool drew are deleted."""
+        self.invalidate()
         with NoUndo():
             grp = self.path_group()
             old = self.paths()
@@ -426,9 +431,11 @@ class PathScatterSystem(object):
                         cmds.delete(c)
 
     def set_surfaces(self, meshes, add=False):
+        self.invalidate()
         self._msg_set("unlokSurfaces", meshes, add=add)
 
     def set_sources(self, nodes):
+        self.invalidate()
         self._msg_set("unlokSources", nodes)
 
     def adopt_curve(self, curve):
@@ -478,6 +485,8 @@ class PathScatterSystem(object):
         current = cmds.getAttr(root + ".unlokProxySig") or ""
         if sig == current and self.proxies():
             return
+        self.invalidate()
+        self._preset_state = None
         with NoUndo(), PreserveSelection():
             self._clear_proxies()
             group = self.source_group()
@@ -541,6 +550,11 @@ class PathScatterSystem(object):
             return
         size = [max(1e-4, float(s.get(k, 1.0))) for k in ("size_x", "size_y", "size_z")]
         sides = int(max(3, s.get("preset_sides", 12)))
+        state = (s.get("source_type"), tuple(size), sides)
+        if state == self._preset_state:
+            return  # nothing changed: skip the scene queries entirely
+        self._preset_state = state
+        self.invalidate()  # item sizes changed
         for proxy in self.proxies():
             for geo in cmds.listRelatives(proxy, children=True, type="transform", fullPath=True) or []:
                 cur = cmds.getAttr(geo + ".scale")[0]
@@ -596,8 +610,8 @@ class PathScatterSystem(object):
                 out.append(_CurveSampler(fn, obj_len, obj_len * axis_scale, closed))
         return out
 
-    def _surface_fns(self):
-        fns = []
+    def _surface_queries(self):
+        out = []
         for node in self.surfaces():
             if cmds.nodeType(node) == "mesh":
                 shapes = [node]
@@ -606,29 +620,50 @@ class PathScatterSystem(object):
             for shape in shapes:
                 dag = get_dag_path(shape)
                 if dag is not None:
-                    fns.append(om.MFnMesh(dag))
-        return fns
+                    try:
+                        out.append(_SurfaceQuery(dag))
+                    except RuntimeError:
+                        pass
+        return out
 
     # --------------------------------------------------------------- compute
-    def compute(self, s):
-        """Return (items, warning). items = [(variant_index, MMatrix), ...]."""
-        proxies = self.proxies()
-        if not proxies:
-            if s.get("source_type") == "Mesh":
-                return [], "Pick source meshes: select them and press 'Use Selected Meshes'."
-            return [], "No source."
-        curves = self._curve_samplers()
-        if not curves:
-            return [], "No path yet. Draw one, or select a curve / edges and press 'Use Selection'."
-        surfaces = self._surface_fns()
+    # Compute runs in two cached stages so the common tweaks stay instant:
+    #   placement : sample the path, snap to surfaces, build each item's frame
+    #               (the expensive part: curve + surface queries)
+    #   finish    : per-item scale / rotation on top of those frames
+    # Changing rotation or (outside Fit to Size) scale only re-runs "finish".
+    # invalidate() drops the cache when paths, surfaces or sources change.
 
+    # Settings that only affect the finish stage. In Fit to Size, scale and
+    # the rotation offset change item lengths (spacing), so they count as
+    # placement there.
+    _FINISH_ONLY = ("rand_rot_x", "rand_rot_y", "rand_rot_z", "preview_boxes", "bake_mode", "keep_system",
+                    "smoothing")
+    _FINISH_ONLY_UNLESS_FIT = ("rot_x", "rot_y", "rot_z", "scale", "scale_x", "scale_y", "scale_z",
+                               "rand_scale_min", "rand_scale_max", "rand_scale_axis")
+
+    def invalidate(self):
+        """Inputs changed (curve edited, surface moved, source modelled...)."""
+        self._cache.clear()
+        self._pushed = None
+
+    def _placement_key(self, s):
+        skip = set(self._FINISH_ONLY)
+        if s.get("dist_mode") != "Fit to Size":
+            skip.update(self._FINISH_ONLY_UNLESS_FIT)
+        return tuple(sorted((k, v) for k, v in s.items() if k not in skip))
+
+    def _variants(self, s, proxies):
+        """Per source variant: (pre-matrix, bounding corners after pre)."""
         remap, axes_ok = axis_remap_matrix(s["forward_axis"], s["up_axis"])
-        warning = None if axes_ok else "Forward and Up axis can't be the same axis."
-
-        # Per-variant pre-matrix: remap axes, then move the chosen pivot to origin.
+        key = ("variants", tuple(proxies), s["forward_axis"], s["up_axis"], s["pivot"])
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit, axes_ok
         variants = []
         for proxy in proxies:
-            corners = self._proxy_corners(proxy) or [om.MPoint(x, y, z) for x in (-0.5, 0.5) for y in (-0.5, 0.5) for z in (-0.5, 0.5)]
+            corners = self._proxy_corners(proxy) or [om.MPoint(x, y, z) for x in (-0.5, 0.5)
+                                                     for y in (-0.5, 0.5) for z in (-0.5, 0.5)]
             rc = [c * remap for c in corners]
             xs, ys, zs = [c.x for c in rc], [c.y for c in rc], [c.z for c in rc]
             cx, cz = (min(xs) + max(xs)) * 0.5, (min(zs) + max(zs)) * 0.5
@@ -640,29 +675,77 @@ class PathScatterSystem(object):
                 pivot = (0.0, 0.0, 0.0)
             pre = remap * mat_translate(-pivot[0], -pivot[1], -pivot[2])
             variants.append((pre, [c * pre for c in corners]))
-        n_var = len(variants)
+        self._cache[key] = variants
+        return variants, axes_ok
 
+    def compute(self, s, use_cache=True):
+        """Return (items, warning). items = [(variant_index, MMatrix), ...]."""
+        if not use_cache:
+            self.invalidate()
+        proxies = self.proxies()
+        if not proxies:
+            if s.get("source_type") == "Mesh":
+                return [], "Pick source meshes: select them and press 'Use Selected Meshes'."
+            return [], "No source."
+        variants, axes_ok = self._variants(s, proxies)
+        warning = None if axes_ok else "Forward and Up axis can't be the same axis."
+
+        pkey = ("placement", self._placement_key(s), len(variants))
+        placed = self._cache.get(pkey)
+        if placed is None:
+            curves = self._curve_samplers()
+            if not curves:
+                return [], "No path yet. Draw one, or select a curve / edges and press 'Use Selection'."
+            for k in [k for k in self._cache if k[0] == "placement"]:
+                del self._cache[k]  # keep one placement in memory
+            placed = self._place(s, variants, curves, self._surface_queries())
+            self._cache[pkey] = placed
+        placements, truncated = placed
+        if truncated:
+            warning = "Capped at %d items (raise 'Max items' in Output if you really need more)." % int(s["max_items"])
+        fkey = ("finish", pkey, tuple(sorted(s.items())))
+        items = self._cache.get(fkey)
+        if items is None:
+            for k in [k for k in self._cache if k[0] == "finish"]:
+                del self._cache[k]
+            items = self._cache[fkey] = self._finish(s, variants, placements)
+        return items, warning
+
+    @staticmethod
+    def _scale_fn(s):
+        base = (s["scale"] * s["scale_x"], s["scale"] * s["scale_y"], s["scale"] * s["scale_z"])
+        smin, smax, axis_j = s["rand_scale_min"], s["rand_scale_max"], s["rand_scale_axis"]
+        if abs(smax - smin) < 1e-12 and axis_j == 0:
+            const = tuple(max(1e-4, b * smin) for b in base)
+            return lambda u: const
+        span = smax - smin
+
+        def scale_of(u):
+            mult = smin + span * u[2]
+            return (max(1e-4, base[0] * mult * (1.0 + (u[3] * 2.0 - 1.0) * axis_j)),
+                    max(1e-4, base[1] * mult * (1.0 + (u[4] * 2.0 - 1.0) * axis_j)),
+                    max(1e-4, base[2] * mult * (1.0 + (u[5] * 2.0 - 1.0) * axis_j)))
+        return scale_of
+
+    def _place(self, s, variants, curves, surfaces):
+        """The expensive stage: [(variant, randoms, frame MMatrix)], truncated."""
+        n_var = len(variants)
         rot_offset = mat_euler_deg(s["rot_x"], s["rot_y"], s["rot_z"])
-        base_scale = (s["scale"] * s["scale_x"], s["scale"] * s["scale_y"], s["scale"] * s["scale_z"])
+        scale_of = self._scale_fn(s)
         extent_cache = {}
 
         def extent(vi, sc):
-            key = (vi, round(sc[0], 6), round(sc[1], 6), round(sc[2], 6))
+            key = (vi, sc)
             hit = extent_cache.get(key)
             if hit is None:
                 m = mat_scale(*sc) * rot_offset
                 xs = [(c * m).x for c in variants[vi][1]]
-                hit = (min(xs), max(xs))
-                extent_cache[key] = hit
+                hit = extent_cache[key] = (min(xs), max(xs))
             return hit
 
         seed = int(s["seed"])
-        smin, smax = s["rand_scale_min"], s["rand_scale_max"]
-        axis_j = s["rand_scale_axis"]
-        rr = (s["rand_rot_x"], s["rand_rot_y"], s["rand_rot_z"])
-        has_rand_rot = any(abs(v) > 1e-9 for v in rr)
         jit = (s["rand_along"], s["rand_side"], s["rand_up"])
-        skip = s["skip_chance"]
+        skip = s["skip_chance"] / 100.0
         cycle = s["variant_mode"] == "Cycle"
         mode = s["dist_mode"]
         gap = s["gap"]
@@ -671,30 +754,21 @@ class PathScatterSystem(object):
         use_normal = s["up_mode"] == "Surface Normal" and bool(surfaces)
         snap = s["snap_surface"] and bool(surfaces)
         follow = s["follow_path"]
+        surface_offset = s["surface_offset"]
+        row_lift = s["row_lift"]
 
-        def item_random(pi, row, i):
-            rng = random.Random(hash((seed, pi, row, i)))
-            u = [rng.random() for _ in range(12)]
-            vi = (i + row) % n_var if cycle else min(n_var - 1, int(u[0] * n_var))
-            mult = smin + (smax - smin) * u[2]
-            sc = tuple(max(1e-4, base_scale[a] * mult * (1.0 + (u[3 + a] * 2.0 - 1.0) * axis_j)) for a in range(3))
-            rot = tuple((u[6 + a] * 2.0 - 1.0) * rr[a] for a in range(3))
-            off = tuple((u[9 + a] * 2.0 - 1.0) * jit[a] for a in range(3))
-            return vi, u[1] * 100.0 < skip, sc, rot, off
+        def variant_of(u, row, i):
+            return (i + row) % n_var if cycle else min(n_var - 1, int(u[0] * n_var))
 
         def closest(point):
             best = None
-            for fn in surfaces:
-                try:
-                    cp, normal, _ = fn.getClosestPointAndNormal(point, om.MSpace.kWorld)
-                except RuntimeError:
-                    continue
-                dist = (cp - point).length()
-                if best is None or dist < best[0]:
-                    best = (dist, cp, normal)
+            for q in surfaces:
+                hit = q.closest(point)
+                if hit is not None and (best is None or hit[0] < best[0]):
+                    best = hit
             return best
 
-        items = []
+        placements = []
         truncated = False
         base_cache = {}  # rows share path samples: (path, distance) -> frame data
         for pi, curve in enumerate(curves):
@@ -703,9 +777,10 @@ class PathScatterSystem(object):
             usable = end - start
             if usable <= 1e-6:
                 continue
-
             if mode == "Fit to Size":
-                mn, mx = extent(0, base_scale)
+                base_sc = tuple(max(1e-4, v) for v in (s["scale"] * s["scale_x"], s["scale"] * s["scale_y"],
+                                                       s["scale"] * s["scale_z"]))
+                mn, mx = extent(0, base_sc)
                 pitch = max(1e-4, (mx - mn) + gap)
             elif mode == "Spacing":
                 pitch = max(1e-4, s["spacing"])
@@ -717,18 +792,18 @@ class PathScatterSystem(object):
                 row_off = ((row - (rows - 1) * 0.5) if s["rows_centered"] else row) * s["row_spacing"]
                 stagger = (row % 2) * s["row_stagger"] * pitch
 
-                # --- slots along this row: (index, distance, random data)
-                slots = []
+                slots = []  # (distance, randoms, variant)
                 if mode == "Fit to Size":
                     d = start + stagger
                     i = 0
-                    while len(items) + len(slots) < max_items:
-                        rnd = item_random(pi, row, i)
-                        mn, mx = extent(rnd[0], rnd[2])
+                    while len(placements) + len(slots) < max_items:
+                        u = _rand12(seed, pi, row, i)
+                        vi = variant_of(u, row, i)
+                        mn, mx = extent(vi, scale_of(u))
                         pos = d - mn
                         if pos + mx > end + 1e-6:
                             break
-                        slots.append((i, pos, rnd))
+                        slots.append((pos, u, vi))
                         d = pos + max(1e-4, mx + gap)
                         i += 1
                     else:
@@ -737,16 +812,17 @@ class PathScatterSystem(object):
                     d = start + stagger
                     i = 0
                     while d <= end + 1e-6:
-                        if len(items) + len(slots) >= max_items:
+                        if len(placements) + len(slots) >= max_items:
                             truncated = True
                             break
-                        slots.append((i, d, item_random(pi, row, i)))
+                        u = _rand12(seed, pi, row, i)
+                        slots.append((d, u, variant_of(u, row, i)))
                         d += pitch
                         i += 1
                 else:
                     n = max(1, int(s["count"]))
                     for i in range(n):
-                        if len(items) + len(slots) >= max_items:
+                        if len(placements) + len(slots) >= max_items:
                             truncated = True
                             break
                         if n == 1 and not curve.closed:
@@ -755,11 +831,11 @@ class PathScatterSystem(object):
                             d = start + i * pitch + stagger
                         if not curve.closed and d > end + 1e-6:
                             continue
-                        slots.append((i, d, item_random(pi, row, i)))
+                        u = _rand12(seed, pi, row, i)
+                        slots.append((d, u, variant_of(u, row, i)))
 
-                # --- place each slot
-                for i, dist, (vi, skipped, sc, rot, off) in slots:
-                    if skipped:
+                for dist, u, vi in slots:
+                    if u[1] < skip:
                         continue
                     key = (pi, round(dist, 6))
                     base = base_cache.get(key)
@@ -769,7 +845,7 @@ class PathScatterSystem(object):
                         if use_normal:
                             hit = closest(point)
                             if hit:
-                                up = om.MVector(hit[2]).normal()
+                                up = hit[2]
                         x0 = tangent - up * (tangent * up)
                         if x0.length() < 1e-6:
                             x0 = WORLD_X - up * (WORLD_X * up)
@@ -779,15 +855,15 @@ class PathScatterSystem(object):
                         z0 = (x0 ^ up).normal()
                         base = base_cache[key] = (point, tangent, up, x0, z0)
                     point, tangent, up, x0, z0 = base
-                    p = om.MPoint(point) + z0 * (row_off + off[1]) + x0 * off[0]
+                    p = om.MPoint(point) + z0 * (row_off + (u[10] * 2.0 - 1.0) * jit[1]) \
+                        + x0 * ((u[9] * 2.0 - 1.0) * jit[0])
                     if snap:
                         hit = closest(p)
                         if hit:
-                            normal = om.MVector(hit[2]).normal()
-                            p = om.MPoint(hit[1]) + normal * s["surface_offset"]
+                            p = hit[1] + hit[2] * surface_offset
                             if use_normal:
-                                up = normal
-                    p = p + up * (s["row_lift"] * row + off[2])
+                                up = hit[2]
+                    p = p + up * (row_lift * row + (u[11] * 2.0 - 1.0) * jit[2])
 
                     ref = tangent if follow else WORLD_X
                     xf = ref - up * (ref * up)
@@ -796,18 +872,30 @@ class PathScatterSystem(object):
                     xf.normalize()
                     zf = (xf ^ up).normal()
                     yf = (zf ^ xf).normal()
-                    frame = mat_from_frame(xf, yf, zf, p)
-
-                    local = variants[vi][0] * mat_scale(*sc) * rot_offset
-                    if has_rand_rot:
-                        local = local * mat_euler_deg(*rot)
-                    items.append((vi, local * frame))
+                    placements.append((vi, u, mat_from_frame(xf, yf, zf, p)))
             if truncated:
                 break
+        return placements, truncated
 
-        if truncated:
-            warning = "Capped at %d items (raise 'Max items' in Output if you really need more)." % max_items
-        return items, warning
+    def _finish(self, s, variants, placements):
+        """The cheap stage: put each source on its frame with scale/rotation."""
+        rot_offset = mat_euler_deg(s["rot_x"], s["rot_y"], s["rot_z"])
+        scale_of = self._scale_fn(s)
+        rr = (s["rand_rot_x"], s["rand_rot_y"], s["rand_rot_z"])
+        has_rand_rot = any(abs(v) > 1e-9 for v in rr)
+        constant_scale = scale_of((0.0,) * 12) == scale_of((1.0,) * 12)
+        if constant_scale and not has_rand_rot:
+            sc = scale_of((0.0,) * 12)
+            locals_ = [pre * mat_scale(*sc) * rot_offset for pre, _ in variants]
+            return [(vi, locals_[vi] * frame) for vi, u, frame in placements]
+        items = []
+        for vi, u, frame in placements:
+            local = variants[vi][0] * mat_scale(*scale_of(u)) * rot_offset
+            if has_rand_rot:
+                local = local * mat_euler_deg((u[6] * 2.0 - 1.0) * rr[0], (u[7] * 2.0 - 1.0) * rr[1],
+                                              (u[8] * 2.0 - 1.0) * rr[2])
+            items.append((vi, local * frame))
+        return items
 
     # ------------------------------------------------------------- preview
     def _push(self, items, boxes=False):
@@ -858,7 +946,11 @@ class PathScatterSystem(object):
             self._ensure_proxies(s)
             self._update_presets(s)
             items, warning = self.compute(s)
-            self._push(items, s.get("preview_boxes", False))
+            # Same list object = cache hit = nothing moved; skip the upload.
+            if items is not self._pushed or s.get("preview_boxes", False) != self._pushed_boxes:
+                self._push(items, s.get("preview_boxes", False))
+                self._pushed = items
+                self._pushed_boxes = s.get("preview_boxes", False)
         self.last_count = len(items)
         return len(items), (time.time() - t0) * 1000.0, warning
 
@@ -881,7 +973,7 @@ class PathScatterSystem(object):
 
     def bake(self, s):
         """Turn the preview into real scene objects. Returns the result node."""
-        items, _ = self.compute(s)
+        items, _ = self.compute(s, use_cache=False)
         if not items:
             raise RuntimeError("Nothing to bake.")
         proxies = self.proxies()
@@ -893,11 +985,16 @@ class PathScatterSystem(object):
             if mode == "Instances":
                 self._bake_instances(items, proxies, out_obj, short)
                 result = out
+            elif mode == "Combined Mesh":
+                result = self._combine_direct(items, proxies, short)
+                if result is None:  # too heavy for the direct build: copies + polyUnite
+                    self._bake_copies(items, proxies, out_obj, short)
+                    result = self._combine(out, short)
+                else:
+                    cmds.delete(out)
             else:
                 self._bake_copies(items, proxies, out_obj, short)
                 result = out
-                if mode == "Combined Mesh":
-                    result = self._combine(out, short)
             root = self.root()
             if s.get("keep_system"):
                 cmds.setAttr(root + ".visibility", 0)
@@ -961,6 +1058,130 @@ class PathScatterSystem(object):
                                                       shapes=True, fullPath=True) or [])
                 copy_shading(src_path, dst)
 
+    COMBINE_DIRECT_MAX_POINTS = 3000000
+
+    @staticmethod
+    def _mesh_data(path, rel):
+        """Everything needed to rebuild a mesh: points, faces, UVs, shading
+        per face and which edges are hard (as face + edge-in-face slots,
+        since edge ids aren't stable between meshes)."""
+        dag = get_dag_path(path)
+        fn = om.MFnMesh(dag)
+        counts, connects = fn.getVertices()
+        uv_set = fn.currentUVSetName()
+        if uv_set and fn.numUVs(uv_set):
+            us, vs = fn.getUVs(uv_set)
+            uvc, uvi = fn.getAssignedUVs(uv_set)
+        else:
+            us = vs = uvc = uvi = []
+        try:
+            shaders, face_sg = fn.getConnectedShaders(dag.instanceNumber())
+            sgs = [om.MFnDependencyNode(o).name() for o in shaders]
+        except RuntimeError:
+            sgs, face_sg = [], []
+        hard = []
+        seen = set()
+        it = om.MItMeshPolygon(dag)
+        while not it.isDone():
+            f = it.index()
+            for k, e in enumerate(it.getEdges()):
+                if e not in seen:
+                    seen.add(e)
+                    if not fn.isEdgeSmooth(e):
+                        hard.append((f, k))
+            it.next()
+        return {
+            "pts": [(q.x, q.y, q.z) for q in fn.getPoints(om.MSpace.kObject)],
+            "counts": list(counts), "connects": list(connects),
+            "us": list(us), "vs": list(vs), "uvc": list(uvc), "uvi": list(uvi),
+            "sgs": sgs, "face_sg": list(face_sg), "hard": hard, "rel": rel,
+            "nfaces": len(counts), "nuvs": len(us),
+        }
+
+    def _combine_direct(self, items, proxies, short):
+        """Build the combined mesh in one MFnMesh.create call.
+
+        O(n) and ~100x faster than polyUnite on thousands of pieces. Keeps
+        UVs (current set), hard/soft edges and per-face materials. Returns
+        None when the result would be too heavy for a Python build.
+        """
+        data = [[self._mesh_data(path, rel) for _, path, rel in self._variant_meshes(p)] for p in proxies]
+        total = sum(len(md["pts"]) for vi, _ in items for md in data[vi])
+        if total > self.COMBINE_DIRECT_MAX_POINTS or total == 0:
+            return None
+        points, counts, connects = [], [], []
+        us, vs, uvc, uvi = [], [], [], []
+        by_sg = {}
+        hard = []
+        vbase = fbase = uvbase = 0
+        has_uvs = all(md["uvc"] for v in data for md in v)
+        for vi, m in items:
+            for md in data[vi]:
+                mm = md["rel"] * m
+                a00, a01, a02 = mm.getElement(0, 0), mm.getElement(0, 1), mm.getElement(0, 2)
+                a10, a11, a12 = mm.getElement(1, 0), mm.getElement(1, 1), mm.getElement(1, 2)
+                a20, a21, a22 = mm.getElement(2, 0), mm.getElement(2, 1), mm.getElement(2, 2)
+                a30, a31, a32 = mm.getElement(3, 0), mm.getElement(3, 1), mm.getElement(3, 2)
+                points.extend((x * a00 + y * a10 + z * a20 + a30,
+                               x * a01 + y * a11 + z * a21 + a31,
+                               x * a02 + y * a12 + z * a22 + a32) for x, y, z in md["pts"])
+                counts.extend(md["counts"])
+                connects.extend([c + vbase for c in md["connects"]])
+                if has_uvs:
+                    us.extend(md["us"])
+                    vs.extend(md["vs"])
+                    uvc.extend(md["uvc"])
+                    uvi.extend([c + uvbase for c in md["uvi"]])
+                face_sg, sgs = md["face_sg"], md["sgs"]
+                if face_sg and len(set(face_sg)) == 1:
+                    sid = face_sg[0]
+                    by_sg.setdefault(sgs[sid] if 0 <= sid < len(sgs) else None, []).append(
+                        (fbase, fbase + md["nfaces"] - 1))
+                else:
+                    for f, sid in enumerate(face_sg or [-1] * md["nfaces"]):
+                        by_sg.setdefault(sgs[sid] if 0 <= sid < len(sgs) else None, []).append(
+                            (fbase + f, fbase + f))
+                hard.extend((fbase + f, k) for f, k in md["hard"])
+                vbase += len(md["pts"])
+                fbase += md["nfaces"]
+                uvbase += md["nuvs"]
+
+        mod = om.MDagModifier()
+        xform = mod.createNode("transform")
+        mod.renameNode(xform, short + "_combined1")
+        mod.doIt()
+        fn = om.MFnMesh()
+        if has_uvs:
+            mesh = fn.create(om.MPointArray(points), counts, connects, us, vs, xform)
+            fn.assignUVs(uvc, uvi)
+        else:
+            mesh = fn.create(om.MPointArray(points), counts, connects, parent=xform)
+        if hard:
+            it = om.MItMeshPolygon(mesh)
+            ids = []
+            for f, k in hard:
+                it.setIndex(f)
+                ids.append(it.getEdges()[k])
+            fn.setEdgeSmoothings(ids, [False] * len(ids))
+            fn.cleanupEdgeSmoothing()
+            fn.updateSurface()
+        shape = om.MDagPath.getAPathTo(mesh).fullPathName()
+        for sg, spans in by_sg.items():
+            sg = sg or "initialShadingGroup"
+            if len(by_sg) == 1:
+                cmds.sets(shape, edit=True, forceElement=sg)
+                break
+            merged = []
+            for a, b in sorted(spans):
+                if merged and a <= merged[-1][1] + 1:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b])
+            comps = ["%s.f[%d:%d]" % (shape, a, b) if a != b else "%s.f[%d]" % (shape, a) for a, b in merged]
+            for i in range(0, len(comps), 5000):
+                cmds.sets(comps[i:i + 5000], edit=True, forceElement=sg)
+        return long_name(om.MDagPath.getAPathTo(xform).fullPathName())
+
     @staticmethod
     def _combine(group, short):
         shapes = cmds.listRelatives(group, allDescendents=True, type="mesh", fullPath=True) or []
@@ -987,6 +1208,74 @@ class PathScatterSystem(object):
                 cmds.delete(root)
 
 
+_MASK64 = (1 << 64) - 1
+
+
+def _rand12(seed, a, b, c):
+    """12 deterministic uniforms in [0, 1) for one item (splitmix64).
+
+    Several times cheaper than a random.Random per item, and stable: an
+    item keeps its random values when the count or other items change.
+    """
+    x = (seed * 0x9E3779B97F4A7C15 ^ a * 0xBF58476D1CE4E5B9 ^ b * 0x94D049BB133111EB
+         ^ c * 0xD6E8FEB86659FD93) & _MASK64
+    out = []
+    for _ in range(3):
+        x = (x + 0x9E3779B97F4A7C15) & _MASK64
+        z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+        z ^= z >> 31
+        out.extend(((z >> 48) & 0xFFFF, (z >> 32) & 0xFFFF, (z >> 16) & 0xFFFF, z & 0xFFFF))
+    return tuple(v * (1.0 / 65536.0) for v in out)
+
+
+class _SurfaceQuery(object):
+    """Accelerated closest point + normal on a mesh, in world space.
+
+    MMeshIntersector answers in ~3 us vs ~200 us for MFnMesh's brute-force
+    getClosestPointAndNormal. It takes world points but answers in the
+    mesh's object space, so results are mapped back here.
+    """
+    __slots__ = ("inter", "matrix", "normal_matrix")
+
+    def __init__(self, dag):
+        self.matrix = dag.inclusiveMatrix()
+        self.normal_matrix = self.matrix.inverse().transpose()
+        self.inter = om.MMeshIntersector()
+        self.inter.create(dag.node(), self.matrix)
+
+    def closest(self, point):
+        """(distance, world point, world unit normal) or None."""
+        try:
+            pom = self.inter.getClosestPoint(point)
+        except RuntimeError:
+            return None
+        p = om.MPoint(pom.point) * self.matrix
+        n = om.MVector(pom.normal) * self.normal_matrix
+        if n.length() < 1e-12:
+            return None
+        return (p - point).length(), p, n.normal()
+
+
+def restore_scatter_previews():
+    """The instancer's point data isn't saved with the scene, so live scatters
+    come back empty after reopening a file. Rebuild them from their stored
+    settings (called when the toolbox opens and whenever a scene opens)."""
+    restored = 0
+    for root in PathScatterSystem.all_roots():
+        try:
+            uuid = cmds.ls(root, uuid=True)[0]
+            system = PathScatterSystem(uuid)
+            if not cmds.getAttr(root + ".visibility"):
+                continue  # hidden after a bake with "keep live system"
+            with NoUndo():
+                system.rebuild(system.get_settings())
+            restored += 1
+        except Exception:
+            traceback.print_exc()
+    return restored
+
+
 class _CurveSampler(object):
     __slots__ = ("fn", "obj_length", "length", "closed")
 
@@ -1010,6 +1299,27 @@ class _CurveSampler(object):
         return point, tangent.normal()
 
 
+def _connect_whole_object_shading(sg, shapes):
+    """Assign whole shapes to a shading group with one batched DG edit
+    (what `sets -forceElement` does, minus its per-object overhead)."""
+    sel = om.MSelectionList()
+    sel.add(sg)
+    sg_fn = om.MFnDependencyNode(sel.getDependNode(0))
+    members = sg_fn.findPlug("dagSetMembers", False)
+    used = members.getExistingArrayAttributeIndices()
+    index = (max(used) + 1) if used else 0
+    mod = om.MDGModifier()
+    for shape in shapes:
+        dag = get_dag_path(shape)
+        if dag is None:
+            continue
+        iog = om.MFnDependencyNode(dag.node()).findPlug("instObjGroups", False)
+        src = iog.elementByLogicalIndex(dag.instanceNumber())
+        mod.connect(src, members.elementByLogicalIndex(index))
+        index += 1
+    mod.doIt()
+
+
 def copy_shading(src_shape, dst_shapes):
     """Give dst_shapes the same shading engine assignments as src_shape,
     including per-face assignments."""
@@ -1028,6 +1338,12 @@ def copy_shading(src_shape, dst_shapes):
                     assigns.append(entry)
     if not assigns:
         assigns = [("initialShadingGroup", "")]
+    if len(assigns) == 1 and not assigns[0][1]:
+        try:
+            _connect_whole_object_shading(assigns[0][0], dst_shapes)
+            return
+        except RuntimeError:
+            pass  # fall back to the command
     for sg, comp in assigns:
         targets = [d + comp for d in dst_shapes] if comp else list(dst_shapes)
         for i in range(0, len(targets), 2000):
@@ -1454,18 +1770,50 @@ ACCENT_HOVER = "#37a596"
 ACTIVE = "#c9772a"
 
 STYLE = """
-#UnlokToolboxWindow QLabel[unlokTitle="true"] { font-size: 13px; font-weight: 600; letter-spacing: 1px; }
-#UnlokToolboxWindow QLabel[unlokHint="true"] { color: #8c8c8c; }
+#UnlokToolboxWindow QLabel[unlokTitle="true"] { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #9a9a9a; }
+#UnlokToolboxWindow QLabel[unlokToolTitle="true"] { font-size: 15px; font-weight: 700; color: #f2f2f2; }
+#UnlokToolboxWindow QLabel[unlokHint="true"] { color: #9a9a9a; }
+
+#UnlokToolboxWindow QTabWidget::pane { border: none; }
+#UnlokToolboxWindow QTabBar::tab {
+    background: transparent; color: #9a9a9a; padding: 6px 16px; border: none;
+    border-bottom: 2px solid transparent; font-weight: 600; }
+#UnlokToolboxWindow QTabBar::tab:selected { color: #f2f2f2; border-bottom: 2px solid %(accent)s; }
+#UnlokToolboxWindow QTabBar::tab:hover { color: #dcdcdc; }
+
+#UnlokToolboxWindow QFrame[unlokNext="true"] {
+    background: rgba(47, 143, 131, 55); border: none; border-left: 3px solid %(accent)s; border-radius: 4px; }
+#UnlokToolboxWindow QFrame[unlokNext="true"][unlokTone="warn"] {
+    background: rgba(224, 176, 80, 45); border-left: 3px solid #e0b050; }
+#UnlokToolboxWindow QFrame[unlokNext="true"][unlokTone="done"] {
+    background: rgba(111, 191, 115, 45); border-left: 3px solid #6fbf73; }
+#UnlokToolboxWindow QFrame[unlokNext="true"][unlokTone="active"] {
+    background: rgba(201, 119, 42, 55); border-left: 3px solid %(active)s; }
+#UnlokToolboxWindow QLabel[unlokNextTag="true"] { color: #7fd6c9; font-size: 10px; font-weight: 800; letter-spacing: 1px; }
+#UnlokToolboxWindow QLabel[unlokNextTag="true"][unlokTone="warn"] { color: #f0c870; }
+#UnlokToolboxWindow QLabel[unlokNextTag="true"][unlokTone="done"] { color: #9ad89d; }
+#UnlokToolboxWindow QLabel[unlokNextTag="true"][unlokTone="active"] { color: #f0a560; }
+
+#UnlokToolboxWindow QFrame[unlokStep="true"] {
+    background: #4b4b4b; border: 1px solid #3a3a3a; border-radius: 6px; }
+#UnlokToolboxWindow QFrame[unlokStep="true"][unlokState="current"] { border: 1px solid %(accent)s; }
+#UnlokToolboxWindow QLabel[unlokBadge="true"] {
+    background: #5f5f5f; color: #dddddd; border-radius: 11px; font-weight: 700; }
+#UnlokToolboxWindow QLabel[unlokBadge="true"][unlokState="current"] { background: %(accent)s; color: white; }
+#UnlokToolboxWindow QLabel[unlokBadge="true"][unlokState="done"] { background: #3f6b45; color: #c8f0cb; }
+#UnlokToolboxWindow QLabel[unlokStepTitle="true"] { font-size: 12px; font-weight: 700; color: #e6e6e6; }
+#UnlokToolboxWindow QLabel[unlokStepTitle="true"][unlokState="done"] { color: #b8b8b8; }
+
 #UnlokToolboxWindow QToolButton[unlokSection="true"] {
-    border: none; border-bottom: 1px solid #3a3a3a; font-weight: 600; padding: 5px 2px; text-align: left; }
+    border: none; border-top: 1px solid #5a5a5a; color: #d0d0d0; font-weight: 600; padding: 6px 0px 4px 0px; }
 #UnlokToolboxWindow QPushButton[unlokPrimary="true"] {
-    background: %(accent)s; color: white; font-weight: 600; padding: 6px 10px; border-radius: 3px; border: none; }
+    background: %(accent)s; color: white; font-weight: 700; padding: 6px 12px; border-radius: 4px; border: none; }
 #UnlokToolboxWindow QPushButton[unlokPrimary="true"]:hover { background: %(hover)s; }
 #UnlokToolboxWindow QPushButton[unlokPrimary="true"]:checked { background: %(active)s; }
-#UnlokToolboxWindow QPushButton[unlokPrimary="true"]:disabled { background: #444; color: #888; }
+#UnlokToolboxWindow QPushButton[unlokPrimary="true"]:disabled { background: #5a5a5a; color: #9a9a9a; }
 #UnlokToolboxWindow QPushButton[unlokSegment="true"] {
-    padding: 4px 6px; border: 1px solid #2b2b2b; border-radius: 2px; background: #5a5a5a; }
-#UnlokToolboxWindow QPushButton[unlokSegment="true"]:hover { background: #666; }
+    padding: 4px 6px; border: 1px solid #333333; border-radius: 3px; background: #5d5d5d; }
+#UnlokToolboxWindow QPushButton[unlokSegment="true"]:hover { background: #686868; }
 #UnlokToolboxWindow QPushButton[unlokSegment="true"]:checked { background: %(accent)s; color: white; }
 """ % {"accent": ACCENT, "hover": ACCENT_HOVER, "active": ACTIVE}
 
@@ -1689,7 +2037,7 @@ class SegmentField(QtWidgets.QWidget):
 class Section(QtWidgets.QWidget):
     """Collapsible block with a two-column grid (label | field)."""
 
-    def __init__(self, title, expanded=True, parent=None):
+    def __init__(self, title, expanded=True, parent=None, header=True):
         super(Section, self).__init__(parent)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1712,6 +2060,9 @@ class Section(QtWidgets.QWidget):
         self.header.toggled.connect(self._toggled)
         self._toggled(expanded)
         self._row = 0
+        if not header:  # plain label | field grid inside a step card
+            self.header.setVisible(False)
+            self.grid.setContentsMargins(0, 0, 0, 0)
 
     def _toggled(self, on):
         self.header.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
@@ -1747,6 +2098,148 @@ def primary_button(text, checkable=False):
     return btn
 
 
+def repolish(*widgets):
+    """Re-apply the stylesheet after a dynamic property change."""
+    for w in widgets:
+        w.style().unpolish(w)
+        w.style().polish(w)
+        w.update()
+
+
+class ToolHeader(QtWidgets.QWidget):
+    """Tool name + one line on what it's for."""
+
+    def __init__(self, title, description, parent=None):
+        super(ToolHeader, self).__init__(parent)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(1)
+        t = QtWidgets.QLabel(title)
+        t.setProperty("unlokToolTitle", True)
+        d = QtWidgets.QLabel(description)
+        d.setWordWrap(True)
+        d.setProperty("unlokHint", True)
+        lay.addWidget(t)
+        lay.addWidget(d)
+
+
+class NextBanner(QtWidgets.QFrame):
+    """'NEXT: ...' strip that always says the one thing to do now."""
+
+    def __init__(self, parent=None):
+        super(NextBanner, self).__init__(parent)
+        self.setProperty("unlokNext", True)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 7, 10, 7)
+        lay.setSpacing(8)
+        self.tag = QtWidgets.QLabel("NEXT")
+        self.tag.setProperty("unlokNextTag", True)
+        self.tag.setMinimumWidth(64)  # bold + letter-spaced text is wider than its first size hint
+        self.tag.setAlignment(QtCore.Qt.AlignTop)
+        self.text = QtWidgets.QLabel()
+        self.text.setWordWrap(True)
+        self.text.setTextFormat(QtCore.Qt.RichText)
+        lay.addWidget(self.tag, 0, QtCore.Qt.AlignTop)
+        lay.addWidget(self.text, 1)
+
+    def set_text(self, text, tag="NEXT", tone="next"):
+        self.tag.setText(tag)
+        self.text.setText(text)
+        if self.property("unlokTone") != tone:
+            self.setProperty("unlokTone", tone)
+            self.tag.setProperty("unlokTone", tone)
+            repolish(self, self.tag)
+
+
+class StepCard(QtWidgets.QFrame):
+    """A numbered workflow step: badge, title, one-line explanation, body.
+
+    State: 'todo' (grey badge), 'current' (accent badge + outline) or
+    'done' (tick).
+    """
+
+    def __init__(self, number, title, subtitle="", parent=None):
+        super(StepCard, self).__init__(parent)
+        self.number = number
+        self.setProperty("unlokStep", True)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 9, 10, 10)
+        lay.setSpacing(7)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(9)
+        self.badge = QtWidgets.QLabel(str(number))
+        self.badge.setProperty("unlokBadge", True)
+        self.badge.setFixedSize(22, 22)
+        self.badge.setAlignment(QtCore.Qt.AlignCenter)
+        titles = QtWidgets.QVBoxLayout()
+        titles.setSpacing(0)
+        self.title = QtWidgets.QLabel(title)
+        self.title.setProperty("unlokStepTitle", True)
+        titles.addWidget(self.title)
+        self.subtitle = QtWidgets.QLabel(subtitle)
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setProperty("unlokHint", True)
+        self.subtitle.setVisible(bool(subtitle))
+        titles.addWidget(self.subtitle)
+        head.addWidget(self.badge, 0, QtCore.Qt.AlignTop)
+        head.addLayout(titles, 1)
+        lay.addLayout(head)
+        self.body = QtWidgets.QVBoxLayout()
+        self.body.setSpacing(5)
+        lay.addLayout(self.body)
+        self.state = None
+        self.set_state("todo")
+
+    def add(self, widget, stretch=0):
+        self.body.addWidget(widget, stretch)
+        return widget
+
+    def add_layout(self, layout):
+        self.body.addLayout(layout)
+        return layout
+
+    def set_state(self, state):
+        if state == self.state:
+            return
+        self.state = state
+        self.badge.setText(u"\u2713" if state == "done" else str(self.number))
+        for w in (self, self.badge, self.title):
+            w.setProperty("unlokState", state)
+        repolish(self, self.badge, self.title)
+
+
+def scroll_column():
+    """A vertical scroll area for step cards; returns (scroll, layout)."""
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    body = QtWidgets.QWidget()
+    body.setProperty("unlokColumn", True)
+    lay = QtWidgets.QVBoxLayout(body)
+    lay.setContentsMargins(6, 2, 6, 8)
+    lay.setSpacing(8)
+    scroll.setWidget(body)
+    return scroll, lay
+
+
+def button_row(*buttons):
+    w = QtWidgets.QWidget()
+    lay = QtWidgets.QHBoxLayout(w)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(4)
+    for b in buttons:
+        lay.addWidget(b)
+    return w
+
+
+def secondary_button(text, tip=None):
+    b = QtWidgets.QPushButton(text)
+    if tip:
+        b.setToolTip(tip)
+    return b
+
+
 # =============================================================================
 # Path Scatter - panel
 # =============================================================================
@@ -1765,6 +2258,7 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._callbacks = []
         self._watched = None
         self._last_message = ""
+        self._baked_message = ""
 
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
@@ -1773,6 +2267,8 @@ class PathScatterPanel(QtWidgets.QWidget):
 
         self.drawer = SurfacePathDrawer(self._on_stroke, lambda: self.fields["smoothing"].value(),
                                         PathScatterSystem.all_roots)
+        if maya_main_window() is not None:
+            restore_scatter_previews()
         self.drawer.on_miss = lambda: self.set_status("That stroke didn't land on anything. Drag across a mesh "
                                                       "(or start on empty grid to draw on the ground).", level="warn")
         self._build()
@@ -1783,86 +2279,94 @@ class PathScatterPanel(QtWidgets.QWidget):
     # ============================================================= layout
     def _build(self):
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(0, 4, 0, 0)
         outer.setSpacing(6)
 
-        # --- actions
-        actions = QtWidgets.QWidget()
-        al = QtWidgets.QGridLayout(actions)
-        al.setContentsMargins(6, 6, 6, 0)
-        al.setSpacing(4)
-        self.draw_btn = primary_button("Draw Path", checkable=True)
-        self.draw_btn.setToolTip("Drag on a mesh to draw a path. Shift: straight line. Ctrl: add another path. "
-                                 "Press Q (or click this again) when done.")
-        self.draw_btn.clicked.connect(lambda *_: self.toggle_draw())
-        use_btn = QtWidgets.QPushButton("Use Selection as Path")
-        use_btn.setToolTip("Use selected curve(s), or selected polygon edges (converted to a curve).")
-        use_btn.clicked.connect(lambda *_: self.use_selected_path())
-        surf_btn = QtWidgets.QPushButton("Set Surface")
-        surf_btn.setToolTip("Selected mesh(es) become the surface to draw on, snap to and align with. "
-                            "Nothing selected = auto-detect under the cursor.")
-        surf_btn.clicked.connect(lambda *_: self.use_selected_surface())
-        al.addWidget(self.draw_btn, 0, 0, 1, 2)
-        al.addWidget(use_btn, 1, 0)
-        al.addWidget(surf_btn, 1, 1)
-        al.addWidget(hint_label("Shift: straight line   Ctrl: add path   Q: finish"), 2, 0, 1, 2)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Path Scatter", "Lay shingles, thatch, rocks or neat arrays along a path you "
+                                                "draw on any surface. Live, no MASH."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
 
-        sys_row = QtWidgets.QHBoxLayout()
-        sys_row.setSpacing(4)
-        self.system_label = QtWidgets.QLabel()
-        new_btn = QtWidgets.QPushButton("New")
-        new_btn.setToolTip("Leave the current scatter as it is; the next path starts a new one.")
-        new_btn.clicked.connect(lambda *_: self.new_system())
-        select_btn = QtWidgets.QPushButton("Select")
-        select_btn.clicked.connect(lambda *_: self.select_system())
-        del_btn = QtWidgets.QPushButton("Delete")
-        del_btn.clicked.connect(lambda *_: self.delete_system())
-        sys_row.addWidget(self.system_label, 1)
-        for b in (new_btn, select_btn, del_btn):
-            b.setFixedWidth(52)
-            sys_row.addWidget(b)
-        al.addLayout(sys_row, 3, 0, 1, 2)
-        outer.addWidget(actions)
-
-        # --- settings (scrolling)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        body = QtWidgets.QWidget()
-        bl = QtWidgets.QVBoxLayout(body)
-        bl.setContentsMargins(6, 0, 6, 6)
-        bl.setSpacing(2)
-        scroll.setWidget(body)
+        scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
 
-        sec = Section("Source")
+        # ---- 1. source
+        card = self.step_source = StepCard(1, "Choose what to scatter",
+                                           "A built-in shape sized here, or your own meshes. "
+                                           "A recipe sets everything up in one click.")
         self.recipe_combo = _guard_focus(_Combo())
         self.recipe_combo.addItems(["Start from a recipe..."] + list(RECIPES))
+        self.recipe_combo.setToolTip("Roof Shingles, Messy Thatch, Rocks... sets every option, then tweak.")
         self.recipe_combo.activated.connect(lambda i: self.apply_recipe(self.recipe_combo.itemText(i)))
-        sec.add_row("Recipe", self.recipe_combo, "Set everything up for a common job in one click, then tweak.")
-        self._add(sec, "source_type", "Type", SegmentField(SOURCE_TYPES),
+        card.add(self.recipe_combo)
+        grid = Section("", expanded=True, header=False)
+        self._add(grid, "source_type", "Shape", SegmentField(SOURCE_TYPES),
                   "A built-in shape, or 'Mesh' to scatter your own objects.")
-        pick = QtWidgets.QPushButton("Use Selected Meshes")
-        pick.setToolTip("Selected objects become the source. Several objects = random variants (rocks, etc.). "
-                        "Edits to them update the scatter live.")
+        pick = secondary_button("Use Selected Meshes",
+                                "Selected objects become the source. Several objects = random variants (rocks, etc.). "
+                                "Edits to them update the scatter live.")
         pick.clicked.connect(lambda *_: self.use_selected_meshes())
-        sec.add_full(pick)
+        grid.add_full(pick)
         self.sources_label = hint_label("")
-        sec.add_full(self.sources_label)
-        self._add(sec, "size_x", "Length", FloatField(0.001, 10000, 0.01, 5), "Size along the path (preset shapes).")
-        self._add(sec, "size_y", "Height", FloatField(0.001, 10000, 0.01, 5), "Size along the up axis.")
-        self._add(sec, "size_z", "Width", FloatField(0.001, 10000, 0.01, 5), "Size across the path.")
-        self._add(sec, "preset_sides", "Sides", IntField(3, 128, 3, 48), "Cylinder / sphere subdivisions.")
+        grid.add_full(self.sources_label)
+        self._add(grid, "size_x", "Length", FloatField(0.001, 10000, 0.01, 5), "Size along the path (preset shapes).")
+        self._add(grid, "size_y", "Height", FloatField(0.001, 10000, 0.01, 5), "Size along the up axis.")
+        self._add(grid, "size_z", "Width", FloatField(0.001, 10000, 0.01, 5), "Size across the path.")
+        self._add(grid, "preset_sides", "Sides", IntField(3, 128, 3, 48), "Cylinder / sphere subdivisions.")
+        card.add(grid)
+        sec = Section("Source axes && pivot", expanded=False)
         self._add(sec, "forward_axis", "Forward axis", ComboField(AXIS_NAMES),
                   "Which axis of the source points along the path.")
         self._add(sec, "up_axis", "Up axis", ComboField(("Y", "-Y", "Z", "-Z", "X", "-X")),
                   "Which axis of the source points away from the surface.")
         self._add(sec, "pivot", "Pivot", ComboField(PIVOT_MODES),
                   "Point of each item that sits on the path. Bottom = rests on the surface.")
-        bl.addWidget(sec)
+        card.add(sec)
+        col.addWidget(card)
 
-        sec = Section("Distribution")
+        # ---- 2. path
+        card = self.step_path = StepCard(2, "Draw the path",
+                                         "Drag across any mesh: the stroke sticks to whatever you start on.")
+        self.draw_btn = primary_button("Draw Path", checkable=True)
+        self.draw_btn.setMinimumHeight(30)
+        self.draw_btn.setToolTip("Drag on a mesh to draw a path. Shift: straight line. Ctrl: add another path. "
+                                 "Press Q (or click this again) when done.")
+        self.draw_btn.clicked.connect(lambda *_: self.toggle_draw())
+        card.add(self.draw_btn)
+        card.add(hint_label("Shift = straight line  \u00b7  Ctrl = add another path  \u00b7  Q = finish"))
+        use_btn = secondary_button("Use Selection as Path",
+                                   "Use selected curve(s), or selected polygon edges (converted to a curve).")
+        use_btn.clicked.connect(lambda *_: self.use_selected_path())
+        surf_btn = secondary_button("Set Surface",
+                                    "Selected mesh(es) become the surface to draw on, snap to and align with. "
+                                    "Nothing selected = auto-detect under the cursor.")
+        surf_btn.clicked.connect(lambda *_: self.use_selected_surface())
+        card.add(button_row(use_btn, surf_btn))
+        sys_row = QtWidgets.QHBoxLayout()
+        sys_row.setSpacing(4)
+        self.system_label = QtWidgets.QLabel()
+        self.system_label.setProperty("unlokHint", True)
+        new_btn = secondary_button("New", "Leave the current scatter as it is; the next path starts a new one.")
+        new_btn.clicked.connect(lambda *_: self.new_system())
+        select_btn = secondary_button("Select", "Select the scatter in the scene.")
+        select_btn.clicked.connect(lambda *_: self.select_system())
+        del_btn = secondary_button("Delete", "Delete the live scatter (drawn paths included).")
+        del_btn.clicked.connect(lambda *_: self.delete_system())
+        sys_row.addWidget(self.system_label, 1)
+        for b in (new_btn, select_btn, del_btn):
+            b.setFixedWidth(54)
+            sys_row.addWidget(b)
+        card.add_layout(sys_row)
+        col.addWidget(card)
+
+        # ---- 3. shape it
+        card = self.step_shape = StepCard(3, "Shape it", "Everything updates live while you tweak.")
+        sec = Section("Spacing")
         self._add(sec, "dist_mode", "Mode", ComboField(DIST_MODES),
                   "Fit to Size: end to end using each item's length (+ gap).\n"
                   "Spacing: fixed distance.\nCount: exact number spread over the path.")
@@ -1871,7 +2375,7 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._add(sec, "count", "Count", IntField(1, 100000, 1, 200), "Items per row.")
         self._add(sec, "start_offset", "Start offset", FloatField(-10000, 10000, 0, 5), "Trim / slide the start.")
         self._add(sec, "end_offset", "End offset", FloatField(-10000, 10000, 0, 5), "Trim the end.")
-        bl.addWidget(sec)
+        card.add(sec)
 
         sec = Section("Rows (grid)")
         self._add(sec, "rows", "Rows", IntField(1, 1000, 1, 50), "Copies of the line side by side, e.g. shingle courses.")
@@ -1882,9 +2386,9 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._add(sec, "row_lift", "Row lift", FloatField(-100, 100, -0.2, 0.2, step=0.01),
                   "Raise each row along the normal, so rows overlap like shingles.")
         self._add(sec, "rows_centered", "", CheckField("Center rows on path"))
-        bl.addWidget(sec)
+        card.add(sec)
 
-        sec = Section("Orientation")
+        sec = Section("Orientation", expanded=False)
         self._add(sec, "follow_path", "", CheckField("Follow path direction"))
         self._add(sec, "up_mode", "Up", ComboField(UP_MODES), "Align items to the surface normal or keep them upright.")
         self._add(sec, "snap_surface", "", CheckField("Snap to surface"))
@@ -1894,21 +2398,21 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._add(sec, "rot_y", "Rotate Y", FloatField(-360, 360, -180, 180, decimals=2, step=1), "Yaw around the up axis.")
         self._add(sec, "rot_z", "Rotate Z", FloatField(-360, 360, -180, 180, decimals=2, step=1),
                   "Tilt / pitch, e.g. to angle shingles.")
-        bl.addWidget(sec)
+        card.add(sec)
 
-        sec = Section("Scale")
+        sec = Section("Scale", expanded=False)
         self._add(sec, "scale", "Scale", FloatField(0.001, 1000, 0.01, 5))
         self._add(sec, "scale_x", "Scale X (length)", FloatField(0.001, 1000, 0.01, 5))
         self._add(sec, "scale_y", "Scale Y (up)", FloatField(0.001, 1000, 0.01, 5))
         self._add(sec, "scale_z", "Scale Z (width)", FloatField(0.001, 1000, 0.01, 5))
-        bl.addWidget(sec)
+        card.add(sec)
 
-        sec = Section("Randomness")
+        sec = Section("Randomness", expanded=False)
         seed_row = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(seed_row)
         sl.setContentsMargins(0, 0, 0, 0)
         seed = IntField(0, 999999, 0, 1000)
-        roll = QtWidgets.QPushButton("Re-roll")
+        roll = secondary_button("Re-roll", "Try a different random arrangement.")
         roll.clicked.connect(lambda *_: self.reroll())
         sl.addWidget(seed, 1)
         sl.addWidget(roll)
@@ -1927,41 +2431,79 @@ class PathScatterPanel(QtWidgets.QWidget):
                   "Randomly leave items out.")
         self._add(sec, "variant_mode", "Variants", ComboField(VARIANT_MODES),
                   "With several source meshes: pick randomly, or cycle in order.")
-        bl.addWidget(sec)
+        card.add(sec)
 
-        sec = Section("Drawing & Output", expanded=False)
+        sec = Section("Drawing && limits", expanded=False)
         self._add(sec, "smoothing", "Stroke smoothing", IntField(0, 10, 0, 10), "Higher = smoother drawn curves.")
         self._add(sec, "max_items", "Max items", IntField(1, 1000000, 100, 100000),
                   "Safety cap so a tiny spacing can't hang Maya.")
         self._add(sec, "preview_boxes", "", CheckField("Preview as bounding boxes (fast for heavy meshes)"))
-        bl.addWidget(sec)
-        bl.addStretch(1)
+        card.add(sec)
+        col.addWidget(card)
+        col.addStretch(1)
 
-        # --- footer
-        footer = QtWidgets.QWidget()
-        fl = QtWidgets.QGridLayout(footer)
-        fl.setContentsMargins(6, 0, 6, 6)
-        fl.setSpacing(4)
-        self.status = QtWidgets.QLabel()
-        self.status.setWordWrap(True)
+        # ---- 4. bake (pinned, always reachable)
+        card = self.step_bake = StepCard(4, "Bake", "Turn the live preview into real geometry.")
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
         self._add_free("bake_mode", ComboField(BAKE_MODES))
-        self.fields["bake_mode"].setToolTip("Instances: light, shares geometry with the source.\n"
-                                            "Copies: separate editable meshes.\n"
-                                            "Combined Mesh: one merged mesh.")
+        self.fields["bake_mode"].setToolTip("Instances: light, shares geometry with the source (slow beyond a few "
+                                            "thousand).\nCopies: separate editable meshes.\n"
+                                            "Combined Mesh: one merged mesh (fastest for big counts).")
         self._add_free("keep_system", CheckField("Keep live system"))
         self.fields["keep_system"].setToolTip("Hide the live scatter after baking instead of deleting it, "
                                               "so you can come back and tweak it.")
+        row.addWidget(QtWidgets.QLabel("Bake as"))
+        row.addWidget(self.fields["bake_mode"], 1)
+        row.addWidget(self.fields["keep_system"])
+        card.add_layout(row)
         self.bake_btn = primary_button("Bake")
+        self.bake_btn.setMinimumHeight(30)
         self.bake_btn.clicked.connect(lambda *_: self.bake())
-        fl.addWidget(self.status, 0, 0, 1, 3)
-        fl.addWidget(QtWidgets.QLabel("Bake as"), 1, 0)
-        fl.addWidget(self.fields["bake_mode"], 1, 1)
-        fl.addWidget(self.fields["keep_system"], 1, 2)
-        fl.addWidget(self.bake_btn, 2, 0, 1, 3)
-        fl.setColumnStretch(1, 1)
-        outer.addWidget(footer)
+        card.add(self.bake_btn)
+        wrap = QtWidgets.QWidget()
+        wl = QtWidgets.QVBoxLayout(wrap)
+        wl.setContentsMargins(6, 0, 6, 0)
+        wl.addWidget(card)
+        outer.addWidget(wrap)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
 
         self.set_settings(PS_DEFAULTS)
+
+    def _update_guidance(self):
+        """Step badges + the NEXT banner, from the current state."""
+        system = self.system if (self.system is not None and self.system.exists()) else None
+        try:
+            has_source = self.fields["source_type"].value() in PRESET_TYPES or bool(system and system.sources())
+            has_path = bool(system and system.paths())
+        except Exception:
+            has_source, has_path = True, False
+        count = system.last_count if system else 0
+        self.step_source.set_state("done" if has_source else "current")
+        self.step_path.set_state("done" if has_path else ("current" if has_source else "todo"))
+        self.step_shape.set_state("done" if count else "todo")
+        self.step_bake.set_state("current" if count else "todo")
+        if SurfacePathDrawer.is_active():
+            self.next_banner.set_text("<b>Drag across a mesh</b> to draw. Shift = straight line, Ctrl = add "
+                                      "another path. Press <b>Q</b> when you're done.", tag="DRAWING", tone="active")
+        elif self._baked_message and system is None:
+            self.next_banner.set_text(self._baked_message, tag="DONE", tone="done")
+        elif not has_source:
+            self.next_banner.set_text("Select the meshes to scatter and press <b>Use Selected Meshes</b> "
+                                      "(or pick a built-in shape in step 1).")
+        elif not has_path:
+            self.next_banner.set_text("Press <b>Draw Path</b> and drag across a mesh, or select a curve or "
+                                      "edges and press <b>Use Selection as Path</b>.")
+        elif not count:
+            self.next_banner.set_text("Nothing fits on the path yet: lower <b>Spacing</b> / item size in step 3, "
+                                      "or check the status below.", tag="CHECK", tone="warn")
+        else:
+            self.next_banner.set_text("Tweak <b>step 3</b> (it updates live), then press <b>Bake</b> when it "
+                                      "looks right.")
 
     def _add(self, section, key, label, widget, tip=None, display=None):
         self.labels[key] = section.add_row(label, display or widget, tip)
@@ -1992,6 +2534,8 @@ class PathScatterPanel(QtWidgets.QWidget):
         if self._loading:
             return
         self._update_enabled()
+        if key == "source_type":
+            self._update_guidance()
         self.schedule()
 
     def _update_enabled(self):
@@ -2021,6 +2565,7 @@ class PathScatterPanel(QtWidgets.QWidget):
     def _ensure_system(self):
         system = self._system()
         if system is None:
+            self._baked_message = ""
             system = PathScatterSystem.create(self.settings())
             self.set_system(system, load_settings=False)
         return system
@@ -2035,6 +2580,10 @@ class PathScatterPanel(QtWidgets.QWidget):
             self.schedule()
 
     def _refresh_system_label(self):
+        self._refresh_system_label_inner()
+        self._update_guidance()
+
+    def _refresh_system_label_inner(self):
         system = self.system if (self.system is not None and self.system.exists()) else None
         if system is None:
             self.system_label.setText("No active scatter")
@@ -2077,12 +2626,14 @@ class PathScatterPanel(QtWidgets.QWidget):
             self.set_status("%d items  |  %s" % (count, warning), level="warn")
         else:
             self.set_status("%d items  |  %.0f ms" % (count, ms))
+        self._update_guidance()
 
     @ui_safe
     def toggle_draw(self):
         if SurfacePathDrawer.is_active():
             SurfacePathDrawer.deactivate()
             self.draw_btn.setChecked(False)
+            self._update_guidance()
             return
         sel = cmds.ls(selection=True, long=True, type="transform") or []
         surfaces = [n for n in sel
@@ -2090,6 +2641,8 @@ class PathScatterPanel(QtWidgets.QWidget):
                     and PathScatterSystem.from_node(n) is None]
         self.drawer.activate(surfaces)
         self.draw_btn.setChecked(True)
+        self._baked_message = ""
+        self._update_guidance()
         if surfaces:
             self.set_status("Drawing on %s. Q when done." % ", ".join(short_name(s) for s in surfaces))
         else:
@@ -2214,11 +2767,43 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._refresh_system_label()
         self.set_status("Scatter deleted.")
 
+    INSTANCE_WARN_COUNT = 1500
+
+    def _confirm_instance_bake(self, count):
+        """Real Maya instances get slower the more there are (quadratic, in
+        Maya itself). Offer the fast modes before a long bake."""
+        est = 0.9e-6 * count * count
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Bake %d instances?" % count)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setText("Maya slows down a lot when creating thousands of instances.\n"
+                    "This bake will take roughly %d seconds." % max(1, round(est)))
+        box.setInformativeText("Copies and Combined Mesh are much faster for this many items.")
+        copies = box.addButton("Bake as Copies", QtWidgets.QMessageBox.AcceptRole)
+        combined = box.addButton("Bake as Combined Mesh", QtWidgets.QMessageBox.AcceptRole)
+        anyway = box.addButton("Bake Instances", QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(copies)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is copies:
+            return "Copies"
+        if clicked is combined:
+            return "Combined Mesh"
+        if clicked is anyway:
+            return "Instances"
+        return None
+
     @ui_safe
     def bake(self):
         system = self._system()
         if system is None:
             return
+        if self.fields["bake_mode"].value() == "Instances" and system.last_count > self.INSTANCE_WARN_COUNT:
+            choice = self._confirm_instance_bake(system.last_count)
+            if choice is None:
+                return
+            self.fields["bake_mode"].setValue(choice)
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             t0 = time.time()
@@ -2228,6 +2813,8 @@ class PathScatterPanel(QtWidgets.QWidget):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self.system = None
+        self._baked_message = "Baked <b>%d</b> items as %s. Draw another path to start a new scatter." % (
+            count, s["bake_mode"].lower())
         self._watch_inputs()
         self._refresh_system_label()
         if result and cmds.objExists(result):
@@ -2268,6 +2855,7 @@ class PathScatterPanel(QtWidgets.QWidget):
     def _on_tool_changed(self):
         try:
             self.draw_btn.setChecked(SurfacePathDrawer.is_active())
+            self._update_guidance()
         except Exception:
             pass
 
@@ -2276,6 +2864,7 @@ class PathScatterPanel(QtWidgets.QWidget):
             self.system = None
             self._watch_inputs()
             self._refresh_system_label()
+            restore_scatter_previews()
         except Exception:
             traceback.print_exc()
 
@@ -2312,6 +2901,8 @@ class PathScatterPanel(QtWidgets.QWidget):
         # just queue a rebuild on the Qt event loop.
         if self._callbacks_muted:
             return
+        if self.system is not None:
+            self.system.invalidate()
         if self.drawer.anchor is not None:
             # Mid-stroke: ray casts against the surface flag it dirty, and a
             # full rebuild here would stall the stroke. The stroke's release
@@ -3265,70 +3856,77 @@ class SmartUdimPanel(QtWidgets.QWidget):
     # ============================================================== layout
     def _build(self):
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(0, 4, 0, 0)
         outer.setSpacing(6)
 
         top = QtWidgets.QWidget()
-        tl = QtWidgets.QGridLayout(top)
-        tl.setContentsMargins(6, 6, 6, 0)
-        tl.setSpacing(4)
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Smart UDIM", "Sort an asset into UDIM sections and material groups, clean it, "
+                                              "and get it ready for layout."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+
+        # ---- 1. asset
+        card = self.step_root = StepCard(1, "Pick the asset", "Select the asset's top group, e.g. house_GRP.")
+        row = QtWidgets.QHBoxLayout()
         self.root_label = QtWidgets.QLabel()
         self.root_label.setWordWrap(True)
-        pick = QtWidgets.QPushButton("Use Selected Group")
-        pick.setToolTip("Select the top group of the asset (e.g. house_GRP), then press this.")
+        pick = secondary_button("Use Selected Group", "Select the top group of the asset, then press this.")
         pick.clicked.connect(lambda *_: self.pick_root())
-        tl.addWidget(QtWidgets.QLabel("Root"), 0, 0)
-        tl.addWidget(self.root_label, 0, 1)
-        tl.addWidget(pick, 0, 2)
+        row.addWidget(self.root_label, 1)
+        row.addWidget(pick)
+        card.add_layout(row)
+        col.addWidget(card)
+
+        # ---- 2. scan
+        card = self.step_scan = StepCard(2, "Scan", "Sorts every mesh into sections (rows of UDIMs) and material "
+                                                    "groups. Re-scanning only sorts new meshes.")
+        grid = Section("", header=False)
         self.source_combo = ComboField(MATERIAL_SOURCES)
         self.source_combo.setToolTip("Where material groups come from for meshes that aren't in a group yet.\n"
                                      "Name: the UnlokRenamer convention (woodGreen_C_beam0001_GEP).\n"
                                      "Shader: the Maya material assigned to each face.")
-        tl.addWidget(QtWidgets.QLabel("Materials from"), 1, 0)
-        tl.addWidget(self.source_combo, 1, 1, 1, 2)
+        grid.add_row("Materials from", self.source_combo)
         self.from_groups = CheckField("New sections from top-level groups")
         self.from_groups.setToolTip("On the first scan, each child group of the root (e.g. westWing_GRP) "
                                     "becomes its own section / row of UDIMs.")
-        tl.addWidget(self.from_groups, 2, 1, 1, 2)
+        grid.add_full(self.from_groups)
+        card.add(grid)
         self.scan_btn = primary_button("Scan")
+        self.scan_btn.setMinimumHeight(28)
         self.scan_btn.setToolTip("Sort every mesh under the root into sections and material groups. "
                                  "Existing groups are kept; only new meshes get sorted. One Ctrl+Z undoes it.")
         self.scan_btn.clicked.connect(lambda *_: self.scan())
-        tl.addWidget(self.scan_btn, 3, 0, 1, 3)
-        tl.setColumnStretch(1, 1)
-        outer.addWidget(top)
+        card.add(self.scan_btn)
+        col.addWidget(card)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        body = QtWidgets.QWidget()
-        bl = QtWidgets.QVBoxLayout(body)
-        bl.setContentsMargins(6, 0, 6, 6)
-        bl.setSpacing(2)
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
-
-        # --- sections & materials
-        sec = Section("Sections && material groups")
+        # ---- 3. organise
+        card = self.step_groups = StepCard(3, "Organise groups",
+                                           "Double-click TD % to change texel density, tick Stack for repeated "
+                                           "pieces. They're plain Maya sets, so renaming works too.")
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setColumnCount(5)
         self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack"])
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tree.setMinimumHeight(220)
         self.tree.setRootIsDecorated(True)
+        self.tree.setAlternatingRowColors(True)
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(self.COL_NAME, QtWidgets.QHeaderView.Stretch)
-        for col in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK):
-            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeToContents)
-        self.tree.setToolTip("Double-click TD % to change texel density. Tick Stack to stack identical shells.\n"
-                             "These are ordinary Maya sets: renaming them (e.g. td150_woodGreen) works too.")
+        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK):
+            header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemDoubleClicked.connect(self._item_double_clicked)
-        sec.add_full(self.tree)
-        row = QtWidgets.QGridLayout()
-        row.setSpacing(3)
+        card.add(self.tree)
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(3)
         buttons = [
             ("Select", "Select the meshes / faces in the highlighted groups.", self.select_members),
             ("Assign Selection", "Move the selected meshes / faces into the highlighted material group.",
@@ -3340,73 +3938,113 @@ class SmartUdimPanel(QtWidgets.QWidget):
             ("Move Down", "Lay this section out later (higher rows).", lambda: self.move_section(1)),
         ]
         for i, (text, tip, fn) in enumerate(buttons):
-            b = QtWidgets.QPushButton(text)
-            b.setToolTip(tip)
+            b = secondary_button(text, tip)
             b.clicked.connect(lambda *_, f=fn: f())
-            row.addWidget(b, i // 3, i % 3)
-        wrap = QtWidgets.QWidget()
-        wrap.setLayout(row)
-        sec.add_full(wrap)
+            grid.addWidget(b, i // 3, i % 3)
+        card.add_layout(grid)
         self.tree_hint = hint_label("")
-        sec.add_full(self.tree_hint)
-        bl.addWidget(sec)
+        card.add(self.tree_hint)
+        col.addWidget(card)
 
-        # --- naming hand-off
-        sec = Section("Naming issues (UnlokRenamer)", expanded=False)
-        self.naming_section = sec
+        # ---- 4. names
+        card = self.naming_section = StepCard(4, "Fix names", "Meshes whose names break the UnlokRenamer "
+                                                              "convention. Fix them there, then Scan again.")
         self.naming_list = QtWidgets.QTreeWidget()
         self.naming_list.setColumnCount(2)
         self.naming_list.setHeaderLabels(["Mesh", "Problem"])
         self.naming_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.naming_list.setMinimumHeight(140)
+        self.naming_list.setMinimumHeight(110)
+        self.naming_list.setAlternatingRowColors(True)
         self.naming_list.itemSelectionChanged.connect(self._naming_selected)
-        sec.add_full(self.naming_list)
-        nrow = QtWidgets.QHBoxLayout()
-        sel_all = QtWidgets.QPushButton("Select All")
-        sel_all.clicked.connect(lambda *_: self._select_nodes([n["node"] for n in (self.snapshot or {}).get("naming", [])]))
-        self.renamer_btn = QtWidgets.QPushButton("Open UnlokRenamer")
+        card.add(self.naming_list)
+        sel_all = secondary_button("Select All", "Select every mesh listed.")
+        sel_all.clicked.connect(lambda *_: self._select_nodes(
+            [n["node"] for n in (self.snapshot or {}).get("naming", [])]))
+        self.renamer_btn = secondary_button("Open UnlokRenamer")
         self.renamer_btn.clicked.connect(lambda *_: self.open_renamer())
-        nrow.addWidget(sel_all)
-        nrow.addWidget(self.renamer_btn)
-        nwrap = QtWidgets.QWidget()
-        nwrap.setLayout(nrow)
-        sec.add_full(nwrap)
-        sec.add_full(hint_label("Meshes whose names don't follow the convention. Unusable names fall back to "
-                                "shader-based groups; fix them in UnlokRenamer (Sanity Checks) and re-scan."))
-        bl.addWidget(sec)
+        card.add(button_row(sel_all, self.renamer_btn))
+        col.addWidget(card)
 
-        # --- pre-process
-        sec = Section("Pre-process")
+        # ---- 5. pre-process
+        card = self.step_prep = StepCard(5, "Pre-process", "Fixes geometry that breaks layout and checks UVs. "
+                                                           "N-gons are only reported. One Ctrl+Z undoes it.")
+        grid = Section("", header=False)
         self.fix_lamina = CheckField("Fix lamina faces")
         self.fix_nonmanifold = CheckField("Fix non-manifold geometry")
         self.fix_zero = CheckField("Remove zero-area faces")
         for w in (self.fix_lamina, self.fix_nonmanifold, self.fix_zero):
             w.setValue(True)
-            sec.add_full(w)
+            grid.add_full(w)
         self.uv_set = QtWidgets.QLineEdit("map1")
         self.uv_set.setToolTip("UV set to check (and later lay out from).")
-        sec.add_row("UV set", self.uv_set)
+        grid.add_row("UV set", self.uv_set)
+        card.add(grid)
         run = primary_button("Run Pre-process")
-        run.setToolTip("Fix geometry that breaks UV layout and report UV problems. N-gons are only reported. "
-                       "One Ctrl+Z undoes the fixes.")
+        run.setMinimumHeight(28)
         run.clicked.connect(lambda *_: self.run_preprocess())
-        sec.add_full(run)
+        card.add(run)
         self.report_tree = QtWidgets.QTreeWidget()
         self.report_tree.setColumnCount(2)
         self.report_tree.setHeaderLabels(["Check", "Count"])
-        self.report_tree.setMinimumHeight(160)
+        self.report_tree.setMinimumHeight(130)
         self.report_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.report_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.report_tree.header().setStretchLastSection(False)
         self.report_tree.itemSelectionChanged.connect(self._report_selected)
-        sec.add_full(self.report_tree)
-        bl.addWidget(sec)
-        bl.addStretch(1)
+        card.add(self.report_tree)
+        col.addWidget(card)
+
+        # ---- 6. layout (next milestone)
+        card = self.step_layout = StepCard(6, "Lay out UDIMs", "Texel density, packing by material, one band of "
+                                                               "rows per section and a UDIM map. Coming next.")
+        soon = primary_button("Lay Out UDIMs (coming soon)")
+        soon.setEnabled(False)
+        card.add(soon)
+        col.addWidget(card)
+        col.addStretch(1)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
-        self.status.setContentsMargins(6, 0, 6, 6)
+        self.status.setContentsMargins(8, 0, 8, 6)
         outer.addWidget(self.status)
+
+    def _update_guidance(self):
+        snap = self.snapshot
+        asset = self._asset()
+        has_root = bool(asset is not None and snap)
+        scanned = has_root and bool(snap["sections"])
+        sorted_ok = scanned and not snap["unassigned"]
+        clean_groups = sorted_ok and not snap["overlaps"]
+        names_ok = has_root and not snap["naming"]
+        skipped = skipped_meshes(self.report) if self.report else set()
+        prepped = bool(self.report) and not skipped
+        self.step_root.set_state("done" if has_root else "current")
+        self.step_scan.set_state("done" if sorted_ok else ("current" if has_root else "todo"))
+        self.step_groups.set_state("done" if clean_groups else "todo")
+        self.naming_section.set_state("done" if names_ok else "todo")
+        self.step_prep.set_state("done" if prepped else ("current" if clean_groups else "todo"))
+        self.step_layout.set_state("todo")
+        if not has_root:
+            self.next_banner.set_text("Select the asset's top group (e.g. <b>house_GRP</b>) and press "
+                                      "<b>Use Selected Group</b>.")
+        elif not scanned:
+            self.next_banner.set_text("Press <b>Scan</b> to sort its meshes into sections and material groups.")
+        elif snap["unassigned"]:
+            self.next_banner.set_text("%d new mesh(es) aren't in a group yet. Press <b>Scan</b> again." %
+                                      len(snap["unassigned"]))
+        elif snap["overlaps"]:
+            self.next_banner.set_text("%d mesh(es) are in two groups. Highlight the right group and press "
+                                      "<b>Assign Selection</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
+        elif not self.report:
+            self.next_banner.set_text("Check the groups in step 3 (TD %, Stack), then press <b>Run "
+                                      "Pre-process</b>.")
+        elif skipped:
+            self.next_banner.set_text("%d mesh(es) will be skipped (no UVs / instanced). Fix them and run "
+                                      "<b>Pre-process</b> again, or carry on without them." % len(skipped),
+                                      tag="CHECK", tone="warn")
+        else:
+            self.next_banner.set_text("Ready for layout. UDIM layout (step 6) arrives in the next update.",
+                                      tag="READY", tone="done")
 
     # ============================================================ state
     def set_status(self, text, level="info"):
@@ -3502,12 +4140,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
             color = LEVEL_COLORS["warn"] if entry["usable"] else LEVEL_COLORS["skip"]
             item.setForeground(1, QtGui.QBrush(QtGui.QColor(color)))
             self.naming_list.addTopLevelItem(item)
-        self.naming_section.header.setText("Naming issues (UnlokRenamer)%s" % (
-            "  -  %d" % len(naming) if naming else ""))
+        self.naming_section.title.setText("Fix names%s" % (
+            "  (%d)" % len(naming) if naming else ""))
         available = _unlok_renamer_available()
         self.renamer_btn.setEnabled(available)
         self.renamer_btn.setToolTip("Open UnlokRenamer to fix these names." if available else
                                     "UnlokRenamer isn't loaded in this Maya session.")
+        self._update_guidance()
 
     def _fill_report(self):
         self.report_tree.clear()
@@ -3840,7 +4479,12 @@ class CategoryPage(QtWidgets.QWidget):
             bar.addWidget(btn)
         bar.addStretch(1)
         group.buttonClicked.connect(lambda b: self.stack.setCurrentIndex(group.id(b)))
-        lay.addLayout(bar)
+        if len(tool_classes) > 1:  # one tool: its own header says what it is
+            lay.addLayout(bar)
+        else:
+            for b in group.buttons():
+                b.setParent(None)
+                b.deleteLater()
         lay.addWidget(self.stack, 1)
 
 
@@ -3851,14 +4495,21 @@ class ToolboxWindow(QtWidgets.QWidget):
         self.setWindowTitle("Unlok Toolbox  %s" % TOOLBOX_VERSION)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setStyleSheet(STYLE)
-        self.resize(380, 780)
+        self.resize(400, 860)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(4, 6, 4, 4)
-        lay.setSpacing(4)
+        lay.setSpacing(2)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(6, 0, 6, 0)
         title = QtWidgets.QLabel("UNLOK TOOLBOX")
         title.setProperty("unlokTitle", True)
-        lay.addWidget(title)
+        version = QtWidgets.QLabel("v" + TOOLBOX_VERSION)
+        version.setProperty("unlokHint", True)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(version)
+        lay.addLayout(head)
 
         self.tabs = QtWidgets.QTabWidget()
         self.pages = []
