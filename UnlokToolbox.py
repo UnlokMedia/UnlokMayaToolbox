@@ -4744,6 +4744,8 @@ def _br_best_matching(nodes, options):
             return 0.0, []
         if mask in memo:
             return memo[mask]
+        if len(memo) > 200000:
+            raise _BRTooBig()
         i = (mask & -mask).bit_length() - 1
         f = nodes[i]
         rest = mask & ~(1 << i)
@@ -4762,7 +4764,27 @@ def _br_best_matching(nodes, options):
         memo[mask] = best
         return best
 
-    return solve((1 << len(nodes)) - 1)[1]
+    try:
+        return solve((1 << len(nodes)) - 1)[1]
+    except _BRTooBig:
+        pass
+    # Too big to search exactly: pair the most constrained face first.
+    picks, free = [], set(nodes)
+    while free:
+        def avail(f):
+            return [o for o in options[f] if o[1] is None or o[1] not in pos or o[1] in free and o[1] != f]
+        f = min(free, key=lambda g: (len(avail(g)) or 99, g))
+        free.discard(f)
+        opts = avail(f)
+        if opts:
+            cost, other, path = opts[0]
+            free.discard(other)
+            picks.append((f, other, path))
+    return picks
+
+
+class _BRTooBig(Exception):
+    pass
 
 
 def plan_parity(topo, targets, strips, max_loop=6, use_border=True):
@@ -4784,6 +4806,11 @@ def plan_parity(topo, targets, strips, max_loop=6, use_border=True):
             # Only near-best options link faces into a cluster; keeps clusters small.
             opts = [o for o in opts if o[0] <= opts[0][0] + 6.0][:6]
         options[f] = opts
+    # Pairing is symmetric: if f can reach g, g can reach f the same way back.
+    for f in odd:
+        for cost, other, (edges, via) in list(options[f]):
+            if other in options and not any(o[1] == f for o in options[other]):
+                options[other].append((cost, f, (edges[::-1], via[::-1])))
     # Clusters: odd faces linked by a pairing option.
     parent = dict((f, f) for f in odd)
 
@@ -4802,17 +4829,7 @@ def plan_parity(topo, targets, strips, max_loop=6, use_border=True):
         clusters.setdefault(root(f), []).append(f)
     picks = []
     for nodes in clusters.values():
-        if len(nodes) <= 14:
-            picks.extend(_br_best_matching(nodes, options))
-            continue
-        flat = sorted(((c, f, o, p) for f in nodes for c, o, p in options[f]), key=lambda x: x[0])
-        done = set()
-        for c, f, o, p in flat:
-            if f not in done and (o is None or o not in done):
-                done.add(f)
-                if o is not None:
-                    done.add(o)
-                picks.append((f, o, p))
+        picks.extend(_br_best_matching(sorted(nodes), options))
     # Free ends (triangles), edges and quads cut by a loop can only be used once.
     matched, used_faces, used_edges, paths = set(), set(), set(), []
     for f, other, (edges, via) in picks:

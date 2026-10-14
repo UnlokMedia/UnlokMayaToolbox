@@ -127,6 +127,38 @@ def cube_edge(seg):
     return full(c)
 
 
+def frame_wall(cells, which="sides", seg=2):
+    """8 x 4 wall of 1-unit cells with protruding window frames, like the
+    user's reference: each window cell is inset into a frame ring that is
+    pushed out (the frames of neighbouring cells merge into a mullion), and
+    the centre pushed in. which: 'sides' bevels the vertical frame-to-wall
+    edges, 'frontsides' the frames' vertical front edges, 'both' every
+    frame-to-wall and front border edge."""
+    w = cmds.polyCube(w=8, h=4, d=0.4, sx=8, sy=4, sz=1, name="frameWall")[0]
+    centres = [faces_where(w, lambda c, cx=cx, cy=cy: c.z > 0.19 and abs(c.x - (cx - 3.5)) < 0.1
+                           and abs(c.y - (cy - 1.5)) < 0.1)[0] for cx, cy in cells]
+    cmds.polyExtrudeFacet(["%s.f[%d]" % (w, f) for f in centres], offset=0.15, ltz=0, keepFacesTogether=False)
+    ring = [f for f in faces_where(w, lambda c: c.z > 0.19 and any(
+        abs(c.x - (cx - 3.5)) < 0.5 and abs(c.y - (cy - 1.5)) < 0.5 for cx, cy in cells)) if f not in centres]
+    cmds.polyExtrudeFacet(["%s.f[%d]" % (w, f) for f in ring], ltz=0.08, keepFacesTogether=True)
+    cmds.polyExtrudeFacet(["%s.f[%d]" % (w, f) for f in centres], ltz=-0.2, keepFacesTogether=False)
+
+    def border(p):
+        return any(abs(abs(p.x - (cx - 3.5)) - 0.5) < 1e-3 and abs(p.y - (cy - 1.5)) < 0.5 + 1e-3 or
+                   abs(abs(p.y - (cy - 1.5)) - 0.5) < 1e-3 and abs(p.x - (cx - 3.5)) < 0.5 + 1e-3 for cx, cy in cells)
+
+    def pick(a, b):
+        if not (border(a) and border(b)):
+            return False
+        base = abs(a.z - 0.2) < 1e-4 and abs(b.z - 0.2) < 1e-4
+        front = abs(a.z - 0.28) < 1e-4 and abs(b.z - 0.28) < 1e-4
+        vertical = abs(a.x - b.x) < 1e-4
+        return {"sides": base and vertical, "frontsides": front and vertical, "both": base or front}[which]
+
+    cmds.polyBevel3(edges_where(w, pick), segments=seg, chamfer=False, offset=0.15, offsetAsFraction=True)
+    return full(w)
+
+
 def window_grid(cols, rows):
     """Wall with cols x rows windows (every other cell, wall all round),
     vertical rims bevelled."""
@@ -210,6 +242,36 @@ def test_side_by_side(tb):
     resolve_case(tb, "two windows side by side", wall(windows=(-1.2, 1.2)), ends=8)
 
 
+def test_protruding_frames(tb):
+    # The user's reference: frames pushed out of a gridded wall, bevel loops
+    # ending on the wall around them. Two frames side by side share a mullion.
+    for cells, which, seg in (([(1, 1)], "sides", 2), ([(1, 1)], "sides", 3), ([(1, 1), (3, 1)], "both", 3),
+                              ([(1, 1), (2, 1)], "sides", 2), ([(1, 1), (2, 1)], "sides", 3),
+                              ([(1, 1), (2, 1)], "frontsides", 3)):
+        cmds.file(new=True, force=True)
+        label = "protruding frame%s (%s, %d seg)" % ("s side by side" if len(cells) == 2 and cells[1][0] == 2
+                                                     else "s" if len(cells) == 2 else "", which, seg)
+        resolve_case(tb, label, frame_wall(cells, which, seg))
+    # Side by side: both chamfer corners above the mullion run up to one shared
+    # vertex on the mullion's vertical loop (the "V" in the user's sketch).
+    cmds.file(new=True, force=True)
+    mesh = frame_wall([(1, 1), (2, 1)], "sides", 2)
+    tb["resolve_bevel_ngons"]({mesh: None})
+    fn = om.MFnMesh(dag(mesh))
+    pts = fn.getPoints()
+    corners = [i for i, p in enumerate(pts) if abs(p.z - 0.2) < 1e-4 and abs(p.y - 0.04) < 0.02
+               and min(abs(p.x + 3), abs(p.x + 1)) < 1e-3]
+    it = om.MItMeshVertex(dag(mesh))
+    reach = []
+    for v in corners:
+        it.setIndex(v)
+        reach.append(set(it.getConnectedVertices()))
+    apex = set.intersection(*reach) if len(reach) == 2 else set()
+    apex = [v for v in apex if abs(pts[v].x + 2) < 1e-3 and pts[v].y > 0.05]
+    check("side-by-side frames: chamfer corners meet at one vertex above the mullion (V)", len(apex) == 1,
+          "corners %s, apex %s" % (corners, [(round(pts[v].x, 2), round(pts[v].y, 2)) for v in apex]))
+
+
 def test_boss(tb):
     cmds.file(new=True, force=True)
     mesh = boss()
@@ -288,7 +350,8 @@ def test_speed(tb):
 
 def run():
     tb = load_toolbox()
-    for test in (test_planning, test_wall, test_top_only, test_side_by_side, test_boss, test_cube_edges,
+    for test in (test_planning, test_wall, test_top_only, test_side_by_side, test_protruding_frames, test_boss,
+                 test_cube_edges,
                  test_selection, test_reports, test_speed):
         try:
             test(tb)
