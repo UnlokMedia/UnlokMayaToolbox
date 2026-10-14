@@ -102,3 +102,6 @@ created when you bake.
   draws strokes through the viewport, saves screenshots to `tests/_out`).
   Set `UNLOK_TEST_DIR` to the `tests` folder (and `UNLOK_TEST_QUIT=1` to close
   Maya afterwards), then launch `maya.exe -script tests/run_gui_smoke.mel`.
+- `tests/gui_draw_bench.py`: measures how responsive path drawing is (time
+  per mouse move in a busy scene). Launch it the same way with
+  `tests/run_gui_draw_bench.mel`.

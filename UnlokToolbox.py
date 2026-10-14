@@ -1049,17 +1049,20 @@ class SurfacePathDrawer(object):
         self.exclude_roots = exclude_roots or (lambda: [])
         self.on_miss = None
         self.forced_surfaces = []
+        self.preview = None  # (transform MObjectHandle, shape MDagPath, cv capacity)
         self._reset()
 
     def _reset(self):
         self.points = []  # [(MPoint, mesh path or None for the plane)]
-        self.candidates = []  # [(dag, fn, accel, world bbox or None)] for this stroke
+        self.candidates = []  # [(dag, fn, accel, world bbox or None, path)] for this stroke
+        self.last_mesh = None  # candidate the stroke is currently on (tried first)
         self.plane = None
         self.anchor = None
         self.last_screen = None
+        self.last_drag = None
         self.straight = False
         self.add = False
-        self.temp_curve = None
+        self._last_refresh = 0.0
 
     # -------------------------------------------------------------- activate
     def activate(self, surfaces=None):
@@ -1077,6 +1080,8 @@ class SurfacePathDrawer(object):
             undoMode="step",
         )
         cmds.setToolTo(DRAW_CTX)
+        # Make the stroke preview now, so no node is created mid-stroke.
+        self._ensure_preview()
 
     @staticmethod
     def is_active():
@@ -1148,8 +1153,14 @@ class SurfacePathDrawer(object):
 
     @staticmethod
     def _ray_hits_bbox(src, direction, bb):
+        return SurfacePathDrawer._ray_box_entry(src, direction, bb) is not None
+
+    @staticmethod
+    def _ray_box_entry(src, direction, bb):
+        """Distance along the ray where it enters the box (0 if it starts
+        inside), or None if it misses. No box = always worth testing."""
         if bb is None:
-            return True
+            return 0.0
         tmin, tmax = -1e30, 1e30
         mn, mx = bb.min, bb.max
         for o, d, lo, hi in ((src.x, direction.x, mn.x, mx.x),
@@ -1157,15 +1168,17 @@ class SurfacePathDrawer(object):
                              (src.z, direction.z, mn.z, mx.z)):
             if abs(d) < 1e-12:
                 if o < lo or o > hi:
-                    return False
+                    return None
                 continue
             t1, t2 = (lo - o) / d, (hi - o) / d
             if t1 > t2:
                 t1, t2 = t2, t1
             tmin, tmax = max(tmin, t1), min(tmax, t2)
             if tmin > tmax:
-                return False
-        return tmax >= 0
+                return None
+        if tmax < 0:
+            return None
+        return max(tmin, 0.0)
 
     @staticmethod
     def _intersect(entry, src, direction):
@@ -1188,16 +1201,27 @@ class SurfacePathDrawer(object):
         """
         src, direction = self._ray(x, y)
         if self.plane is None:
+            # Nearest visible hit wins. Testing the mesh we're already on first
+            # gives a hit distance that rules out (by bounding box) nearly
+            # every other mesh without a full intersection test.
             best = None
-            for dag, fn, accel, bb in self.candidates:
-                if not self._ray_hits_bbox(src, direction, bb):
+            if self.last_mesh is not None:
+                hit = self._intersect((self.last_mesh[1], self.last_mesh[2]), src, direction)
+                if hit:
+                    best = (hit[0], hit[1], self.last_mesh)
+            for cand in self.candidates:
+                if cand is self.last_mesh:
                     continue
-                hit = self._intersect((fn, accel), src, direction)
+                entry = self._ray_box_entry(src, direction, cand[3])
+                if entry is None or (best is not None and entry >= best[1]):
+                    continue
+                hit = self._intersect((cand[1], cand[2]), src, direction)
                 if hit and (best is None or hit[1] < best[1]):
-                    best = (hit[0], hit[1], dag)
+                    best = (hit[0], hit[1], cand)
             if best is None:
                 return None
-            return best[0], best[2].fullPathName()
+            self.last_mesh = best[2]
+            return best[0], best[2][4]
         origin, normal = self.plane
         denom = direction * normal
         if abs(denom) > 1e-9:
@@ -1231,6 +1255,8 @@ class SurfacePathDrawer(object):
 
     def press_at(self, x, y, mod="none"):
         self._reset()
+        self.anchor = (x, y)  # stroke in progress from here on
+        self._ensure_preview()
         self.straight = mod == "shift"
         self.add = mod == "ctrl"
         src, direction = self._ray(x, y)
@@ -1242,6 +1268,7 @@ class SurfacePathDrawer(object):
         if p is None and self.forced_surfaces:
             # Didn't start on the selected surface: use whatever is under the cursor.
             self.candidates = self._make_candidates(self._candidate_meshes(use_forced=False))
+            self.last_mesh = None
             p = self._cast(x, y)
         if p is None:
             # Started on empty space: draw on the ground (or a camera-facing plane).
@@ -1258,22 +1285,16 @@ class SurfacePathDrawer(object):
         out = []
         for dag in dags:
             fn = om.MFnMesh(dag)
-            out.append((dag, fn, fn.autoUniformGridParams(), SurfacePathDrawer._world_box(dag)))
+            out.append((dag, fn, fn.autoUniformGridParams(), SurfacePathDrawer._world_box(dag), dag.fullPathName()))
         return out
 
     def drag_at(self, x, y):
         if self.anchor is None:
             return
+        self.last_drag = (x, y)
         if self.straight:
-            ax, ay = self.anchor
-            steps = max(2, int(math.hypot(x - ax, y - ay) / 6.0))
-            pts = []
-            for i in range(steps + 1):
-                t = float(i) / steps
-                p = self._cast(ax + (x - ax) * t, ay + (y - ay) * t)
-                if p is not None:
-                    pts.append(p)
-            self.points = pts
+            # Coarse while dragging; release() resamples finely.
+            self.points = self._line_points(x, y, 24.0)
         else:
             lx, ly = self.last_screen
             if math.hypot(x - lx, y - ly) < 3.0:
@@ -1283,10 +1304,23 @@ class SurfacePathDrawer(object):
                 return
             self.points.append(p)
             self.last_screen = (x, y)
-        self._update_temp_curve()
+        self._update_preview()
+
+    def _line_points(self, x, y, step_px):
+        ax, ay = self.anchor
+        steps = max(2, int(math.hypot(x - ax, y - ay) / step_px))
+        pts = []
+        for i in range(steps + 1):
+            t = float(i) / steps
+            p = self._cast(ax + (x - ax) * t, ay + (y - ay) * t)
+            if p is not None:
+                pts.append(p)
+        return pts
 
     def release(self):
         try:
+            if self.straight and self.last_drag is not None and self.anchor is not None:
+                self.points = self._line_points(self.last_drag[0], self.last_drag[1], 6.0)
             # Meshes the stroke only grazed (e.g. the wall under an eave) don't
             # become snap surfaces, and points on them are dropped so the path
             # doesn't dip off the edge.
@@ -1297,7 +1331,7 @@ class SurfacePathDrawer(object):
             total = float(sum(counts.values()) or 1)
             surfaces = [m for m, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n / total >= 0.15]
             pts = self._clean_points([pt for pt, mesh in self.points if mesh is None or mesh in surfaces])
-            self._delete_temp_curve()
+            self._set_preview_visible(False)
             if len(pts) < 2:
                 if self.on_miss is not None:
                     self.on_miss()
@@ -1318,7 +1352,7 @@ class SurfacePathDrawer(object):
 
     def _finalize(self):
         try:
-            self._delete_temp_curve()
+            self._delete_preview()
         except Exception:
             pass
 
@@ -1331,28 +1365,78 @@ class SurfacePathDrawer(object):
                 out.append(p)
         return out
 
-    def _update_temp_curve(self):
+    PREVIEW_CAPACITY = 1024
+
+    def _update_preview(self):
+        """Show the stroke while drawing.
+
+        Runs on every mouse move, so it stays off the command layer: one
+        preview curve is made when the tool starts and then only has its CVs
+        moved through the API (no node creation, selection changes or undo
+        entries mid-stroke), with redraws capped at ~60 fps.
+        """
         pts = self._clean_points([pt for pt, _ in self.points])
         if len(pts) < 2:
             return
-        coords = [(p.x, p.y, p.z) for p in pts]
-        with NoUndo(), PreserveSelection():
-            if self.temp_curve and cmds.objExists(self.temp_curve):
-                cmds.curve(self.temp_curve, replace=True, degree=1, point=coords)
-            else:
-                self.temp_curve = long_name(cmds.curve(degree=1, point=coords, name="unlokPathPreview"))
-                shape = cmds.listRelatives(self.temp_curve, shapes=True, fullPath=True)[0]
-                cmds.setAttr(shape + ".overrideEnabled", 1)
-                cmds.setAttr(shape + ".overrideRGBColors", 1)
-                cmds.setAttr(shape + ".overrideColorRGB", 1.0, 0.75, 0.2)
-                cmds.setAttr(shape + ".lineWidth", 2.0)
-        cmds.refresh(currentView=True, force=True)
+        self._ensure_preview()
+        handle, shape, cap = self.preview
+        if len(pts) > cap:  # very long stroke: thin it out for display only
+            step = int(math.ceil(len(pts) / float(cap - 1)))
+            pts = pts[::step][:cap - 1] + [pts[-1]]
+        cvs = om.MPointArray(pts)
+        for _ in range(cap - len(pts)):
+            cvs.append(pts[-1])  # spare CVs sit on the last point
+        fn = om.MFnNurbsCurve(shape)
+        fn.setCVPositions(cvs, om.MSpace.kObject)
+        fn.updateCurve()
+        self._set_preview_visible(True)
+        now = time.time()
+        if now - self._last_refresh > 1.0 / 60.0:
+            self._last_refresh = now
+            cmds.refresh(currentView=True)
 
-    def _delete_temp_curve(self):
-        if self.temp_curve and cmds.objExists(self.temp_curve):
-            with NoUndo():
-                cmds.delete(self.temp_curve)
-        self.temp_curve = None
+    def _preview_valid(self):
+        return self.preview is not None and self.preview[0].isValid() and self.preview[0].isAlive()
+
+    def _ensure_preview(self):
+        if not self._preview_valid():
+            self._create_preview(self.PREVIEW_CAPACITY)
+
+    def _create_preview(self, capacity):
+        mod = om.MDagModifier()
+        xform = mod.createNode("transform")
+        mod.renameNode(xform, "unlokPathPreview")
+        mod.doIt()
+        knots = om.MDoubleArray([float(i) for i in range(capacity)])
+        cvs = om.MPointArray([om.MPoint()] * capacity)
+        shape_obj = om.MFnNurbsCurve().create(cvs, knots, 1, om.MFnNurbsCurve.kOpen, False, False, xform)
+        for obj in (xform, shape_obj):
+            om.MFnDependencyNode(obj).setDoNotWrite(True)  # never saved with the scene
+        shape = om.MDagPath.getAPathTo(shape_obj)
+        name = shape.fullPathName()
+        with NoUndo():
+            cmds.setAttr(om.MDagPath.getAPathTo(xform).fullPathName() + ".hiddenInOutliner", 1)
+            cmds.setAttr(name + ".overrideEnabled", 1)
+            cmds.setAttr(name + ".overrideRGBColors", 1)
+            cmds.setAttr(name + ".overrideColorRGB", 1.0, 0.75, 0.2)
+            cmds.setAttr(name + ".lineWidth", 2.5)
+            if cmds.attributeQuery("alwaysDrawOnTop", node=name, exists=True):
+                cmds.setAttr(name + ".alwaysDrawOnTop", 1)
+        self.preview = (om.MObjectHandle(xform), shape, capacity)
+        self._set_preview_visible(False)
+
+    def _set_preview_visible(self, on):
+        if self._preview_valid():
+            plug = om.MFnDependencyNode(self.preview[0].object()).findPlug("visibility", False)
+            if plug.asBool() != on:
+                plug.setBool(on)
+
+    def _delete_preview(self):
+        if self._preview_valid():
+            mod = om.MDagModifier()
+            mod.deleteNode(self.preview[0].object())
+            mod.doIt()
+        self.preview = None
 
 
 # =============================================================================
@@ -1972,6 +2056,11 @@ class PathScatterPanel(QtWidgets.QWidget):
         system = self._system()
         if system is None:
             return
+        if self.drawer.anchor is not None:
+            # Never rebuild mid-stroke (a dense scatter can take a few hundred
+            # ms and would freeze the stroke). Try again once it's finished.
+            self._timer.start(100)
+            return
         self._callbacks_muted = True
         try:
             count, ms, warning = system.rebuild(self.settings())
@@ -2216,6 +2305,11 @@ class PathScatterPanel(QtWidgets.QWidget):
         # Called from inside Maya's evaluation: never touch the scene here,
         # just queue a rebuild on the Qt event loop.
         if self._callbacks_muted:
+            return
+        if self.drawer.anchor is not None:
+            # Mid-stroke: ray casts against the surface flag it dirty, and a
+            # full rebuild here would stall the stroke. The stroke's release
+            # schedules its own rebuild.
             return
         try:
             self._timer.start(40)

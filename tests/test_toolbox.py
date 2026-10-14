@@ -222,6 +222,33 @@ def run():
     check("raycast miss returns None", miss is None)
     check("ray/box prefilter hit", drawer._ray_hits_box(om.MPoint(0, 10, 0), om.MVector(0, -1, 0), dag))
     check("ray/box prefilter miss", not drawer._ray_hits_box(om.MPoint(10, 10, 0), om.MVector(0, -1, 0), dag))
+    entry = drawer._ray_box_entry(om.MPoint(0, 10, 0), om.MVector(0, -1, 0), drawer._world_box(dag))
+    check("ray/box entry distance", entry is not None and abs(entry - 8.0) < 1e-6, str(entry))
+
+    # live stroke preview: edited in place, grows past capacity, leaves nothing behind
+    d = drawer(lambda *a: None, lambda: 3)
+    before = set(cmds.ls(dagObjects=True, long=True))
+    sel_before = cmds.ls(selection=True)
+    d.points = [(om.MPoint(i * 0.1, 0, 0), None) for i in range(10)]
+    d._update_preview()
+    shape = d.preview[1].fullPathName()
+    cvs = cmds.getAttr(shape + ".cv[*]")
+    check("preview curve shows stroke points", d.preview[2] == 1024 and abs(cvs[9][0] - 0.9) < 1e-6
+          and abs(cvs[-1][0] - 0.9) < 1e-6, str(cvs[9]))
+    node = d.preview[0]
+    d.points = [(om.MPoint(i * 0.01, 0, 0), None) for i in range(3000)]
+    d._update_preview()
+    last = cmds.getAttr(d.preview[1].fullPathName() + ".cv[1023]")[0][0]
+    check("long strokes reuse the same preview node (thinned for display)",
+          d.preview[0] is node and abs(last - 29.99) < 1e-6, str(last))
+    xform = om.MDagPath.getAPathTo(d.preview[0].object()).fullPathName()
+    check("preview is never saved and hidden from the Outliner",
+          not om.MFnDependencyNode(d.preview[0].object()).canBeWritten() and cmds.getAttr(xform + ".hiddenInOutliner"))
+    d._set_preview_visible(False)
+    check("preview hides between strokes", not cmds.getAttr(xform + ".visibility"))
+    check("preview doesn't change the selection", cmds.ls(selection=True) == sel_before)
+    d._delete_preview()
+    check("preview cleaned up", set(cmds.ls(dagObjects=True, long=True)) == before)
 
     # UI is covered by tests/gui_smoke.py (needs a real Maya session).
 

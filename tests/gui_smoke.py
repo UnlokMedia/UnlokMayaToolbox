@@ -241,6 +241,8 @@ def main():
     ms = (time.time() - t0) * 1000
     thatch = panel.system
     info = [(c.split("|")[-1], round(cmds.arclen(c), 2)) for c in thatch.paths()]
+    check("thatch strokes land on the visible roof slabs, not the wall behind",
+          sorted(x.split("|")[-1] for x in thatch.surfaces()) == ["roofLeft", "roofRight"], str(thatch.surfaces()))
     check("thatch builds", thatch is not None and thatch.last_count > 4000,
           "%d strands in %.0f ms, paths %s, surfaces %s" % (thatch.last_count, ms, info, thatch.surfaces()))
     times = []

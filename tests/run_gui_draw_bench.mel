@@ -1,0 +1,1 @@
+python("import os; exec(compile(open(os.path.join(os.environ['UNLOK_TEST_DIR'], 'gui_draw_bench.py')).read(), 'gui_draw_bench.py', 'exec'), {'__name__': 'bench'})");

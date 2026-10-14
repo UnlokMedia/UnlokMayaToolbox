@@ -24,6 +24,15 @@
   nodes is about 1 ms each, which is too slow for live updates. Only bake
   creates them.
 - Live edits run inside `NoUndo` so slider drags don't flood the undo queue.
+- Stroke preview must stay cheap per mouse move:
+  - One preview curve (1,024 CVs, never saved, hidden in the Outliner) is made
+    when Draw Path starts, and only its CVs are moved through the API.
+  - Never create nodes, change the selection or toggle undo mid-stroke. A
+    new node or a selection change sends Maya into UI and viewport rebuilds
+    costing hundreds of ms.
+  - The panel never rebuilds a scatter mid-stroke (`drawer.anchor` is set):
+    ray casts flag the surface dirty, and a dense rebuild stalls the stroke.
+  - Measure with `tests/gui_draw_bench.py`.
 - Strokes: each point hits the nearest mesh under the cursor. Selected meshes
   restrict drawing, but only if the stroke starts on them. On release, meshes
   that got under 15% of the points count as "grazed": they are dropped as
