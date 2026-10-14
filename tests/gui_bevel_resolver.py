@@ -156,6 +156,9 @@ def main():
     pump()
     check("Resolve leaves no n-gons", all(ngons(m) == 0 for m in meshes), panel.status.text())
     check("status reports success", "Resolved" in panel.status.text(), panel.status.text())
+    check("NEXT banner says it's done, steps ticked", panel.next_banner.tag.text() == "DONE"
+          and panel.step_resolve.state == "done" and panel.step_check.state == "done",
+          "%s: %s" % (panel.next_banner.tag.text(), panel.next_banner.text.text()))
     items = [panel.report_tree.topLevelItem(i).text(0) for i in range(panel.report_tree.topLevelItemCount())]
     check("report lists both meshes", len(items) == 2 and all("resolved" in t for t in items), str(items))
     # Before the screenshots: their display / selection changes are undo steps too.
@@ -180,6 +183,8 @@ def main():
     panel.resolve()
     pump()
     top = panel.report_tree.topLevelItem(0)
+    check("leftovers turn the banner into a CHECK", panel.next_banner.tag.text() == "CHECK"
+          and panel.step_check.state == "current", panel.next_banner.text.text())
     check("unresolved faces get a report row", top is not None and top.childCount() == 1,
           top.child(0).text(0) if top and top.childCount() else panel.status.text())
     cmds.select(clear=True)
@@ -195,6 +200,8 @@ def main():
     cmds.select(clear=True)
     panel.resolve()
     check("no selection gives a warning", "Select" in panel.status.text(), panel.status.text())
+    check("with nothing selected the banner asks for a selection", "Select" in panel.next_banner.text.text()
+          and panel.step_select.state == "current", panel.next_banner.text.text())
 
 
 def run():

@@ -5351,68 +5351,144 @@ class BevelResolverPanel(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super(BevelResolverPanel, self).__init__(parent)
-        self.report = {}
+        self.last = None  # {"kind": "find"/"resolve", "selection": key, "found", "resolved", "left"}
+        self._jobs = []
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(self._update_guidance)
         self._build()
-        self.set_status("Select meshes (or faces / edges / vertices) and press Resolve.")
+        self._install_jobs()
+        self._update_guidance()
 
+    # ============================================================== layout
     def _build(self):
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setContentsMargins(0, 4, 0, 0)
         outer.setSpacing(6)
-        outer.addWidget(hint_label(
-            "A bevel with Chamfer off leaves 5- and 6-sided faces where the bevel ends. Resolve cuts them "
-            "into quads: chamfers side by side merge into each other, a lone chamfer gets a diagonal to the "
-            "next loop, and any pole lands on the flat area, not the bevel."))
 
-        sec = Section("Find")
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Bevel Resolver", "Turn the 5- and 6-sided faces a Chamfer-off bevel leaves "
+                                                  "where it ends into clean SubD quads."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+
+        # ---- 1. select
+        card = self.step_select = StepCard(1, "Select", "Meshes (the whole mesh is checked), or faces / edges / "
+                                                        "vertices around the bevel ends you want fixed.")
+        self.sel_label = hint_label("")
+        card.add(self.sel_label)
+        grid = Section("", header=False)
         self.scope = SegmentField(BR_SCOPES)
-        sec.add_row("Faces", self.scope, "Bevel n-gons: only n-gons touching a thin bevel strip (and their "
-                                         "neighbours).\nAll n-gons: every face with more than 4 sides.\n"
-                                         "Selected faces / edges / vertices: every n-gon among them.")
+        grid.add_row("Faces", self.scope, "Bevel n-gons: only n-gons touching a thin bevel strip (and their "
+                                          "neighbours).\nAll n-gons: every face with more than 4 sides.\n"
+                                          "With faces / edges / vertices selected, every n-gon among them.")
+        card.add(grid)
+        col.addWidget(card)
+
+        # ---- 2. resolve
+        card = self.step_resolve = StepCard(2, "Resolve", "Side-by-side chamfers merge, a lone chamfer gets a "
+                                                          "diagonal to the next loop, and poles land on the flat "
+                                                          "area. One Ctrl+Z undoes it.")
+        find = secondary_button("Select N-gons", "Select the n-gons Resolve would work on, changing nothing.")
+        find.clicked.connect(lambda *_: self.find())
+        self.resolve_btn = primary_button("Resolve")
+        self.resolve_btn.setMinimumHeight(28)
+        self.resolve_btn.setToolTip("Cut the n-gons into quads. One Ctrl+Z undoes it. "
+                                    "Faces that can't be resolved cleanly are left alone and selected.")
+        self.resolve_btn.clicked.connect(lambda *_: self.resolve())
+        row = button_row(find, self.resolve_btn)
+        row.layout().setStretch(1, 1)
+        card.add(row)
+        adv = Section("Advanced", expanded=False)
         self.strip_ratio = FloatField(0.05, 0.6, decimals=2, step=0.05)
         self.strip_ratio.setValue(BR_DEFAULTS["strip_ratio"])
-        sec.add_row("Strip ratio", self.strip_ratio, "A quad whose short sides are this much thinner than its "
+        adv.add_row("Strip ratio", self.strip_ratio, "A quad whose short sides are this much thinner than its "
                                                      "long sides counts as a bevel strip.")
-        outer.addWidget(sec)
-
-        sec = Section("Odd-sided faces")
         self.max_loop = IntField(0, 30, 0, 12)
         self.max_loop.setValue(BR_DEFAULTS["max_loop"])
-        sec.add_row("Max loop", self.max_loop, "A 5- or 7-sided face can't become quads alone. If no other odd "
+        adv.add_row("Max loop", self.max_loop, "A 5- or 7-sided face can't become quads alone. If no other odd "
                                                "face touches it, a short edge loop runs through up to this many "
                                                "flat quads to reach one.")
         self.use_border = CheckField("Loops may end on an open border")
         self.use_border.setValue(BR_DEFAULTS["use_border"])
-        sec.add_full(self.use_border)
-        outer.addWidget(sec)
+        adv.add_full(self.use_border)
+        card.add(adv)
+        col.addWidget(card)
 
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(4)
-        find = QtWidgets.QPushButton("Select N-gons")
-        find.setToolTip("Select the n-gons Resolve would work on, without changing anything.")
-        find.clicked.connect(lambda *_: self.find())
-        self.resolve_btn = primary_button("Resolve")
-        self.resolve_btn.setToolTip("Cut the n-gons into quads. One Ctrl+Z undoes it. "
-                                    "Faces that can't be resolved cleanly are left alone and selected.")
-        self.resolve_btn.clicked.connect(lambda *_: self.resolve())
-        row.addWidget(find)
-        row.addWidget(self.resolve_btn, 1)
-        outer.addLayout(row)
-
+        # ---- 3. check
+        card = self.step_check = StepCard(3, "Check the result", "Anything it couldn't resolve cleanly is listed "
+                                                                 "and left alone. Click a row to select it.")
         self.report_tree = QtWidgets.QTreeWidget()
         self.report_tree.setColumnCount(2)
         self.report_tree.setHeaderLabels(["Result", "Faces"])
         self.report_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.report_tree.setMinimumHeight(140)
+        self.report_tree.setAlternatingRowColors(True)
         self.report_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.report_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.report_tree.header().setStretchLastSection(False)
-        self.report_tree.setToolTip("Click a row to select those faces.")
         self.report_tree.itemSelectionChanged.connect(self._report_selected)
-        outer.addWidget(self.report_tree, 1)
+        card.add(self.report_tree)
+        col.addWidget(card)
+        col.addStretch(1)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
         outer.addWidget(self.status)
+
+    # ============================================================ guidance
+    def _selection_key(self):
+        return tuple(cmds.ls(selection=True, long=True) or [])
+
+    def _update_guidance(self):
+        try:
+            sel = self._selection_key()
+        except Exception:
+            sel = ()
+        meshes = set()
+        comps = 0
+        for s in sel:
+            if "." in s:
+                comps += 1
+                meshes.add(s.split(".")[0])
+            else:
+                meshes.add(s)
+        self.sel_label.setText("%d object(s) selected%s." % (len(meshes), (", %d component group(s)" % comps)
+                                                             if comps else "") if sel else "Nothing selected.")
+        last = self.last if self.last and self.last["selection"] == sel else None
+        self.step_select.set_state("done" if sel else "current")
+        resolved = last is not None and last["kind"] == "resolve"
+        self.step_resolve.set_state("done" if resolved else ("current" if sel else "todo"))
+        self.step_check.set_state(("current" if last["left"] else "done") if resolved else "todo")
+        if not sel:
+            self.next_banner.set_text("Select the bevelled mesh(es), or faces / edges / vertices around the "
+                                      "bevel ends.")
+        elif last is None:
+            self.next_banner.set_text("Press <b>Resolve</b> (or <b>Select N-gons</b> to see what it will "
+                                      "change first).")
+        elif last["kind"] == "find":
+            self.next_banner.set_text("%d n-gon(s) selected. Press <b>Resolve</b>." % last["found"]
+                                      if last["found"] else "No %s here. Try <b>All n-gons</b>, or select "
+                                      "other meshes." % self.scope.value().lower())
+        elif last["left"]:
+            self.next_banner.set_text("%d face(s) couldn't be resolved cleanly and are selected. See step 3; "
+                                      "fix them by hand or with a different selection." % last["left"],
+                                      tag="CHECK", tone="warn")
+        elif last["found"]:
+            self.next_banner.set_text("All %d n-gon(s) resolved. Check the smooth preview (press 3)."
+                                      % last["resolved"], tag="DONE", tone="done")
+        else:
+            self.next_banner.set_text("No %s found. Try <b>All n-gons</b>, or select other meshes."
+                                      % self.scope.value().lower())
 
     def set_status(self, text, level="info"):
         color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
@@ -5426,8 +5502,10 @@ class BevelResolverPanel(QtWidgets.QWidget):
         items = bevel_selection()
         if not items:
             self.set_status("Select one or more meshes, or faces / edges / vertices on them.", level="warn")
+            self._update_guidance()
         return items
 
+    # ============================================================= actions
     @ui_safe
     def find(self):
         items = self._items()
@@ -5442,12 +5520,15 @@ class BevelResolverPanel(QtWidgets.QWidget):
         found = sum(r["found"] for r in report.values())
         stuck = sum(len(r["unresolved"]) for r in report.values())
         self._fill_report(report, dry_run=True)
+        self.last = {"kind": "find", "selection": self._selection_key(), "found": found, "resolved": 0,
+                     "left": stuck}
         if not found:
             self.set_status("No %s found on %d mesh(es)." % (self.scope.value().lower(), len(report)))
         else:
             self.set_status("%d n-gon(s) on %d mesh(es)%s." % (
-                found, len(report), (", %d can't be paired (see below)" % stuck) if stuck else ""),
+                found, len(report), (", %d can't be paired (see step 3)" % stuck) if stuck else ""),
                 level="warn" if stuck else "info")
+        self._update_guidance()
 
     @ui_safe
     def resolve(self):
@@ -5464,6 +5545,8 @@ class BevelResolverPanel(QtWidgets.QWidget):
         found = sum(r["found"] for r in report.values())
         done = sum(r["resolved"] for r in report.values())
         left = sum(len(r["unresolved"]) for r in report.values())
+        self.last = {"kind": "resolve", "selection": self._selection_key(), "found": found, "resolved": done,
+                     "left": left}
         errors = [x for x, r in report.items() if r.get("error")]
         if errors:
             self.set_status("Failed on %s: %s" % (short_name(errors[0]), report[errors[0]]["error"]), level="error")
@@ -5473,7 +5556,9 @@ class BevelResolverPanel(QtWidgets.QWidget):
             self.set_status("Resolved %d of %d n-gon(s) in %.2fs%s. One Ctrl+Z undoes it." % (
                 done, found, time.time() - t0, (", %d left and selected" % left) if left else ""),
                 level="warn" if left else "fixed")
+        self._update_guidance()
 
+    # ============================================================== report
     def _fill_report(self, report, dry_run=False):
         self.report_tree.clear()
         for xform, r in sorted(report.items()):
@@ -5523,11 +5608,31 @@ class BevelResolverPanel(QtWidgets.QWidget):
                     comps.append(xform)
             if comps:
                 cmds.select(comps, replace=True)
+                # Picking from the report isn't a new selection to work on.
+                if self.last:
+                    self.last["selection"] = self._selection_key()
         except Exception:
             traceback.print_exc()
 
+    # ======================================================= scene events
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
     def shutdown(self):
-        pass
+        self._sel_timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
 
 
 # =============================================================================
