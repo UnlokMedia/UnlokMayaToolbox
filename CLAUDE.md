@@ -16,6 +16,11 @@
   script jobs and callbacks on close and on re-paste (`_registry()` in
   `__main__`).
 
+## Workflow
+- **Push to main as you go.** Commit tested work on `main` and push. No PRs
+  and no stacked branches. Parallel sessions rebase onto `origin/main` and
+  fast-forward.
+
 ## Context
 - **Film pipeline.** Don't add game-only features such as lightmap UVs,
   tiling or trim-sheet UVs, or engine export.
