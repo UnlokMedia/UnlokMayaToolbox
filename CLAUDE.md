@@ -90,6 +90,35 @@
 - `RECIPES` holds one-click presets (overrides on `PS_DEFAULTS`). The user's
   benchmark jobs are roof shingles and a messy thatch/straw roof.
 
+- **Bevel Resolver** (Modeling tab): turns the n-gons a chamfer-off bevel
+  leaves at its ends into quads. Engine `resolve_mesh` /
+  `resolve_bevel_ngons`, panel `BevelResolverPanel`.
+  - **Finding:** `bevel_ngons` keeps n-gons touching a thin quad
+    (`strip_faces`, short/long side < *Strip ratio*), plus n-gons up to two
+    shared-vertex steps away. A component selection resolves every n-gon in
+    it, whatever the scope.
+  - **Pass 1, parity:** an odd-sided face can never be quadded alone.
+    `plan_parity` pairs odd faces through a small Dijkstra (`_br_odd_paths`):
+    across a shared edge (one new vertex: the "merge"), straight through
+    quads (an edge loop that cuts them), or through even target n-gons (two
+    new vertices, no cut). New vertices on bent edges (`edge_bend`) cost
+    more. Pairs are chosen by exact bitmask matching per cluster
+    (`_br_best_matching`), since greedy pairing strands faces.
+  - **Pass 2, split:** `plan_grid` carries support loops straight across a
+    rectangle-like n-gon whose opposite sides carry matching extra vertices
+    (crossing cuts get exact intersection points). Otherwise `plan_quads`
+    scores every diagonal-only split (`_br_splits`: 3 for 6 sides, 7,752 for
+    16) by quad squareness plus valence: spilled vertices want a 4th edge,
+    and poles cost 4x more on bevel-strip vertices. A 180-degree quad corner
+    is allowed but costly (the triangle-shaped quad support loops end in);
+    only clearly reflex corners are rejected.
+  - **Executing:** plan from one snapshot per pass, since Maya keeps
+    indices when it cuts. Cuts are packed into a few `polyConnectComponents`
+    calls (`_br_batches`), never one command per cut (see gotchas).
+  - **Reported, not touched:** faces with holes, over 16 sides, zero-area or
+    with coincident corners (Maya's bevel makes these where recesses touch
+    or a bevel runs off a box corner), unpaired odd faces, no clean split.
+
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -128,10 +157,30 @@
   scene changes.
 - mayapy standalone has a QGuiApplication, so QWidgets can't be built
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
+- Keeping an `MFnMesh` across a `cmds` topology edit (polySplit etc.) can
+  hard-crash Maya. Make a new one from the dag path after every edit.
+- Poly edits keep indices: existing vertices, edges and faces keep their
+  index and new ones are appended. A split edge keeps its index for one
+  half; a split face keeps it for one part.
+- `polySplit` in Python: use `ip=[(edge, factor), ...]` (`ep`/`fp` print a
+  deprecation warning). `ch=False` is ignored on a mesh with history.
+- With construction history, every new poly node re-evaluates the chain
+  (a polyBevel3 node on a 4k-face mesh costs ~0.15 s per command). Cost is
+  in the number of commands, not cuts: batch them.
+- `polyConnectComponents` takes many vertices and/or edges in one call and
+  joins any two selected components that share a face (edges at their
+  mid-points, chaining through quads). Fine for batching if no face holds
+  two selected components except the cut you mean (`_br_batches`).
+- `polyBevel3` with `chamfer=False` keeps the shape (support loops); the
+  n-gons it leaves are where a bevelled edge chain ends. Closed loops miter
+  into all quads.
 
 ## Testing
 Maya 2024 and 2025 are installed locally (no 2023). Run
-`mayapy tests/test_toolbox.py` and `tests/test_smart_udim.py` for the
-engines, and `tests/bench_scatter.py [--profile]` for speed. For the UI, launch GUI Maya
+`mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
+`tests/test_bevel_resolver.py` for the engines, and
+`tests/bench_scatter.py [--profile]` for speed. The Bevel Resolver GUI test
+is `tests/run_gui_bevel_resolver.mel` (screenshots in
+`tests/_out/bevel_resolver`). For the UI, launch GUI Maya
 with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
 the output folder.

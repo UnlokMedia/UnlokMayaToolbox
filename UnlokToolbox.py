@@ -13,6 +13,8 @@ Modeling
     Path Scatter  - draw a path on any surface and scatter / array objects
                     along it (presets or your own meshes), with rows, stagger,
                     randomness and bake to instances, copies or one mesh.
+    Bevel Resolver - turn the n-gons a chamfer-off bevel leaves at its ends
+                     into clean SubD quads, mesh-wide or on a selection.
 UV
     Smart UDIM    - sort an asset into UDIM sections and material groups
                     (plain Maya sets, UnlokRenamer naming), clean geometry
@@ -4444,12 +4446,1080 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Bevel Resolver - engine
+# =============================================================================
+#
+# A chamfer-off bevel (support loops that keep a hard edge under SubD) leaves
+# n-gons wherever a bevelled edge chain ends: the chamfer-corner cap spills one
+# extra vertex into every face around the old end vertex. So you get
+# cut-corner 5-gons, 6-gons with two chamfer tips, and an odd-sided cap.
+#
+# An odd-sided face can never be split into quads on its own (a quad mesh of a
+# disk always has an even boundary). So the resolver works in two passes:
+#   1. Parity: pair every odd n-gon with another odd face. Neighbours share an
+#      edge, which gets one new vertex (the two chamfers "merge"). Otherwise a
+#      short straight edge loop runs between them through flat quads (or
+#      passes an even n-gon by adding a vertex on the way in and one out).
+#   2. Split: every n-gon (now even) is cut into quads. If support loops end
+#      on opposite sides in matching numbers they carry straight across (a
+#      grid). Otherwise it gets diagonals between its existing vertices: every
+#      possible split is scored, and the best one has the squarest quads,
+#      gives the bevel's spilled vertices their fourth edge (so they stop
+#      being poles), and leaves any pole on the flat area, not on a bevel.
+# The plan is made from one snapshot of the mesh per pass. Maya keeps vertex,
+# edge and face indices when it splits (new parts are appended), so the plan
+# stays valid while the cuts are made.
+
+BR_SCOPES = ("Bevel n-gons", "All n-gons")
+BR_DEFAULTS = {"scope": "Bevel n-gons", "strip_ratio": 0.3, "max_loop": 6, "use_border": True}
+BR_MAX_SIDES = 16
+BR_REASONS = {
+    "unpaired": "Odd-sided with no odd face to pair with nearby",
+    "no_split": "No clean way to split into quads",
+    "too_many": "More than %d sides" % BR_MAX_SIDES,
+    "holed": "Face has holes",
+    "degenerate": "Zero-area face (overlapping vertices)",
+}
+
+_BR_SPLITS = {}
+
+
+def _br_ekey(a, b):
+    return (a, b) if a < b else (b, a)
+
+
+def _br_splits(n):
+    """Every way to cut a polygon 0..n-1 (n even) into quads with diagonals.
+
+    Returns a list of splits, each a list of quads (tuples of corner indices).
+    There are 3 for a hexagon, 12 for an octagon and 7,752 for 16 sides.
+    """
+    if n in _BR_SPLITS:
+        return _BR_SPLITS[n]
+    memo = {}
+
+    def rec(poly):
+        if len(poly) == 4:
+            return [[poly]]
+        if poly in memo:
+            return memo[poly]
+        out = []
+        m = len(poly)
+        # The quad on the side poly[0]-poly[1] is (poly[0], poly[1], poly[x], poly[y]).
+        # The three pieces it leaves (poly[1..x], poly[x..y] and poly[y..]+poly[0])
+        # must each be a plain side or an even polygon.
+        for x in range(2, m - 1, 2):
+            for y in range(x + 1, m, 2):
+                parts = [poly[1:x + 1], poly[x:y + 1], poly[y:] + poly[:1]]
+                subs = [[[]] if len(p) == 2 else rec(p) for p in parts]
+                quad = (poly[0], poly[1], poly[x], poly[y])
+                for a in subs[0]:
+                    for b in subs[1]:
+                        for c in subs[2]:
+                            out.append([quad] + a + b + c)
+        memo[poly] = out
+        return out
+
+    _BR_SPLITS[n] = rec(tuple(range(n)))
+    return _BR_SPLITS[n]
+
+
+class BevelTopology(object):
+    """Plain-Python snapshot of a mesh for planning (one API read)."""
+
+    def __init__(self, dag):
+        fn = om.MFnMesh(dag)
+        counts, conn = fn.getVertices()
+        conn = list(conn)
+        self.pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kObject)]
+        self.faces = []
+        off = 0
+        for c in counts:
+            self.faces.append(conn[off:off + c])
+            off += c
+        self.edge_faces = {}
+        for f, vs in enumerate(self.faces):
+            prev = vs[-1]
+            for v in vs:
+                self.edge_faces.setdefault((prev, v) if prev < v else (v, prev), []).append(f)
+                prev = v
+        self.valence = [0] * len(self.pts)
+        self.border = set()
+        for (a, b), fs in self.edge_faces.items():
+            self.valence[a] += 1
+            self.valence[b] += 1
+            if len(fs) == 1:
+                self.border.add(a)
+                self.border.add(b)
+        holes = fn.getHoles()
+        info = list(holes[0]) if holes else []
+        self.holed = set(info[0::3])
+        self._bend = {}
+
+    def dist(self, a, b):
+        p, q = self.pts[a], self.pts[b]
+        return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2)
+
+    def strip_faces(self, ratio):
+        """Thin quads: bevel / support-loop strips."""
+        out = set()
+        for f, vs in enumerate(self.faces):
+            if len(vs) != 4:
+                continue
+            a = self.dist(vs[0], vs[1]) + self.dist(vs[2], vs[3])
+            b = self.dist(vs[1], vs[2]) + self.dist(vs[3], vs[0])
+            if min(a, b) < ratio * max(a, b):
+                out.add(f)
+        return out
+
+    def _corner_sum(self, face, a, b):
+        """Normal of `face` near its side a-b (sum of the two corner normals)."""
+        vs = self.faces[face]
+        n = len(vs)
+        out = [0.0, 0.0, 0.0]
+        for v in (a, b):
+            i = vs.index(v)
+            p, c, q = self.pts[vs[i - 1]], self.pts[v], self.pts[vs[(i + 1) % n]]
+            u = (q[0] - c[0], q[1] - c[1], q[2] - c[2])
+            w = (p[0] - c[0], p[1] - c[1], p[2] - c[2])
+            out[0] += u[1] * w[2] - u[2] * w[1]
+            out[1] += u[2] * w[0] - u[0] * w[2]
+            out[2] += u[0] * w[1] - u[1] * w[0]
+        ln = math.sqrt(out[0] ** 2 + out[1] ** 2 + out[2] ** 2)
+        return [c / ln for c in out] if ln > 1e-12 else None
+
+    def edge_bend(self, key):
+        """0 where the faces on both sides of an edge are flat, 1 at a 90 degree
+        corner. Poles and new vertices belong on flat edges."""
+        if key in self._bend:
+            return self._bend[key]
+        fs = self.edge_faces.get(key, [])
+        if len(fs) != 2:
+            bend = 0.0 if len(fs) == 1 else 2.0
+        else:
+            n1, n2 = self._corner_sum(fs[0], *key), self._corner_sum(fs[1], *key)
+            bend = 1.0 if n1 is None or n2 is None else 1.0 - (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+        self._bend[key] = bend
+        return bend
+
+    def degenerate(self, face):
+        """Zero area, or two corners on the same spot (bevels through tight
+        corners leave these)."""
+        vs = self.faces[face]
+        if self.normal(vs) is None:
+            return True
+        size = max(self.dist(vs[i - 1], vs[i]) for i in range(len(vs)))
+        seen = set()
+        for v in vs:
+            key = tuple(int(round(c / (size * 1e-4))) for c in self.pts[v])
+            if key in seen:
+                return True
+            seen.add(key)
+        return False
+
+    def normal(self, verts):
+        """Newell normal of a polygon (works for bent n-gons)."""
+        nx = ny = nz = 0.0
+        prev = self.pts[verts[-1]]
+        for v in verts:
+            p = self.pts[v]
+            nx += (prev[1] - p[1]) * (prev[2] + p[2])
+            ny += (prev[2] - p[2]) * (prev[0] + p[0])
+            nz += (prev[0] - p[0]) * (prev[1] + p[1])
+            prev = p
+        ln = math.sqrt(nx * nx + ny * ny + nz * nz)
+        return (nx / ln, ny / ln, nz / ln) if ln > 1e-12 else None
+
+
+def bevel_ngons(topo, faces=None, scope="Bevel n-gons", strip_ratio=0.3):
+    """N-gons to resolve. 'Bevel n-gons' keeps the ones that touch a thin bevel
+    strip, plus n-gons up to two steps away from those through shared vertices
+    (so the face between two chamfer tips counts too)."""
+    pool = range(len(topo.faces)) if faces is None else faces
+    ngons = set(f for f in pool if len(topo.faces[f]) > 4)
+    if scope != "Bevel n-gons" or not ngons:
+        return sorted(ngons)
+    strip_verts = set()
+    for f in topo.strip_faces(strip_ratio):
+        strip_verts.update(topo.faces[f])
+    by_vert = {}
+    for f in ngons:
+        for v in topo.faces[f]:
+            by_vert.setdefault(v, []).append(f)
+    found = set(f for f in ngons if any(v in strip_verts for v in topo.faces[f]))
+    ring = set(found)
+    for _ in range(2):
+        nxt = set()
+        for f in ring:
+            for v in topo.faces[f]:
+                nxt.update(g for g in by_vert[v] if g not in found)
+        found.update(nxt)
+        ring = nxt
+    return sorted(found)
+
+
+def _br_odd_paths(topo, start, partners, quads, ngons, strips, max_loop, use_border):
+    """Ways to give odd face `start` one more side, cheapest first.
+
+    A chain of new vertices leaves through one of its edges. Through a plain
+    quad it runs straight to the opposite edge and cuts the quad in two (an
+    edge loop). Through an even target n-gon it just leaves by another edge:
+    the n-gon gains two vertices, stays even, and is split later. The chain
+    ends at another odd face (or the mesh border). New vertices on bent edges
+    (hard corners) and loops along bevel strips cost more.
+    Returns [(cost, partner or None, edges, via)]; via[i] = (face, cut) is the
+    face between edges[i] and edges[i + 1].
+    """
+    import heapq
+    vs = topo.faces[start]
+    n = len(vs)
+    heap = []
+    for i in range(n):
+        key = _br_ekey(vs[i], vs[(i + 1) % n])
+        heap.append((4.0 * topo.edge_bend(key), i, start, key, (key,), ()))
+    heapq.heapify(heap)
+    tick = n
+    found, seen, pops = {}, set(), 0
+    while heap and pops < 300:
+        cost, _, cur, key, edges, via = heapq.heappop(heap)
+        pops += 1
+        if len(found) >= 4 and cost > min(o[0] for o in found.values()) + 6.0:
+            break  # the rest would never be picked
+        if (cur, key) in seen:
+            continue
+        seen.add((cur, key))
+        nbs = [f for f in topo.edge_faces[key] if f != cur]
+        if not nbs:
+            if use_border and ("border", key) not in found:
+                found[("border", key)] = (cost + 1.5, None, edges, via)
+            continue
+        nb = nbs[0]
+        if len(nbs) > 1 or nb == start or any(nb == f for f, _ in via):
+            continue
+        if nb in partners:
+            if nb not in found:
+                # A triangle partner turns into a quad: a small bonus.
+                found[nb] = (cost - (0.3 if len(topo.faces[nb]) == 3 else 0.0), nb, edges, via)
+            continue
+        if len(via) >= max_loop:
+            continue
+        q = topo.faces[nb]
+        if nb in quads:
+            k = [j for j in range(4) if _br_ekey(q[j], q[(j + 1) % 4]) == key][0]
+            nxt = [(_br_ekey(q[(k + 2) % 4], q[(k + 3) % 4]), True)]
+            step = 1.0
+            if nb in strips:
+                # Running along a bevel strip would add a loop to the bevel: avoid.
+                step += 6.0 if topo.dist(*key) < topo.dist(q[(k + 1) % 4], q[(k + 2) % 4]) else 2.0
+        elif nb in ngons and len(q) + 2 <= BR_MAX_SIDES:
+            m = len(q)
+            nxt = [(_br_ekey(q[j], q[(j + 1) % m]), False) for j in range(m)]
+            step = 1.5
+        else:
+            continue
+        for k2, cut in nxt:
+            if k2 == key or k2 in edges:
+                continue
+            tick += 1
+            heapq.heappush(heap, (cost + step + 4.0 * topo.edge_bend(k2), tick, nb, k2, edges + (k2,),
+                                  via + ((nb, cut),)))
+    return sorted(found.values(), key=lambda o: o[0])
+
+
+BR_UNPAIRED_COST = 40.0
+
+
+def _br_best_matching(nodes, options):
+    """Cheapest way to pair up `nodes` (a small cluster of odd faces).
+
+    options[f] lists (cost, partner, path); partner is another node, or a free
+    end (border, triangle) when it isn't in `nodes`. Exact bitmask search, so
+    two neighbours don't grab each other when that strands a third.
+    """
+    pos = dict((f, i) for i, f in enumerate(nodes))
+    memo = {}
+
+    def solve(mask):
+        if mask == 0:
+            return 0.0, []
+        if mask in memo:
+            return memo[mask]
+        i = (mask & -mask).bit_length() - 1
+        f = nodes[i]
+        rest = mask & ~(1 << i)
+        sub_cost, sub_pick = solve(rest)
+        best = (sub_cost + BR_UNPAIRED_COST, sub_pick)
+        for cost, other, path in options[f]:
+            j = pos.get(other)
+            if j is None:
+                c, pick = sub_cost, sub_pick
+            elif rest & (1 << j):
+                c, pick = solve(rest & ~(1 << j))
+            else:
+                continue
+            if cost + c < best[0]:
+                best = (cost + c, [(f, other, path)] + pick)
+        memo[mask] = best
+        return best
+
+    return solve((1 << len(nodes)) - 1)[1]
+
+
+def plan_parity(topo, targets, strips, max_loop=6, use_border=True):
+    """Pair odd target faces. Returns (paths, unpaired): each path is
+    (edges, via) as from _br_odd_paths; every edge gets a mid-point vertex."""
+    odd = [f for f in targets if len(topo.faces[f]) % 2]
+    if not odd:
+        return [], []
+    target_set = set(targets)
+    partners = set(odd)
+    partners.update(f for f, vs in enumerate(topo.faces) if len(vs) == 3)
+    quads = set(f for f, vs in enumerate(topo.faces) if len(vs) == 4) - target_set
+    ngons = set(f for f in targets if len(topo.faces[f]) % 2 == 0)
+    options = {}
+    for f in odd:
+        opts = [(c, o, (e, v)) for c, o, e, v in
+                _br_odd_paths(topo, f, partners, quads, ngons, strips, max_loop, use_border)]
+        if opts:
+            # Only near-best options link faces into a cluster; keeps clusters small.
+            opts = [o for o in opts if o[0] <= opts[0][0] + 6.0][:6]
+        options[f] = opts
+    # Clusters: odd faces linked by a pairing option.
+    parent = dict((f, f) for f in odd)
+
+    def root(f):
+        while parent[f] != f:
+            parent[f] = parent[parent[f]]
+            f = parent[f]
+        return f
+
+    for f in odd:
+        for _, other, _ in options[f]:
+            if other in parent:
+                parent[root(f)] = root(other)
+    clusters = {}
+    for f in odd:
+        clusters.setdefault(root(f), []).append(f)
+    picks = []
+    for nodes in clusters.values():
+        if len(nodes) <= 14:
+            picks.extend(_br_best_matching(nodes, options))
+            continue
+        flat = sorted(((c, f, o, p) for f in nodes for c, o, p in options[f]), key=lambda x: x[0])
+        done = set()
+        for c, f, o, p in flat:
+            if f not in done and (o is None or o not in done):
+                done.add(f)
+                if o is not None:
+                    done.add(o)
+                picks.append((f, o, p))
+    # Free ends (triangles), edges and quads cut by a loop can only be used once.
+    matched, used_faces, used_edges, paths = set(), set(), set(), []
+    for f, other, (edges, via) in picks:
+        cut = [q for q, c in via if c]
+        if f in matched or (other is not None and other in matched):
+            continue
+        if any(e in used_edges for e in edges) or any(q in used_faces for q in cut):
+            continue
+        matched.add(f)
+        if other is not None:
+            matched.add(other)
+        used_edges.update(edges)
+        used_faces.update(cut)
+        paths.append((edges, via))
+    return paths, [f for f in odd if f not in matched]
+
+
+def _br_sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _br_quad_cost(topo, quad, normal):
+    """How far a quad is from a clean square-ish quad (None if degenerate)."""
+    pts = [topo.pts[v] for v in quad]
+    qn = topo.normal(quad)
+    if qn is None or qn[0] * normal[0] + qn[1] * normal[1] + qn[2] * normal[2] < 0.2:
+        return None  # folded over or flipped against the n-gon
+    cost = 0.0
+    for i in range(4):
+        u = _br_sub(pts[i - 1], pts[i])
+        w = _br_sub(pts[(i + 1) % 4], pts[i])
+        lu = math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+        lw = math.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+        if lu < 1e-9 or lw < 1e-9:
+            return None
+        cos_a = clamp((u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (lu * lw), -1.0, 1.0)
+        ang = math.acos(cos_a)
+        # Corner clearly turning the wrong way round the normal: concave quad.
+        # A straight (180 degree) corner is allowed but costly: it's the
+        # "triangle-shaped quad" that support loops end in.
+        cx = (w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0])
+        if (cx[0] * qn[0] + cx[1] * qn[1] + cx[2] * qn[2]) / (lu * lw) < -0.08:
+            return None
+        cost += ((ang - math.pi / 2) / (math.pi / 2)) ** 2
+        if ang > math.radians(160):
+            cost += 3.0
+    return cost
+
+
+def plan_quads(topo, face, strip_verts, valence, val_weight=0.6):
+    """Best set of diagonals that cuts even-sided `face` into quads, or None.
+
+    `valence` is updated in place so faces planned later see the new edges.
+    """
+    verts = topo.faces[face]
+    n = len(verts)
+    normal = topo.normal(verts)
+    if normal is None or n % 2 or n > BR_MAX_SIDES:
+        return None
+    quad_costs = {}
+    best, best_cost = None, None
+    for split in _br_splits(n):
+        cost = 0.0
+        for q in split:
+            if q not in quad_costs:
+                quad_costs[q] = _br_quad_cost(topo, [verts[i] for i in q], normal)
+            qc = quad_costs[q]
+            if qc is None:
+                cost = None
+                break
+            cost += qc
+        if cost is None or (best_cost is not None and cost >= best_cost + 10):
+            continue
+        diags = set()
+        for q in split:
+            for j in range(4):
+                a, b = q[j], q[(j + 1) % 4]
+                if (b - a) % n not in (1, n - 1):
+                    diags.add(_br_ekey(a, b))
+        added = {}
+        for a, b in diags:
+            added[a] = added.get(a, 0) + 1
+            added[b] = added.get(b, 0) + 1
+        for i, k in added.items():
+            v = verts[i]
+            want = 3 if v in topo.border else 4
+            was = valence[v]
+            delta = abs(was + k - want) - abs(was - want)
+            if delta > 0 and v in strip_verts:
+                delta *= 4.0  # never park a pole on a bevel strip
+            cost += val_weight * delta
+        if best_cost is None or cost < best_cost:
+            best, best_cost = sorted(diags), cost
+    if best is None:
+        return None
+    pairs = [(verts[a], verts[b]) for a, b in best]
+    for a, b in pairs:
+        valence[a] += 1
+        valence[b] += 1
+    return pairs
+
+
+def plan_grid(topo, face, valence, corner_angle=155.0):
+    """Rectangle-like n-gon whose opposite sides carry the same number of extra
+    vertices (e.g. a boss top where four support loops end): carry each loop
+    straight across, like an edge loop would. Returns (rows, cols) vertex
+    pairs, or None. Rows are plain cuts; cols cross them when both exist."""
+    verts = topo.faces[face]
+    n = len(verts)
+    normal = topo.normal(verts)
+    if normal is None:
+        return None
+    corners = []
+    for i in range(n):
+        p, c, q = topo.pts[verts[i - 1]], topo.pts[verts[i]], topo.pts[verts[(i + 1) % n]]
+        u, w = _br_sub(p, c), _br_sub(q, c)
+        lu = math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+        lw = math.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+        if lu < 1e-9 or lw < 1e-9:
+            return None
+        cx = (w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0])
+        sin_a = (cx[0] * normal[0] + cx[1] * normal[1] + cx[2] * normal[2]) / (lu * lw)
+        cos_a = (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (lu * lw)
+        ang = math.degrees(math.atan2(sin_a, cos_a)) % 360.0
+        if ang < corner_angle or ang > 360.0 - corner_angle:
+            corners.append(i)
+    if len(corners) != 4:
+        return None
+    sides = []
+    for k in range(4):
+        a, b = corners[k], corners[(k + 1) % 4]
+        sides.append([verts[(a + j) % n] for j in range(1, (b - a) % n)])
+    if len(sides[0]) != len(sides[2]) or len(sides[1]) != len(sides[3]):
+        return None
+    rows = list(zip(sides[0], reversed(sides[2])))
+    cols = list(zip(sides[1], reversed(sides[3])))
+    if not rows and not cols:
+        return None
+    if not rows:
+        rows, cols = cols, []
+    for a, b in rows + cols:
+        valence[a] += 1
+        valence[b] += 1
+    return rows, cols
+
+
+def _br_cross_factor(topo, a, b, c, d):
+    """Where segment a-b crosses segment c-d, as a 0..1 factor along c-d."""
+    p, q, r, s = topo.pts[a], topo.pts[b], topo.pts[c], topo.pts[d]
+    u, v, w = _br_sub(q, p), _br_sub(s, r), _br_sub(p, r)
+    uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2]
+    uv = u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+    vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+    uw = u[0] * w[0] + u[1] * w[1] + u[2] * w[2]
+    vw = v[0] * w[0] + v[1] * w[1] + v[2] * w[2]
+    den = uu * vv - uv * uv
+    t = (uu * vw - uv * uw) / den if abs(den) > 1e-12 else 0.5
+    return clamp(t, 0.05, 0.95)
+
+
+def _br_batches(groups, comp_faces):
+    """Pack cuts into as few polyConnectComponents calls as possible.
+
+    That command joins any two selected components (vertices or edges) that
+    share a face. So within one call no face may hold two selected
+    components unless they are exactly the cut planned for that face, and a
+    face gets at most one planned cut (a fan's two diagonals go in different
+    calls). groups: [(components, {face: planned components}, ...)]. Checked
+    on the mesh before cutting, which is safe: cutting only shrinks faces.
+    Returns (batches, solo): solo groups clash with themselves (two vertices
+    sharing two faces) and need a polySplit of their own.
+    """
+    batches, solo = [], []
+    for group in groups:
+        comps, planned = group[0], group[1]
+        touched = {}
+        for c in comps:
+            for g in comp_faces[c]:
+                touched.setdefault(g, set()).add(c)
+
+        def fits(batch):
+            if any(f in batch[1] for f in planned):
+                return False
+            for g, mine in touched.items():
+                sel = batch[2].get(g, set()) | mine
+                if len(sel) > 1 and sel != planned.get(g, batch[1].get(g)):
+                    return False
+            return True
+
+        batch = next((b for b in batches if fits(b)), None)
+        if batch is None:
+            batch = ([], {}, {})
+            if not fits(batch):
+                solo.append(group)
+                continue
+            batches.append(batch)
+        batch[0].append(group)
+        batch[1].update(planned)
+        for g, mine in touched.items():
+            batch[2].setdefault(g, set()).update(mine)
+    return [b[0] for b in batches], solo
+
+
+def _br_row_point(fn, dag, c, d, t, first_new):
+    """Insert point at factor t along row c-d. An earlier column may already
+    have split the row (new vertices >= first_new), so walk its pieces."""
+    pc, pd = fn.getPoint(c), fn.getPoint(d)
+    span = pd - pc
+    length2 = span * span
+    if length2 < 1e-18:
+        return None
+    prev, cur, cur_t = None, c, 0.0
+    for _ in range(64):
+        it = om.MItMeshVertex(dag)
+        it.setIndex(cur)
+        step = None
+        for e in it.getConnectedEdges():
+            o = it.getOppositeVertex(e)
+            if o == prev:
+                continue
+            if o == d or o >= first_new:
+                off = fn.getPoint(o) - pc
+                ot = 1.0 if o == d else (off * span) / length2
+                on_row = o == d or (off ^ span).length() < 1e-4 * length2 ** 0.5 + 1e-6
+                if ot > cur_t and on_row:
+                    step = (e, o, ot)
+                    break
+        if step is None:
+            return None
+        e, o, ot = step
+        if t <= ot or o == d:
+            local = clamp((t - cur_t) / (ot - cur_t), 0.05, 0.95) if ot > cur_t else 0.5
+            return (e, local if fn.getEdgeVertices(e)[0] == cur else 1.0 - local)
+        prev, cur, cur_t = cur, o, ot
+    return None
+
+
+def _br_edge_index(dag, a, b):
+    it = om.MItMeshVertex(dag)
+    it.setIndex(a)
+    for e in it.getConnectedEdges():
+        if b == it.getOppositeVertex(e):
+            return e
+    return None
+
+
+def _br_vertex_point(fn, dag, face, v):
+    """polySplit insert point that lands exactly on vertex v of `face`."""
+    it = om.MItMeshPolygon(dag)
+    it.setIndex(face)
+    for e in it.getEdges():
+        ends = fn.getEdgeVertices(e)
+        if v in ends:
+            return (e, 0.0 if ends[0] == v else 1.0)
+    return None
+
+
+def _br_history(shape):
+    if cmds.listConnections(shape + ".inMesh", source=True, destination=False):
+        return True
+    return bool(cmds.constructionHistory(q=True, toggle=True))
+
+
+def _br_shape(xform):
+    shapes = cmds.listRelatives(xform, shapes=True, type="mesh", noIntermediate=True, fullPath=True) or []
+    return shapes[0] if shapes else None
+
+
+def resolve_mesh(xform, faces=None, scope="Bevel n-gons", strip_ratio=0.3, max_loop=6, use_border=True,
+                 dry_run=False):
+    """Resolve bevel n-gons on one mesh. `faces`: restrict to these (component
+    selection: every n-gon among them is resolved, whatever the scope).
+
+    Returns a dict: found, resolved, cuts, poles, strip_poles, unresolved
+    ({final face id: reason}), dry_run plans when dry_run.
+    """
+    shape = _br_shape(xform)
+    res = {"found": 0, "resolved": 0, "cuts": 0, "loops": 0, "poles": 0, "strip_poles": 0, "unresolved": {}}
+    if not shape:
+        return res
+    dag = get_dag_path(shape)
+    topo = BevelTopology(dag)
+    targets = bevel_ngons(topo, faces, "All n-gons" if faces is not None else scope, strip_ratio)
+    res["found"] = len(targets)
+    if not targets:
+        return res
+    bad = {}
+    for f in targets:
+        if f in topo.holed:
+            bad[f] = "holed"
+        elif len(topo.faces[f]) > BR_MAX_SIDES:
+            bad[f] = "too_many"
+        elif topo.degenerate(f):
+            bad[f] = "degenerate"
+    targets = [f for f in targets if f not in bad]
+    strips = topo.strip_faces(strip_ratio)
+    paths, unpaired = plan_parity(topo, targets, strips, max_loop, use_border)
+    for f in unpaired:
+        bad[f] = "unpaired"
+    if dry_run:
+        res["unresolved"] = bad
+        res["targets"] = targets
+        res["paths"] = paths
+        return res
+    watch = set()
+    for f in list(targets) + list(bad):
+        watch.update(topo.faces[f])
+    first_count = len(topo.pts)
+    first_faces = len(topo.faces)
+    mine = set(targets) | set(bad)
+    before = dict((v, topo.valence[v]) for v in watch)
+    history = _br_history(shape)
+    name = cmds.ls(shape, long=True)[0]
+
+    # --- pass 1: parity. Look every edge up before cutting: indices of edges a
+    # cut doesn't touch stay put, and no two paths share an edge.
+    # With construction history every new poly node re-evaluates the chain
+    # (the bevel node itself), so the cost is in the number of commands, not
+    # cuts: lone mid-points (faces touching, or passing an n-gon) go in one
+    # polySubdivideEdge, and runs through quads (edge loops) are packed into
+    # a few polyConnectComponents calls on their edges.
+    mids, runs = [], []
+    for edges, via in paths:
+        run = [edges[0]]
+        for i, (q, cut) in enumerate(via):
+            if not cut:
+                (runs if len(run) > 1 else mids).append(run)
+                run = []
+            run.append(edges[i + 1])
+        (runs if len(run) > 1 else mids).append(run)
+        res["loops"] += 1
+    index = {}
+    for key in set(k for r in mids + runs for k in r):
+        index[key] = _br_edge_index(dag, *key)
+    groups = []
+    for run in runs:
+        if None in [index[k] for k in run]:
+            continue
+        planned = {}
+        for k1, k2 in zip(run, run[1:]):
+            q = set(topo.edge_faces[k1]) & set(topo.edge_faces[k2])
+            planned[q.pop()] = set((k1, k2))
+        groups.append((set(run), planned, run))
+    batches, solo = _br_batches(groups, topo.edge_faces)
+    for batch in batches:
+        _br_connect(name, ["%s.e[%d]" % (name, index[k]) for g in batch for k in g[2]], history)
+    for g in solo:
+        _br_split(name, [(index[k], 0.5) for k in g[2]], history)
+    lone = [index[r[0]] for r in mids if index[r[0]] is not None]
+    if lone:
+        cmds.polySubdivideEdge(["%s.e[%d]" % (name, e) for e in lone], dv=1, ch=history)
+
+    # --- pass 2: split every even n-gon into quads. Faces whose support loops
+    # can run straight across get a grid; the rest get the best diagonals.
+    dag = get_dag_path(name)
+    topo = BevelTopology(dag)
+    strip_verts = set()
+    for f in topo.strip_faces(strip_ratio):
+        strip_verts.update(topo.faces[f])
+    valence = list(topo.valence)
+    cuts, crossings = [], []
+    fn = om.MFnMesh(dag)
+    for f in targets:
+        if f in bad or len(topo.faces[f]) <= 4:
+            continue
+        if topo.normal(topo.faces[f]) is None:
+            bad[f] = "degenerate"
+            continue
+        grid = plan_grid(topo, f, valence)
+        if grid:
+            pairs, cols = grid
+            if cols:
+                crossings.append((f, pairs, cols))
+        else:
+            pairs = plan_quads(topo, f, strip_verts, valence)
+        if pairs is None:
+            bad[f] = "no_split"
+            continue
+        cuts.extend((f, a, b) for a, b in pairs)
+    # Grid columns cross the rows: their vertex ends sit on the face's original
+    # sides (never cut), so look those up before cutting.
+    col_ends = []
+    for f, rows, cols in crossings:
+        for a, b in cols:
+            col_ends.append((a, b, rows, _br_vertex_point(fn, dag, f, a), _br_vertex_point(fn, dag, f, b)))
+    # A few polyConnectComponents calls instead of one polySplit per cut (a
+    # 200-window wall went from 30 s to a couple of seconds).
+    vert_faces = {}
+    used = set(v for _, a, b in cuts for v in (a, b))
+    for f, vs in enumerate(topo.faces):
+        for v in vs:
+            if v in used:
+                vert_faces.setdefault(v, []).append(f)
+    batches, solo = _br_batches([(set((a, b)), {f: set((a, b))}, (f, a, b)) for f, a, b in cuts], vert_faces)
+    # Look polySplit points up before cutting (an MFnMesh mustn't outlive a cut).
+    solo = [(_br_vertex_point(fn, dag, f, a), _br_vertex_point(fn, dag, f, b)) for _, _, (f, a, b) in solo]
+    for batch in batches:
+        if _br_connect(name, ["%s.vtx[%d]" % (name, v) for g in batch for v in sorted(g[0])], history):
+            res["cuts"] += len(batch)
+    for pa, pb in solo:
+        if pa and pb and _br_split(name, [pa, pb], history):
+            res["cuts"] += 1
+    if col_ends:
+        first_new = None
+        for a, b, rows, pa, pb in col_ends:
+            if not (pa and pb):
+                continue
+            dag = get_dag_path(name)
+            fn = om.MFnMesh(dag)
+            if first_new is None:
+                first_new = fn.numVertices
+            points = [pa]
+            # Cross the rows in the order the column meets them, from a to b.
+            for c, d in sorted(rows, key=lambda r: _br_cross_factor(topo, r[0], r[1], a, b)):
+                hit = _br_row_point(fn, dag, c, d, _br_cross_factor(topo, a, b, c, d), first_new)
+                if hit is None:
+                    points = None
+                    break
+                points.append(hit)
+            if points and _br_split(name, points + [pb], history):
+                res["cuts"] += 1
+
+    # --- report on the final mesh.
+    topo = BevelTopology(get_dag_path(name))
+    for v in watch | set(range(first_count, len(topo.pts))):
+        if v in topo.border:
+            continue
+        val = topo.valence[v]
+        if val != 4 and (v >= first_count or val != before[v]):
+            res["poles"] += 1
+            if v in strip_verts:
+                res["strip_poles"] += 1
+    # Split faces keep their index (the new parts are appended), so these are
+    # the target n-gons that are still n-gons.
+    for f, vs in enumerate(topo.faces):
+        if len(vs) > 4 and (f in mine or f >= first_faces):
+            res["unresolved"][f] = bad.get(f, "no_split")
+    res["resolved"] = max(0, res["found"] - len(res["unresolved"]))
+    return res
+
+
+def _br_connect(name, comps, history):
+    try:
+        cmds.polyConnectComponents(comps, ch=history)
+        return True
+    except RuntimeError:
+        traceback.print_exc()
+        return False
+
+
+def _br_split(name, points, history):
+    try:
+        cmds.polySplit(name, ip=points, ch=history)
+        return True
+    except RuntimeError:
+        traceback.print_exc()
+        return False
+
+
+def resolve_bevel_ngons(items, scope="Bevel n-gons", strip_ratio=0.3, max_loop=6, use_border=True,
+                        dry_run=False, select_unresolved=True):
+    """Resolve (or with dry_run just find) bevel n-gons on {mesh transform:
+    None (whole mesh) or set of faces}. One undo step for everything."""
+    report = {}
+    with UndoChunk("Bevel Resolver"):
+        for xform, faces in items.items():
+            try:
+                report[xform] = resolve_mesh(xform, faces, scope, strip_ratio, max_loop, use_border, dry_run)
+            except RuntimeError as exc:
+                report[xform] = {"error": str(exc), "found": 0, "resolved": 0, "unresolved": {}}
+        if select_unresolved and not dry_run:
+            # Inside the chunk, so the selection change undoes with the cuts.
+            comps = []
+            for xform, r in report.items():
+                comps.extend("%s.%s" % (xform, s) for s in face_ranges(r.get("unresolved", {})))
+            keep = [x for x in items if cmds.objExists(x)]
+            if comps:
+                cmds.select(comps, replace=True)
+            elif keep:
+                cmds.select(keep, replace=True)
+    return report
+
+
+# =============================================================================
+# Bevel Resolver - panel
+# =============================================================================
+
+def bevel_selection():
+    """{mesh transform: None (whole mesh) or set of faces} from the selection.
+    Selected vertices / edges count as the faces around them."""
+    items = {}
+    sel = cmds.ls(selection=True, long=True, flatten=False) or []
+    for node in [s for s in sel if "." not in s]:
+        if cmds.objectType(node, isAType="shape"):
+            node = cmds.listRelatives(node, parent=True, fullPath=True)[0]
+        if cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
+            items[node] = None
+        else:
+            for shape in cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True) or []:
+                if not cmds.getAttr(shape + ".intermediateObject"):
+                    items[cmds.listRelatives(shape, parent=True, fullPath=True)[0]] = None
+    comps = [s for s in sel if "." in s]
+    if comps:
+        for face in cmds.ls(cmds.polyListComponentConversion(comps, toFace=True) or [], long=True) or []:
+            node, _, spec = face.partition(".")
+            if cmds.objectType(node, isAType="shape"):
+                node = cmds.listRelatives(node, parent=True, fullPath=True)[0]
+            m = re.match(r"f\[(\d+)(?::(\d+))?\]$", spec)
+            if not m or items.get(node, set()) is None:
+                continue
+            lo = int(m.group(1))
+            items.setdefault(node, set()).update(range(lo, int(m.group(2) or lo) + 1))
+    return items
+
+
+class BevelResolverPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Bevel Resolver"
+    TOOL_TIP = "Turn the n-gons a chamfer-off bevel leaves at its ends into clean SubD quads."
+
+    def __init__(self, parent=None):
+        super(BevelResolverPanel, self).__init__(parent)
+        self.report = {}
+        self._build()
+        self.set_status("Select meshes (or faces / edges / vertices) and press Resolve.")
+
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(6)
+        outer.addWidget(hint_label(
+            "A bevel with Chamfer off leaves 5- and 6-sided faces where the bevel ends. Resolve cuts them "
+            "into quads: chamfers side by side merge into each other, a lone chamfer gets a diagonal to the "
+            "next loop, and any pole lands on the flat area, not the bevel."))
+
+        sec = Section("Find")
+        self.scope = SegmentField(BR_SCOPES)
+        sec.add_row("Faces", self.scope, "Bevel n-gons: only n-gons touching a thin bevel strip (and their "
+                                         "neighbours).\nAll n-gons: every face with more than 4 sides.\n"
+                                         "Selected faces / edges / vertices: every n-gon among them.")
+        self.strip_ratio = FloatField(0.05, 0.6, decimals=2, step=0.05)
+        self.strip_ratio.setValue(BR_DEFAULTS["strip_ratio"])
+        sec.add_row("Strip ratio", self.strip_ratio, "A quad whose short sides are this much thinner than its "
+                                                     "long sides counts as a bevel strip.")
+        outer.addWidget(sec)
+
+        sec = Section("Odd-sided faces")
+        self.max_loop = IntField(0, 30, 0, 12)
+        self.max_loop.setValue(BR_DEFAULTS["max_loop"])
+        sec.add_row("Max loop", self.max_loop, "A 5- or 7-sided face can't become quads alone. If no other odd "
+                                               "face touches it, a short edge loop runs through up to this many "
+                                               "flat quads to reach one.")
+        self.use_border = CheckField("Loops may end on an open border")
+        self.use_border.setValue(BR_DEFAULTS["use_border"])
+        sec.add_full(self.use_border)
+        outer.addWidget(sec)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
+        find = QtWidgets.QPushButton("Select N-gons")
+        find.setToolTip("Select the n-gons Resolve would work on, without changing anything.")
+        find.clicked.connect(lambda *_: self.find())
+        self.resolve_btn = primary_button("Resolve")
+        self.resolve_btn.setToolTip("Cut the n-gons into quads. One Ctrl+Z undoes it. "
+                                    "Faces that can't be resolved cleanly are left alone and selected.")
+        self.resolve_btn.clicked.connect(lambda *_: self.resolve())
+        row.addWidget(find)
+        row.addWidget(self.resolve_btn, 1)
+        outer.addLayout(row)
+
+        self.report_tree = QtWidgets.QTreeWidget()
+        self.report_tree.setColumnCount(2)
+        self.report_tree.setHeaderLabels(["Result", "Faces"])
+        self.report_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.report_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.report_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.report_tree.header().setStretchLastSection(False)
+        self.report_tree.setToolTip("Click a row to select those faces.")
+        self.report_tree.itemSelectionChanged.connect(self._report_selected)
+        outer.addWidget(self.report_tree, 1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def options(self):
+        return {"scope": self.scope.value(), "strip_ratio": self.strip_ratio.value(),
+                "max_loop": self.max_loop.value(), "use_border": self.use_border.value()}
+
+    def _items(self):
+        items = bevel_selection()
+        if not items:
+            self.set_status("Select one or more meshes, or faces / edges / vertices on them.", level="warn")
+        return items
+
+    @ui_safe
+    def find(self):
+        items = self._items()
+        if not items:
+            return
+        report = resolve_bevel_ngons(items, dry_run=True, **self.options())
+        comps = []
+        for xform, r in report.items():
+            comps.extend("%s.%s" % (xform, s) for s in face_ranges(r.get("targets", [])))
+        if comps:
+            cmds.select(comps, replace=True)
+        found = sum(r["found"] for r in report.values())
+        stuck = sum(len(r["unresolved"]) for r in report.values())
+        self._fill_report(report, dry_run=True)
+        if not found:
+            self.set_status("No %s found on %d mesh(es)." % (self.scope.value().lower(), len(report)))
+        else:
+            self.set_status("%d n-gon(s) on %d mesh(es)%s." % (
+                found, len(report), (", %d can't be paired (see below)" % stuck) if stuck else ""),
+                level="warn" if stuck else "info")
+
+    @ui_safe
+    def resolve(self):
+        items = self._items()
+        if not items:
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            t0 = time.time()
+            report = resolve_bevel_ngons(items, **self.options())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._fill_report(report)
+        found = sum(r["found"] for r in report.values())
+        done = sum(r["resolved"] for r in report.values())
+        left = sum(len(r["unresolved"]) for r in report.values())
+        errors = [x for x, r in report.items() if r.get("error")]
+        if errors:
+            self.set_status("Failed on %s: %s" % (short_name(errors[0]), report[errors[0]]["error"]), level="error")
+        elif not found:
+            self.set_status("No %s found." % self.scope.value().lower())
+        else:
+            self.set_status("Resolved %d of %d n-gon(s) in %.2fs%s. One Ctrl+Z undoes it." % (
+                done, found, time.time() - t0, (", %d left and selected" % left) if left else ""),
+                level="warn" if left else "fixed")
+
+    def _fill_report(self, report, dry_run=False):
+        self.report_tree.clear()
+        for xform, r in sorted(report.items()):
+            if r.get("error"):
+                top = QtWidgets.QTreeWidgetItem([short_name(xform), "error"])
+                top.setToolTip(0, r["error"])
+                top.setForeground(1, QtGui.QBrush(QtGui.QColor("#e06060")))
+                self.report_tree.addTopLevelItem(top)
+                continue
+            if dry_run:
+                label = "%s: %d n-gon(s)" % (short_name(xform), r["found"])
+                faces = r.get("targets", [])
+            else:
+                label = "%s: %d of %d resolved" % (short_name(xform), r["resolved"], r["found"])
+                faces = list(r["unresolved"])
+            top = QtWidgets.QTreeWidgetItem([label, str(len(faces)) if faces else ""])
+            top.setData(0, QtCore.Qt.UserRole, [xform, faces])
+            top.setToolTip(0, xform)
+            if not dry_run:
+                top.setForeground(0, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["warn" if faces else "fixed"])))
+                tip = ("%d cut(s), %d odd-face pairing(s), %d new pole(s) (%d touching a bevel strip, "
+                       "usually where the bevel ends)" % (r.get("cuts", 0), r.get("loops", 0), r.get("poles", 0),
+                                                          r.get("strip_poles", 0)))
+                top.setToolTip(1, tip)
+                top.setToolTip(0, "%s\n%s" % (xform, tip))
+            by_reason = {}
+            for f, reason in r["unresolved"].items():
+                by_reason.setdefault(reason, []).append(f)
+            for reason, fs in sorted(by_reason.items()):
+                child = QtWidgets.QTreeWidgetItem([BR_REASONS.get(reason, reason), str(len(fs))])
+                child.setData(0, QtCore.Qt.UserRole, [xform, fs])
+                child.setForeground(0, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["skip"])))
+                top.addChild(child)
+            top.setExpanded(True)
+            self.report_tree.addTopLevelItem(top)
+
+    def _report_selected(self):
+        try:
+            comps = []
+            for it in self.report_tree.selectedItems():
+                xform, faces = it.data(0, QtCore.Qt.UserRole) or (None, [])
+                if not xform or not cmds.objExists(xform):
+                    continue
+                if faces:
+                    comps.extend("%s.%s" % (xform, s) for s in face_ranges(faces))
+                else:
+                    comps.append(xform)
+            if comps:
+                cmds.select(comps, replace=True)
+        except Exception:
+            traceback.print_exc()
+
+    def shutdown(self):
+        pass
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
-    ("Modeling", [PathScatterPanel]),
+    ("Modeling", [PathScatterPanel, BevelResolverPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

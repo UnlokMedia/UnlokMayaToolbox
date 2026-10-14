@@ -92,6 +92,49 @@ eave) is ignored automatically.
 - Live scatters rebuild their preview when you open a scene with the toolbox
   open, or when you open the toolbox.
 
+### Modeling > Bevel Resolver
+
+Cleans up after hard-surface bevels for SubD. A bevel with **Chamfer off**
+keeps edges sharp when smoothed, but wherever a bevelled edge chain *ends* it
+leaves 5-, 6- and 7-sided faces: the chamfer corner spills an extra vertex
+into every face around it. Bevel Resolver turns those into quads in one click.
+
+![Before and after: n-gons at the bevel ends (left), resolved quads (right)](docs/images/bevel-resolver.png)
+
+1. Select one or more meshes (the whole mesh is checked), or some faces,
+   edges or vertices (only the n-gons there are resolved).
+2. Optional: **Select N-gons** shows what it will work on, changing nothing.
+3. Press **Resolve**. One Ctrl+Z undoes everything.
+
+**What it does**
+
+- **Chamfers side by side merge:** when two chamfer tips land on the same
+  face, they're joined straight across, so the bevels run into each other.
+- **A lone chamfer gets one diagonal** from its corner up to a vertex on the
+  next loop (two cuts meeting at one vertex where two chamfers share it).
+  The pole that leaves sits on the flat area, not on the bevel.
+- **Support loops carry across:** a face where loops end on opposite sides
+  in matching numbers (the top of a boss with bevelled sides) gets the loops
+  continued straight through, as a grid, with no poles.
+- **Odd-sided faces are paired:** a 5- or 7-sided face can't become quads on
+  its own. It's paired with the odd face next to it (the shared edge gets one
+  new vertex), or a short edge loop runs between the two through flat quads.
+  New vertices go on flat edges, never on a hard corner.
+
+**Options:** *Faces* (bevel n-gons only, or every n-gon), *Strip ratio* (how
+thin a quad must be to count as a bevel strip), *Max loop* (how far a pairing
+loop may run) and *Loops may end on an open border*.
+
+**Left alone and listed** (click a row to select them): faces with holes,
+faces over 16 sides, zero-area faces (Maya's bevel makes these where two
+recesses touch), odd faces with no partner nearby, and n-gons with no clean
+split. The original vertices never move: it only adds edges and vertices.
+
+**Speed:** about 0.3 s for a façade with 24 windows (200 n-gons), 1 s for 50
+windows. A 200-window wall (1,600 n-gons) takes about 10 s with the bevel
+still in its history, because every Maya poly command re-evaluates the
+history. Delete history first to halve that.
+
 ### UV > Smart UDIM (in progress)
 
 Organises an asset for UDIM layout by **section** (one band of UDIM rows,
@@ -159,6 +202,16 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   ```bash
   "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_smart_udim.py
   ```
+- `tests/test_bevel_resolver.py`: headless Bevel Resolver tests (walls with
+  window recesses, a boss, single edges, side-by-side chamfers, selection,
+  reports, undo, speed):
+  ```bash
+  "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_bevel_resolver.py
+  ```
+- `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
+  Maya session and saves before / after screenshots (wireframe and smooth
+  preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test
+  below, with `tests/run_gui_bevel_resolver.mel`.
 - `tests/gui_smoke.py`: runs inside a real Maya session (opens the window,
   draws strokes through the viewport, saves screenshots to `tests/_out`).
   Set `UNLOK_TEST_DIR` to the `tests` folder (and `UNLOK_TEST_QUIT=1` to close
