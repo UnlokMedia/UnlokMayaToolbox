@@ -162,13 +162,17 @@ finished work.
   - coverage written to names
   - the UDIM Map widget
   - Apply is one Ctrl+Z
+- **M6 + M7 done:**
+  - validation report (range, crossing, overlap, flipped, tiny, density,
+    padding; click to select)
+  - PNG / clipboard hand-off sheet (shells in material colours, tiles,
+    sections, legend)
 - **Still open:**
   - tighter (non-shelf) packing
   - per-set rotation modes (align grain)
   - `_stack` shell stacking
-  - the validation report (M6)
-  - the PNG hand-off sheet (M7)
   - the UV Editor overlay (M8)
+  - the UnlokRenamer sanity-check hookup (beyond the naming list)
 
 ## Build order
 

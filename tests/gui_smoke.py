@@ -361,6 +361,26 @@ def main():
     window.grab().save(os.path.join(OUT, "11_smart_layout.png"))
     udim.udim_map.grab().save(os.path.join(OUT, "12_udim_map.png"))
 
+    # --- validate + hand-off sheet through the panel
+    udim.validate()
+    pump()
+    cats = [udim.check_tree.topLevelItem(i).text(0) for i in range(udim.check_tree.topLevelItemCount())]
+    check("Validate fills the report", bool(cats), "%s | %s" % (cats, udim.status.text()))
+    QtWidgets.QApplication.clipboard().clear()
+    udim.copy_sheet()
+    pump()
+    clip = QtWidgets.QApplication.clipboard().image()
+    check("Copy Sheet puts the hand-off sheet on the clipboard", not clip.isNull() and clip.width() > 200,
+          "%dx%d" % (clip.width(), clip.height()))
+    clip.save(os.path.join(OUT, "13_handoff_sheet.png"))
+    check("step 8 is the current step or done", udim.step_check.state in ("current", "done"),
+          udim.next_banner.text.text())
+    scroll = udim.step_check.parentWidget().parentWidget().parentWidget()
+    if hasattr(scroll, "ensureWidgetVisible"):
+        scroll.ensureWidgetVisible(udim.step_check)
+    pump()
+    window.grab().save(os.path.join(OUT, "14_check_handoff.png"))
+
     # --- re-paste replaces the window cleanly
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), {"__name__": "__main__", "__file__": TOOLBOX})

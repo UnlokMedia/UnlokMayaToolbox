@@ -213,6 +213,26 @@ density. The actual layout is still being built; see
      fit.
    - **Coverage:** written into the set names (`c222` = 2.22 tiles).
 
+8. **Check & hand off**:
+   - **Validate** checks the finished layout. Click any finding to select
+     its faces.
+     - Problems: UVs outside the UDIM range, shells crossing tile borders,
+       overlapping shells (intentional `_stack` groups excepted).
+     - Warnings: flipped shells, shells under 2 px, density more than 10%
+       off the layout's target (locked groups excepted), shells closer
+       together than the padding.
+   - **Save Sheet PNG** / **Copy Sheet** gives texture artists a picture of
+     the whole layout:
+     - every shell filled and outlined in its material's colour (the same
+       colour in every section)
+     - tile numbers and section names per row
+     - a title line with the asset, density, map size and date
+     - a legend with each group's section, tiles, TD % and coverage
+
+     Copy Sheet is there for locked-down machines where saving files isn't
+     allowed. Sheet size is Small, Medium or Large (256, 512 or 1024 px per
+     tile).
+
 Every Smart UDIM action is a single Ctrl+Z.
 
 ## How it stays fast
@@ -247,6 +267,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   building (`--snapshot DIR` also writes a UV snapshot).
 - `tests/test_smart_layout.py`: headless smart layout tests (exact density,
   tile borders, fit-to-tiles, locks, change detection, undo).
+- `tests/test_validation_handoff.py`: headless validation + hand-off sheet
+  tests (breaks shells on purpose and checks each problem is found;
+  `--sheet PATH` saves the rendered sheet).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

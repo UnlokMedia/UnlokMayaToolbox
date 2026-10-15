@@ -4551,6 +4551,7 @@ def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set=
             cmds.setAttr(node + "." + LAYOUT_TILES, ",".join(str(t) for t in st["tiles"]), type="string")
             cmds.setAttr(node + "." + LAYOUT_PRINT, g["print"], type="string")
             cmds.setAttr(node + "." + UDIM_COV, st["coverage"])
+        store_layout_settings(asset, plan)
         asset.sync_names()
     return {"meshes": len(by_mesh), "shells": len(plan["placements"])}
 
@@ -4571,6 +4572,338 @@ def set_group_lock(node, locked):
             if not cmds.attributeQuery(LAYOUT_TILES, node=node, exists=True):
                 cmds.addAttr(node, longName=LAYOUT_TILES, dataType="string")
             cmds.setAttr(node + "." + LAYOUT_TILES, ",".join(str(t) for t in sorted(tiles)), type="string")
+
+
+# =============================================================================
+# Smart UDIM - validation report + hand-off sheet
+# =============================================================================
+
+LAYOUT_SETTINGS_ATTR = "unlokUdimLayout"
+
+VALIDATION_LABELS = {
+    "out_of_range": ("UVs outside the UDIM range", "skip"),
+    "crossing": ("Shells crossing a tile border", "skip"),
+    "overlap": ("Overlapping shells", "skip"),
+    "flipped": ("Flipped (mirrored) shells", "warn"),
+    "tiny": ("Shells under 2 px", "warn"),
+    "density": ("Density more than 10% off target", "warn"),
+    "padding": ("Shells closer than the padding", "warn"),
+}
+VALIDATION_ORDER = ("out_of_range", "crossing", "overlap", "flipped", "tiny", "density", "padding")
+
+
+def layout_settings_of(asset):
+    """The settings the last Apply Layout used (stored on the root set)."""
+    root = asset.root_set() if asset else None
+    if not root or not cmds.attributeQuery(LAYOUT_SETTINGS_ATTR, node=root, exists=True):
+        return {}
+    try:
+        return json.loads(cmds.getAttr(root + "." + LAYOUT_SETTINGS_ATTR) or "{}")
+    except ValueError:
+        return {}
+
+
+def store_layout_settings(asset, plan):
+    root = asset.root_set()
+    if not root:
+        return
+    if not cmds.attributeQuery(LAYOUT_SETTINGS_ATTR, node=root, exists=True):
+        cmds.addAttr(root, longName=LAYOUT_SETTINGS_ATTR, dataType="string")
+    data = dict(plan["settings"])
+    data["density"] = plan["density"]
+    cmds.setAttr(root + "." + LAYOUT_SETTINGS_ATTR, json.dumps(data, sort_keys=True), type="string")
+
+
+def _mesh_shells(xform, uv_set, unit_scale):
+    """Every UV shell of a mesh: faces, uv ids, bbox, signed UV area, 3D / UV area."""
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return []
+    counts, ids = fn.getAssignedUVs(uv_set)
+    nf = len(counts)
+    if nf == 0:
+        return []
+    if fn.currentUVSetName() != uv_set:
+        with NoUndo():
+            cmds.polyUVSet(xform, currentUVSet=True, uvSet=uv_set)
+    a3, auv = _face_areas(xform, nf)
+    _, shell_of = fn.getUvShellsIds(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    us, vs, ids = list(us), list(vs), list(ids)
+    shells = {}
+    k = 0
+    for f, c in enumerate(counts):
+        if c == 0:
+            continue
+        sid = shell_of[ids[k]]
+        sh = shells.get(sid)
+        if sh is None:
+            sh = shells[sid] = {"mesh": xform, "faces": [], "uvs": set(), "signed": 0.0, "a3": 0.0, "auv": 0.0,
+                                "box": [1e30, 1e30, -1e30, -1e30]}
+        sh["faces"].append(f)
+        area = 0.0
+        for i in range(c):
+            a = ids[k + i]
+            b = ids[k + (i + 1) % c]
+            area += us[a] * vs[b] - us[b] * vs[a]
+            sh["uvs"].add(a)
+        sh["signed"] += area
+        sh["a3"] += a3[f] * unit_scale
+        sh["auv"] += auv[f]
+        k += c
+    for sh in shells.values():
+        box = sh["box"]
+        for u in sh["uvs"]:
+            box[0] = min(box[0], us[u])
+            box[1] = min(box[1], vs[u])
+            box[2] = max(box[2], us[u])
+            box[3] = max(box[3], vs[u])
+    return list(shells.values())
+
+
+def _group_lookup(asset):
+    """{(mesh, face) or (mesh, None): (set, td %, stack)} for the asset's groups."""
+    out = {}
+    for sec in asset.sections():
+        sec_td = _get(sec, UDIM_TD, 100.0)
+        for mat in asset.materials(sec):
+            td = _get(mat, UDIM_TD, 100.0) * sec_td / 100.0
+            stack = bool(_get(mat, UDIM_STACK, False))
+            locked = bool(_get(mat, LAYOUT_LOCK, False))
+            members, _ = expand_members(mat)
+            for xform, faces in members.items():
+                if faces is None:
+                    out[(xform, None)] = (mat, td, stack, locked)
+                else:
+                    for f in faces:
+                        out[(xform, f)] = (mat, td, stack, locked)
+    return out
+
+
+def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target_density=None):
+    """Check the finished layout. Returns {"items": {category: [item...]},
+    "shells": n, "seconds": s}; each item is {"mesh", "faces", "detail"}."""
+    t0 = time.time()
+    stored = layout_settings_of(asset)
+    map_size = float(map_size or stored.get("map_size") or 4096)
+    padding_px = float(stored.get("padding_px", 8) if padding_px is None else padding_px)
+    target = target_density or stored.get("density")
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    groups = _group_lookup(asset)
+    meshes, _ = asset.meshes()
+    shells = []
+    for xform in meshes:
+        for sh in _mesh_shells(xform, uv_set, unit_scale):
+            g = groups.get((xform, sh["faces"][0])) or groups.get((xform, None))
+            sh["group"], sh["td"], sh["stack"], sh["locked"] = g if g else (None, 100.0, False, False)
+            shells.append(sh)
+    items = {k: [] for k in VALIDATION_ORDER}
+
+    def add(cat, sh, detail):
+        items[cat].append({"mesh": sh["mesh"], "faces": sh["faces"], "detail": detail})
+
+    for sh in shells:
+        u0, v0, u1, v1 = sh["box"]
+        if u0 < -1e-6 or v0 < -1e-6 or u1 > 10.0 + 1e-6:
+            add("out_of_range", sh, "U %.2f-%.2f, V %.2f-%.2f" % (u0, u1, v0, v1))
+        elif math.floor(u0 + 1e-6) != math.floor(u1 - 1e-6) or math.floor(v0 + 1e-6) != math.floor(v1 - 1e-6):
+            add("crossing", sh, "spans U %.2f-%.2f, V %.2f-%.2f" % (u0, u1, v0, v1))
+        if sh["signed"] < 0:
+            add("flipped", sh, "mirrored: textures will read backwards")
+        if max(u1 - u0, v1 - v0) * map_size < 2.0:
+            add("tiny", sh, "%.1f px across at %d" % (max(u1 - u0, v1 - v0) * map_size, map_size))
+        if target and not sh["locked"] and sh["a3"] > 1e-12 and sh["auv"] > 0:  # locked = frozen on purpose
+            want = target * sh["td"] / 100.0
+            got = math.sqrt(sh["auv"] / sh["a3"]) * map_size
+            if abs(got / want - 1.0) > 0.10:
+                add("density", sh, "%d px/m (layout target %d)" % (round(got), round(want)))
+
+    # overlaps + padding: sweep over shell boxes, then confirm overlaps with Maya
+    order = sorted(range(len(shells)), key=lambda i: shells[i]["box"][0])
+    min_gap = max(1.0, padding_px * 0.5) / map_size
+    candidates = set()
+    tight = set()
+    for a_pos, i in enumerate(order):
+        bi = shells[i]["box"]
+        for j in order[a_pos + 1:]:
+            bj = shells[j]["box"]
+            if bj[0] > bi[2] + min_gap:
+                break
+            if math.floor(bi[0] + 1e-6) != math.floor(bj[0] + 1e-6) or \
+                    math.floor(bi[1] + 1e-6) != math.floor(bj[1] + 1e-6):
+                continue  # different tiles
+            gap = max(bj[0] - bi[2], bi[0] - bj[2], bj[1] - bi[3], bi[1] - bj[3])
+            if gap < 0:
+                if not (shells[i]["stack"] and shells[j]["stack"]):
+                    candidates.update((i, j))
+            elif gap < min_gap:
+                tight.update((i, j))
+    flagged = set()
+    if candidates:
+        comps = []
+        for i in candidates:
+            sh = shells[i]
+            comps.extend("%s.%s" % (sh["mesh"], r) for r in face_ranges(sh["faces"]))
+        hits = cmds.polyUVOverlap(comps, overlappingComponents=True) or []
+        hit_faces = set()
+        for comp in hits:
+            node, _, spec = comp.partition(".")
+            if cmds.objectType(node, isAType="shape"):
+                node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+            for f in _parse_face_spec(spec) or []:
+                hit_faces.add((long_name(node), f))
+        for i in candidates:
+            sh = shells[i]
+            if any((sh["mesh"], f) in hit_faces for f in sh["faces"]):
+                flagged.add(i)
+                add("overlap", sh, "overlaps another shell")
+    for i in sorted(tight - flagged):
+        add("padding", shells[i], "under %d px from a neighbour" % round(min_gap * map_size))
+    return {"items": items, "shells": len(shells), "seconds": time.time() - t0, "map_size": map_size}
+
+
+def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
+    """Paint the UDIM layout for texture artists: every shell filled and
+    outlined in its material colour, tile numbers, section names per row and a
+    legend. Returns a QImage."""
+    stored = layout_settings_of(asset)
+    groups = []
+    for sec in asset.sections():
+        sec_key = _get(sec, UDIM_KEY) or parse_group_name(sec)["key"]
+        for mat in asset.materials(sec):
+            members, _ = expand_members(mat)
+            groups.append({"set": mat, "key": _get(mat, UDIM_KEY) or parse_group_name(mat)["key"],
+                           "section": sec_key, "members": members, "cov": _get(mat, UDIM_COV, -1.0),
+                           "td": _get(mat, UDIM_TD, 100.0), "tiles": set(), "faces": 0})
+    polys_by_group = []
+    max_u = max_v = 0
+    for g in groups:
+        polys, edges = [], []
+        for xform, faces in g["members"].items():
+            fn = _mesh_fn(xform)
+            if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+                continue
+            counts, ids = fn.getAssignedUVs(uv_set)
+            us, vs = fn.getUVs(uv_set)
+            ids = list(ids)
+            starts = []
+            k = 0
+            for c in counts:
+                starts.append(k)
+                k += c
+            border = {}
+            for f in (range(len(counts)) if faces is None else sorted(faces)):
+                c = counts[f]
+                if c < 3:
+                    continue
+                s = starts[f]
+                face_ids = ids[s:s + c]
+                polys.append([(us[u], vs[u]) for u in face_ids])
+                for i in range(c):
+                    a, b = face_ids[i], face_ids[(i + 1) % c]
+                    key = (a, b) if a < b else (b, a)
+                    border[key] = border.get(key, 0) + 1
+            edges.extend(((us[a], vs[a]), (us[b], vs[b])) for (a, b), n in border.items() if n == 1)
+        for poly in polys:
+            for u, v in poly:
+                if 0 <= u < 10 and v >= 0:
+                    tile = 1001 + int(u) + 10 * int(v)
+                    g["tiles"].add(tile)
+                    max_u, max_v = max(max_u, int(u)), max(max_v, int(v))
+        g["faces"] = len(polys)
+        polys_by_group.append((g, polys, edges))
+    cols, rows = max_u + 1, max_v + 1
+    set_key_palette([g["key"] for g in groups])
+    T = int(px_per_tile)
+    left, top, gap = 190, 64, 6
+    legend_h = 28 + 22 * len(groups)
+    width = left + cols * T + 24
+    height = top + rows * T + legend_h + 20
+    img = QtGui.QImage(width, height, QtGui.QImage.Format_RGB32)
+    img.fill(QtGui.QColor("#262626"))
+    p = QtGui.QPainter(img)
+    p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+    def to_px(u, v):
+        return QtCore.QPointF(left + u * T, top + (rows - v) * T)
+
+    title = QtGui.QFont()
+    title.setPointSize(15)
+    title.setBold(True)
+    p.setFont(title)
+    p.setPen(QtGui.QColor("#f0f0f0"))
+    root_group = asset.root_group() or ""
+    p.drawText(QtCore.QRectF(16, 10, width - 32, 28), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+               "%s  -  UDIM layout" % short_name(root_group))
+    small = QtGui.QFont()
+    small.setPointSize(9)
+    p.setFont(small)
+    p.setPen(QtGui.QColor("#a8a8a8"))
+    info = "%d tile(s)" % len(set(t for g in groups for t in g["tiles"]))
+    if stored:
+        info += "  |  %d px/m on %s maps  |  %d px padding" % (round(stored.get("density", 0)),
+                                                              stored.get("map_size", "?"),
+                                                              stored.get("padding_px", 0))
+    info += "  |  %s" % time.strftime("%Y-%m-%d")
+    p.drawText(QtCore.QRectF(16, 36, width - 32, 20), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, info)
+
+    # tiles + numbers
+    tile_font = QtGui.QFont()
+    tile_font.setPointSizeF(max(7.0, T / 40.0))
+    for v in range(rows):
+        for u in range(cols):
+            tl = to_px(u, v + 1)
+            rect = QtCore.QRectF(tl.x(), tl.y(), T, T)
+            p.fillRect(rect, QtGui.QColor("#303030"))
+            p.setPen(QtGui.QPen(QtGui.QColor("#4c4c4c"), 1))
+            p.drawRect(rect)
+    # shells
+    for g, polys, edges in polys_by_group:
+        fill = _key_color(g["key"], 120)
+        line = _key_color(g["key"], 255)
+        path = QtGui.QPainterPath()
+        path.setFillRule(QtCore.Qt.WindingFill)
+        for poly in polys:
+            path.addPolygon(QtGui.QPolygonF([to_px(u, v) for u, v in poly]))
+            path.closeSubpath()
+        p.fillPath(path, fill)
+        p.setPen(QtGui.QPen(line, 1.2))
+        p.drawLines([QtCore.QLineF(to_px(*a), to_px(*b)) for a, b in edges])
+    p.setFont(tile_font)
+    for v in range(rows):
+        for u in range(cols):
+            tl = to_px(u, v + 1)
+            p.setPen(QtGui.QColor("#d8d8d8"))
+            p.drawText(QtCore.QRectF(tl.x() + 5, tl.y() + 3, T - 10, 20), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
+                       str(1001 + u + 10 * v))
+    # section names per row
+    p.setFont(small)
+    for v in range(rows):
+        names = sorted(set(g["section"] for g in groups if any((t - 1001) // 10 == v for t in g["tiles"])))
+        tl = to_px(0, v + 1)
+        p.setPen(QtGui.QColor("#e6e6e6"))
+        p.drawText(QtCore.QRectF(12, tl.y(), left - 24, T), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
+                   "\n".join(names) if names else "")
+    # legend
+    y = top + rows * T + 18
+    p.setPen(QtGui.QColor("#a8a8a8"))
+    p.drawText(QtCore.QRectF(16, y, width, 18), QtCore.Qt.AlignLeft, "Material groups")
+    y += 22
+    for g in groups:
+        if not g["faces"]:
+            continue
+        p.fillRect(QtCore.QRectF(16, y + 2, 14, 14), _key_color(g["key"], 255))
+        tiles = sorted(g["tiles"])
+        tile_text = ("%d-%d" % (tiles[0], tiles[-1]) if len(tiles) > 2 else ", ".join(str(t) for t in tiles)) \
+            if tiles else "-"
+        cov = ("  |  %.2f tiles" % (g["cov"] / 100.0)) if g["cov"] >= 0 else ""
+        p.setPen(QtGui.QColor("#e6e6e6"))
+        p.drawText(QtCore.QRectF(38, y, width - 50, 18), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                   "%s   (%s)   tiles %s   |   TD %s%%%s" % (g["key"], g["section"], tile_text,
+                                                           _num_token(g["td"]), cov))
+        y += 22
+    p.end()
+    return img
 
 
 # =============================================================================
@@ -4608,15 +4941,33 @@ def _unlok_renamer_available():
 
 
 LEVEL_COLORS = {"fixed": "#6fbf73", "warn": "#e0b050", "skip": "#e07a5f", "info": "#a8a8a8"}
+SHEET_SIZES = {"Small": 256, "Medium": 512, "Large": 1024}
+
+
+# Distinct colours for material groups (hand-picked so neighbours never look
+# alike). Keys get them in sorted order via set_key_palette; unknown keys fall
+# back to a hash.
+GROUP_PALETTE = ("#e0675a", "#5aa9e6", "#7fcf6b", "#e8b84a", "#b07ce0", "#4fc9b8", "#f08bb4", "#c9a27a",
+                 "#9aa7ff", "#d9e05a", "#ff9f5a", "#8fd0ff")
+_KEY_COLORS = {}
+
+
+def set_key_palette(keys):
+    """Give each material key a distinct palette colour (sorted, so the same
+    asset always gets the same colours)."""
+    _KEY_COLORS.clear()
+    for i, k in enumerate(sorted(set(keys))):
+        _KEY_COLORS[k] = GROUP_PALETTE[i % len(GROUP_PALETTE)]
 
 
 def _key_color(key, alpha=255):
-    """Stable, distinct-ish colour per material key."""
-    h = 0
-    for ch in key:
-        h = (h * 131 + ord(ch)) & 0xFFFFFF
-    hue = (h % 360) / 360.0
-    c = QtGui.QColor.fromHsvF(hue, 0.55, 0.85)
+    hexcol = _KEY_COLORS.get(key)
+    if hexcol is None:
+        h = 0
+        for ch in key:
+            h = (h * 131 + ord(ch)) & 0xFFFFFF
+        hexcol = GROUP_PALETTE[h % len(GROUP_PALETTE)]
+    c = QtGui.QColor(hexcol)
     c.setAlpha(alpha)
     return c
 
@@ -4642,6 +4993,7 @@ class UdimMapWidget(QtWidgets.QWidget):
         self.shells = []
         self.labels = {}
         if plan and collected:
+            set_key_palette([g["key"] for g in collected["groups"] + collected["locked"]])
             for g in collected["groups"]:
                 st = plan["stats"].get(g["set"], {})
                 self.labels[g["set"]] = (g["key"], "%s  |  %d px/m  |  %d%% of a tile  |  tiles %s" % (
@@ -4753,6 +5105,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._collected = None
         self._plan = None
         self.layout_applied = None
+        self.validation = None
         self._replan_timer = QtCore.QTimer(self)
         self._replan_timer.setSingleShot(True)
         self._replan_timer.setInterval(60)
@@ -5029,6 +5382,37 @@ class SmartUdimPanel(QtWidgets.QWidget):
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
                   self.lay_rotate, self.lay_rows, self.lay_comp):
             w.changed.connect(self._layout_settings_changed)
+
+        # ---- 8. check & hand off
+        card = self.step_check = StepCard(8, "Check & hand off", "Validate the finished layout, then give texture "
+                                                                 "artists a picture of what's where.")
+        validate = primary_button("Validate")
+        validate.setMinimumHeight(28)
+        validate.setToolTip("Look for UVs outside the UDIM range, shells crossing tiles, overlaps, flipped or "
+                            "tiny shells, density off target and shells closer than the padding.")
+        validate.clicked.connect(lambda *_: self.validate())
+        card.add(validate)
+        self.check_tree = QtWidgets.QTreeWidget()
+        self.check_tree.setColumnCount(2)
+        self.check_tree.setHeaderLabels(["Check", "Count"])
+        self.check_tree.setMinimumHeight(130)
+        self.check_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.check_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.check_tree.header().setStretchLastSection(False)
+        self.check_tree.itemSelectionChanged.connect(self._check_selected)
+        card.add(self.check_tree)
+        self.sheet_size = ComboField(list(SHEET_SIZES))
+        self.sheet_size.setValue("Medium")
+        self.sheet_size.setToolTip("Pixels per UDIM tile in the sheet: Small 256, Medium 512, Large 1024.")
+        save = secondary_button("Save Sheet PNG...", "Save a picture of the layout (shells coloured by material, "
+                                                    "tile numbers, sections and a legend) for texture artists.")
+        save.clicked.connect(lambda *_: self.save_sheet())
+        copy = secondary_button("Copy Sheet", "Copy the same picture to the clipboard (handy where saving "
+                                             "files is locked down).")
+        copy.clicked.connect(lambda *_: self.copy_sheet())
+        sheet_label = QtWidgets.QLabel("Sheet")
+        card.add(button_row(sheet_label, self.sheet_size, save, copy))
+        col.addWidget(card)
         self._update_layout_enabled()
         col.addStretch(1)
 
@@ -5056,6 +5440,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.step_prep.set_state("done" if prepped else ("current" if clean_groups and not auto_done else "todo"))
         self.step_auto.set_state("done" if auto_clean else ("current" if clean_groups else "todo"))
         self.step_layout.set_state("done" if self.layout_applied else ("current" if auto_done else "todo"))
+        res = self.validation
+        problems = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "skip") if res else 0
+        warns = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "warn") if res else 0
+        self.step_check.set_state("done" if res and not problems else ("current" if self.layout_applied else "todo"))
         if not has_root:
             self.next_banner.set_text("Select the asset's top group (e.g. <b>house_GRP</b>) and press "
                                       "<b>Use Selected Group</b>.")
@@ -5067,11 +5455,19 @@ class SmartUdimPanel(QtWidgets.QWidget):
         elif snap["overlaps"]:
             self.next_banner.set_text("%d mesh(es) are in two groups. Highlight the right group and press "
                                       "<b>Assign Selection</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
-        elif self.layout_applied:
-            self.next_banner.set_text("Laid out into <b>%d tile(s)</b> at %d px/m. Lock finished groups (Lock "
-                                      "column) so later re-layouts leave them alone." % (
-                                          self.layout_applied["tiles"], round(self.layout_applied["density"])),
+        elif res and problems:
+            self.next_banner.set_text("Validation found <b>%d problem(s)</b>%s. Click them in step 8 to select "
+                                      "the faces." % (problems, (" and %d warning(s)" % warns) if warns else ""),
+                                      tag="CHECK", tone="warn")
+        elif res:
+            self.next_banner.set_text("Layout checked%s. <b>Save Sheet PNG</b> (or Copy Sheet) for the texture "
+                                      "artists, and lock finished groups so re-layouts leave them alone." % (
+                                          (" with %d warning(s)" % warns) if warns else ": all good"),
                                       tag="DONE", tone="done")
+        elif self.layout_applied:
+            self.next_banner.set_text("Laid out into <b>%d tile(s)</b> at %d px/m. Press <b>Validate</b> in step 8, "
+                                      "then save the hand-off sheet." % (
+                                          self.layout_applied["tiles"], round(self.layout_applied["density"])))
         elif auto_done and self._plan is not None:
             self.next_banner.set_text("Check the map in step 7 (hover for details), then press <b>Apply "
                                       "Layout</b>.")
@@ -5116,6 +5512,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._fill_auto()
         self._plan = None
         self.layout_applied = None
+        self.validation = None
+        if hasattr(self, "check_tree"):
+            self.check_tree.clear()
         if hasattr(self, "udim_map"):
             self.udim_map.set_plan(None, None)
             self.layout_summary.setText("")
@@ -5517,11 +5916,111 @@ class SmartUdimPanel(QtWidgets.QWidget):
             QtWidgets.QApplication.restoreOverrideCursor()
         plan = self._plan
         self.layout_applied = {"tiles": len(plan["new_tiles"]), "density": plan["density"]}
+        self.validation = None
+        self.check_tree.clear()
         self.refresh()
         self.plan_layout(quiet=True)  # re-read so the map shows what's in the scene now
         self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
             result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
         self._update_guidance()
+
+    @ui_safe
+    def validate(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            self.validation = validate_layout(asset, self.uv_set.text().strip() or "map1")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._fill_check()
+        res = self.validation
+        problems = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "skip")
+        warnings = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "warn")
+        self.set_status("Checked %d shells in %.2fs: %d problem(s), %d warning(s)." % (
+            res["shells"], res["seconds"], problems, warnings), level="warn" if problems or warnings else "info")
+        self._update_guidance()
+
+    def _fill_check(self):
+        self.check_tree.clear()
+        res = self.validation
+        if not res:
+            return
+        any_found = False
+        for cat in VALIDATION_ORDER:
+            found = res["items"].get(cat) or []
+            if not found:
+                continue
+            any_found = True
+            label, level = VALIDATION_LABELS[cat]
+            top = QtWidgets.QTreeWidgetItem([label, str(len(found))])
+            top.setForeground(0, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS[level])))
+            top.setData(0, QtCore.Qt.UserRole, [(it["mesh"], it["faces"]) for it in found])
+            for it in found[:500]:
+                child = QtWidgets.QTreeWidgetItem([short_name(it["mesh"]), ""])
+                child.setToolTip(0, "%s\n%s" % (it["mesh"], it["detail"]))
+                child.setText(1, "")
+                child.setData(0, QtCore.Qt.UserRole, [(it["mesh"], it["faces"])])
+                child.setText(0, "%s  -  %s" % (short_name(it["mesh"]), it["detail"]))
+                top.addChild(child)
+            self.check_tree.addTopLevelItem(top)
+        if not any_found:
+            ok = QtWidgets.QTreeWidgetItem(["All checks passed", ""])
+            ok.setForeground(0, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["fixed"])))
+            self.check_tree.addTopLevelItem(ok)
+
+    def _check_selected(self):
+        try:
+            comps = []
+            for it in self.check_tree.selectedItems():
+                for mesh, faces in it.data(0, QtCore.Qt.UserRole) or []:
+                    if cmds.objExists(mesh):
+                        comps.extend("%s.%s" % (mesh, r) for r in face_ranges(faces))
+            if comps:
+                cmds.select(comps, replace=True)
+        except Exception:
+            traceback.print_exc()
+
+    def _sheet(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return None
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            return render_handoff_sheet(asset, self.uv_set.text().strip() or "map1",
+                                        SHEET_SIZES.get(self.sheet_size.value(), 512))
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    @ui_safe
+    def save_sheet(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        name = "%s_udim_layout.png" % sanitize_key(short_name(asset.root_group() or "asset"))
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save hand-off sheet", name, "PNG image (*.png)")
+        if not path:
+            return
+        img = self._sheet()
+        if img is None:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        if img.save(path, "PNG"):
+            self.set_status("Saved the hand-off sheet (%dx%d) to %s" % (img.width(), img.height(), path))
+        else:
+            self.set_status("Couldn't save to %s (is the folder writable?). Try Copy Sheet." % path, level="error")
+
+    @ui_safe
+    def copy_sheet(self):
+        img = self._sheet()
+        if img is None:
+            return
+        QtWidgets.QApplication.clipboard().setImage(img)
+        self.set_status("Hand-off sheet (%dx%d) copied to the clipboard." % (img.width(), img.height()))
 
     def _map_clicked(self, node):
         try:

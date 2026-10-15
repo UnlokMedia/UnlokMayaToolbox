@@ -156,6 +156,14 @@
     - Locks live in `unlokUdimLock`; tiles in `unlokUdimTiles`.
     - The plan keys stats by set name *and* uuid: names change when
       coverage is written.
+  - **Validation and hand-off** (`validate_layout`, `render_handoff_sheet`):
+    - Apply stores its settings as JSON in `unlokUdimLayout` on the root
+      set, which gives validation the target density, map size and padding.
+    - Overlap candidates come from a bounding-box sweep, then are confirmed
+      by `polyUVOverlap`, which works across meshes too.
+    - The sheet is QPainter on a QImage (works headless in mayapy).
+      Colours come from `GROUP_PALETTE` via `set_key_palette` (sorted
+      keys), not a hash, so groups never look alike.
 
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
