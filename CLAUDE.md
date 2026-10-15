@@ -17,6 +17,11 @@
   `__main__`).
 
 ## Workflow
+- **The repo lives on Google Drive** (by choice). Drive keeps recreating
+  `desktop.ini` files inside `.git`, which breaks git ("bad object
+  refs/desktop.ini", fetch "did not send all necessary objects"). Fix with
+  `find .git -name desktop.ini -delete` and check with `git fsck`. Don't
+  move `.git` off Drive.
 - **Push to main as you go.** Commit tested work on `main` and push. No PRs
   and no stacked branches. Parallel sessions rebase onto `origin/main` and
   fast-forward.
