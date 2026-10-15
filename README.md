@@ -207,11 +207,15 @@ density. The actual layout is still being built; see
 
      Override it per group with the **Orient** column (double-click to
      cycle), or put `_up` / `_keep` / `_axis` in the set name.
-   - **Packing:** shells are packed tile by tile in rows, tallest first, so
-     similar pieces sit together. Shorter pieces fill the gaps at the end of
-     earlier rows in the same group. A group flows into the next tile when
-     one fills up, no shell crosses a tile border, and each section starts
-     on a new row.
+   - **Packing:** a 2D packer places the biggest pieces first, each in the
+     lowest free spot. Small pieces fill the gaps left under bigger ones, and
+     in Main axis mode a piece may turn 90 degrees if that sits lower. On the
+     test building this fills about 83% of each tile, up from 65% with the
+     old row packer, and needs 7 tiles instead of 9.
+     - A group stays in neighbouring tiles: it may top up the tiles the
+       previous group ended on, then opens new ones.
+     - No shell crosses a tile border, and each section starts on a new row.
+     - The same scene always gives the same layout.
    - **Stacking:** in a group marked `_stack` (Stack column), identical
      pieces such as repeated windows or tiles share one spot, so they cost
      one footprint, not N. Validation knows these overlaps are intentional.
@@ -283,7 +287,7 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
 - `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and
-  first-fit packing.
+  2D packing (fill, padding, stable re-plans, speed).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

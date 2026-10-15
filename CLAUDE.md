@@ -148,7 +148,7 @@
   - **Smart layout** (`collect_shells` -> `make_plan` -> `apply_layout`):
     - `collect_shells` reads every shell once (3D/UV area, points, PCA
       angle).
-    - `plan_layout` is pure math: exact density per shell, a shelf packer
+    - `plan_layout` is pure math: exact density per shell, a 2D packer
       tile by tile, sections on new rows, locked tiles reserved.
       `plan_fit_to_tiles` binary-searches the density.
     - `apply_layout` writes through `write_uvs` (undoable) and stores
@@ -164,8 +164,20 @@
     - Placements are `(tile_u, tile_v, x, y, scale, angle, w, h)`.
     - `_stack` groups share placements for shells with the same signature
       `(uv count, w, h)` after density scaling.
-    - Packing is first-fit decreasing height within each group (groups
-      never share a shelf).
+    - Packing: `_TilePacker` per tile.
+      - It's a skyline bottom-left packer plus a list of the gaps left under
+        overhangs, which are reused first with a guillotine split.
+      - Rects are reserved with `pad` on their right and top, inside
+        [pad, 1].
+      - Pieces are sorted by long side, then area, then (mesh, first UV id),
+        so the same input always gives the same layout.
+      - Main axis may turn a piece 90 degrees (angle + pi/2, w/h swapped).
+        Upright and Keep never turn.
+      - A group may use the tiles the previous group in its section ended
+        on, then opens new ones.
+      - Packing isn't monotonic in density, so `plan_fit_to_tiles` probes
+        upward in 2% steps after its binary search.
+      - About 50 ms for 1,200 shells.
     - The plan keys stats by set name *and* uuid: names change when
       coverage is written.
   - **Validation and hand-off** (`validate_layout`, `render_handoff_sheet`):

@@ -4413,6 +4413,90 @@ def _udim_tiles(start_row, count_needed, reserved):
         v += 1
 
 
+class _TilePacker(object):
+    """Skyline bottom-left packer for one UDIM tile, plus a list of the free
+    gaps the skyline leaves under overhangs (reused first, guillotine-split).
+
+    Coordinates are in tile space; every rect is reserved with `pad` on its
+    right and top, inside [pad, 1] on both axes, so neighbours and the tile
+    border all get `pad` of clearance.
+    """
+    __slots__ = ("tile", "lo", "segs", "gaps")
+
+    def __init__(self, tile, pad):
+        self.tile = tile
+        self.lo = pad
+        self.segs = [[pad, pad, 1.0 - pad]]  # [x, top y, width], left to right
+        self.gaps = []  # [x, y, w, h] free rects below the skyline
+
+    def find(self, w, h):
+        """Best spot for a w x h rect: (score, kind, index, x, y), or None.
+        Gaps score below anything on the skyline, so they're used first."""
+        eps = 1e-9
+        best = None
+        for i, gap in enumerate(self.gaps):
+            if w <= gap[2] + eps and h <= gap[3] + eps:
+                score = (-1.0, gap[2] * gap[3] - w * h, 0.0)  # tightest gap
+                if best is None or score < best[0]:
+                    best = (score, 1, i, gap[0], gap[1])
+        if best is not None:
+            return best
+        segs = self.segs
+        n = len(segs)
+        for i in range(n):
+            x = segs[i][0]
+            if x + w > 1.0 + eps:
+                break
+            y = 0.0
+            j = i
+            right = x + w - eps
+            while j < n and segs[j][0] < right:
+                if segs[j][1] > y:
+                    y = segs[j][1]
+                j += 1
+            if y + h > 1.0 + eps:
+                continue
+            score = (y + h, x, 0.0)
+            if best is None or score < best[0]:
+                best = (score, 0, i, x, y)
+        return best
+
+    def place(self, spot, w, h):
+        _, kind, i, x, y = spot
+        if kind == 1:  # inside a gap: split what's left into right and top parts
+            gx, gy, gw, gh = self.gaps.pop(i)
+            if gw - w > 1e-6:
+                self.gaps.append([gx + w, gy, gw - w, gh])
+            if gh - h > 1e-6:
+                self.gaps.append([gx, gy + h, w, gh - h])
+            return
+        top = y + h
+        right = x + w
+        new = []
+        for sx, sy, sw in self.segs:
+            ex = sx + sw
+            if ex <= x + 1e-12 or sx >= right - 1e-12:
+                new.append([sx, sy, sw])
+                continue
+            a, b = max(sx, x), min(ex, right)
+            if y - sy > 1e-6 and b - a > 1e-6:
+                self.gaps.append([a, sy, b - a, y - sy])  # hole under the new rect
+            if sx < x:
+                new.append([sx, sy, x - sx])
+            if ex > right:
+                new.append([right, sy, ex - right])
+        new.append([x, top, w])
+        new.sort(key=lambda s: s[0])
+        merged = [new[0]]
+        for s in new[1:]:
+            last = merged[-1]
+            if abs(s[1] - last[1]) < 1e-9 and abs(last[0] + last[2] - s[0]) < 1e-9:
+                last[2] += s[2]
+            else:
+                merged.append(s)
+        self.segs = merged
+
+
 def plan_layout(collected, settings, density_scale=1.0):
     """Pure-math layout plan. Returns a dict with per-shell placements, group
     stats, tiles used and warnings. Nothing in the scene changes."""
@@ -4437,24 +4521,22 @@ def plan_layout(collected, settings, density_scale=1.0):
     row = 0
     current_section = None
     tile_iter = None
-    tile = None
-    top_y = pad  # next free height in the current tile
+    carry = []  # packers the previous group of this section ended on
     orientation = s.get("orientation") or ("Main axis" if s.get("rotate", True) else "Keep")
     default_mode = _ORIENT_MODE.get(orientation, "axis")
 
     def next_tile():
         t = next(tile_iter)
         tiles_used.add(1001 + t[0] + 10 * t[1])
-        return t
+        return _TilePacker(t, pad)
 
     for g in groups:
         if g["section_index"] != current_section:
             if current_section is not None and s["new_row_per_section"]:
                 row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
+                carry = []
             current_section = g["section_index"]
             tile_iter = _udim_tiles(row, 0, reserved)
-            tile = None
-            top_y = pad
         mode = g.get("orient") or default_mode
         density = td * g["td"] / 100.0
         compensate = 1.0
@@ -4477,6 +4559,7 @@ def plan_layout(collected, settings, density_scale=1.0):
         # _stack groups: identical pieces share one spot (one footprint for N copies)
         stacked = {}
         unique = []
+        sizes.sort(key=lambda t: (t[0].mesh, t[0].uv_ids[0]))  # same representative every time
         for item in sizes:
             sh, k, a, w, h = item
             if g.get("stack"):
@@ -4486,11 +4569,15 @@ def plan_layout(collected, settings, density_scale=1.0):
                     continue
                 stacked[sig] = (item, [])
             unique.append(item)
-        # first-fit decreasing height: tallest first, and every later (shorter)
-        # piece goes into the first of this group's shelves with room, so gaps
-        # at the end of rows get filled. Groups never share a shelf.
-        unique.sort(key=lambda t: (-round(t[4], 4), -t[3]))
-        shelves = []  # [tile, y, height, cursor_x]
+        # 2D packing: biggest first, each piece goes to the lowest spot on the
+        # skyline of the first tile it fits (gaps under overhangs first). The
+        # group may top up the tiles the previous group ended on, then opens
+        # new ones, so groups stay in neighbouring tiles. Main axis may turn
+        # pieces 90 degrees when that sits lower.
+        unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
+                                   t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
+        can_turn = mode == "axis"
+        packers = list(carry)
         g_tiles = set()
         area = 0.0
         for item in unique:
@@ -4498,31 +4585,49 @@ def plan_layout(collected, settings, density_scale=1.0):
             w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
             if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
                 w_res, h_res = min(w_res, usable), min(h_res, usable)
-            spot = None
-            for shelf in shelves:
-                if h_res <= shelf[2] + 1e-9 and shelf[3] + w_res <= 1.0 - pad + 1e-9:
-                    spot = shelf
+            rw, rh = w_res + pad, h_res + pad
+            found = None
+            for pk in packers:
+                spot = pk.find(rw, rh)
+                turned = False
+                if can_turn and abs(rw - rh) > 1e-9:
+                    alt = pk.find(rh, rw)
+                    if alt is not None and (spot is None or alt[0] < spot[0]):
+                        spot, turned = alt, True
+                if spot is not None:
+                    found = (pk, spot, turned)
                     break
-            if spot is None:
-                if tile is None:
-                    tile = next_tile()
-                    top_y = pad
-                if top_y + h_res > 1.0 - pad + 1e-9:
-                    tile = next_tile()
-                    top_y = pad
-                spot = [tile, top_y, h_res, pad]
-                shelves.append(spot)
-                top_y += h_res + pad
-            st_tile, y = spot[0], spot[1]
-            x = spot[3]
-            spot[3] += w_res + pad
-            placements[id(sh)] = (st_tile[0], st_tile[1], x, y, k, a, w, h)
-            g_tiles.add(1001 + st_tile[0] + 10 * st_tile[1])
+            if found is None:
+                pk = next_tile()
+                packers.append(pk)
+                spot = pk.find(rw, rh)
+                turned = False
+                if spot is None and can_turn:
+                    spot, turned = pk.find(rh, rw), True
+                if spot is None:  # can only happen for clamped oversize pieces
+                    spot, turned = (None, 0, 0, pad, pad), False
+                found = (pk, spot, turned)
+            pk, spot, turned = found
+            if turned:
+                a += math.pi / 2.0
+                w, h = h, w
+                rw, rh = rh, rw
+            if spot[0] is not None:
+                pk.place(spot, rw, rh)
+            x, y = spot[3], spot[4]
+            tu, tv = pk.tile
+            placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
+            g_tiles.add(1001 + tu + 10 * tv)
             area += w * h
             if g.get("stack"):
-                for dup in stacked[(len(sh.uv_ids), round(w, 3), round(h, 3))][1]:
+                for dup in stacked[(len(sh.uv_ids), round(item[3], 3), round(item[4], 3))][1]:
                     dsh, dk, da, dw, dh = dup
-                    placements[id(dsh)] = (st_tile[0], st_tile[1], x, y, dk, da, dw, dh)
+                    if turned:
+                        da, dw, dh = da + math.pi / 2.0, dh, dw
+                    placements[id(dsh)] = (tu, tv, x, y, dk, da, dw, dh)
+        if packers:
+            last = max(packers, key=lambda q: (q.tile[1], q.tile[0]))
+            carry = [q for q in packers if 1001 + q.tile[0] + 10 * q.tile[1] in g_tiles] or [last]
         n_stacked = sum(len(v[1]) for v in stacked.values())
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
                            "density": density * compensate, "shells": len(g["shells"]), "stacked": n_stacked,
@@ -4556,6 +4661,12 @@ def plan_fit_to_tiles(collected, settings):
             lo, best = mid, p
         else:
             hi = mid
+    if best is not None:  # packing isn't monotonic: a bit denser can still fit, so probe upward
+        base = lo
+        for i in range(1, 13):
+            p = plan_layout(collected, settings, base * (1.0 + 0.02 * i))
+            if len(p["new_tiles"]) <= limit:
+                best = p
     if best is None:
         best = plan_layout(collected, settings, max(lo, 1e-3))
         best["warnings"].append("Couldn't fit everything into %d tiles; showing the smallest layout." % limit)

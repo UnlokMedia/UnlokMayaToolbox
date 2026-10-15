@@ -171,9 +171,9 @@ finished work.
   - orientation modes (Main axis / Upright / Keep) with a per-group
     override
   - `_stack` stacking of identical pieces
-  - first-fit shelf packing (about 65% fill on the test building)
+  - 2D skyline packing with gap reuse and 90-degree turns: 83% fill and
+    7 tiles on the test building (the shelf packer managed 65% and 9)
 - **Still open:**
-  - a true 2D packer (beyond shelves) for denser fills
   - the UV Editor overlay (M8)
   - the UnlokRenamer sanity-check hookup (beyond the naming list)
 

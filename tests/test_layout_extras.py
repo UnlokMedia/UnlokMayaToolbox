@@ -48,9 +48,76 @@ def run():
     col = tb["collect_shells"](asset)
     plan = tb["make_plan"](col, base)
     eff = efficiency(plan, base)
-    check("first-fit packing uses no more tiles than before (9)", len(plan["new_tiles"]) <= 9,
+    check("2D packing needs fewer tiles than the old shelf packer (9)", len(plan["new_tiles"]) <= 8,
           "%d tiles, %.0f%% of usable area filled" % (len(plan["new_tiles"]), eff * 100))
     print("  packing efficiency (main axis): %.1f%%" % (eff * 100))
+    pad = base["padding_px"] / float(base["map_size"])
+    by_tile = {}
+    for p in plan["placements"].values():
+        by_tile.setdefault((p[0], p[1]), []).append((p[2], p[3], p[2] + p[6], p[3] + p[7]))
+    inside = all(b[0] >= pad - 1e-9 and b[1] >= pad - 1e-9 and b[2] <= 1 - pad + 1e-9 and b[3] <= 1 - pad + 1e-9
+                 for boxes in by_tile.values() for b in boxes)
+    clash = 0
+    for boxes in by_tile.values():
+        boxes.sort()
+        for i, a in enumerate(boxes):
+            for b in boxes[i + 1:]:
+                if b[0] >= a[2] + pad - 1e-9:
+                    break
+                if b[1] < a[3] + pad - 1e-9 and a[1] < b[3] + pad - 1e-9:
+                    clash += 1
+    check("planned boxes stay inside their tile and keep the padding apart", inside and clash == 0,
+          "%d boxes, %d too close" % (sum(len(b) for b in by_tile.values()), clash))
+    turned = sum(1 for g in col["groups"] for sh in g["shells"]
+                 if abs(plan["placements"][id(sh)][5] - sh.dims["axis"][0]) > 1e-6)
+    tb["apply_layout"](asset, col, plan)
+    worst = 0.0
+    for g in col["groups"]:
+        for sh in g["shells"]:
+            tu, tv, x, y, k, a, w, h = plan["placements"][id(sh)]
+            us, vs = tb["_mesh_fn"](sh.mesh).getUVs("map1")
+            su = [us[i] for i in sh.uv_ids]
+            sv = [vs[i] for i in sh.uv_ids]
+            worst = max(worst, abs(min(su) - tu - x), abs(min(sv) - tv - y),
+                        abs(max(su) - min(su) - w), abs(max(sv) - min(sv) - h))
+    px = 1.0 / float(base["map_size"])
+    check("turned and unturned pieces land where planned (within a pixel)", turned > 0 and worst < px,
+          "%d turned 90 deg, worst error %.2f px" % (turned, worst / px))
+    col = tb["collect_shells"](asset)
+    res = tb["validate_layout"](asset)
+    bad = dict((c, len(res["items"][c])) for c in ("out_of_range", "crossing", "overlap", "padding")
+               if res["items"][c])
+    check("validation finds no overlap, crossing or padding issues after packing", not bad, str(bad))
+
+    # --- stable: the same shells in another order give the same layout
+    def spots(c, pl):
+        return sorted((sh.mesh, sh.uv_ids[0], tuple(round(v, 9) for v in pl["placements"][id(sh)]))
+                      for g in c["groups"] for sh in g["shells"])
+    first = spots(col, tb["make_plan"](col, base))
+    for g in col["groups"]:
+        g["shells"].reverse()
+    check("re-planning is stable whatever order shells were read in",
+          spots(col, tb["make_plan"](col, base)) == first)
+
+    # --- speed: 1,200 synthetic shells in 12 groups (pure math, no scene)
+    rng = __import__("random").Random(7)
+    groups = []
+    for gi in range(12):
+        shells = []
+        for _ in range(100):
+            w, h = rng.uniform(0.02, 0.6), rng.uniform(0.01, 0.15)
+            sh = tb["LayoutShell"]("m", [0, 1, 2, 3], w * h, w * h, [(0, 0), (w, 0), (w, h), (0, h)])
+            shells.append(sh)
+        groups.append({"set": "g%d" % gi, "uuid": "u%d" % gi, "key": "k%d" % gi, "section_index": gi // 4,
+                       "td": 100.0, "shells": shells, "print": "", "old_print": "", "stack": False,
+                       "orient": None, "tiles": []})
+    synth = {"groups": groups, "locked": [], "skipped": [], "conflicts": 0}
+    synth_settings = dict(base, texel_density=1.0, map_size="1", padding_px=0.002)
+    t0 = __import__("time").time()
+    sp = tb["plan_layout"](synth, synth_settings)
+    dt = __import__("time").time() - t0
+    check("plans 1,200 shells fast", dt < 0.25, "%.0f ms, %d tiles, %.0f%% filled" % (
+        dt * 1000, len(sp["new_tiles"]), efficiency(sp, synth_settings) * 100))
 
     # --- Upright: world up runs along +V for walls
     up_settings = dict(base, orientation="Upright")
