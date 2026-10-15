@@ -3053,6 +3053,8 @@ UDIM_STACK = "unlokUdimStack"
 UDIM_ORDER = "unlokUdimOrder"
 UDIM_SOURCE = "unlokUdimSource"
 UDIM_GROUP = "unlokUdimGroup"
+UDIM_ORIENT = "unlokUdimOrient"
+ORIENT_TOKENS = ("up", "keep", "axis")  # per-group orientation override in set names
 
 SECTION_SUFFIX = "UDS"
 ROOT_SUFFIX = "smartUDIM_SET"
@@ -3068,6 +3070,7 @@ def parse_group_name(name):
     short = name.split("|")[-1].split(":")[-1]
     td = cov = None
     stack = False
+    orient = None
     key_parts = []
     for token in short.split("_"):
         if not token:
@@ -3080,19 +3083,26 @@ def parse_group_name(name):
             cov = float(m_cov.group(1))
         elif token.lower() == "stack":
             stack = True
+        elif token.lower() in ORIENT_TOKENS:
+            orient = token.lower()
         elif token.isdigit() or token in (SECTION_SUFFIX, "SET", "smartUDIM"):
             continue
         else:
             key_parts.append(token)
-    return {"key": "_".join(key_parts) or None, "td": td, "cov": cov, "stack": stack}
+    out = {"key": "_".join(key_parts) or None, "td": td, "cov": cov, "stack": stack}
+    if orient:
+        out["orient"] = orient
+    return out
 
 
-def compose_material_set_name(key, td=100.0, cov=None, stack=False):
+def compose_material_set_name(key, td=100.0, cov=None, stack=False, orient=None):
     parts = ["td%s" % _num_token(td), key]
     if cov is not None and cov >= 0:
         parts.append("c%03d" % int(round(cov)))
     if stack:
         parts.append("stack")
+    if orient in ORIENT_TOKENS:
+        parts.append(orient)
     return "_".join(parts)
 
 
@@ -3132,6 +3142,7 @@ def _add_set_attrs(node, role):
         add(UDIM_COV, attributeType="double", defaultValue=-1.0)
         add(UDIM_STACK, attributeType="bool", defaultValue=False)
         add(UDIM_SOURCE, dataType="string")
+        add(UDIM_ORIENT, dataType="string")
     if role == "section":
         add(UDIM_ORDER, attributeType="long", defaultValue=0)
     if role in ("root", "section"):
@@ -3396,25 +3407,34 @@ class SmartUdimAsset(object):
                 cmds.setAttr(mat + "." + UDIM_KEY, key, type="string")
                 cmds.setAttr(mat + "." + UDIM_TD, td)
                 cmds.setAttr(mat + "." + UDIM_STACK, bool(parsed["stack"]))
+                if not cmds.attributeQuery(UDIM_ORIENT, node=mat, exists=True):
+                    cmds.addAttr(mat, longName=UDIM_ORIENT, dataType="string")
+                cmds.setAttr(mat + "." + UDIM_ORIENT, parsed.get("orient") or "", type="string")
                 cov = _get(mat, UDIM_COV, -1.0)
-                wanted = compose_material_set_name(key, td, cov if cov >= 0 else None, parsed["stack"])
+                wanted = compose_material_set_name(key, td, cov if cov >= 0 else None, parsed["stack"],
+                                                   parsed.get("orient"))
                 if _base_name(mat) != wanted:
                     cmds.rename(mat, _unique_set_name(wanted, mat))
 
-    def set_group_values(self, node, td=None, stack=None):
+    def set_group_values(self, node, td=None, stack=None, orient=None):
+        """orient: 'up' / 'keep' / 'axis', or '' to follow the layout setting."""
         role = set_role(node)
         with UndoChunk("Smart UDIM edit"):
             if td is not None:
                 cmds.setAttr(node + "." + UDIM_TD, float(td))
             if stack is not None and role == "material":
                 cmds.setAttr(node + "." + UDIM_STACK, bool(stack))
+            if orient is not None and role == "material":
+                if not cmds.attributeQuery(UDIM_ORIENT, node=node, exists=True):
+                    cmds.addAttr(node, longName=UDIM_ORIENT, dataType="string")
+                cmds.setAttr(node + "." + UDIM_ORIENT, orient if orient in ORIENT_TOKENS else "", type="string")
             key = _get(node, UDIM_KEY) or parse_group_name(node)["key"]
             if role == "section":
                 wanted = compose_section_set_name(key, _get(node, UDIM_TD, 100.0))
             else:
                 cov = _get(node, UDIM_COV, -1.0)
                 wanted = compose_material_set_name(key, _get(node, UDIM_TD, 100.0), cov if cov >= 0 else None,
-                                                   _get(node, UDIM_STACK, False))
+                                                   _get(node, UDIM_STACK, False), _get(node, UDIM_ORIENT, "") or None)
             return cmds.rename(node, _unique_set_name(wanted, node))
 
     def move_section(self, section, step):
@@ -3505,6 +3525,7 @@ class SmartUdimAsset(object):
                     "odd": odd,
                     "source": _get(mat, UDIM_SOURCE, "manual"),
                     "locked": bool(_get(mat, LAYOUT_LOCK, False)),
+                    "orient": _get(mat, UDIM_ORIENT, "") or "",
                 })
             sections.append({
                 "set": sec,
@@ -4194,6 +4215,10 @@ LAYOUT_TILES = "unlokUdimTiles"
 LAYOUT_PRINT = "unlokUdimPrint"
 LAYOUT_MODES = ("Fixed density", "Fit to tiles")
 MAP_SIZES = ("1024", "2048", "4096", "8192")
+# Main axis: longest direction along U (lying flat). Upright: world up along +V
+# (brick courses stay horizontal, walls read upright). Keep: never rotate.
+ORIENTATIONS = ("Main axis", "Upright", "Keep")
+_ORIENT_MODE = {"Main axis": "axis", "Upright": "up", "Keep": "keep"}
 _UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
               "mi": 1609.344}
 
@@ -4203,7 +4228,7 @@ LAYOUT_DEFAULTS = {
     "mode": "Fixed density",
     "max_tiles": 10,
     "padding_px": 8,
-    "rotate": True,
+    "orientation": "Main axis",
     "new_row_per_section": True,
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
@@ -4211,10 +4236,14 @@ LAYOUT_DEFAULTS = {
 
 
 class LayoutShell(object):
-    """One UV shell of one material group (all sizes before density scaling)."""
-    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "angle", "w0", "h0", "group")
+    """One UV shell of one material group (sizes before density scaling).
 
-    def __init__(self, mesh, uv_ids, area3d, area_uv, pts, rotate):
+    dims[mode] = (angle, w0, h0) for each orientation mode ('axis', 'up',
+    'keep'), so switching orientation is just a re-plan.
+    """
+    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "dims", "group")
+
+    def __init__(self, mesh, uv_ids, area3d, area_uv, pts, up_dir=None):
         self.mesh = mesh
         self.uv_ids = uv_ids
         self.area3d = area3d
@@ -4223,21 +4252,29 @@ class LayoutShell(object):
         cx = sum(p[0] for p in pts) / n
         cy = sum(p[1] for p in pts) / n
         self.cx, self.cy = cx, cy
-        angle = 0.0
-        if rotate and len(pts) > 2:
+
+        def box(angle):
+            ca, sa = math.cos(angle), math.sin(angle)
+            xs = [(p[0] - cx) * ca - (p[1] - cy) * sa for p in pts]
+            ys = [(p[0] - cx) * sa + (p[1] - cy) * ca for p in pts]
+            return max(xs) - min(xs), max(ys) - min(ys)
+
+        axis = 0.0
+        if len(pts) > 2:
             sxx = sum((p[0] - cx) ** 2 for p in pts)
             syy = sum((p[1] - cy) ** 2 for p in pts)
             sxy = sum((p[0] - cx) * (p[1] - cy) for p in pts)
-            angle = -0.5 * math.atan2(2.0 * sxy, sxx - syy)  # main axis onto U
-        ca, sa = math.cos(angle), math.sin(angle)
-        xs = [(p[0] - cx) * ca - (p[1] - cy) * sa for p in pts]
-        ys = [(p[0] - cx) * sa + (p[1] - cy) * ca for p in pts]
-        w0, h0 = max(xs) - min(xs), max(ys) - min(ys)
-        if rotate and h0 > w0:  # lie flat: shelves pack wide shells best
-            angle += math.pi / 2.0
-            w0, h0 = h0, w0
-        self.angle = angle
-        self.w0, self.h0 = w0, h0
+            axis = -0.5 * math.atan2(2.0 * sxy, sxx - syy)  # main axis onto U
+        w, h = box(axis)
+        if h > w:  # lie flat: shelves pack wide shells best
+            axis += math.pi / 2.0
+            w, h = h, w
+        self.dims = {"axis": (axis, w, h), "keep": (0.0,) + box(0.0)}
+        if up_dir is not None:
+            up = math.pi / 2.0 - math.atan2(up_dir[1], up_dir[0])  # world up -> +V
+            self.dims["up"] = (up,) + box(up)
+        else:  # flat (floor / roof) pieces have no up: fall back to the main axis
+            self.dims["up"] = self.dims["axis"]
         self.group = None
 
 
@@ -4261,8 +4298,38 @@ def _mesh_cache(xform, uv_set, unit_scale):
     for c in counts:
         face_uvs.append(ids[k:k + c])
         k += c
+    vcounts, connects = fn.getVertices()
+    face_vtx = []
+    k = 0
+    connects = list(connects)
+    for c in vcounts:
+        face_vtx.append(connects[k:k + c])
+        k += c
+    heights = [pt.y for pt in fn.getPoints(om.MSpace.kWorld)]
     return {"a3": [a * unit_scale for a in a3], "auv": auv, "uv_shell": list(uv_shell), "us": list(us),
-            "vs": list(vs), "face_uvs": face_uvs, "nf": nf}
+            "vs": list(vs), "face_uvs": face_uvs, "face_vtx": face_vtx, "heights": heights, "nf": nf}
+
+
+def _shell_up_direction(cache, faces):
+    """UV direction in which world height increases across a shell, or None
+    for flat (horizontal) pieces."""
+    us, vs, hs = cache["us"], cache["vs"], cache["heights"]
+    du_acc = dv_acc = 0.0
+    total = 0.0
+    for f in faces:
+        uvs, vtx = cache["face_uvs"][f], cache["face_vtx"][f]
+        c = len(uvs)
+        for i in range(c):
+            a, b = i, (i + 1) % c
+            dy = hs[vtx[b]] - hs[vtx[a]]
+            du, dv = us[uvs[b]] - us[uvs[a]], vs[uvs[b]] - vs[uvs[a]]
+            du_acc += du * dy
+            dv_acc += dv * dy
+            total += abs(dy) * math.hypot(du, dv)
+    mag = math.hypot(du_acc, dv_acc)
+    if total <= 1e-12 or mag < 0.05 * total:
+        return None
+    return du_acc / mag, dv_acc / mag
 
 
 def _group_print(members):
@@ -4279,7 +4346,7 @@ def _group_print(members):
     return "%d:%.4g" % (total_faces, area)
 
 
-def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):
+def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
@@ -4300,6 +4367,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):
                     "section_index": si,
                     "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
                     "print": _group_print(members), "old_print": _get(mat, LAYOUT_PRINT, "") or "",
+                    "stack": bool(_get(mat, UDIM_STACK, False)), "orient": _get(mat, UDIM_ORIENT, "") or None,
                     "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()]}
             if _get(mat, LAYOUT_LOCK, False):
                 locked.append(info)
@@ -4328,7 +4396,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):
                     if a3 <= 1e-12 or auv <= 1e-14:
                         continue
                     pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
-                    shell_obj = LayoutShell(xform, uv_ids, a3, auv, pts, rotate)
+                    shell_obj = LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs))
                     shell_obj.group = mat
                     info["shells"].append(shell_obj)
             groups.append(info)
@@ -4362,7 +4430,7 @@ def plan_layout(collected, settings, density_scale=1.0):
     rank = {k: i for i, k in enumerate(order)}
     groups = sorted(collected["groups"], key=lambda g: (g["section_index"], rank[g["key"]]))
 
-    placements = {}  # id(shell) -> (tile_u, tile_v, x, y, scale)
+    placements = {}  # id(shell) -> (tile_u, tile_v, x, y, scale, angle, w, h)
     stats = {}
     warnings = []
     tiles_used = set()
@@ -4370,7 +4438,9 @@ def plan_layout(collected, settings, density_scale=1.0):
     current_section = None
     tile_iter = None
     tile = None
-    shelf_y = shelf_h = cursor_x = 0.0
+    top_y = pad  # next free height in the current tile
+    orientation = s.get("orientation") or ("Main axis" if s.get("rotate", True) else "Keep")
+    default_mode = _ORIENT_MODE.get(orientation, "axis")
 
     def next_tile():
         t = next(tile_iter)
@@ -4384,51 +4454,79 @@ def plan_layout(collected, settings, density_scale=1.0):
             current_section = g["section_index"]
             tile_iter = _udim_tiles(row, 0, reserved)
             tile = None
-            shelf_y, shelf_h, cursor_x = pad, 0.0, pad
-        # density for this group (px/m) -> UV side scale per shell
+            top_y = pad
+        mode = g.get("orient") or default_mode
         density = td * g["td"] / 100.0
         compensate = 1.0
         sizes = []
         for sh in g["shells"]:
+            angle, w0, h0 = sh.dims.get(mode, sh.dims["axis"])
             target = sh.area3d * (density / res) ** 2  # UV area in tiles
             k = math.sqrt(target / sh.area_uv)
-            sizes.append((sh, k, sh.w0 * k, sh.h0 * k))
-        biggest = max([max(w, h) for _, _, w, h in sizes] or [0.0])
+            sizes.append((sh, k, angle, w0 * k, h0 * k))
+        biggest = max([max(w, h) for _, _, _, w, h in sizes] or [0.0])
         if biggest > usable:
             if s["auto_compensate"]:
                 compensate = usable / biggest * 0.999
-                sizes = [(sh, k * compensate, w * compensate, h * compensate) for sh, k, w, h in sizes]
+                sizes = [(sh, k * compensate, a, w * compensate, h * compensate) for sh, k, a, w, h in sizes]
                 warnings.append("%s: largest piece didn't fit a tile at %d px/m, so this group was lowered to "
                                 "%d px/m." % (g["key"], round(density), round(density * compensate)))
             else:
                 warnings.append("%s: a piece is bigger than a whole tile at %d px/m (raise Map size or lower "
                                 "the density, or turn on Auto-compensate)." % (g["key"], round(density)))
-        # each group starts on a fresh shelf, so groups sit in their own bands
-        if cursor_x > pad:
-            shelf_y += shelf_h + pad
-            shelf_h, cursor_x = 0.0, pad
+        # _stack groups: identical pieces share one spot (one footprint for N copies)
+        stacked = {}
+        unique = []
+        for item in sizes:
+            sh, k, a, w, h = item
+            if g.get("stack"):
+                sig = (len(sh.uv_ids), round(w, 3), round(h, 3))
+                if sig in stacked:
+                    stacked[sig][1].append(item)
+                    continue
+                stacked[sig] = (item, [])
+            unique.append(item)
+        # first-fit decreasing height: tallest first, and every later (shorter)
+        # piece goes into the first of this group's shelves with room, so gaps
+        # at the end of rows get filled. Groups never share a shelf.
+        unique.sort(key=lambda t: (-round(t[4], 4), -t[3]))
+        shelves = []  # [tile, y, height, cursor_x]
         g_tiles = set()
         area = 0.0
-        sizes.sort(key=lambda t: (-round(t[3], 4), -t[2]))
-        for sh, k, w, h in sizes:
+        for item in unique:
+            sh, k, a, w, h = item
             w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
             if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
                 w_res, h_res = min(w_res, usable), min(h_res, usable)
-            if tile is None:
-                tile = next_tile()
-            if cursor_x + w_res > 1.0 - pad + 1e-9:
-                shelf_y += shelf_h + pad
-                shelf_h, cursor_x = 0.0, pad
-            if shelf_y + h_res > 1.0 - pad + 1e-9:
-                tile = next_tile()
-                shelf_y, shelf_h, cursor_x = pad, 0.0, pad
-            placements[id(sh)] = (tile[0], tile[1], cursor_x, shelf_y, k)
-            g_tiles.add(1001 + tile[0] + 10 * tile[1])
-            cursor_x += w_res + pad
-            shelf_h = max(shelf_h, h_res)
+            spot = None
+            for shelf in shelves:
+                if h_res <= shelf[2] + 1e-9 and shelf[3] + w_res <= 1.0 - pad + 1e-9:
+                    spot = shelf
+                    break
+            if spot is None:
+                if tile is None:
+                    tile = next_tile()
+                    top_y = pad
+                if top_y + h_res > 1.0 - pad + 1e-9:
+                    tile = next_tile()
+                    top_y = pad
+                spot = [tile, top_y, h_res, pad]
+                shelves.append(spot)
+                top_y += h_res + pad
+            st_tile, y = spot[0], spot[1]
+            x = spot[3]
+            spot[3] += w_res + pad
+            placements[id(sh)] = (st_tile[0], st_tile[1], x, y, k, a, w, h)
+            g_tiles.add(1001 + st_tile[0] + 10 * st_tile[1])
             area += w * h
+            if g.get("stack"):
+                for dup in stacked[(len(sh.uv_ids), round(w, 3), round(h, 3))][1]:
+                    dsh, dk, da, dw, dh = dup
+                    placements[id(dsh)] = (st_tile[0], st_tile[1], x, y, dk, da, dw, dh)
+        n_stacked = sum(len(v[1]) for v in stacked.values())
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
-                           "density": density * compensate, "shells": len(g["shells"]),
+                           "density": density * compensate, "shells": len(g["shells"]), "stacked": n_stacked,
+                           "orientation": mode,
                            "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
     for g in collected["locked"]:
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": g["tiles"], "coverage": None,
@@ -4527,8 +4625,8 @@ def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set=
             us, vs = fn.getUVs(uv_set)
             us, vs = list(us), list(vs)
             for sh in shells:
-                tu, tv, x, y, k = plan["placements"][id(sh)]
-                ca, sa = math.cos(sh.angle), math.sin(sh.angle)
+                tu, tv, x, y, k, angle = plan["placements"][id(sh)][:6]
+                ca, sa = math.cos(angle), math.sin(angle)
                 pts = []
                 for u in sh.uv_ids:
                     du, dv = us[u] - sh.cx, vs[u] - sh.cy
@@ -5002,8 +5100,7 @@ class UdimMapWidget(QtWidgets.QWidget):
                 for sh in g["shells"]:
                     p = plan["placements"].get(id(sh))
                     if p:
-                        tu, tv, x, y, k = p
-                        self.shells.append((tu + x, tv + y, sh.w0 * k, sh.h0 * k, g["set"], g["key"]))
+                        self.shells.append((p[0] + p[2], p[1] + p[3], p[6], p[7], g["set"], g["key"]))
             self.locked_tiles = set()
             for g in collected["locked"]:
                 self.locked_tiles.update(g["tiles"])
@@ -5093,7 +5190,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
     TOOL_NAME = "Smart UDIM"
     TOOL_TIP = "Organise geometry into UDIM sections and material groups, clean it and check its UVs."
 
-    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK, COL_LOCK = range(6)
+    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK, COL_LOCK, COL_ORIENT = range(7)
 
     def __init__(self, parent=None):
         super(SmartUdimPanel, self).__init__(parent)
@@ -5181,8 +5278,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                            "Double-click TD % to change texel density, tick Stack for repeated "
                                            "pieces. They're plain Maya sets, so renaming works too.")
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock"])
+        self.tree.setColumnCount(7)
+        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock", "Orient"])
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tree.setMinimumHeight(220)
         self.tree.setRootIsDecorated(True)
@@ -5190,7 +5287,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(self.COL_NAME, QtWidgets.QHeaderView.Stretch)
-        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK, self.COL_LOCK):
+        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK, self.COL_LOCK, self.COL_ORIENT):
             header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemDoubleClicked.connect(self._item_double_clicked)
@@ -5353,11 +5450,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_growth = FloatField(0.0, 100.0, 0.0, 50.0, decimals=0, step=5.0)
         grid.add_row("Spare room %", self.lay_growth, "Leave this much extra space around every shell so small "
                                                       "model changes still fit without moving anything.")
-        self.lay_rotate = CheckField("Rotate shells onto their main axis")
-        self.lay_rotate.setValue(True)
-        self.lay_rotate.setToolTip("Turn it off to keep shells exactly as they're oriented (e.g. you already "
-                                   "straightened them).")
-        grid.add_full(self.lay_rotate)
+        self.lay_orient = ComboField(ORIENTATIONS)
+        grid.add_row("Orientation", self.lay_orient,
+                     "Main axis: each shell's longest direction along U, lying flat (packs tightest).\n"
+                     "Upright: world up along +V, so brick courses stay level and walls read upright.\n"
+                     "Keep: never rotate (you already straightened them).\n"
+                     "Override per group in the Orient column (or _up / _keep / _axis in the set name).")
         self.lay_rows = CheckField("Each section starts a new row")
         self.lay_rows.setValue(True)
         grid.add_full(self.lay_rows)
@@ -5380,7 +5478,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
-                  self.lay_rotate, self.lay_rows, self.lay_comp):
+                  self.lay_orient, self.lay_rows, self.lay_comp):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -5574,6 +5672,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     mitem.setCheckState(self.COL_STACK, QtCore.Qt.Checked if mat["stack"] else QtCore.Qt.Unchecked)
                     mitem.setCheckState(self.COL_LOCK, QtCore.Qt.Checked if mat["locked"] else QtCore.Qt.Unchecked)
                     mitem.setToolTip(self.COL_LOCK, "Locked groups keep their UVs and tiles when you lay out again.")
+                    mitem.setText(self.COL_ORIENT, mat["orient"] or "auto")
+                    mitem.setToolTip(self.COL_ORIENT, "Double-click to cycle: auto (the layout setting), up "
+                                                      "(upright), keep (never rotate), axis (main axis).")
                     if mat["odd"]:
                         mitem.setForeground(self.COL_ITEMS, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["warn"])))
                         mitem.setToolTip(self.COL_ITEMS, "Has non-face members that layout ignores: %s" %
@@ -5677,6 +5778,22 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _item_double_clicked(self, item, column):
         if column in (self.COL_TD, self.COL_NAME):
             self.tree.editItem(item, column)
+        elif column == self.COL_ORIENT:
+            self._cycle_orient(item)
+
+    @ui_safe
+    def _cycle_orient(self, item):
+        asset = self._asset()
+        node = item.data(0, QtCore.Qt.UserRole)
+        if asset is None or not node or set_role(node) != "material":
+            return
+        order = ["", "up", "keep", "axis"]
+        cur = _get(node, UDIM_ORIENT, "") or ""
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else ""
+        renamed = asset.set_group_values(node, orient=nxt)
+        self._collected = None
+        self.set_status("%s orientation: %s." % (renamed, nxt or "auto (layout setting)"))
+        self._refresh_timer.start()
 
     # ======================================================== actions
     @ui_safe
@@ -5841,7 +5958,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         return {"texel_density": self.lay_density.value(), "map_size": self.lay_map.value(),
                 "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
                 "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
-                "rotate": self.lay_rotate.value(), "new_row_per_section": self.lay_rows.value(),
+                "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
@@ -5870,10 +5987,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return None
         t0 = time.time()
         settings = self._layout_settings()
-        if self._collected is None or self._collected.get("rotate") != settings["rotate"]:
+        if self._collected is None:  # orientation etc. are re-plans only: no scene read
             uv_set = self.uv_set.text().strip() or "map1"
-            self._collected = collect_shells(asset, uv_set, rotate=settings["rotate"])
-            self._collected["rotate"] = settings["rotate"]
+            self._collected = collect_shells(asset, uv_set)
         self._plan = make_plan(self._collected, settings)
         self.udim_map.set_plan(self._collected, self._plan)
         self._summarise_plan(time.time() - t0)

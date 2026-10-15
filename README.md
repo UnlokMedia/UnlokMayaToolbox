@@ -198,11 +198,23 @@ density. The actual layout is still being built; see
    - **Density:** every shell is scaled to exactly the target texel density,
      times its group's and section's TD %. A group renamed `td150_...` gets
      1.5x.
-   - **Packing:** shells are rotated onto their main axis and laid flat (turn
-     *Rotate* off to keep your own orientation). They're packed tile by tile
-     in rows, tallest first, so similar pieces sit together. A group flows
-     into the next tile when one fills up, no shell crosses a tile border,
-     and each section starts on a new row.
+   - **Orientation:**
+     - *Main axis*: the longest direction along U, lying flat. Packs
+       tightest.
+     - *Upright*: world up along +V, so brick courses stay level and walls
+       read upright. Flat pieces fall back to Main axis.
+     - *Keep*: never rotate, for shells you've already straightened.
+
+     Override it per group with the **Orient** column (double-click to
+     cycle), or put `_up` / `_keep` / `_axis` in the set name.
+   - **Packing:** shells are packed tile by tile in rows, tallest first, so
+     similar pieces sit together. Shorter pieces fill the gaps at the end of
+     earlier rows in the same group. A group flows into the next tile when
+     one fills up, no shell crosses a tile border, and each section starts
+     on a new row.
+   - **Stacking:** in a group marked `_stack` (Stack column), identical
+     pieces such as repeated windows or tiles share one spot, so they cost
+     one footprint, not N. Validation knows these overlaps are intentional.
    - **Fit to tiles:** finds the highest density that fits your tile budget.
    - **Auto-compensate:** lowers only a group whose piece is bigger than a
      tile, and tells you so.
@@ -270,6 +282,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and
+  first-fit packing.
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

@@ -167,10 +167,13 @@ finished work.
     padding; click to select)
   - PNG / clipboard hand-off sheet (shells in material colours, tiles,
     sections, legend)
+- **Done:**
+  - orientation modes (Main axis / Upright / Keep) with a per-group
+    override
+  - `_stack` stacking of identical pieces
+  - first-fit shelf packing (about 65% fill on the test building)
 - **Still open:**
-  - tighter (non-shelf) packing
-  - per-set rotation modes (align grain)
-  - `_stack` shell stacking
+  - a true 2D packer (beyond shelves) for denser fills
   - the UV Editor overlay (M8)
   - the UnlokRenamer sanity-check hookup (beyond the naming list)
 

@@ -154,6 +154,18 @@
     - `apply_layout` writes through `write_uvs` (undoable) and stores
       tiles, a fingerprint and coverage on each set.
     - Locks live in `unlokUdimLock`; tiles in `unlokUdimTiles`.
+    - Orientation:
+      - Each `LayoutShell` stores `dims[mode] = (angle, w0, h0)` for 'axis',
+        'up' and 'keep', so switching modes is a re-plan with no scene read.
+      - 'up' comes from `_shell_up_direction`: world height gradient in UV,
+        accumulated over edges.
+      - The per-group override is the `unlokUdimOrient` attribute plus the
+        `_up` / `_keep` / `_axis` name token.
+    - Placements are `(tile_u, tile_v, x, y, scale, angle, w, h)`.
+    - `_stack` groups share placements for shells with the same signature
+      `(uv count, w, h)` after density scaling.
+    - Packing is first-fit decreasing height within each group (groups
+      never share a shelf).
     - The plan keys stats by set name *and* uuid: names change when
       coverage is written.
   - **Validation and hand-off** (`validate_layout`, `render_handoff_sheet`):

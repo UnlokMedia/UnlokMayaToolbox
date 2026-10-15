@@ -86,8 +86,8 @@ def run():
     rects = []
     for g in col["groups"]:
         for sh in g["shells"]:
-            tu, tv, x, y, k = plan["placements"][id(sh)]
-            rects.append((tu + x, tv + y, tu + x + sh.w0 * k, tv + y + sh.h0 * k))
+            tu, tv, x, y, k, a, w, h = plan["placements"][id(sh)]
+            rects.append((tu + x, tv + y, tu + x + w, tv + y + h))
     overl = 0
     rects.sort()
     for i in range(len(rects)):
@@ -193,7 +193,8 @@ def run():
     check("auto-compensate lowers just the oversized group", slab["density"] < 2048.0 and
           any("concreteGrey" in w for w in plan["warnings"]),
           "%.0f px/m; %s" % (slab["density"], plan["warnings"][:1]))
-    big = max(max(sh.w0, sh.h0) * plan["placements"][id(sh)][4] for g in col["groups"] if g["key"] == "concreteGrey"
+    big = max(max(plan["placements"][id(sh)][6], plan["placements"][id(sh)][7]) for g in col["groups"]
+              if g["key"] == "concreteGrey"
               for sh in g["shells"])
     check("oversized piece now fits in a tile", big <= 1.0, "%.3f" % big)
 
