@@ -167,6 +167,29 @@ density. The actual layout is still being built; see
    - **Lists for skipping:** meshes with missing UVs, faces without UVs, and
      instanced meshes.
 
+6. **Auto UV**: for assets that are modelled, named and grouped but don't
+   have good UVs yet. It gives you an organised, usable base to polish from;
+   it doesn't aim for perfect UVs.
+   - **Analyse** scores every mesh's UVs from 0 (none or garbage) to 1
+     (clean) and lists them worst first. A face counts as bad if it has no
+     UVs, is collapsed, folded or overlapping, or is stretched more than 4x
+     compared with the rest of its own shell. Rectangulated or straightened
+     shells and shells at different densities aren't penalised.
+   - **Auto UV** works through these steps:
+     1. backs up the current UVs into `map1_backup` (only if that set doesn't
+        exist yet, so re-runs keep your originals)
+     2. cleans bad geometry
+     3. re-unwraps every mesh scoring below *Keep above* (0.85): normal-based
+        projection, sew soft edges, cut hard edges and edges sharper than
+        *Seam angle* as seams, Unfold3D auto-seams for closed shapes, relax,
+        then extra cuts where shells are still stretched
+     4. packs each material group into its own UDIM tile, with sections on
+        their own rows and each material in the same column for every section
+   - **Restore Backup** copies the backup set back into `map1` for the
+     selected meshes, or for all of them if nothing is selected.
+   - About 7 s for a 47-mesh test building that includes a 19,000-face dome.
+     The whole run is one Ctrl+Z.
+
 Every Smart UDIM action is a single Ctrl+Z.
 
 ## How it stays fast
@@ -197,6 +220,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   ```bash
   "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_toolbox.py
   ```
+- `tests/test_auto_uv.py`: headless Auto UV tests on a messy generated
+  building (`--snapshot DIR` also writes a UV snapshot).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

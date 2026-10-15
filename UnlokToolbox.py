@@ -3794,6 +3794,386 @@ def skipped_meshes(report):
 
 
 # =============================================================================
+# Smart UDIM - Auto UV (scorched-earth first pass)
+# =============================================================================
+#
+# For assets that are modelled, named and grouped but not UV'd: score how laid
+# out each mesh already is, re-unwrap the bad ones (worst first) and pack
+# everything by section and material. Not meant to be final UVs: a clean,
+# organised, usable base that shows what's left to do.
+#
+#   unwrap = normal-based projection -> sew soft edges back together -> cut
+#            hard / sharp edges as seams -> Unfold3D auto-seams for closed
+#            shells (spheres, pipes) -> relax -> extra cuts where shells are
+#            still stretched -> relax again
+#
+# All the heavy lifting is Maya's own C++ (projection, sew/cut, Unfold3D,
+# per-face areas); Python only decides what to run on.
+
+AUTO_UV_STRETCH_TOL = math.log(4.0)  # face area ratio 4x off its shell's = stretched
+AUTO_UV_KEEP_SCORE = 0.85
+# Unfold3D packing grid. 1024 packs ~3x faster than 2048 with the same result
+# quality for a first pass; padding stays 8 px on a 2K map either way.
+AUTO_UV_PACKING = {"Fast": 512, "Balanced": 1024, "Best": 2048}
+
+
+def _mesh_fn(xform):
+    shapes = cmds.listRelatives(xform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+    if not shapes:
+        return None
+    dag = get_dag_path(shapes[0])
+    return om.MFnMesh(dag) if dag is not None else None
+
+
+def _face_areas(xform, nf):
+    """Per-face (world area, UV area) from Maya's C++ evaluator."""
+    faces = "%s.f[0:%d]" % (xform, nf - 1)
+    a3 = cmds.polyEvaluate(faces, worldFaceArea=True)
+    auv = cmds.polyEvaluate(faces, uvFaceArea=True)
+    if not isinstance(a3, list):
+        a3, auv = [a3], [auv]
+    return a3, auv
+
+
+def uv_quality(xform, uv_set="map1", check_overlap=True):
+    """How laid out a mesh already is: (score 0..1, reason).
+
+    Score = share of the surface (by 3D area) whose UVs are fine. A face is
+    bad if it has no / zero-area UVs, is folded over inside its shell, overlaps
+    another face, or its area ratio is more than 4x off its shell's median.
+    Comparing each face to *its own shell* keeps rectangulated / straightened
+    shells and shells at different densities from counting as stretched.
+    """
+    fn = _mesh_fn(xform)
+    if fn is None:
+        return 0.0, "not a mesh"
+    if uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return 0.0, "no UVs"
+    counts, ids = fn.getAssignedUVs(uv_set)
+    nf = len(counts)
+    if nf == 0:
+        return 0.0, "no faces"
+    if any(c == 0 for c in counts):
+        return 0.0, "faces without UVs"
+    if fn.currentUVSetName() != uv_set:
+        # per-face UV areas read the current set; switching it is view state,
+        # so don't leave stray undo steps between tool actions
+        with NoUndo():
+            cmds.polyUVSet(xform, currentUVSet=True, uvSet=uv_set)
+    a3, auv = _face_areas(xform, nf)
+    nshell, uv_shell = fn.getUvShellsIds(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    us, vs = list(us), list(vs)
+    ids = list(ids)
+    face_shell, signs = [], []
+    k = 0
+    for c in counts:
+        face_shell.append(uv_shell[ids[k]])
+        area = 0.0
+        for i in range(c):
+            a = ids[k + i]
+            b = ids[k + (i + 1) % c]
+            area += us[a] * vs[b] - us[b] * vs[a]
+        signs.append(area >= 0)
+        k += c
+    logs, wind = {}, {}
+    for f in range(nf):
+        s = face_shell[f]
+        if a3[f] > 1e-12 and auv[f] > 1e-14:
+            logs.setdefault(s, []).append(math.log(auv[f] / a3[f]))
+        wind[s] = wind.get(s, 0.0) + (a3[f] if signs[f] else -a3[f])
+    med = {}
+    for s, v in logs.items():
+        v.sort()
+        med[s] = v[len(v) // 2]
+    total = sum(a3) or 1.0
+    bad = 0.0
+    for f in range(nf):
+        if a3[f] <= 1e-12:
+            continue
+        s = face_shell[f]
+        if auv[f] <= 1e-14 or s not in med:
+            bad += a3[f]
+        elif abs(math.log(auv[f] / a3[f]) - med[s]) > AUTO_UV_STRETCH_TOL:
+            bad += a3[f]
+        elif signs[f] != (wind[s] >= 0):
+            bad += a3[f]  # folded over inside its shell
+    if check_overlap:
+        overlap = cmds.polyUVOverlap("%s.f[0:%d]" % (xform, nf - 1), overlappingComponents=True) or []
+        if overlap:
+            idx = set()
+            for comp in overlap:
+                faces = _parse_face_spec(comp.partition(".")[2])
+                if faces:
+                    idx.update(faces)
+            bad += sum(a3[i] for i in idx if i < nf)
+    score = max(0.0, 1.0 - bad / total)
+    if nf > 20 and nshell > nf * 0.5:
+        return score * 0.5, "over-split (%d shells for %d faces)" % (nshell, nf)
+    if score < 1.0:
+        return score, "stretched / overlapping / folded UVs"
+    return score, ""
+
+
+def _edges_by_constraint(meshes, **constraint):
+    """Edges matching a polySelectConstraint, via Maya's C++ selection
+    filter (fast on big meshes). Leaves the constraint state reset."""
+    if not meshes:
+        return []
+    cmds.select([m + ".e[*]" for m in meshes], replace=True)
+    try:
+        cmds.polySelectConstraint(mode=2, type=0x8000, **constraint)
+        return cmds.ls(selection=True, flatten=True, long=True) or []
+    finally:
+        cmds.polySelectConstraint(mode=0, angle=0, smoothness=0, disable=True)
+
+
+def _stretched_shell_faces(xform, uv_set="map1"):
+    """Faces in shells that are still badly stretched or collapsed."""
+    fn = _mesh_fn(xform)
+    if fn is None or fn.numUVs(uv_set) == 0:
+        return []
+    counts, ids = fn.getAssignedUVs(uv_set)
+    nf = len(counts)
+    a3, auv = _face_areas(xform, nf)
+    _, uv_shell = fn.getUvShellsIds(uv_set)
+    shell_faces = {}
+    k = 0
+    for f, c in enumerate(counts):
+        if c:
+            shell_faces.setdefault(uv_shell[ids[k]], []).append(f)
+        k += c
+    bad = []
+    for fs in shell_faces.values():
+        area3 = sum(a3[f] for f in fs)
+        if area3 > 1e-12 and sum(auv[f] for f in fs) < 1e-10 * max(area3, 1.0):
+            bad.extend(fs)
+            continue
+        logs = sorted(math.log(auv[f] / a3[f]) for f in fs if a3[f] > 1e-12 and auv[f] > 1e-14)
+        if not logs:
+            continue
+        med = logs[len(logs) // 2]
+        off = sum(1 for v in logs if abs(v - med) > AUTO_UV_STRETCH_TOL)
+        if off > max(1, 0.05 * len(logs)):
+            bad.extend(fs)
+    return bad
+
+
+def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
+    """Copy uv_set to backup_set on meshes that have UVs and no backup yet
+    (an existing backup is never overwritten, so re-runs keep the original)."""
+    made = 0
+    for xform in meshes:
+        fn = _mesh_fn(xform)
+        if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+            continue
+        if backup_set in fn.getUVSetNames():
+            continue
+        cmds.polyUVSet(xform, copy=True, uvSet=uv_set, newUVSet=backup_set)
+        made += 1
+    return made
+
+
+def restore_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
+    """Copy backup_set back over uv_set. Returns how many meshes had one."""
+    restored = 0
+    with UndoChunk("Smart UDIM restore UVs"):
+        for xform in meshes:
+            fn = _mesh_fn(xform)
+            if fn is None or backup_set not in fn.getUVSetNames():
+                continue
+            cmds.polyUVSet(xform, copy=True, uvSet=backup_set, newUVSet=uv_set)
+            cmds.polyUVSet(xform, currentUVSet=True, uvSet=uv_set)
+            restored += 1
+    return restored
+
+
+def auto_unwrap(meshes, hard_angle=40.0, passes=2):
+    """Unwrap meshes (see the section comment). Returns {mesh: error} for any
+    that failed; one bad mesh never stops the rest."""
+    failed = {}
+    if not meshes:
+        return failed
+    cmds.loadPlugin("Unfold3D", quiet=True)
+    ok = []
+    for xform in meshes:  # projection works one object at a time
+        try:
+            cmds.polyAutoProjection(xform + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1,
+                                    percentageSpace=0.2, scaleMode=1, constructionHistory=False)
+            ok.append(xform)
+        except Exception as exc:
+            failed[xform] = "projection failed: %s" % exc
+    hard = set(_edges_by_constraint(ok, smoothness=1))
+    sharp = set(_edges_by_constraint(ok, angle=1, anglebound=(hard_angle, 180.0)))
+    soft = [e for e in _edges_by_constraint(ok, angle=1, anglebound=(0.0, hard_angle)) if e not in hard]
+    by_soft, by_seam = {}, {}
+    for e in soft:
+        by_soft.setdefault(e.split(".")[0], []).append(e)
+    for e in hard | sharp:
+        by_seam.setdefault(e.split(".")[0], []).append(e)
+    for xform in ok:
+        try:
+            if by_soft.get(xform):
+                cmds.polyMapSewMove(by_soft[xform], constructionHistory=False)
+            if by_seam.get(xform):
+                cmds.polyMapCut(by_seam[xform], constructionHistory=False)
+        except Exception as exc:
+            failed[xform] = "seams failed: %s" % exc
+    ok = [m for m in ok if m not in failed]
+
+    def unfold(targets):
+        try:
+            cmds.u3dUnfold(targets, iterations=1, pack=0, borderintersection=1, triangleflip=1,
+                           mapsize=1024, roomspace=0)
+        except Exception:
+            for m in targets:  # isolate the culprit
+                try:
+                    cmds.u3dUnfold(m, iterations=1, pack=0, borderintersection=1, triangleflip=1,
+                                   mapsize=1024, roomspace=0)
+                except Exception as exc:
+                    failed[m] = "unfold failed: %s" % exc
+
+    if ok:
+        try:
+            cmds.select(ok, replace=True)
+            cmds.u3dAutoSeam(splitShells=0, cutPipes=1)  # closed shells need at least one seam
+        except Exception:
+            pass
+        unfold(ok)
+    for _ in range(passes):
+        bad = []
+        for m in ok:
+            if m in failed:
+                continue
+            bad.extend("%s.f[%s]" % (m, r[2:-1]) for r in face_ranges(_stretched_shell_faces(m)))
+        if not bad:
+            break
+        try:
+            cmds.select(bad, replace=True)
+            cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
+        except Exception:
+            pass
+        unfold(sorted(set(b.split(".")[0] for b in bad)))
+    return failed
+
+
+def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048):
+    """Pack every material group into its own UDIM tile.
+
+    Sections take bands of rows (in section order); each material keeps the
+    same column in every section, so e.g. glass sits in the same spot for
+    every building. Texel density is even within a group (multi-tile groups
+    and density across groups are the next milestone).
+    """
+    cmds.loadPlugin("Unfold3D", quiet=True)
+    exclude = set(exclude)
+    sections = asset.sections()
+    keys = sorted(set(_get(m, UDIM_KEY) or parse_group_name(m)["key"]
+                      for s in sections for m in asset.materials(s)))
+    column = {k: i for i, k in enumerate(keys)}
+    rows_per_section = max(1, (len(keys) + 9) // 10)
+    pad = float(padding)
+    placed = []
+    for si, sec in enumerate(sections):
+        for mat in asset.materials(sec):
+            members, _ = expand_members(mat)
+            items = []
+            for xform, faces in members.items():
+                if xform in exclude:
+                    continue
+                if faces is None:
+                    items.append(xform)
+                else:
+                    items.extend("%s.%s" % (xform, r) for r in face_ranges(faces))
+            if not items:
+                continue
+            col = column[_get(mat, UDIM_KEY) or parse_group_name(mat)["key"]]
+            u0 = col % 10
+            v0 = si * rows_per_section + col // 10
+            # NB: u3dLayout's box is [uMin, uMax, vMin, vMax]. scl=1 keeps shells'
+            # 3D size ratio (even density in the group); the default layout
+            # scale mode fits the group to the box.
+            box = [u0 + pad, u0 + 1.0 - pad, v0 + pad, v0 + 1.0 - pad]
+            cmds.u3dLayout(items, res=resolution, scl=1, rot=1, rst=90, spc=pad, mar=pad, box=box)
+            placed.append((mat, 1001 + u0 + 10 * v0))
+    return placed
+
+
+def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
+                hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing="Balanced"):
+    """The whole Auto UV pass on an asset, as one Ctrl+Z.
+
+    Returns {"rows": [{mesh, before, reason, after, action}], "timing": {...},
+    "tiles": [(material set, udim)], "backups": n}. Rows are worst first.
+    """
+    timing = {}
+    t0 = time.time()
+    meshes, instanced = asset.meshes()
+    rows = []
+    scores = {}
+    for m in meshes:
+        try:
+            scores[m] = uv_quality(m, uv_set)
+        except Exception as exc:
+            scores[m] = (0.0, "couldn't score: %s" % exc)
+    timing["score"] = time.time() - t0
+    order = sorted(meshes, key=lambda m: scores[m][0])
+    todo = [m for m in order if scores[m][0] < keep_score]
+    if analyse_only:
+        rows = [{"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": None,
+                 "action": "will unwrap" if m in todo else "keep"} for m in order]
+        rows += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"}
+                 for m in instanced]
+        return {"rows": rows, "timing": timing, "tiles": [], "backups": 0}
+
+    backups = 0
+    failed = {}
+    tiles = []
+    with UndoChunk("Smart UDIM Auto UV"), PreserveSelection():
+        if clean_first and todo:
+            t = time.time()
+            issues = detect_geometry_issues(todo)
+            dirty = sorted(set(issues["lamina"]) | set(issues["nonmanifold"]) | set(issues["zeroarea"]))
+            if dirty:
+                _run_cleanup(dirty, True, True, True)
+            timing["clean"] = time.time() - t
+        if backup:
+            backups = backup_uvs(meshes, uv_set, backup_set)
+        for m in meshes:
+            fn = _mesh_fn(m)
+            if fn is not None and uv_set in fn.getUVSetNames():
+                if fn.currentUVSetName() != uv_set:
+                    cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
+            elif fn is not None:
+                cmds.polyUVSet(m, create=True, uvSet=uv_set)
+                cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
+        t = time.time()
+        failed = auto_unwrap(todo, hard_angle=hard_angle)
+        timing["unwrap"] = time.time() - t
+        if pack:
+            t = time.time()
+            tiles = pack_udims(asset, exclude=set(failed) | set(instanced),
+                               resolution=AUTO_UV_PACKING.get(packing, 1024))
+            timing["pack"] = time.time() - t
+        # scoring can switch a mesh's current UV set: keep it inside the chunk so
+        # one Ctrl+Z still undoes the whole run
+        for m in order:
+            if m in failed:
+                rows.append({"mesh": m, "before": scores[m][0], "reason": failed[m], "after": None,
+                             "action": "failed"})
+                continue
+            after = uv_quality(m, uv_set, check_overlap=pack)[0] if (m in todo or pack) else scores[m][0]
+            action = "unwrapped" if m in todo else "kept"
+            if after < keep_score:
+                action = "check" if m in todo else "kept (check)"
+            rows.append({"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": after,
+                         "action": action})
+    rows += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"} for m in instanced]
+    timing["total"] = time.time() - t0
+    return {"rows": rows, "timing": timing, "tiles": tiles, "backups": backups}
+
+
+# =============================================================================
 # Smart UDIM - panel
 # =============================================================================
 
@@ -3841,6 +4221,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.asset = None
         self.snapshot = None
         self.report = {}
+        self.auto_result = None
         self._jobs = []
         self._populating = False
         self._refresh_timer = QtCore.QTimer(self)
@@ -3996,10 +4377,76 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.report_tree)
         col.addWidget(card)
 
-        # ---- 6. layout (next milestone)
-        card = self.step_layout = StepCard(6, "Lay out UDIMs", "Texel density, packing by material, one band of "
-                                                               "rows per section and a UDIM map. Coming next.")
-        soon = primary_button("Lay Out UDIMs (coming soon)")
+        # ---- 6. auto UV
+        card = self.step_auto = StepCard(6, "Auto UV", "For assets without good UVs: unwraps the meshes that "
+                                                       "aren't laid out yet (worst first), keeps the ones that are, "
+                                                       "and packs everything by section and material.")
+        grid = Section("", header=False)
+        backup_row = QtWidgets.QWidget()
+        bl2 = QtWidgets.QHBoxLayout(backup_row)
+        bl2.setContentsMargins(0, 0, 0, 0)
+        self.auto_backup = CheckField("Back up UVs to")
+        self.auto_backup.setValue(True)
+        self.auto_backup.setToolTip("Copies each mesh's current UVs into this set first (only if it doesn't "
+                                    "exist yet, so re-runs keep your originals). Restore Backup copies it back.")
+        self.auto_backup_name = QtWidgets.QLineEdit("map1_backup")
+        bl2.addWidget(self.auto_backup)
+        bl2.addWidget(self.auto_backup_name, 1)
+        grid.add_full(backup_row)
+        self.auto_keep = FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05)
+        self.auto_keep.setValue(AUTO_UV_KEEP_SCORE)
+        grid.add_row("Keep above", self.auto_keep,
+                     "Meshes whose UVs score at least this (1 = clean, 0 = none / garbage) are kept as they are.")
+        self.auto_angle = FloatField(1.0, 179.0, 10.0, 90.0, decimals=0, step=5.0)
+        self.auto_angle.setValue(40.0)
+        grid.add_row("Seam angle", self.auto_angle,
+                     "Edges sharper than this, and edges marked hard, become UV seams.")
+        self.auto_clean = CheckField("Clean bad geometry first")
+        self.auto_clean.setValue(True)
+        self.auto_clean.setToolTip("Fix lamina, non-manifold and zero-area faces on the meshes being unwrapped.")
+        grid.add_full(self.auto_clean)
+        self.auto_pack = CheckField("Pack into UDIM tiles by section and material")
+        self.auto_pack.setValue(True)
+        self.auto_pack.setToolTip("Each material group gets its own tile; sections take their own rows and a "
+                                  "material keeps the same column in every section.")
+        grid.add_full(self.auto_pack)
+        self.auto_packing = ComboField(list(AUTO_UV_PACKING))
+        self.auto_packing.setValue("Balanced")
+        grid.add_row("Packing", self.auto_packing,
+                     "Fast / Balanced / Best packing precision. Balanced is about 3x faster than Best and plenty "
+                     "for a first pass.")
+        card.add(grid)
+        analyse = secondary_button("Analyse", "Score every mesh's UVs (worst first) without changing anything.")
+        analyse.clicked.connect(lambda *_: self.analyse_uvs())
+        restore = secondary_button("Restore Backup", "Copy the backup set back into the UV set, for the selected "
+                                                     "meshes (or all of them when nothing is selected).")
+        restore.clicked.connect(lambda *_: self.restore_backup())
+        card.add(button_row(analyse, restore))
+        run_auto = primary_button("Auto UV")
+        run_auto.setMinimumHeight(28)
+        run_auto.setToolTip("Back up, clean, unwrap what isn't laid out and pack. One Ctrl+Z undoes it all.")
+        run_auto.clicked.connect(lambda *_: self.auto_uv())
+        card.add(run_auto)
+        self.auto_tree = QtWidgets.QTreeWidget()
+        self.auto_tree.setColumnCount(4)
+        self.auto_tree.setHeaderLabels(["Mesh", "Before", "After", "Result"])
+        self.auto_tree.setMinimumHeight(150)
+        self.auto_tree.setAlternatingRowColors(True)
+        self.auto_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        ah = self.auto_tree.header()
+        ah.setStretchLastSection(False)
+        ah.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        for c in (1, 2, 3):
+            ah.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
+        self.auto_tree.itemSelectionChanged.connect(self._auto_selected)
+        card.add(self.auto_tree)
+        col.addWidget(card)
+
+        # ---- 7. smart layout (next milestone)
+        card = self.step_layout = StepCard(7, "Smart layout", "Even texel density across groups, groups that span "
+                                                              "several tiles, locked tiles and the UDIM map. "
+                                                              "Coming next.")
+        soon = primary_button("Smart Layout (coming soon)")
         soon.setEnabled(False)
         card.add(soon)
         col.addWidget(card)
@@ -4024,7 +4471,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.step_scan.set_state("done" if sorted_ok else ("current" if has_root else "todo"))
         self.step_groups.set_state("done" if clean_groups else "todo")
         self.naming_section.set_state("done" if names_ok else "todo")
-        self.step_prep.set_state("done" if prepped else ("current" if clean_groups else "todo"))
+        auto_done = bool(self.auto_result and not self.auto_result.get("analysed_only"))
+        auto_clean = auto_done and not any(r["action"] in ("failed", "check") for r in self.auto_result["rows"])
+        self.step_prep.set_state("done" if prepped else ("current" if clean_groups and not auto_done else "todo"))
+        self.step_auto.set_state("done" if auto_clean else ("current" if clean_groups else "todo"))
         self.step_layout.set_state("todo")
         if not has_root:
             self.next_banner.set_text("Select the asset's top group (e.g. <b>house_GRP</b>) and press "
@@ -4037,16 +4487,26 @@ class SmartUdimPanel(QtWidgets.QWidget):
         elif snap["overlaps"]:
             self.next_banner.set_text("%d mesh(es) are in two groups. Highlight the right group and press "
                                       "<b>Assign Selection</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
+        elif auto_done:
+            rows = self.auto_result["rows"]
+            n_check = sum(1 for r in rows if r["action"] in ("failed", "check"))
+            if n_check:
+                self.next_banner.set_text("Auto UV done. <b>%d mesh(es)</b> still need a look (amber / red in step "
+                                          "6): click one to select it." % n_check, tag="CHECK", tone="warn")
+            else:
+                self.next_banner.set_text("Auto UV done: everything is unwrapped and packed into UDIMs. Polish "
+                                          "by hand from here; old UVs are in the backup set.", tag="DONE",
+                                          tone="done")
         elif not self.report:
-            self.next_banner.set_text("Check the groups in step 3 (TD %, Stack), then press <b>Run "
-                                      "Pre-process</b>.")
+            self.next_banner.set_text("Check the groups in step 3, then <b>Run Pre-process</b>. No good UVs yet? "
+                                      "Press <b>Auto UV</b> in step 6 to unwrap and pack the lot.")
         elif skipped:
             self.next_banner.set_text("%d mesh(es) will be skipped (no UVs / instanced). Fix them and run "
                                       "<b>Pre-process</b> again, or carry on without them." % len(skipped),
                                       tag="CHECK", tone="warn")
         else:
-            self.next_banner.set_text("Ready for layout. UDIM layout (step 6) arrives in the next update.",
-                                      tag="READY", tone="done")
+            self.next_banner.set_text("Press <b>Auto UV</b> (step 6) to unwrap what isn't laid out and pack it "
+                                      "all into UDIMs, or <b>Analyse</b> to see the worst meshes first.")
 
     # ============================================================ state
     def set_status(self, text, level="info"):
@@ -4061,6 +4521,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def set_asset(self, asset):
         self.asset = asset
         self.report = {}
+        self.auto_result = None
+        self._fill_auto()
         self._fill_report()
         self.refresh()
 
@@ -4371,6 +4833,92 @@ class SmartUdimPanel(QtWidgets.QWidget):
         level = "warn" if (skipped or warn) else "info"
         self.set_status("Pre-process on %d meshes in %.2fs: %d problem(s) fixed, %d mesh(es) will be skipped, "
                         "%d with warnings." % (len(meshes), time.time() - t0, fixed, skipped, warn), level=level)
+
+    def _auto_options(self):
+        return dict(uv_set=self.uv_set.text().strip() or "map1",
+                    backup=self.auto_backup.value(),
+                    backup_set=self.auto_backup_name.text().strip() or "map1_backup",
+                    keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
+                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(),
+                    packing=self.auto_packing.value())
+
+    @ui_safe
+    def analyse_uvs(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        t0 = time.time()
+        opts = self._auto_options()
+        result = run_auto_uv(asset, uv_set=opts["uv_set"], keep_score=opts["keep_score"], analyse_only=True)
+        result["analysed_only"] = True
+        self.auto_result = result
+        self._fill_auto()
+        todo = sum(1 for r in result["rows"] if r["action"] == "will unwrap")
+        self.set_status("Analysed %d meshes in %.2fs: %d need unwrapping (worst first in step 6)." % (
+            len(result["rows"]), time.time() - t0, todo))
+        self._update_guidance()
+
+    @ui_safe
+    def auto_uv(self):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        if not asset.sections():
+            self.set_status("Press Scan first so meshes are grouped by section and material.", level="warn")
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            result = run_auto_uv(asset, **self._auto_options())
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.auto_result = result
+        self._fill_auto()
+        self.refresh()
+        rows = result["rows"]
+        count = lambda *acts: sum(1 for r in rows if r["action"] in acts)  # noqa: E731
+        level = "warn" if count("failed", "check") else "info"
+        self.set_status("Auto UV in %.1fs: %d unwrapped, %d kept, %d to check, %d failed. %d tile(s) packed%s." % (
+            result["timing"].get("total", 0.0), count("unwrapped", "check"), count("kept", "kept (check)"),
+            count("check", "kept (check)"), count("failed"), len(result["tiles"]),
+            ("; %d backed up to %s" % (result["backups"], self.auto_backup_name.text())) if result["backups"]
+            else ""), level=level)
+
+    @ui_safe
+    def restore_backup(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        meshes = list(self._items_in_root(selection_items())) or asset.meshes()[0]
+        opts = self._auto_options()
+        n = restore_uvs(meshes, opts["uv_set"], opts["backup_set"])
+        self.set_status("Restored %s from %s on %d mesh(es)." % (opts["uv_set"], opts["backup_set"], n),
+                        level="info" if n else "warn")
+
+    def _fill_auto(self):
+        self.auto_tree.clear()
+        if not self.auto_result:
+            return
+        colors = {"unwrapped": LEVEL_COLORS["fixed"], "kept": LEVEL_COLORS["info"],
+                  "check": LEVEL_COLORS["warn"], "kept (check)": LEVEL_COLORS["warn"],
+                  "will unwrap": LEVEL_COLORS["warn"], "failed": LEVEL_COLORS["skip"],
+                  "skip": LEVEL_COLORS["skip"], "keep": LEVEL_COLORS["info"]}
+        fmt = lambda v: "-" if v is None else "%.2f" % v  # noqa: E731
+        for r in self.auto_result["rows"]:
+            item = QtWidgets.QTreeWidgetItem([short_name(r["mesh"]), fmt(r["before"]), fmt(r["after"]),
+                                              r["action"]])
+            item.setData(0, QtCore.Qt.UserRole, r["mesh"])
+            item.setToolTip(0, r["mesh"])
+            item.setToolTip(3, r["reason"] or r["action"])
+            item.setForeground(3, QtGui.QBrush(QtGui.QColor(colors.get(r["action"], LEVEL_COLORS["info"]))))
+            self.auto_tree.addTopLevelItem(item)
+
+    def _auto_selected(self):
+        try:
+            self._select_nodes([it.data(0, QtCore.Qt.UserRole) for it in self.auto_tree.selectedItems()])
+        except Exception:
+            traceback.print_exc()
 
     @ui_safe
     def open_renamer(self):

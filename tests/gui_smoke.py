@@ -310,6 +310,27 @@ def main():
     pump()
     window.grab().save(os.path.join(OUT, "09_smart_udim_panel.png"))
 
+    # --- Auto UV through the panel: analyse, then unwrap + pack
+    for i in range(3):
+        c = cmds.polyCube(name="woodBrown_C_rafter%04d_GEP" % (i + 1))[0]
+        cmds.polyMapDel(c + ".f[*]", constructionHistory=False)
+        cmds.parent(c, "|house_GRP|westWing_GRP")
+    udim.scan()
+    udim.analyse_uvs()
+    pump()
+    actions = [udim.auto_tree.topLevelItem(i).text(3) for i in range(udim.auto_tree.topLevelItemCount())]
+    check("Analyse lists the un-UV'd rafters first", actions[:3] == ["will unwrap"] * 3, str(actions[:6]))
+    udim.auto_uv()
+    pump()
+    actions = [udim.auto_tree.topLevelItem(i).text(3) for i in range(udim.auto_tree.topLevelItemCount())]
+    check("Auto UV unwraps them and keeps the rest", actions.count("unwrapped") >= 3 and "failed" not in actions,
+          "%s | %s" % (actions, udim.status.text()))
+    check("Auto UV step shows done", udim.step_auto.state == "done", udim.next_banner.text.text())
+    udim.step_auto.parentWidget().parentWidget().parentWidget().ensureWidgetVisible(udim.step_auto) \
+        if hasattr(udim.step_auto.parentWidget().parentWidget().parentWidget(), "ensureWidgetVisible") else None
+    pump()
+    window.grab().save(os.path.join(OUT, "10_auto_uv.png"))
+
     # --- re-paste replaces the window cleanly
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), {"__name__": "__main__", "__file__": TOOLBOX})

@@ -140,6 +140,16 @@ finished work.
   sections becomes `td100_woodGreen` and `td100_woodGreen_2`. Parsing
   ignores the `_2`.
 
+- **Auto UV added** (user request): a scorched-earth first pass for
+  un-UV'd assets.
+  - It scores UV quality, re-unwraps the worst meshes (projection, then
+    hard-edge seams, then Unfold3D, then extra stretch cuts), backs up the
+    old UVs and packs one tile per material group.
+  - This replaces the earlier "warn and skip meshes with bad UVs" decision
+    for assets that have no usable UVs. Pre-process still reports them.
+  - Smart layout (M3-M5) builds on this: even density across groups,
+    multi-tile groups and locks.
+
 ## Build order
 
 1. **M1:** sets, name parsing (`td`, `c`, `_stack`, sections), scan, the

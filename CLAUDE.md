@@ -134,8 +134,17 @@
     ourselves. Parsing ignores all-digit tokens.
   - **Undo:** every scene edit runs inside `UndoChunk`, so it's undoable,
     unlike Path Scatter's live preview.
-  - **Status:** milestones 1-2 are done; the plan is in
+  - **Status:** milestones 1-2 are done, plus Auto UV (scoring,
+    re-unwrapping, packing one tile per group); the plan is in
     `docs/smart-udim-plan.md`.
+  - **Auto UV** (`run_auto_uv`):
+    - `uv_quality` scores 0..1 by the 3D-area share of good faces, comparing
+      each face's area ratio to its own shell's median so rectangulated
+      shells pass.
+    - `auto_unwrap` isolates failures per mesh.
+    - `pack_udims` puts one tile per material group, with sections on rows
+      and the same column per material.
+    - Backups go to `map1_backup` and are never overwritten.
 
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
@@ -160,6 +169,17 @@
 - Keeping OpenMaya objects (MObject, MPlug, data) across `file -new` or
   `file -open` and then using them hard-crashes Maya. Re-resolve after
   scene changes.
+- **`u3dLayout -box` is `[uMin, uMax, vMin, vMax]`**, not
+  `[uMin, vMin, uMax, vMax]`. Its default layout scale mode (2) fits the
+  shells to the box.
+- `polyAutoProjection`, `polyMapSewMove` and `polyMapCut` only take one object
+  per call; loop over meshes. `u3dUnfold`, `u3dLayout` and `u3dAutoSeam`
+  accept many.
+- `polyEvaluate -worldFaceArea` / `-uvFaceArea` give per-face areas in C++
+  (fast scoring). `-uvFaceArea` reads the *current* UV set.
+- Switch a mesh's current UV set inside `NoUndo` (it's view state).
+  Otherwise stray undo steps land between tool actions and Ctrl+Z stops
+  undoing whole runs.
 - mayapy standalone has a QGuiApplication, so QWidgets can't be built
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
 - Keeping an `MFnMesh` across a `cmds` topology edit (polySplit etc.) can
