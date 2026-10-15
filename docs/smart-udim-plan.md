@@ -150,6 +150,26 @@ finished work.
   - Smart layout (M3-M5) builds on this: even density across groups,
     multi-tile groups and locks.
 
+- **Smart layout v1 done (M3-M5 core):**
+  - exact texel density per shell (group and section TD %)
+  - PCA rotation, with a keep-orientation option
+  - shelf packing tile by tile (tallest first, similar shapes together)
+  - groups spanning tiles, without crossing borders
+  - sections on rows
+  - fit to N tiles
+  - auto-compensate for oversized pieces
+  - locks with reserved tiles, change fingerprints, spare room
+  - coverage written to names
+  - the UDIM Map widget
+  - Apply is one Ctrl+Z
+- **Still open:**
+  - tighter (non-shelf) packing
+  - per-set rotation modes (align grain)
+  - `_stack` shell stacking
+  - the validation report (M6)
+  - the PNG hand-off sheet (M7)
+  - the UV Editor overlay (M8)
+
 ## Build order
 
 1. **M1:** sets, name parsing (`td`, `c`, `_stack`, sections), scan, the

@@ -145,6 +145,17 @@
     - `pack_udims` puts one tile per material group, with sections on rows
       and the same column per material.
     - Backups go to `map1_backup` and are never overwritten.
+  - **Smart layout** (`collect_shells` -> `make_plan` -> `apply_layout`):
+    - `collect_shells` reads every shell once (3D/UV area, points, PCA
+      angle).
+    - `plan_layout` is pure math: exact density per shell, a shelf packer
+      tile by tile, sections on new rows, locked tiles reserved.
+      `plan_fit_to_tiles` binary-searches the density.
+    - `apply_layout` writes through `write_uvs` (undoable) and stores
+      tiles, a fingerprint and coverage on each set.
+    - Locks live in `unlokUdimLock`; tiles in `unlokUdimTiles`.
+    - The plan keys stats by set name *and* uuid: names change when
+      coverage is written.
 
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
@@ -180,6 +191,17 @@
 - Switch a mesh's current UV set inside `NoUndo` (it's view state).
   Otherwise stray undo steps land between tool actions and Ctrl+Z stops
   undoing whole runs.
+- Writing UVs:
+  - `MFnMesh.setUVs` sticks on the *current* UV set even with history, but
+    it isn't undoable, and writes to another set get recomputed away on
+    history meshes.
+  - For undoable bulk writes use `write_uvs()`. Without history it's one
+    `setAttr` on `shape.uvst[i].uvsp[a:b]`; with history it adds a
+    polyTweakUV (via one `polyEditUV`) and does one `setAttr` on
+    `.uvTweak[a:b]`.
+- Tiny shells (a few % of a tile with thousands of faces) trip
+  `polyUVOverlap` and absolute area thresholds. Treat only *exactly* zero
+  UV area as collapsed, and test layouts at real-world scale (metres).
 - mayapy standalone has a QGuiApplication, so QWidgets can't be built
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
 - Keeping an `MFnMesh` across a `cmds` topology edit (polySplit etc.) can

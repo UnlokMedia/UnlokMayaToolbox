@@ -190,6 +190,29 @@ density. The actual layout is still being built; see
    - About 7 s for a 47-mesh test building that includes a 19,000-face dome.
      The whole run is one Ctrl+Z.
 
+7. **Smart layout**: the even-density UDIM layout.
+   - Set *Density px/m* and *Map size*, then press **Plan**. The UDIM Map
+     previews every shell coloured by material: hover for density, coverage
+     and tiles, click to select a group, and locked tiles show hatched.
+     Changing a setting re-plans instantly. **Apply Layout** writes it.
+   - **Density:** every shell is scaled to exactly the target texel density,
+     times its group's and section's TD %. A group renamed `td150_...` gets
+     1.5x.
+   - **Packing:** shells are rotated onto their main axis and laid flat (turn
+     *Rotate* off to keep your own orientation). They're packed tile by tile
+     in rows, tallest first, so similar pieces sit together. A group flows
+     into the next tile when one fills up, no shell crosses a tile border,
+     and each section starts on a new row.
+   - **Fit to tiles:** finds the highest density that fits your tile budget.
+   - **Auto-compensate:** lowers only a group whose piece is bigger than a
+     tile, and tells you so.
+   - **Locks (Lock column):** a locked group keeps its UVs and its tiles stay
+     reserved, so you can re-lay everything else around finished work.
+     Groups whose geometry changed since they were laid out get flagged.
+     *Spare room %* leaves slack around every shell so small changes still
+     fit.
+   - **Coverage:** written into the set names (`c222` = 2.22 tiles).
+
 Every Smart UDIM action is a single Ctrl+Z.
 
 ## How it stays fast
@@ -222,6 +245,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   ```
 - `tests/test_auto_uv.py`: headless Auto UV tests on a messy generated
   building (`--snapshot DIR` also writes a UV snapshot).
+- `tests/test_smart_layout.py`: headless smart layout tests (exact density,
+  tile borders, fit-to-tiles, locks, change detection, undo).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

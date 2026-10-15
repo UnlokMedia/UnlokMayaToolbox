@@ -3504,6 +3504,7 @@ class SmartUdimAsset(object):
                     "partial": sum(1 for f in members.values() if f is not None),
                     "odd": odd,
                     "source": _get(mat, UDIM_SOURCE, "manual"),
+                    "locked": bool(_get(mat, LAYOUT_LOCK, False)),
                 })
             sections.append({
                 "set": sec,
@@ -3879,7 +3880,7 @@ def uv_quality(xform, uv_set="map1", check_overlap=True):
     logs, wind = {}, {}
     for f in range(nf):
         s = face_shell[f]
-        if a3[f] > 1e-12 and auv[f] > 1e-14:
+        if a3[f] > 1e-12 and auv[f] > 0.0:
             logs.setdefault(s, []).append(math.log(auv[f] / a3[f]))
         wind[s] = wind.get(s, 0.0) + (a3[f] if signs[f] else -a3[f])
     med = {}
@@ -3892,7 +3893,7 @@ def uv_quality(xform, uv_set="map1", check_overlap=True):
         if a3[f] <= 1e-12:
             continue
         s = face_shell[f]
-        if auv[f] <= 1e-14 or s not in med:
+        if auv[f] <= 0.0 or s not in med:
             bad += a3[f]
         elif abs(math.log(auv[f] / a3[f]) - med[s]) > AUTO_UV_STRETCH_TOL:
             bad += a3[f]
@@ -3949,7 +3950,7 @@ def _stretched_shell_faces(xform, uv_set="map1"):
         if area3 > 1e-12 and sum(auv[f] for f in fs) < 1e-10 * max(area3, 1.0):
             bad.extend(fs)
             continue
-        logs = sorted(math.log(auv[f] / a3[f]) for f in fs if a3[f] > 1e-12 and auv[f] > 1e-14)
+        logs = sorted(math.log(auv[f] / a3[f]) for f in fs if a3[f] > 1e-12 and auv[f] > 0.0)
         if not logs:
             continue
         med = logs[len(logs) // 2]
@@ -4174,6 +4175,405 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
 
 
 # =============================================================================
+# Smart UDIM - smart layout (texel density, planning, packing, locks)
+# =============================================================================
+#
+#   collect_shells -> plan_layout -> apply_layout
+#
+# collect_shells reads every UV shell of every (unlocked) material group once:
+# its 3D area, UV area and UV points. plan_layout is pure math on those (so it
+# can re-run in milliseconds while settings change): it scales each shell to the
+# exact target texel density, rotates it onto its main axis and shelf-packs the
+# shells tile by tile (tallest first, so similar pieces end up side by side).
+# A group just flows into the next tile when one is full; no shell ever crosses
+# a tile border. apply_layout writes the result through a scratch UV set and an
+# undoable copy, so the whole layout is one Ctrl+Z.
+
+LAYOUT_LOCK = "unlokUdimLock"
+LAYOUT_TILES = "unlokUdimTiles"
+LAYOUT_PRINT = "unlokUdimPrint"
+LAYOUT_MODES = ("Fixed density", "Fit to tiles")
+MAP_SIZES = ("1024", "2048", "4096", "8192")
+_UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
+              "mi": 1609.344}
+
+LAYOUT_DEFAULTS = {
+    "texel_density": 1024.0,  # px per metre
+    "map_size": "4096",
+    "mode": "Fixed density",
+    "max_tiles": 10,
+    "padding_px": 8,
+    "rotate": True,
+    "new_row_per_section": True,
+    "auto_compensate": True,
+    "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
+}
+
+
+class LayoutShell(object):
+    """One UV shell of one material group (all sizes before density scaling)."""
+    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "angle", "w0", "h0", "group")
+
+    def __init__(self, mesh, uv_ids, area3d, area_uv, pts, rotate):
+        self.mesh = mesh
+        self.uv_ids = uv_ids
+        self.area3d = area3d
+        self.area_uv = area_uv
+        n = float(len(pts))
+        cx = sum(p[0] for p in pts) / n
+        cy = sum(p[1] for p in pts) / n
+        self.cx, self.cy = cx, cy
+        angle = 0.0
+        if rotate and len(pts) > 2:
+            sxx = sum((p[0] - cx) ** 2 for p in pts)
+            syy = sum((p[1] - cy) ** 2 for p in pts)
+            sxy = sum((p[0] - cx) * (p[1] - cy) for p in pts)
+            angle = -0.5 * math.atan2(2.0 * sxy, sxx - syy)  # main axis onto U
+        ca, sa = math.cos(angle), math.sin(angle)
+        xs = [(p[0] - cx) * ca - (p[1] - cy) * sa for p in pts]
+        ys = [(p[0] - cx) * sa + (p[1] - cy) * ca for p in pts]
+        w0, h0 = max(xs) - min(xs), max(ys) - min(ys)
+        if rotate and h0 > w0:  # lie flat: shelves pack wide shells best
+            angle += math.pi / 2.0
+            w0, h0 = h0, w0
+        self.angle = angle
+        self.w0, self.h0 = w0, h0
+        self.group = None
+
+
+def _mesh_cache(xform, uv_set, unit_scale):
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return None
+    counts, ids = fn.getAssignedUVs(uv_set)
+    nf = len(counts)
+    if nf == 0 or any(c == 0 for c in counts):
+        return None
+    if fn.currentUVSetName() != uv_set:
+        with NoUndo():
+            cmds.polyUVSet(xform, currentUVSet=True, uvSet=uv_set)
+    a3, auv = _face_areas(xform, nf)
+    _, uv_shell = fn.getUvShellsIds(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    face_uvs = []
+    k = 0
+    ids = list(ids)
+    for c in counts:
+        face_uvs.append(ids[k:k + c])
+        k += c
+    return {"a3": [a * unit_scale for a in a3], "auv": auv, "uv_shell": list(uv_shell), "us": list(us),
+            "vs": list(vs), "face_uvs": face_uvs, "nf": nf}
+
+
+def _group_print(members):
+    """Fingerprint of a group's geometry, to spot changes since the last layout."""
+    total_faces = 0
+    area = 0.0
+    for xform, faces in sorted(members.items()):
+        n = cmds.polyEvaluate(xform, face=True) if faces is None else len(faces)
+        total_faces += n
+        try:
+            area += cmds.polyEvaluate(xform, worldArea=True) if faces is None else 0.0
+        except Exception:
+            pass
+    return "%d:%.4g" % (total_faces, area)
+
+
+def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):
+    """Read every UV shell of every material group.
+
+    Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
+    "conflicts": n}. Locked groups are listed with their tiles but not read.
+    """
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    exclude = set(exclude)
+    caches = {}
+    claimed = set()
+    groups, locked, skipped = [], [], set()
+    conflicts = 0
+    for si, sec in enumerate(asset.sections()):
+        sec_td = _get(sec, UDIM_TD, 100.0)
+        for mat in asset.materials(sec):
+            key = _get(mat, UDIM_KEY) or parse_group_name(mat)["key"]
+            members, _ = expand_members(mat)
+            info = {"set": mat, "uuid": cmds.ls(mat, uuid=True)[0], "key": key, "section": sec,
+                    "section_index": si,
+                    "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
+                    "print": _group_print(members), "old_print": _get(mat, LAYOUT_PRINT, "") or "",
+                    "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()]}
+            if _get(mat, LAYOUT_LOCK, False):
+                locked.append(info)
+                continue
+            for xform, faces in members.items():
+                if xform in exclude:
+                    continue
+                if xform not in caches:
+                    caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
+                cache = caches[xform]
+                if cache is None:
+                    skipped.add(xform)
+                    continue
+                by_shell = {}
+                for f in (range(cache["nf"]) if faces is None else sorted(faces)):
+                    if f < cache["nf"] and cache["face_uvs"][f]:
+                        by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
+                for shell, fs in by_shell.items():
+                    if (xform, shell) in claimed:
+                        conflicts += 1
+                        continue
+                    claimed.add((xform, shell))
+                    uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
+                    a3 = sum(cache["a3"][f] for f in fs)
+                    auv = sum(cache["auv"][f] for f in fs)
+                    if a3 <= 1e-12 or auv <= 1e-14:
+                        continue
+                    pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
+                    shell_obj = LayoutShell(xform, uv_ids, a3, auv, pts, rotate)
+                    shell_obj.group = mat
+                    info["shells"].append(shell_obj)
+            groups.append(info)
+    return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts}
+
+
+def _udim_tiles(start_row, count_needed, reserved):
+    """Yield (u, v) tile coordinates row by row from start_row, skipping reserved."""
+    v = start_row
+    while True:
+        for u in range(10):
+            if 1001 + u + 10 * v not in reserved:
+                yield u, v
+        v += 1
+
+
+def plan_layout(collected, settings, density_scale=1.0):
+    """Pure-math layout plan. Returns a dict with per-shell placements, group
+    stats, tiles used and warnings. Nothing in the scene changes."""
+    s = dict(LAYOUT_DEFAULTS)
+    s.update(settings or {})
+    res = float(s["map_size"])
+    td = float(s["texel_density"]) * density_scale
+    pad = float(s["padding_px"]) / res
+    usable = 1.0 - 2.0 * pad
+    growth = max(0.0, float(s["growth"]))
+    reserved = set()
+    for g in collected["locked"]:
+        reserved.update(g["tiles"])
+    order = sorted(set(g["key"] for g in collected["groups"]))
+    rank = {k: i for i, k in enumerate(order)}
+    groups = sorted(collected["groups"], key=lambda g: (g["section_index"], rank[g["key"]]))
+
+    placements = {}  # id(shell) -> (tile_u, tile_v, x, y, scale)
+    stats = {}
+    warnings = []
+    tiles_used = set()
+    row = 0
+    current_section = None
+    tile_iter = None
+    tile = None
+    shelf_y = shelf_h = cursor_x = 0.0
+
+    def next_tile():
+        t = next(tile_iter)
+        tiles_used.add(1001 + t[0] + 10 * t[1])
+        return t
+
+    for g in groups:
+        if g["section_index"] != current_section:
+            if current_section is not None and s["new_row_per_section"]:
+                row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
+            current_section = g["section_index"]
+            tile_iter = _udim_tiles(row, 0, reserved)
+            tile = None
+            shelf_y, shelf_h, cursor_x = pad, 0.0, pad
+        # density for this group (px/m) -> UV side scale per shell
+        density = td * g["td"] / 100.0
+        compensate = 1.0
+        sizes = []
+        for sh in g["shells"]:
+            target = sh.area3d * (density / res) ** 2  # UV area in tiles
+            k = math.sqrt(target / sh.area_uv)
+            sizes.append((sh, k, sh.w0 * k, sh.h0 * k))
+        biggest = max([max(w, h) for _, _, w, h in sizes] or [0.0])
+        if biggest > usable:
+            if s["auto_compensate"]:
+                compensate = usable / biggest * 0.999
+                sizes = [(sh, k * compensate, w * compensate, h * compensate) for sh, k, w, h in sizes]
+                warnings.append("%s: largest piece didn't fit a tile at %d px/m, so this group was lowered to "
+                                "%d px/m." % (g["key"], round(density), round(density * compensate)))
+            else:
+                warnings.append("%s: a piece is bigger than a whole tile at %d px/m (raise Map size or lower "
+                                "the density, or turn on Auto-compensate)." % (g["key"], round(density)))
+        # each group starts on a fresh shelf, so groups sit in their own bands
+        if cursor_x > pad:
+            shelf_y += shelf_h + pad
+            shelf_h, cursor_x = 0.0, pad
+        g_tiles = set()
+        area = 0.0
+        sizes.sort(key=lambda t: (-round(t[3], 4), -t[2]))
+        for sh, k, w, h in sizes:
+            w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
+            if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
+                w_res, h_res = min(w_res, usable), min(h_res, usable)
+            if tile is None:
+                tile = next_tile()
+            if cursor_x + w_res > 1.0 - pad + 1e-9:
+                shelf_y += shelf_h + pad
+                shelf_h, cursor_x = 0.0, pad
+            if shelf_y + h_res > 1.0 - pad + 1e-9:
+                tile = next_tile()
+                shelf_y, shelf_h, cursor_x = pad, 0.0, pad
+            placements[id(sh)] = (tile[0], tile[1], cursor_x, shelf_y, k)
+            g_tiles.add(1001 + tile[0] + 10 * tile[1])
+            cursor_x += w_res + pad
+            shelf_h = max(shelf_h, h_res)
+            area += w * h
+        stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
+                           "density": density * compensate, "shells": len(g["shells"]),
+                           "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
+    for g in collected["locked"]:
+        stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": g["tiles"], "coverage": None,
+                           "density": None,
+                           "shells": None, "locked": True,
+                           "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
+        if stats[g["set"]]["changed"]:
+            warnings.append("%s is locked but its geometry changed since it was laid out: unlock it to re-lay "
+                            "it, or leave it if the change doesn't matter." % g["key"])
+    return {"placements": placements, "stats": stats, "tiles": sorted(tiles_used | reserved),
+            "new_tiles": sorted(tiles_used), "warnings": warnings, "density": td, "settings": s}
+
+
+def plan_fit_to_tiles(collected, settings):
+    """Highest density whose layout fits in settings['max_tiles'] tiles."""
+    limit = max(1, int(settings.get("max_tiles", 10)))
+    lo, hi = 0.0, 1.0
+    plan = plan_layout(collected, settings, hi)
+    while len(plan["new_tiles"]) <= limit and hi < 1e4:  # find an upper bound
+        lo, hi = hi, hi * 2.0
+        plan = plan_layout(collected, settings, hi)
+    best = plan_layout(collected, settings, lo) if lo > 0 else None
+    for _ in range(18):
+        mid = (lo + hi) / 2.0
+        p = plan_layout(collected, settings, mid)
+        if len(p["new_tiles"]) <= limit:
+            lo, best = mid, p
+        else:
+            hi = mid
+    if best is None:
+        best = plan_layout(collected, settings, max(lo, 1e-3))
+        best["warnings"].append("Couldn't fit everything into %d tiles; showing the smallest layout." % limit)
+    return best
+
+
+def make_plan(collected, settings):
+    if settings.get("mode") == "Fit to tiles":
+        return plan_fit_to_tiles(collected, settings)
+    return plan_layout(collected, settings)
+
+
+def write_uvs(xform, uv_set, us, vs):
+    """Set every UV of a mesh in one undoable step, with or without history.
+
+    No history: one setAttr on the shape's own UV array. With history: UVs are
+    recomputed from upstream, so write the difference into a polyTweakUV at
+    the end of the history (that's what Maya's own UV tools do), again with
+    one setAttr. (MFnMesh.setUVs is fast but not undoable.)
+    """
+    fn = _mesh_fn(xform)
+    cur_u, cur_v = fn.getUVs(uv_set)
+    n = len(cur_u)
+    if n != len(us):
+        raise RuntimeError("UV count changed on %s" % xform)
+    shape = om.MDagPath.getAPathTo(fn.object()).fullPathName()
+    if not cmds.listConnections(shape + ".inMesh", source=True, destination=False):
+        names = cmds.polyUVSet(shape, q=True, allUVSets=True) or []
+        idx = (cmds.polyUVSet(shape, q=True, allUVSetsIndices=True) or [])[names.index(uv_set)]
+        for a in range(0, n, 5000):
+            b = min(n, a + 5000)
+            flat = []
+            for i in range(a, b):
+                flat.extend((us[i], vs[i]))
+            cmds.setAttr("%s.uvst[%d].uvsp[%d:%d]" % (shape, idx, a, b - 1), *flat)
+        return
+    cmds.polyEditUV(xform + ".map[0]", u=0.0, v=0.0, relative=True, uvSetName=uv_set)
+    tweaks = [h for h in (cmds.listHistory(shape) or []) if cmds.nodeType(h) == "polyTweakUV"
+              and (cmds.getAttr(h + ".uvSetName") or uv_set) == uv_set]
+    if not tweaks:
+        raise RuntimeError("couldn't add a UV tweak to %s" % xform)
+    node = tweaks[0]  # nearest the shape
+    old = {}
+    for i in cmds.getAttr(node + ".uvTweak", multiIndices=True) or []:
+        old[i] = cmds.getAttr("%s.uvTweak[%d]" % (node, i))[0]
+    for a in range(0, n, 5000):
+        b = min(n, a + 5000)
+        flat = []
+        for i in range(a, b):
+            ou, ov = old.get(i, (0.0, 0.0))
+            flat.extend((ou + us[i] - cur_u[i], ov + vs[i] - cur_v[i]))
+        cmds.setAttr("%s.uvTweak[%d:%d]" % (node, a, b - 1), *flat)
+
+
+def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set="map1_backup"):
+    """Write the planned layout into uv_set (one Ctrl+Z). Returns stats."""
+    by_mesh = {}
+    for g in collected["groups"]:
+        for sh in g["shells"]:
+            if id(sh) in plan["placements"]:
+                by_mesh.setdefault(sh.mesh, []).append(sh)
+    with UndoChunk("Smart UDIM layout"), PreserveSelection():
+        if backup:
+            backup_uvs(sorted(by_mesh), uv_set, backup_set)
+        for xform, shells in by_mesh.items():
+            fn = _mesh_fn(xform)
+            us, vs = fn.getUVs(uv_set)
+            us, vs = list(us), list(vs)
+            for sh in shells:
+                tu, tv, x, y, k = plan["placements"][id(sh)]
+                ca, sa = math.cos(sh.angle), math.sin(sh.angle)
+                pts = []
+                for u in sh.uv_ids:
+                    du, dv = us[u] - sh.cx, vs[u] - sh.cy
+                    pts.append(((du * ca - dv * sa) * k, (du * sa + dv * ca) * k))
+                mx = min(p[0] for p in pts)
+                my = min(p[1] for p in pts)
+                for u, (pu, pv) in zip(sh.uv_ids, pts):
+                    us[u] = tu + x + (pu - mx)
+                    vs[u] = tv + y + (pv - my)
+            write_uvs(xform, uv_set, us, vs)
+        for g in collected["groups"]:
+            st = plan["stats"].get(g["set"])
+            if not st:
+                continue
+            node = g["set"]
+            for ln, kw in ((LAYOUT_TILES, {"dataType": "string"}), (LAYOUT_PRINT, {"dataType": "string"}),
+                           (LAYOUT_LOCK, {"attributeType": "bool"})):
+                if not cmds.attributeQuery(ln, node=node, exists=True):
+                    cmds.addAttr(node, longName=ln, **kw)
+            cmds.setAttr(node + "." + LAYOUT_TILES, ",".join(str(t) for t in st["tiles"]), type="string")
+            cmds.setAttr(node + "." + LAYOUT_PRINT, g["print"], type="string")
+            cmds.setAttr(node + "." + UDIM_COV, st["coverage"])
+        asset.sync_names()
+    return {"meshes": len(by_mesh), "shells": len(plan["placements"])}
+
+
+def set_group_lock(node, locked):
+    with UndoChunk("Smart UDIM lock"):
+        if not cmds.attributeQuery(LAYOUT_LOCK, node=node, exists=True):
+            cmds.addAttr(node, longName=LAYOUT_LOCK, attributeType="bool")
+        cmds.setAttr(node + "." + LAYOUT_LOCK, bool(locked))
+        if locked and not (_get(node, LAYOUT_TILES, "") or ""):
+            # never laid out by the tool: reserve the tiles its UVs sit in now
+            members, _ = expand_members(node)
+            tiles = set()
+            for xform in members:
+                uvs = cmds.polyEditUV(cmds.polyListComponentConversion(xform, toUV=True), q=True) or []
+                for i in range(0, len(uvs), 2):
+                    tiles.add(1001 + int(math.floor(uvs[i])) + 10 * int(math.floor(uvs[i + 1])))
+            if not cmds.attributeQuery(LAYOUT_TILES, node=node, exists=True):
+                cmds.addAttr(node, longName=LAYOUT_TILES, dataType="string")
+            cmds.setAttr(node + "." + LAYOUT_TILES, ",".join(str(t) for t in sorted(tiles)), type="string")
+
+
+# =============================================================================
 # Smart UDIM - panel
 # =============================================================================
 
@@ -4210,11 +4610,138 @@ def _unlok_renamer_available():
 LEVEL_COLORS = {"fixed": "#6fbf73", "warn": "#e0b050", "skip": "#e07a5f", "info": "#a8a8a8"}
 
 
+def _key_color(key, alpha=255):
+    """Stable, distinct-ish colour per material key."""
+    h = 0
+    for ch in key:
+        h = (h * 131 + ord(ch)) & 0xFFFFFF
+    hue = (h % 360) / 360.0
+    c = QtGui.QColor.fromHsvF(hue, 0.55, 0.85)
+    c.setAlpha(alpha)
+    return c
+
+
+class UdimMapWidget(QtWidgets.QWidget):
+    """Painted overview of a layout plan: UDIM tiles, every shell coloured by
+    material group, locked tiles hatched. Hover for details, click to select
+    a group's meshes. Painting only rectangles keeps it instant."""
+
+    groupClicked = QtCore.Signal(str)
+
+    def __init__(self, parent=None):
+        super(UdimMapWidget, self).__init__(parent)
+        self.setMouseTracking(True)
+        self.setMinimumHeight(120)
+        self.shells = []  # (u, v, w, h, set, key)
+        self.locked_tiles = set()
+        self.tiles = set()
+        self.labels = {}  # set -> (key, info text)
+        self.cols, self.rows = 4, 1
+
+    def set_plan(self, collected, plan):
+        self.shells = []
+        self.labels = {}
+        if plan and collected:
+            for g in collected["groups"]:
+                st = plan["stats"].get(g["set"], {})
+                self.labels[g["set"]] = (g["key"], "%s  |  %d px/m  |  %d%% of a tile  |  tiles %s" % (
+                    g["key"], round(st.get("density") or 0), round(st.get("coverage") or 0),
+                    ", ".join(str(t) for t in st.get("tiles", []))))
+                for sh in g["shells"]:
+                    p = plan["placements"].get(id(sh))
+                    if p:
+                        tu, tv, x, y, k = p
+                        self.shells.append((tu + x, tv + y, sh.w0 * k, sh.h0 * k, g["set"], g["key"]))
+            self.locked_tiles = set()
+            for g in collected["locked"]:
+                self.locked_tiles.update(g["tiles"])
+                self.labels[g["set"]] = (g["key"], "%s  |  locked  |  tiles %s" % (
+                    g["key"], ", ".join(str(t) for t in g["tiles"])))
+            self.tiles = set(plan["tiles"])
+        else:
+            self.tiles, self.locked_tiles = set(), set()
+        us = [(t - 1001) % 10 for t in self.tiles] or [3]
+        vs = [(t - 1001) // 10 for t in self.tiles] or [0]
+        self.cols = max(4, max(us) + 1)
+        self.rows = max(1, max(vs) + 1)
+        self.setMinimumHeight(int(max(120, min(520, self.rows * self._tile_px() + 24))))
+        self.update()
+
+    def _tile_px(self):
+        return max(24.0, (self.width() - 12.0) / max(1, self.cols))
+
+    def _to_px(self, u, v):
+        t = self._tile_px()
+        return 6.0 + u * t, 6.0 + (self.rows - v) * t
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        p.fillRect(self.rect(), QtGui.QColor("#2c2c2c"))
+        t = self._tile_px()
+        font = p.font()
+        font.setPointSizeF(max(6.0, min(8.0, t / 9.0)))
+        p.setFont(font)
+        for v in range(self.rows):
+            for u in range(self.cols):
+                udim = 1001 + u + 10 * v
+                x, y = self._to_px(u, v + 1)
+                rect = QtCore.QRectF(x, y, t, t)
+                if udim in self.locked_tiles:
+                    p.fillRect(rect, QtGui.QBrush(QtGui.QColor("#4a4030"), QtCore.Qt.BDiagPattern))
+                elif udim in self.tiles:
+                    p.fillRect(rect, QtGui.QColor("#383838"))
+                p.setPen(QtGui.QPen(QtGui.QColor("#555555")))
+                p.drawRect(rect)
+                p.setPen(QtGui.QColor("#8a8a8a"))
+                p.drawText(rect.adjusted(3, 2, -2, -2), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, str(udim))
+        for u, v, w, h, node, key in self.shells:
+            x0, y1 = self._to_px(u, v)
+            x1, y0 = self._to_px(u + w, v + h)
+            rect = QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
+            p.fillRect(rect, _key_color(key, 150))
+        if not self.shells and not self.locked_tiles:
+            p.setPen(QtGui.QColor("#8a8a8a"))
+            p.drawText(self.rect(), QtCore.Qt.AlignCenter, "Press Plan to preview the layout")
+        p.end()
+
+    def _hit(self, pos):
+        t = self._tile_px()
+        u = (pos.x() - 6.0) / t
+        v = self.rows - (pos.y() - 6.0) / t
+        for su, sv, w, h, node, key in self.shells:
+            if su <= u <= su + w and sv <= v <= sv + h:
+                return node
+        udim = 1001 + int(math.floor(u)) + 10 * int(math.floor(v))
+        if udim in self.locked_tiles:
+            for node, (key, text) in self.labels.items():
+                if "locked" in text and str(udim) in text:
+                    return node
+        return None
+
+    def mouseMoveEvent(self, event):
+        node = self._hit(event.pos())
+        text = self.labels.get(node, ("", ""))[1] if node else ""
+        if text:
+            QtWidgets.QToolTip.showText(event.globalPos(), text, self)
+        else:
+            QtWidgets.QToolTip.hideText()
+
+    def mousePressEvent(self, event):
+        node = self._hit(event.pos())
+        if node:
+            self.groupClicked.emit(node)
+
+    def resizeEvent(self, event):
+        super(UdimMapWidget, self).resizeEvent(event)
+        self.setMinimumHeight(int(max(120, min(520, self.rows * self._tile_px() + 24))))
+
+
 class SmartUdimPanel(QtWidgets.QWidget):
     TOOL_NAME = "Smart UDIM"
     TOOL_TIP = "Organise geometry into UDIM sections and material groups, clean it and check its UVs."
 
-    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK = range(5)
+    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK, COL_LOCK = range(6)
 
     def __init__(self, parent=None):
         super(SmartUdimPanel, self).__init__(parent)
@@ -4223,6 +4750,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.report = {}
         self.auto_result = None
         self._jobs = []
+        self._collected = None
+        self._plan = None
+        self.layout_applied = None
+        self._replan_timer = QtCore.QTimer(self)
+        self._replan_timer.setSingleShot(True)
+        self._replan_timer.setInterval(60)
+        self._replan_timer.timeout.connect(self._replan)
         self._populating = False
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -4294,8 +4828,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                            "Double-click TD % to change texel density, tick Stack for repeated "
                                            "pieces. They're plain Maya sets, so renaming works too.")
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setColumnCount(5)
-        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack"])
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock"])
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tree.setMinimumHeight(220)
         self.tree.setRootIsDecorated(True)
@@ -4303,7 +4837,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(self.COL_NAME, QtWidgets.QHeaderView.Stretch)
-        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK):
+        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK, self.COL_LOCK):
             header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemDoubleClicked.connect(self._item_double_clicked)
@@ -4442,14 +4976,60 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.auto_tree)
         col.addWidget(card)
 
-        # ---- 7. smart layout (next milestone)
-        card = self.step_layout = StepCard(7, "Smart layout", "Even texel density across groups, groups that span "
-                                                              "several tiles, locked tiles and the UDIM map. "
-                                                              "Coming next.")
-        soon = primary_button("Smart Layout (coming soon)")
-        soon.setEnabled(False)
-        card.add(soon)
+        # ---- 7. smart layout
+        card = self.step_layout = StepCard(7, "Smart layout", "Every shell at the same texel density, packed tile "
+                                                              "by tile per section. Plan previews instantly; Apply "
+                                                              "writes it (one Ctrl+Z).")
+        grid = Section("", header=False)
+        self.lay_density = FloatField(1.0, 100000.0, 64.0, 4096.0, decimals=0, step=64.0)
+        self.lay_density.setValue(LAYOUT_DEFAULTS["texel_density"])
+        grid.add_row("Density px/m", self.lay_density, "Target texel density in pixels per metre (times each "
+                                                       "group's and section's TD %).")
+        self.lay_map = ComboField(MAP_SIZES)
+        self.lay_map.setValue(LAYOUT_DEFAULTS["map_size"])
+        grid.add_row("Map size", self.lay_map, "Texture resolution of one UDIM tile.")
+        self.lay_mode = ComboField(LAYOUT_MODES)
+        grid.add_row("Mode", self.lay_mode, "Fixed density: use the density above.\n"
+                                            "Fit to tiles: find the highest density that fits in Max tiles.")
+        self.lay_tiles = IntField(1, 1000, 1, 60)
+        self.lay_tiles.setValue(LAYOUT_DEFAULTS["max_tiles"])
+        self.lay_tiles_label = grid.add_row("Max tiles", self.lay_tiles, "Tile budget for Fit to tiles.")
+        self.lay_padding = IntField(0, 128, 0, 32)
+        self.lay_padding.setValue(LAYOUT_DEFAULTS["padding_px"])
+        grid.add_row("Padding px", self.lay_padding, "Gap between shells and around each tile, in pixels.")
+        self.lay_growth = FloatField(0.0, 100.0, 0.0, 50.0, decimals=0, step=5.0)
+        grid.add_row("Spare room %", self.lay_growth, "Leave this much extra space around every shell so small "
+                                                      "model changes still fit without moving anything.")
+        self.lay_rotate = CheckField("Rotate shells onto their main axis")
+        self.lay_rotate.setValue(True)
+        self.lay_rotate.setToolTip("Turn it off to keep shells exactly as they're oriented (e.g. you already "
+                                   "straightened them).")
+        grid.add_full(self.lay_rotate)
+        self.lay_rows = CheckField("Each section starts a new row")
+        self.lay_rows.setValue(True)
+        grid.add_full(self.lay_rows)
+        self.lay_comp = CheckField("Auto-compensate pieces bigger than a tile")
+        self.lay_comp.setValue(True)
+        grid.add_full(self.lay_comp)
+        card.add(grid)
+        plan_btn = secondary_button("Plan", "Preview the layout in the map below without changing anything.")
+        plan_btn.clicked.connect(lambda *_: self.plan_layout())
+        self.apply_btn = primary_button("Apply Layout")
+        self.apply_btn.setMinimumHeight(28)
+        self.apply_btn.setToolTip("Write the planned layout into the UV set (old UVs backed up if step 6's "
+                                  "backup is ticked). One Ctrl+Z undoes it.")
+        self.apply_btn.clicked.connect(lambda *_: self.apply_layout())
+        card.add(button_row(plan_btn, self.apply_btn))
+        self.udim_map = UdimMapWidget()
+        self.udim_map.groupClicked.connect(self._map_clicked)
+        card.add(self.udim_map)
+        self.layout_summary = hint_label("")
+        card.add(self.layout_summary)
         col.addWidget(card)
+        for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
+                  self.lay_rotate, self.lay_rows, self.lay_comp):
+            w.changed.connect(self._layout_settings_changed)
+        self._update_layout_enabled()
         col.addStretch(1)
 
         self.status = QtWidgets.QLabel()
@@ -4475,7 +5055,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         auto_clean = auto_done and not any(r["action"] in ("failed", "check") for r in self.auto_result["rows"])
         self.step_prep.set_state("done" if prepped else ("current" if clean_groups and not auto_done else "todo"))
         self.step_auto.set_state("done" if auto_clean else ("current" if clean_groups else "todo"))
-        self.step_layout.set_state("todo")
+        self.step_layout.set_state("done" if self.layout_applied else ("current" if auto_done else "todo"))
         if not has_root:
             self.next_banner.set_text("Select the asset's top group (e.g. <b>house_GRP</b>) and press "
                                       "<b>Use Selected Group</b>.")
@@ -4487,6 +5067,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
         elif snap["overlaps"]:
             self.next_banner.set_text("%d mesh(es) are in two groups. Highlight the right group and press "
                                       "<b>Assign Selection</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
+        elif self.layout_applied:
+            self.next_banner.set_text("Laid out into <b>%d tile(s)</b> at %d px/m. Lock finished groups (Lock "
+                                      "column) so later re-layouts leave them alone." % (
+                                          self.layout_applied["tiles"], round(self.layout_applied["density"])),
+                                      tag="DONE", tone="done")
+        elif auto_done and self._plan is not None:
+            self.next_banner.set_text("Check the map in step 7 (hover for details), then press <b>Apply "
+                                      "Layout</b>.")
+        elif auto_done and not any(r["action"] in ("failed", "check") for r in self.auto_result["rows"]):
+            self.next_banner.set_text("UVs are in place. Set the texel density in <b>step 7</b> and press "
+                                      "<b>Plan</b> for an even-density UDIM layout.")
         elif auto_done:
             rows = self.auto_result["rows"]
             n_check = sum(1 for r in rows if r["action"] in ("failed", "check"))
@@ -4523,11 +5114,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.report = {}
         self.auto_result = None
         self._fill_auto()
+        self._plan = None
+        self.layout_applied = None
+        if hasattr(self, "udim_map"):
+            self.udim_map.set_plan(None, None)
+            self.layout_summary.setText("")
         self._fill_report()
         self.refresh()
 
     @ui_safe
     def refresh(self):
+        self._collected = None  # shells are re-read on the next Plan
         asset = self._asset()
         if asset is None or not asset.root_group():
             self.snapshot = None
@@ -4576,6 +5173,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     mitem.setToolTip(0, "%s\nfrom %s" % (mat["set"], mat["source"]))
                     mitem.setFlags(mitem.flags() | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
                     mitem.setCheckState(self.COL_STACK, QtCore.Qt.Checked if mat["stack"] else QtCore.Qt.Unchecked)
+                    mitem.setCheckState(self.COL_LOCK, QtCore.Qt.Checked if mat["locked"] else QtCore.Qt.Unchecked)
+                    mitem.setToolTip(self.COL_LOCK, "Locked groups keep their UVs and tiles when you lay out again.")
                     if mat["odd"]:
                         mitem.setForeground(self.COL_ITEMS, QtGui.QBrush(QtGui.QColor(LEVEL_COLORS["warn"])))
                         mitem.setToolTip(self.COL_ITEMS, "Has non-face members that layout ignores: %s" %
@@ -4659,6 +5258,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
             asset.set_group_values(node, td=td)
         elif column == self.COL_STACK and set_role(node) == "material":
             asset.set_group_values(node, stack=item.checkState(self.COL_STACK) == QtCore.Qt.Checked)
+        elif column == self.COL_LOCK and set_role(node) == "material":
+            locked = item.checkState(self.COL_LOCK) == QtCore.Qt.Checked
+            set_group_lock(node, locked)
+            self._collected = None
+            self.set_status("%s %s." % (node, "locked: it keeps its UVs and tiles" if locked else "unlocked"))
         elif column == self.COL_NAME:
             key = sanitize_key(item.text(self.COL_NAME))
             cmds.setAttr(node + "." + UDIM_KEY, key, type="string")
@@ -4834,6 +5438,101 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.set_status("Pre-process on %d meshes in %.2fs: %d problem(s) fixed, %d mesh(es) will be skipped, "
                         "%d with warnings." % (len(meshes), time.time() - t0, fixed, skipped, warn), level=level)
 
+    def _layout_settings(self):
+        return {"texel_density": self.lay_density.value(), "map_size": self.lay_map.value(),
+                "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
+                "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
+                "rotate": self.lay_rotate.value(), "new_row_per_section": self.lay_rows.value(),
+                "auto_compensate": self.lay_comp.value()}
+
+    def _update_layout_enabled(self):
+        fit = self.lay_mode.value() == "Fit to tiles"
+        self.lay_tiles.setEnabled(fit)
+        self.lay_tiles_label.setEnabled(fit)
+        self.lay_density.setEnabled(not fit)
+
+    def _layout_settings_changed(self):
+        self._update_layout_enabled()
+        if self._plan is not None:
+            self._replan_timer.start()  # live re-plan: pure math on cached shells
+
+    def _replan(self):
+        try:
+            if self._plan is not None:
+                self.plan_layout(quiet=True)
+        except Exception:
+            traceback.print_exc()
+
+    @ui_safe
+    def plan_layout(self, quiet=False):
+        asset = self._asset()
+        if asset is None or not asset.sections():
+            self.set_status("Pick a root and Scan first.", level="warn")
+            return None
+        t0 = time.time()
+        settings = self._layout_settings()
+        if self._collected is None or self._collected.get("rotate") != settings["rotate"]:
+            uv_set = self.uv_set.text().strip() or "map1"
+            self._collected = collect_shells(asset, uv_set, rotate=settings["rotate"])
+            self._collected["rotate"] = settings["rotate"]
+        self._plan = make_plan(self._collected, settings)
+        self.udim_map.set_plan(self._collected, self._plan)
+        self._summarise_plan(time.time() - t0)
+        self._update_guidance()
+        return self._plan
+
+    def _summarise_plan(self, seconds):
+        plan, col = self._plan, self._collected
+        n_shells = len(plan["placements"])
+        lines = ["%d shells from %d groups -> %d tile(s) at %d px/m (%s map), planned in %.2fs." % (
+            n_shells, len(col["groups"]), len(plan["new_tiles"]), round(plan["density"]),
+            plan["settings"]["map_size"], seconds)]
+        if col["locked"]:
+            lines.append("%d locked group(s) keep tiles %s." % (len(col["locked"]), ", ".join(
+                str(t) for g in col["locked"] for t in g["tiles"])))
+        changed = [st["key"] for st in plan["stats"].values() if st.get("changed") and not st.get("locked")]
+        if changed:
+            lines.append("Changed since last layout: %s." % ", ".join(sorted(set(changed))))
+        if col["skipped"]:
+            lines.append("%d mesh(es) without usable UVs skipped (run Auto UV)." % len(col["skipped"]))
+        lines.extend(plan["warnings"][:4])
+        self.layout_summary.setText("\n".join(lines))
+
+    @ui_safe
+    def apply_layout(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        self._replan_timer.stop()
+        if self.plan_layout(quiet=True) is None:  # always apply exactly what the current settings plan
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            t0 = time.time()
+            opts = self._auto_options()
+            result = apply_layout(asset, self._collected, self._plan, uv_set=opts["uv_set"],
+                                  backup=opts["backup"], backup_set=opts["backup_set"])
+            seconds = time.time() - t0
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        plan = self._plan
+        self.layout_applied = {"tiles": len(plan["new_tiles"]), "density": plan["density"]}
+        self.refresh()
+        self.plan_layout(quiet=True)  # re-read so the map shows what's in the scene now
+        self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
+            result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
+        self._update_guidance()
+
+    def _map_clicked(self, node):
+        try:
+            if cmds.objExists(node):
+                members = cmds.sets(node, q=True) or []
+                if members:
+                    cmds.select(members, replace=True)
+                self.set_status("Selected %s." % node)
+        except Exception:
+            traceback.print_exc()
+
     def _auto_options(self):
         return dict(uv_set=self.uv_set.text().strip() or "map1",
                     backup=self.auto_backup.value(),
@@ -4974,6 +5673,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _on_scene_changed(self):
         try:
+            self._collected = None
+            self._plan = None
             assets = SmartUdimAsset.all()
             self.set_asset(assets[0] if len(assets) == 1 else None)
         except Exception:

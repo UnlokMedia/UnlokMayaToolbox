@@ -331,6 +331,36 @@ def main():
     pump()
     window.grab().save(os.path.join(OUT, "10_auto_uv.png"))
 
+    # --- Smart layout through the panel: plan (map), lock a group, apply
+    udim.lay_density.setValue(2048.0)
+    udim.lay_map.setValue("1024")
+    udim.plan_layout()
+    pump()
+    check("Plan fills the UDIM map", len(udim.udim_map.shells) > 0 and udim.udim_map.tiles,
+          "%d shells, tiles %s | %s" % (len(udim.udim_map.shells), sorted(udim.udim_map.tiles),
+                                        udim.layout_summary.text()[:160]))
+    udim.lay_density.spin.setValue(1024.0)  # like a user edit: emits, so it live re-plans from cached shells
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        pump(1)
+    check("changing a setting re-plans live", "1024 px/m" in udim.layout_summary.text(),
+          udim.layout_summary.text()[:120])
+    first = udim.tree.topLevelItem(0).child(0)
+    first.setCheckState(udim.COL_LOCK, ns["QtCore"].Qt.Checked)
+    pump()
+    udim.apply_layout()
+    pump()
+    check("Apply Layout writes it and the step completes", udim.step_layout.state == "done" and
+          "Laid out" in udim.status.text(), udim.status.text())
+    check("locked group shows as locked in the map", bool(udim.udim_map.locked_tiles),
+          str(sorted(udim.udim_map.locked_tiles)))
+    scroll = udim.step_layout.parentWidget().parentWidget().parentWidget()
+    if hasattr(scroll, "ensureWidgetVisible"):
+        scroll.ensureWidgetVisible(udim.udim_map)
+    pump()
+    window.grab().save(os.path.join(OUT, "11_smart_layout.png"))
+    udim.udim_map.grab().save(os.path.join(OUT, "12_udim_map.png"))
+
     # --- re-paste replaces the window cleanly
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), {"__name__": "__main__", "__file__": TOOLBOX})
