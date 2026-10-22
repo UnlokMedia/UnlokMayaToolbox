@@ -2949,7 +2949,7 @@ class PathScatterPanel(QtWidgets.QWidget):
 # =============================================================================
 # Smart UDIM - naming (UnlokRenamer convention)
 # =============================================================================
-# Copied from UnlokRenamer (src/unlok_renamer/ui.py) so this file stays
+# Copied from UnlokRenamer (unlok_renamer.py) so this file stays
 # self-contained. Keep these lists and helpers in sync with UnlokRenamer.
 
 UR_MATERIALS = [
@@ -5344,12 +5344,25 @@ def selection_items():
     return items
 
 
-def _unlok_renamer_available():
+def _unlok_renamer_main():
+    """UnlokRenamer's main(): from the Script Editor if it was pasted and run
+    there (secure setups), else from an importable unlok_renamer.py; None if
+    neither."""
+    import __main__
+    if hasattr(__main__, "RenamerWindow") and callable(getattr(__main__, "main", None)):
+        return __main__.main
     try:
         import importlib.util
-        return importlib.util.find_spec("unlok_renamer") is not None
+        if importlib.util.find_spec("unlok_renamer") is not None:
+            import unlok_renamer
+            return unlok_renamer.main
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _unlok_renamer_available():
+    return _unlok_renamer_main() is not None
 
 
 LEVEL_COLORS = {"fixed": "#6fbf73", "warn": "#e0b050", "skip": "#e07a5f", "info": "#a8a8a8"}
@@ -6062,7 +6075,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         available = _unlok_renamer_available()
         self.renamer_btn.setEnabled(available)
         self.renamer_btn.setToolTip("Open UnlokRenamer to fix these names." if available else
-                                    "UnlokRenamer isn't loaded in this Maya session.")
+                                    "UnlokRenamer isn't loaded in this Maya session (paste and run "
+                                    "unlok_renamer.py once, then re-scan).")
         self._update_guidance()
 
     def _fill_report(self):
@@ -6642,8 +6656,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     @ui_safe
     def open_renamer(self):
-        import unlok_renamer
-        unlok_renamer.main()
+        opener = _unlok_renamer_main()
+        if opener is None:
+            self.set_status("UnlokRenamer isn't loaded: paste unlok_renamer.py into the Script Editor and run it "
+                            "once, then try again.", level="warn")
+            return
+        opener()
 
     # ======================================================== helpers
     def _parent_section(self, material_set):
