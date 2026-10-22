@@ -86,6 +86,109 @@ class NoUndo(object):
         return False
 
 
+class Cancelled(Exception):
+    """The user pressed Esc during a long run."""
+
+
+class Progress(object):
+    """Progress for long runs: Maya's main progress bar (Esc cancels) plus an
+    optional callback(fraction, text) for a panel to show the same thing.
+
+    stages = [(key, weight)]: each stage's share of the bar. Inside a stage,
+    call item(detail, weight) before each piece of work. Updates are
+    throttled to ~10 a second, so calling it per mesh costs next to nothing.
+    Raises Cancelled from item() / update() once Esc was pressed.
+    """
+
+    def __init__(self, title, stages, callback=None):
+        self.title = title
+        self.callback = callback
+        total = float(sum(w for _, w in stages)) or 1.0
+        self.span = {}
+        acc = 0.0
+        for key, w in stages:
+            self.span[key] = (acc / total, w / total)
+            acc += w
+        self.key, self.label, self.detail = None, "", ""
+        self.count, self.items, self.pos, self.done, self._pending = 1.0, 1, 0, 0.0, 0.0
+        self.t0 = time.time()
+        self._last = 0.0
+        self.bar = None
+
+    def __enter__(self):
+        if not cmds.about(batch=True):
+            try:
+                self.bar = mel.eval("$unlokTmpBar = $gMainProgressBar")
+                cmds.progressBar(self.bar, edit=True, beginProgress=True, isInterruptable=True,
+                                 status=self.title, maxValue=1000)
+            except Exception:
+                self.bar = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.bar:
+            try:
+                cmds.progressBar(self.bar, edit=True, endProgress=True)
+            except Exception:
+                pass
+        return False
+
+    def stage(self, key, count, label, items=None):
+        """count: total weight of the stage's items; items: how many there
+        are, when weights aren't 1 each (e.g. batches weighted by faces)."""
+        self.key, self.label, self.detail = key, label, ""
+        self.count = float(max(1, count))
+        self.items = int(count if items is None else items)
+        self.pos, self.done, self._pending = 0, 0.0, 0.0
+        self.update(force=True)
+
+    def item(self, detail="", weight=1.0):
+        self.done += self._pending
+        self._pending = float(weight)
+        self.pos += 1
+        self.detail = detail
+        self.update()
+
+    def fraction(self):
+        start, share = self.span.get(self.key, (0.0, 0.0))
+        return min(1.0, start + share * min(1.0, self.done / self.count))
+
+    def where(self):
+        """'Unfolding (12 of 47)', for reports."""
+        return "%s (%d of %d)" % (self.label, self.pos, self.items) if self.pos else self.label
+
+    def text(self):
+        f = self.fraction()
+        spent = time.time() - self.t0
+        txt = "%s - %s" % (self.title, self.label)
+        if self.pos:
+            txt += " %d of %d" % (self.pos, self.items)
+        if self.detail:
+            txt += ": %s" % self.detail
+        txt += "  |  %d%%, %s" % (round(f * 100), _secs(spent))
+        if f > 0.05 and spent > 2.0:
+            txt += ", about %s left" % _secs(spent / f - spent)
+        return txt
+
+    def update(self, force=False):
+        now = time.time()
+        if not force and now - self._last < 0.1:
+            return
+        self._last = now
+        if self.bar:
+            if cmds.progressBar(self.bar, query=True, isCancelled=True):
+                raise Cancelled(self.where())
+            cmds.progressBar(self.bar, edit=True, progress=int(self.fraction() * 1000),
+                             status=self.text() + "  |  Esc cancels")
+        if self.callback:
+            self.callback(self.fraction(), self.text())
+
+
+def _secs(s):
+    s = int(round(s))
+    return "%ds" % s if s < 60 else "%dm %02ds" % (s // 60, s % 60)
+
+
 class PreserveSelection(object):
     """Restore the user's selection after commands that change it."""
 
@@ -3768,10 +3871,12 @@ def _faces_by_mesh(components):
     return out
 
 
-def detect_geometry_issues(meshes):
+def detect_geometry_issues(meshes, progress=None):
     """{category: {transform: count}} for lamina, non-manifold, zero-area, n-gons."""
     issues = {"lamina": {}, "nonmanifold": {}, "zeroarea": {}, "ngons": {}}
     for xform in meshes:
+        if progress:
+            progress.item(short_name(xform))
         lam = cmds.polyInfo(xform, laminaFaces=True) or []
         if lam:
             issues["lamina"][xform] = len(cmds.ls(lam, flatten=True))
@@ -4097,11 +4202,13 @@ def uv_footprints(xform, uv_set="map1", faces=None):
     return out
 
 
-def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
+def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup", progress=None):
     """Copy uv_set to backup_set on meshes that have UVs and no backup yet
     (an existing backup is never overwritten, so re-runs keep the original)."""
     made = 0
     for xform in meshes:
+        if progress:
+            progress.item(short_name(xform))
         fn = _mesh_fn(xform)
         if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
             continue
@@ -4126,21 +4233,51 @@ def restore_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
     return restored
 
 
-def auto_unwrap(meshes, hard_angle=40.0, passes=2):
+def _unwrap_batches(meshes, budget=8000):
+    """Split meshes into batches of about `budget` faces, so the Unfold3D
+    calls report progress (and can be cancelled) between batches. A mesh
+    bigger than the budget is a batch of its own. [(meshes, faces)]."""
+    batches, cur, size = [], [], 0
+    for m in meshes:
+        n = cmds.polyEvaluate(m, face=True) or 0
+        if cur and size + n > budget:
+            batches.append((cur, size))
+            cur, size = [], 0
+        cur.append(m)
+        size += n
+    if cur:
+        batches.append((cur, size))
+    return batches
+
+
+def _batch_label(batch):
+    names, faces = batch
+    if len(names) == 1:
+        return "%s (%s faces)" % (short_name(names[0]), "{:,}".format(faces))
+    return "%d meshes (%s faces)" % (len(names), "{:,}".format(faces))
+
+
+def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
     """Unwrap meshes (see the section comment). Returns {mesh: error} for any
-    that failed; one bad mesh never stops the rest."""
+    that failed; one bad mesh never stops the rest. With a Progress, it
+    reports stages 'project', 'seams', 'unfold' and 'fix'."""
     failed = {}
     if not meshes:
         return failed
+    pr = progress or Progress("", [])
     cmds.loadPlugin("Unfold3D", quiet=True)
     ok = []
+    pr.stage("project", len(meshes), "Projecting")
     for xform in meshes:  # projection works one object at a time
+        pr.item(short_name(xform))
         try:
             cmds.polyAutoProjection(xform + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1,
                                     percentageSpace=0.2, scaleMode=1, constructionHistory=False)
             ok.append(xform)
         except Exception as exc:
             failed[xform] = "projection failed: %s" % exc
+    pr.stage("seams", len(ok) + 1, "Cutting seams")
+    pr.item("finding hard and sharp edges")
     hard = set(_edges_by_constraint(ok, smoothness=1))
     sharp = set(_edges_by_constraint(ok, angle=1, anglebound=(hard_angle, 180.0)))
     soft = [e for e in _edges_by_constraint(ok, angle=1, anglebound=(0.0, hard_angle)) if e not in hard]
@@ -4150,6 +4287,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2):
     for e in hard | sharp:
         by_seam.setdefault(e.split(".")[0], []).append(e)
     for xform in ok:
+        pr.item(short_name(xform))
         try:
             if by_soft.get(xform):
                 cmds.polyMapSewMove(by_soft[xform], constructionHistory=False)
@@ -4171,31 +4309,41 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2):
                 except Exception as exc:
                     failed[m] = "unfold failed: %s" % exc
 
-    if ok:
+    batches = _unwrap_batches(ok)
+    pr.stage("unfold", sum(n for _, n in batches), "Unfolding", items=len(batches))
+    for batch in batches:  # batches, so progress moves (and Esc works) on big assets
+        pr.item(_batch_label(batch), weight=batch[1])
         try:
-            cmds.select(ok, replace=True)
+            cmds.select(batch[0], replace=True)
             cmds.u3dAutoSeam(splitShells=0, cutPipes=1)  # closed shells need at least one seam
         except Exception:
             pass
-        unfold(ok)
-    for _ in range(passes):
+        unfold(batch[0])
+    for i in range(passes):
+        pr.stage("fix", len(ok), "Fixing stretched shells (pass %d of %d)" % (i + 1, passes))
         bad = []
         for m in ok:
+            pr.item(short_name(m))
             if m in failed:
                 continue
             bad.extend("%s.f[%s]" % (m, r[2:-1]) for r in face_ranges(_stretched_shell_faces(m)))
         if not bad:
             break
-        try:
-            cmds.select(bad, replace=True)
-            cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
-        except Exception:
-            pass
-        unfold(sorted(set(b.split(".")[0] for b in bad)))
+        by_mesh = {}
+        for face in bad:
+            by_mesh.setdefault(face.split(".")[0], []).append(face)
+        for batch in _unwrap_batches(sorted(by_mesh)):
+            pr.update()
+            try:
+                cmds.select([f for m in batch[0] for f in by_mesh[m]], replace=True)
+                cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
+            except Exception:
+                pass
+            unfold(batch[0])
     return failed
 
 
-def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_tiles=()):
+def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_tiles=(), progress=None):
     """Pack every material group into its own UDIM tile.
 
     Sections take bands of rows (in section order); each material keeps the
@@ -4226,6 +4374,8 @@ def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_til
                     items.extend("%s.%s" % (xform, r) for r in face_ranges(faces))
             if not items:
                 continue
+            if progress:
+                progress.item("%s (%d piece%s)" % (short_name(mat), len(items), "" if len(items) == 1 else "s"))
             col = column[_get(mat, UDIM_KEY) or parse_group_name(mat)["key"]]
             u0 = col % 10
             v0 = first_row + si * rows_per_section + col // 10
@@ -4238,13 +4388,34 @@ def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_til
     return placed
 
 
+AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("seams", 8), ("unfold", 40),
+                  ("fix", 10), ("pack", 12), ("check", 4)]
+
+
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
-                hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing="Balanced"):
+                hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing="Balanced",
+                progress_callback=None):
     """The whole Auto UV pass on an asset, as one Ctrl+Z.
 
     Returns {"rows": [{mesh, before, reason, after, action}], "timing": {...},
     "tiles": [(material set, udim)], "backups": n}. Rows are worst first.
+    Progress shows in Maya's progress bar and through progress_callback
+    (fraction, text). Esc stops it at the next mesh: the result then has
+    "cancelled" (where it stopped) and Ctrl+Z undoes what was done.
     """
+    pr = Progress("Auto UV" if not analyse_only else "Analyse UVs",
+                  AUTO_UV_STAGES if not analyse_only else [("score", 1)], progress_callback)
+    try:
+        with pr:
+            return _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack,
+                                analyse_only, packing, pr)
+    except Cancelled:
+        return {"rows": [], "timing": {"total": time.time() - pr.t0}, "tiles": [], "backups": 0,
+                "cancelled": pr.where()}
+
+
+def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack, analyse_only,
+                 packing, pr):
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
@@ -4254,7 +4425,9 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     meshes = [m for m in meshes if status.get(m) != "handsoff"]
     rows = []
     scores = {}
+    pr.stage("score", len(meshes), "Scoring UVs")
     for m in meshes:
+        pr.item(short_name(m))
         try:
             scores[m] = uv_quality(m, uv_set)
         except Exception as exc:
@@ -4277,13 +4450,15 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     with UndoChunk("Smart UDIM Auto UV"), PreserveSelection():
         if clean_first and todo:
             t = time.time()
-            issues = detect_geometry_issues(todo)
+            pr.stage("clean", len(todo), "Checking geometry")
+            issues = detect_geometry_issues(todo, pr)
             dirty = sorted(set(issues["lamina"]) | set(issues["nonmanifold"]) | set(issues["zeroarea"]))
             if dirty:
                 _run_cleanup(dirty, True, True, True)
             timing["clean"] = time.time() - t
         if backup:
-            backups = backup_uvs(meshes, uv_set, backup_set)
+            pr.stage("backup", len(meshes), "Backing up UVs")
+            backups = backup_uvs(meshes, uv_set, backup_set, pr)
         for m in meshes:
             fn = _mesh_fn(m)
             if fn is not None and uv_set in fn.getUVSetNames():
@@ -4293,19 +4468,22 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
                 cmds.polyUVSet(m, create=True, uvSet=uv_set)
                 cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
         t = time.time()
-        failed = auto_unwrap(todo, hard_angle=hard_angle)
+        failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr)
         timing["unwrap"] = time.time() - t
         if pack:
             t = time.time()
             avoid = set()
             for m in handsoff:
                 avoid.update(t for t, _, _ in uv_footprints(m, uv_set))
+            pr.stage("pack", len(asset.all_material_sets()), "Packing into UDIMs")
             tiles = pack_udims(asset, exclude=set(failed) | set(instanced) | set(handsoff),
-                               resolution=AUTO_UV_PACKING.get(packing, 1024), avoid_tiles=avoid)
+                               resolution=AUTO_UV_PACKING.get(packing, 1024), avoid_tiles=avoid, progress=pr)
             timing["pack"] = time.time() - t
         # scoring can switch a mesh's current UV set: keep it inside the chunk so
         # one Ctrl+Z still undoes the whole run
+        pr.stage("check", len(order), "Checking the result")
         for m in order:
+            pr.item(short_name(m))
             if m in failed:
                 rows.append({"mesh": m, "before": scores[m][0], "reason": failed[m], "after": None,
                              "action": "failed"})
@@ -5770,6 +5948,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
         run_auto.setToolTip("Back up, clean, unwrap what isn't laid out and pack. One Ctrl+Z undoes it all.")
         run_auto.clicked.connect(lambda *_: self.auto_uv())
         card.add(run_auto)
+        self.auto_progress = QtWidgets.QProgressBar()
+        self.auto_progress.setRange(0, 1000)
+        self.auto_progress.setTextVisible(False)
+        self.auto_progress.setFixedHeight(8)
+        self.auto_progress.setVisible(False)
+        card.add(self.auto_progress)
+        self.auto_progress_label = hint_label("")
+        self.auto_progress_label.setVisible(False)
+        card.add(self.auto_progress_label)
         self.auto_tree = QtWidgets.QTreeWidget()
         self.auto_tree.setColumnCount(5)
         self.auto_tree.setHeaderLabels(["Mesh", "Before", "After", "Result", "Status"])
@@ -6529,6 +6716,37 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     clean_first=self.auto_clean.value(), pack=self.auto_pack.value(),
                     packing=self.auto_packing.value())
 
+    def _progress_start(self):
+        self.auto_progress.setValue(0)
+        self.auto_progress_label.setText("Starting... (Esc cancels)")
+        self.auto_progress.setVisible(True)
+        self.auto_progress_label.setVisible(True)
+        scroll = self.step_auto.parentWidget().parentWidget().parentWidget()
+        if hasattr(scroll, "ensureWidgetVisible"):
+            scroll.ensureWidgetVisible(self.auto_progress_label)
+        self.repaint()
+
+    def _progress(self, fraction, text):
+        """Progress callback: only repaints these widgets (no event
+        processing, so nothing else can run in the middle of a scene edit).
+        Maya's own progress bar keeps the window responsive and catches Esc."""
+        self.auto_progress.setValue(int(fraction * 1000))
+        self.auto_progress_label.setText(text.split(" - ", 1)[-1] + "  |  Esc cancels")
+        self.auto_progress.repaint()
+        self.auto_progress_label.repaint()
+
+    def _progress_end(self):
+        self.auto_progress.setVisible(False)
+        self.auto_progress_label.setVisible(False)
+
+    def _cancelled(self, result, what):
+        if not result.get("cancelled"):
+            return False
+        self.set_status("%s cancelled during %s after %.1fs. %s" % (
+            what, result["cancelled"], result["timing"].get("total", 0.0),
+            "Ctrl+Z undoes what was done." if what == "Auto UV" else "Nothing was changed."), level="warn")
+        return True
+
     @ui_safe
     def analyse_uvs(self):
         asset = self._asset()
@@ -6537,7 +6755,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return
         t0 = time.time()
         opts = self._auto_options()
-        result = run_auto_uv(asset, uv_set=opts["uv_set"], keep_score=opts["keep_score"], analyse_only=True)
+        self._progress_start()
+        try:
+            result = run_auto_uv(asset, uv_set=opts["uv_set"], keep_score=opts["keep_score"], analyse_only=True,
+                                 progress_callback=self._progress)
+        finally:
+            self._progress_end()
+        if self._cancelled(result, "Analyse"):
+            return
         result["analysed_only"] = True
         self.auto_result = result
         self._fill_auto()
@@ -6556,10 +6781,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("Press Scan first so meshes are grouped by section and material.", level="warn")
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        self._progress_start()
         try:
-            result = run_auto_uv(asset, **self._auto_options())
+            result = run_auto_uv(asset, progress_callback=self._progress, **self._auto_options())
         finally:
+            self._progress_end()
             QtWidgets.QApplication.restoreOverrideCursor()
+        if self._cancelled(result, "Auto UV"):
+            self.refresh()
+            return
         self.auto_result = result
         self._fill_auto()
         self.refresh()

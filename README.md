@@ -216,6 +216,12 @@ density. The actual layout is still being built; see
         then extra cuts where shells are still stretched
      4. packs each material group into its own UDIM tile, with sections on
         their own rows and each material in the same column for every section
+   - **Progress:** Maya's progress bar at the bottom of the window, and the
+     Auto UV step itself, show each stage, the mesh or batch it's on, a
+     percentage and the time left. Press **Esc** to stop at the next mesh;
+     one Ctrl+Z then undoes what was done. A long pause only happens inside
+     one Unfold3D call (a big mesh, or packing a big group), and the bar
+     names it first.
    - **Restore Backup** copies the backup set back into `map1` for the
      selected meshes, or for all of them if nothing is selected.
    - **Meshes you've already UV'd:** select them and press one of these
@@ -337,6 +343,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_auto_uv_progress.py`: Auto UV progress on a 141-mesh
+  building (every stage reports, no unexplained silences, Esc cancels
+  cleanly, one Ctrl+Z after a cancel).
 - `tests/test_uv_status.py`: Keep UVs / Hands off marks through Auto UV,
   both hands-off tile modes and validation.
 - `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and

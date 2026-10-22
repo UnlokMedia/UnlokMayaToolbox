@@ -164,6 +164,17 @@
     - `pack_udims` puts one tile per material group, with sections on rows
       and the same column per material.
     - Backups go to `map1_backup` and are never overwritten.
+    - **Progress** (`Progress`, `Cancelled`):
+      - Maya's main progress bar (Esc sets `isCancelled`) plus a panel
+        callback, throttled to ~10 updates a second.
+      - The panel callback only `repaint()`s its own widgets and never
+        processes events, so no timer or scriptJob runs in the middle of a
+        scene edit.
+      - `u3dAutoSeam` / `u3dUnfold` run in batches of about 8,000 faces
+        (`_unwrap_batches`) so progress moves; a single Unfold3D call can't
+        report.
+      - Measured: `u3dLayout` packing is the slowest part on big assets
+        (24 s for a 36-piece group at Balanced).
   - **UV status** (per mesh, whole meshes only):
     - Stored as membership of two child sets of the root set, roles
       `uvkeep` / `uvhandsoff` (`status_set`, `uv_status`, `set_uv_status`).
