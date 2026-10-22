@@ -113,6 +113,8 @@ class Progress(object):
         self.count, self.items, self.pos, self.done, self._pending = 1.0, 1, 0, 0.0, 0.0
         self.t0 = time.time()
         self._last = 0.0
+        self._last_view = 0.0
+        self.refresh_view = False  # redraw the viewport about once a second (live UV colours)
         self.bar = None
 
     def __enter__(self):
@@ -183,6 +185,9 @@ class Progress(object):
                 raise Cancelled(self.where())
             cmds.progressBar(self.bar, edit=True, progress=int(self.fraction() * 1000),
                              status=self.text() + "  |  Esc cancels")
+            if self.refresh_view and now - self._last_view > 1.0:
+                self._last_view = now
+                cmds.refresh(currentView=True)
         if self.callback:
             self.callback(self.fraction(), self.text())
 
@@ -3183,8 +3188,12 @@ SECTION_SUFFIX = "UDS"
 #   handsoff = never touch: no unwrap, no layout; the plan works around it
 UV_STATUSES = ("auto", "keep", "handsoff")
 UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "handsoff": "Hands off"}
-_STATUS_ROLE = {"keep": "uvkeep", "handsoff": "uvhandsoff"}
-_STATUS_SUFFIX = {"keep": "uvKeep_SET", "handsoff": "uvHandsOff_SET"}
+# Tool-owned tracking sets (also under the root): what Auto UV unwrapped, what
+# Smart Layout laid out, and what needs a human (Auto UV failed / still bad).
+_STATUS_ROLE = {"keep": "uvkeep", "handsoff": "uvhandsoff", "auto": "uvauto", "laidout": "uvlaidout",
+                "problem": "uvproblem"}
+_STATUS_SUFFIX = {"keep": "uvKeep_SET", "handsoff": "uvHandsOff_SET", "auto": "uvAuto_SET",
+                  "laidout": "uvLaidOut_SET", "problem": "uvProblem_SET"}
 ROOT_SUFFIX = "smartUDIM_SET"
 
 
@@ -3376,10 +3385,25 @@ def expand_members(set_node):
 
 def shader_face_groups(transform):
     """{shaderKey: face indices or None (all faces)} using the mesh's
-    per-face shading assignment."""
+    per-face shading assignment (its real one while UV colours are on)."""
     shapes = cmds.listRelatives(transform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
     if not shapes:
         return {}
+    if cmds.attributeQuery(ORIG_SHADING_ATTR, node=shapes[0], exists=True):
+        try:
+            orig = json.loads(cmds.getAttr(shapes[0] + "." + ORIG_SHADING_ATTR) or "{}")
+        except ValueError:
+            orig = {}
+        if orig:
+            groups = {}
+            for sg, ranges in orig.items():
+                key = _sg_key(sg) if cmds.objExists(sg) else "default"
+                if ranges is None:  # one shader on the whole mesh
+                    return {key: None}
+                faces = groups.setdefault(key, [])
+                for r in ranges:
+                    faces.extend(_parse_face_spec(r) or [])
+            return groups
     dag = get_dag_path(shapes[0])
     fn = om.MFnMesh(dag)
     try:
@@ -3763,6 +3787,30 @@ class SmartUdimAsset(object):
                     cmds.delete(mat)
                     gone += 1
         return gone
+
+    def tool_members(self, kind):
+        """Meshes in a tracking set ('auto', 'laidout', 'problem')."""
+        node = self.status_set(kind)
+        return set(expand_members(node)[0]) if node else set()
+
+    def update_tool_sets(self, add=None, remove=None):
+        """add / remove: {kind: [meshes]}. Runs in the caller's undo chunk."""
+        for kind, meshes in (remove or {}).items():
+            node = self.status_set(kind)
+            if not node or not meshes:
+                continue
+            members = expand_members(node)[0]
+            gone = []
+            for m in meshes:
+                if m in members:
+                    gone.append(m)
+                    gone.extend(cmds.listRelatives(m, shapes=True, fullPath=True) or [])
+            if gone:
+                cmds.sets(gone, remove=node)
+        for kind, meshes in (add or {}).items():
+            meshes = [m for m in meshes if cmds.objExists(m)]
+            if meshes:
+                cmds.sets(meshes, add=self.status_set(kind, create=True))
 
     # ---------------------------------------------------------- membership
     def assignments(self):
@@ -4338,6 +4386,157 @@ def uv_footprints(xform, uv_set="map1", faces=None):
     return out
 
 
+UV_STATE_ORDER = ("needs", "problem", "unknown", "good", "keep", "auto", "laidout", "handsoff")
+UV_STATE_INFO = {  # state: (label, colour, what it means)
+    "needs": ("Needs UVs", "#e8c23a", "No usable UVs yet: Auto UV will unwrap these."),
+    "problem": ("Problem", "#e05050", "Auto UV failed or the result still needs a look (or the mesh is "
+                                      "instanced). See the reason in step 6."),
+    "unknown": ("Not checked", "#8a8a8a", "Not scored yet: press Check UVs."),
+    "good": ("Good UVs", "#57c785", "Already laid out well enough, so Auto UV keeps them."),
+    "keep": ("Keep UVs", "#2fa84f", "You marked these Keep UVs: never re-unwrapped."),
+    "auto": ("Auto UV'd", "#a4d65e", "Unwrapped by Auto UV."),
+    "laidout": ("Laid out", "#5aa9e6", "Placed by Smart Layout."),
+    "handsoff": ("Hands off", "#3c5fd0", "You marked these Hands off: never touched."),
+}
+UV_COLOURS_ATTR = "unlokUVColours"   # bool on the root set: colours are on
+ORIG_SHADING_ATTR = "unlokOrigShading"  # JSON on a mesh shape: its real shading while coloured
+
+
+def uv_states(asset, scores=None, keep_score=AUTO_UV_KEEP_SCORE):
+    """{mesh: state} (see UV_STATE_INFO). Marks and tracking sets come from
+    the scene; 'good' vs 'needs' from scores {mesh: 0..1} (else 'unknown')."""
+    meshes, instanced = asset.meshes()
+    status = asset.uv_status()
+    auto, laid, prob = asset.tool_members("auto"), asset.tool_members("laidout"), asset.tool_members("problem")
+    out = {}
+    for m in meshes:
+        if status.get(m) == "handsoff":
+            out[m] = "handsoff"
+        elif m in laid:
+            out[m] = "laidout"
+        elif m in prob:
+            out[m] = "problem"
+        elif m in auto:
+            out[m] = "auto"
+        elif status.get(m) == "keep":
+            out[m] = "keep"
+        elif scores and m in scores and scores[m] is not None:
+            out[m] = "good" if scores[m] >= keep_score else "needs"
+        else:
+            out[m] = "unknown"
+    for m in instanced:
+        out[m] = "problem"
+    return out
+
+
+def _sg_key(sg):
+    mats = cmds.listConnections(sg + ".surfaceShader", source=True, destination=False) or []
+    return sanitize_key(mats[0] if mats else sg)
+
+
+def _shading_of(xform):
+    """{shading group: face ranges or None (whole mesh)} for a mesh."""
+    shapes = cmds.listRelatives(xform, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+    if not shapes:
+        return {}
+    dag = get_dag_path(shapes[0])
+    try:
+        sgs, ids = om.MFnMesh(dag).getConnectedShaders(dag.instanceNumber())
+    except RuntimeError:
+        return {}
+    names = [om.MFnDependencyNode(sgs[i]).name() for i in range(len(sgs))]
+    faces = {}
+    for f, sid in enumerate(ids):
+        if 0 <= sid < len(names):
+            faces.setdefault(names[sid], []).append(f)
+    if len(faces) == 1 and len(list(faces.values())[0]) == len(ids):
+        return {list(faces)[0]: None}
+    return {sg: face_ranges(fs) for sg, fs in faces.items()}
+
+
+def _preview_sg(state):
+    sg = "unlokUV_%s_SG" % state
+    if cmds.objExists(sg):
+        return sg
+    mat = cmds.shadingNode("lambert", asShader=True, name="unlokUV_%s_MAT" % state)
+    col = UV_STATE_INFO[state][1]
+    cmds.setAttr(mat + ".color", int(col[1:3], 16) / 255.0, int(col[3:5], 16) / 255.0, int(col[5:7], 16) / 255.0,
+                 type="double3")
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=sg)
+    cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader")
+    return sg
+
+
+def _is_preview_sg(sg):
+    return sg.startswith("unlokUV_") and sg.endswith("_SG")
+
+
+def show_uv_colours(asset, states):
+    """Colour meshes by state with preview materials. Each mesh's real
+    shading is stored on its shape first and comes back with
+    hide_uv_colours. Kept out of undo: it's a display aid. Instanced meshes
+    are left alone (shading is shared between instances)."""
+    with NoUndo():
+        by_state = {}
+        for mesh, state in states.items():
+            shapes = cmds.listRelatives(mesh, shapes=True, type="mesh", fullPath=True, noIntermediate=True) or []
+            if not shapes or len(cmds.ls(shapes[0], allPaths=True) or []) > 1:
+                continue
+            shape = shapes[0]
+            if not cmds.attributeQuery(ORIG_SHADING_ATTR, node=shape, exists=True):
+                orig = _shading_of(mesh)
+                if all(_is_preview_sg(sg) for sg in orig):
+                    continue  # nothing real to remember
+                cmds.addAttr(shape, longName=ORIG_SHADING_ATTR, dataType="string")
+                cmds.setAttr(shape + "." + ORIG_SHADING_ATTR, json.dumps(orig, sort_keys=True), type="string")
+            by_state.setdefault(state, []).append(mesh)
+        for state, meshes in by_state.items():
+            cmds.sets(meshes, edit=True, forceElement=_preview_sg(state))
+        root = asset.root_set()
+        if root:
+            if not cmds.attributeQuery(UV_COLOURS_ATTR, node=root, exists=True):
+                cmds.addAttr(root, longName=UV_COLOURS_ATTR, attributeType="bool")
+            cmds.setAttr(root + "." + UV_COLOURS_ATTR, True)
+    return sum(len(v) for v in by_state.values())
+
+
+def hide_uv_colours(asset=None):
+    """Put every coloured mesh's real shading back. A mesh you re-shaded
+    yourself while colours were on keeps your new shading."""
+    restored = 0
+    with NoUndo():
+        for shape in cmds.ls(type="mesh", long=True) or []:
+            if not cmds.attributeQuery(ORIG_SHADING_ATTR, node=shape, exists=True):
+                continue
+            xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
+            try:
+                orig = json.loads(cmds.getAttr(shape + "." + ORIG_SHADING_ATTR) or "{}")
+            except ValueError:
+                orig = {}
+            now = _shading_of(xform)
+            if now and all(_is_preview_sg(sg) for sg in now):
+                for sg, ranges in orig.items():
+                    target = sg if cmds.objExists(sg) else "initialShadingGroup"
+                    comps = [xform] if ranges is None else ["%s.%s" % (xform, r) for r in ranges]
+                    cmds.sets(comps, edit=True, forceElement=target)
+                restored += 1
+            cmds.deleteAttr(shape + "." + ORIG_SHADING_ATTR)
+        for state in UV_STATE_INFO:
+            sg = "unlokUV_%s_SG" % state
+            if cmds.objExists(sg) and not (cmds.sets(sg, q=True) or []):
+                mats = cmds.listConnections(sg + ".surfaceShader", source=True, destination=False) or []
+                cmds.delete([sg] + mats)
+        root = asset.root_set() if asset else None
+        if root and cmds.attributeQuery(UV_COLOURS_ATTR, node=root, exists=True):
+            cmds.setAttr(root + "." + UV_COLOURS_ATTR, False)
+    return restored
+
+
+def uv_colours_on(asset):
+    root = asset.root_set() if asset else None
+    return bool(root and _get(root, UV_COLOURS_ATTR, False))
+
+
 def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup", progress=None):
     """Copy uv_set to backup_set on meshes that have UVs and no backup yet
     (an existing backup is never overwritten, so re-runs keep the original)."""
@@ -4393,7 +4592,7 @@ def _batch_label(batch):
     return "%d meshes (%s faces)" % (len(names), "{:,}".format(faces))
 
 
-def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
+def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=None):
     """Unwrap meshes (see the section comment). Returns {mesh: error} for any
     that failed; one bad mesh never stops the rest. With a Progress, it
     reports stages 'project', 'seams', 'unfold' and 'fix'."""
@@ -4455,6 +4654,8 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
         except Exception:
             pass
         unfold(batch[0])
+        if on_unfolded:
+            on_unfolded([m for m in batch[0] if m not in failed])
     for i in range(passes):
         pr.stage("fix", len(ok), "Fixing stretched shells (pass %d of %d)" % (i + 1, passes))
         bad = []
@@ -4533,7 +4734,7 @@ def _pack_one_tile(shells, pad):
 
 
 def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_tiles=(), progress=None,
-               uv_set="map1"):
+               uv_set="map1", only_groups=None):
     """Pack every material group into its own UDIM tile.
 
     Sections take bands of rows (in section order); each material keeps the
@@ -4557,6 +4758,8 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
     moves = {}  # mesh -> [(shell, tu, tv, x, y, k, angle)]
     for si, sec in enumerate(sections):
         for mat in asset.materials(sec):
+            if only_groups is not None and mat not in only_groups:
+                continue
             members, _ = expand_members(mat)
             shells = []
             for xform, faces in members.items():
@@ -4585,6 +4788,7 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
         for sh, tu, tv, x, y, k, angle in items:
             _place_shell(us, vs, sh, tu, tv, x, y, k, angle)
         write_uvs(xform, uv_set, us, vs)
+    pack_udims.last_moved = sorted(moves)
     return placed
 
 
@@ -4594,7 +4798,7 @@ AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("
 
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
                 hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing=None,
-                progress_callback=None):
+                progress_callback=None, only=None, colours=False):
     """The whole Auto UV pass on an asset, as one Ctrl+Z. (packing: unused
     since packing went pure-maths; kept for old callers.)
 
@@ -4603,23 +4807,34 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     Progress shows in Maya's progress bar and through progress_callback
     (fraction, text). Esc stops it at the next mesh: the result then has
     "cancelled" (where it stopped) and Ctrl+Z undoes what was done.
+
+    only: just these meshes (e.g. a selected group), packing only the
+    groups they're in. colours: recolour meshes as they're unwrapped (see
+    show_uv_colours). Unwrapped meshes go into the asset's Auto UV'd set,
+    failures and poor results into its Problem set, and anything packed
+    leaves its Laid out set.
     """
     pr = Progress("Auto UV" if not analyse_only else "Analyse UVs",
                   AUTO_UV_STAGES if not analyse_only else [("score", 1)], progress_callback)
     try:
         with pr:
+            pr.refresh_view = bool(colours)
             return _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack,
-                                analyse_only, packing, pr)
+                                analyse_only, packing, pr, only, colours)
     except Cancelled:
         return {"rows": [], "timing": {"total": time.time() - pr.t0}, "tiles": [], "backups": 0,
                 "cancelled": pr.where()}
 
 
 def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack, analyse_only,
-                 packing, pr):
+                 packing, pr, only=None, colours=False):
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
+    if only is not None:
+        only = set(only)
+        meshes = [m for m in meshes if m in only]
+        instanced = [m for m in instanced if m in only]
     status = asset.uv_status()
     handsoff = [m for m in meshes if status.get(m) == "handsoff"]  # not even scored: never touched
     marked_keep = set(m for m in meshes if status.get(m) == "keep")
@@ -4669,16 +4884,33 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 cmds.polyUVSet(m, create=True, uvSet=uv_set)
                 cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
         t = time.time()
-        failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr)
+        live = (lambda done: show_uv_colours(asset, {m: "auto" for m in done})) if colours else None
+        failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr, on_unfolded=live)
         timing["unwrap"] = time.time() - t
         if pack:
             t = time.time()
             avoid = set()
-            for m in handsoff:
+            all_handsoff = [m for m, st in status.items() if st == "handsoff"]  # not just the selection's
+            for m in all_handsoff:
                 avoid.update(t for t, _, _ in uv_footprints(m, uv_set))
-            pr.stage("pack", len(asset.all_material_sets()), "Packing into UDIMs")
-            tiles = pack_udims(asset, exclude=set(failed) | set(instanced) | set(handsoff),
-                               avoid_tiles=avoid, progress=pr, uv_set=uv_set)
+            exclude = set(failed) | set(instanced) | set(all_handsoff)
+            groups = None
+            if only is not None:  # pack just the groups these meshes are in, around their finished members
+                done = set(m for m in meshes if m not in failed)
+                groups = set(mat for mat in asset.all_material_sets()
+                             if done & set(expand_members(mat)[0]))
+                ready = asset.tool_members("auto") | asset.tool_members("laidout") | marked_keep | done
+                for mat in groups:
+                    for m in expand_members(mat)[0]:
+                        if m in exclude or m in ready:  # hands off is already in exclude
+                            continue
+                        if uv_quality(m, uv_set, check_overlap=False)[0] < keep_score:
+                            exclude.add(m)
+            pr.stage("pack", len(groups) if groups is not None else len(asset.all_material_sets()),
+                     "Packing into UDIMs")
+            tiles = pack_udims(asset, exclude=exclude, avoid_tiles=avoid, progress=pr, uv_set=uv_set,
+                               only_groups=groups)
+            asset.update_tool_sets(remove={"laidout": getattr(pack_udims, "last_moved", [])})
             timing["pack"] = time.time() - t
         # scoring can switch a mesh's current UV set: keep it inside the chunk so
         # one Ctrl+Z still undoes the whole run
@@ -4697,6 +4929,10 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 action = "keep UVs"
             rows.append({"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": after,
                          "action": action})
+        unwrapped = [r["mesh"] for r in rows if r["action"] == "unwrapped"]
+        trouble = [r["mesh"] for r in rows if r["action"] in ("failed", "check")] + list(instanced)
+        asset.update_tool_sets(add={"auto": unwrapped, "problem": trouble},
+                               remove={"problem": unwrapped, "auto": [m for m in trouble if m in failed]})
     rows += tail
     timing["total"] = time.time() - t0
     return {"rows": rows, "timing": timing, "tiles": tiles, "backups": backups}
@@ -5346,6 +5582,7 @@ def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set=
             for sh in shells:
                 _place_shell(us, vs, sh, *plan["placements"][id(sh)][:6])
             write_uvs(xform, uv_set, us, vs)
+        asset.update_tool_sets(add={"laidout": sorted(by_mesh)})
         for g in collected["groups"]:
             st = plan["stats"].get(g["set"])
             if not st:
@@ -6033,6 +6270,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(self.refresh)
+        self.states = {}
+        self._applied = {}  # mesh -> state last coloured
         self._scene_timer = QtCore.QTimer(self)
         self._scene_timer.setSingleShot(True)
         self._scene_timer.setInterval(0)
@@ -6061,6 +6300,35 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                               "and get it ready for layout."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
+        strip = QtWidgets.QFrame()
+        strip.setProperty("unlokStep", True)
+        sl = QtWidgets.QVBoxLayout(strip)
+        sl.setContentsMargins(8, 6, 8, 6)
+        sl.setSpacing(4)
+        self.colour_box = CheckField("Colour meshes by UV status")
+        self.colour_box.setToolTip("Gives every mesh a temporary preview material so you can see in the viewport "
+                                   "what still needs UVs (yellow), what's done (greens), what's laid out (light "
+                                   "blue) and what has a problem (red). Meshes change colour live as Auto UV "
+                                   "works. Untick to get your real materials back.")
+        self.colour_box.changed.connect(self._colours_toggled)
+        sl.addWidget(self.colour_box)
+        legend = QtWidgets.QGridLayout()
+        legend.setSpacing(2)
+        self.legend = {}
+        for i, state in enumerate(UV_STATE_ORDER):
+            label, colour, tip = UV_STATE_INFO[state]
+            b = QtWidgets.QPushButton(label)
+            pix = QtGui.QPixmap(10, 10)
+            pix.fill(QtGui.QColor(colour))
+            b.setIcon(QtGui.QIcon(pix))
+            b.setFlat(True)
+            b.setStyleSheet("text-align: left; padding: 1px 4px;")
+            b.setToolTip(tip + "\nClick to select them.")
+            b.clicked.connect(lambda *_, s=state: self._select_state(s))
+            legend.addWidget(b, i // 2, i % 2)
+            self.legend[state] = b
+        sl.addLayout(legend)
+        tl.addWidget(strip)
         outer.addWidget(top)
 
         scroll, col = scroll_column()
@@ -6259,7 +6527,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                   "material keeps the same column in every section.")
         grid.add_full(self.auto_pack)
         card.add(grid)
-        analyse = secondary_button("Analyse", "Score every mesh's UVs (worst first) without changing anything.")
+        analyse = secondary_button("Check UVs", "Score every mesh's existing UVs (are there any, are they "
+                                                "stretched, overlapping or folded?) without changing anything. "
+                                                "It decides what Auto UV will unwrap, and with colours on, good "
+                                                "ones turn green and the rest yellow. Not texel density: that's "
+                                                "step 7.")
         analyse.clicked.connect(lambda *_: self.analyse_uvs())
         restore = secondary_button("Restore Backup", "Copy the backup set back into the UV set, for the selected "
                                                      "meshes (or all of them when nothing is selected).")
@@ -6282,7 +6554,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
         run_auto.setMinimumHeight(28)
         run_auto.setToolTip("Back up, clean, unwrap what isn't laid out and pack. One Ctrl+Z undoes it all.")
         run_auto.clicked.connect(lambda *_: self.auto_uv())
-        card.add(run_auto)
+        run_sel = secondary_button("Auto UV Selected", "Only the selected meshes or groups (bit by bit). Packing "
+                                                       "covers just the material groups they're in.")
+        run_sel.setMinimumHeight(28)
+        run_sel.clicked.connect(lambda *_: self.auto_uv(selected=True))
+        row = button_row(run_auto, run_sel)
+        row.layout().setStretch(0, 1)
+        card.add(row)
         self.auto_progress = QtWidgets.QProgressBar()
         self.auto_progress.setRange(0, 1000)
         self.auto_progress.setTextVisible(False)
@@ -6505,6 +6783,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.layout_applied = None
         self.validation = None
         self.restored = None
+        self._applied = {}
+        if hasattr(self, "colour_box"):
+            self.colour_box.setValue(uv_colours_on(asset))
         if hasattr(self, "check_tree"):
             self.check_tree.clear()
         if hasattr(self, "udim_map"):
@@ -6658,6 +6939,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._fill_tree()
         self._fill_naming()
         self._fill_status_hint()
+        self._update_states()
 
     # ============================================================ trees
     def _fill_tree(self):
@@ -7272,6 +7554,64 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
                     clean_first=self.auto_clean.value(), pack=self.auto_pack.value())
 
+    # ------------------------------------------------------------ UV states
+    def _scores(self):
+        """Score per mesh from the last Check UVs / Auto UV (before it ran:
+        what happened since is in the tracking sets)."""
+        rows = (self.auto_result or {}).get("rows") or []
+        return {r["mesh"]: r["before"] for r in rows if r.get("before") is not None}
+
+    def _update_states(self, recolour=True):
+        asset = self._asset()
+        states = uv_states(asset, self._scores(), self.auto_keep.value()) if asset else {}
+        self.states = states
+        counts = {}
+        for s in states.values():
+            counts[s] = counts.get(s, 0) + 1
+        for state, b in self.legend.items():
+            n = counts.get(state, 0)
+            b.setText("%s  %d" % (UV_STATE_INFO[state][0], n))
+            b.setEnabled(n > 0)  # all eight always shown, so the grid never has holes
+        if recolour and asset is not None and self.colour_box.value():
+            changed = {m: s for m, s in states.items() if self._applied.get(m) != s}
+            if changed:
+                show_uv_colours(asset, changed)
+                self._applied.update(changed)
+
+    def _colours_toggled(self):
+        try:
+            asset = self._asset()
+            if asset is None:
+                self.colour_box.setValue(False)
+                self.set_status("Pick an asset first.", level="warn")
+                return
+            if self.colour_box.value():
+                if not self._scores():
+                    self.analyse_uvs()  # need scores to tell yellow from green
+                self._applied = {}
+                self._update_states()
+                self.set_status("Colouring meshes by UV status (your real materials come back when you untick "
+                                "it).")
+            else:
+                n = hide_uv_colours(asset)
+                self._applied = {}
+                self.set_status("Real materials back on %d mesh(es)." % n)
+            self._save_session()
+        except Exception as exc:
+            traceback.print_exc()
+            self.set_status("Error: %s" % exc, level="error")
+
+    def _select_state(self, state):
+        try:
+            meshes = [m for m, s in (self.states or {}).items() if s == state and cmds.objExists(m)]
+            if meshes:
+                cmds.select(meshes, replace=True)
+            else:
+                cmds.select(clear=True)
+            self.set_status("Selected %d mesh(es): %s." % (len(meshes), UV_STATE_INFO[state][0]))
+        except Exception:
+            traceback.print_exc()
+
     def _progress_start(self):
         self.auto_progress.setValue(0)
         self.auto_progress_label.setText("Starting... (Esc cancels)")
@@ -7322,6 +7662,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         result["analysed_only"] = True
         self.auto_result = result
         self._fill_auto()
+        self._update_states()
         self._save_session()
         todo = sum(1 for r in result["rows"] if r["action"] == "will unwrap")
         self.set_status("Analysed %d meshes in %.2fs: %d need unwrapping (worst first in step 6)." % (
@@ -7329,7 +7670,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._update_guidance()
 
     @ui_safe
-    def auto_uv(self):
+    def auto_uv(self, selected=False):
         asset = self._asset()
         if asset is None:
             self.set_status("Pick a root group first.", level="warn")
@@ -7337,16 +7678,27 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if not asset.sections():
             self.set_status("Press Scan first so meshes are grouped by section and material.", level="warn")
             return
+        only = None
+        if selected:
+            only = sorted(self._items_in_root(selection_items()))
+            if not only:
+                self.set_status("Select the meshes or groups to Auto UV first.", level="warn")
+                return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         self._progress_start()
         try:
-            result = run_auto_uv(asset, progress_callback=self._progress, **self._auto_options())
+            result = run_auto_uv(asset, progress_callback=self._progress, only=only,
+                                 colours=self.colour_box.value(), **self._auto_options())
         finally:
             self._progress_end()
             QtWidgets.QApplication.restoreOverrideCursor()
         if self._cancelled(result, "Auto UV"):
             self.refresh()
             return
+        if only is not None and self.auto_result and self.auto_result.get("rows"):
+            fresh = dict((r["mesh"], r) for r in result["rows"])  # merge into the full list
+            merged = [fresh.pop(r["mesh"], r) for r in self.auto_result["rows"]]
+            result["rows"] = merged + list(fresh.values())
         self.auto_result = result
         self._fill_auto()
         self.refresh()
@@ -7367,7 +7719,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return
         meshes = list(self._items_in_root(selection_items())) or asset.meshes()[0]
         opts = self._auto_options()
-        n = restore_uvs(meshes, opts["uv_set"], opts["backup_set"])
+        with UndoChunk("Smart UDIM restore UVs"):
+            n = restore_uvs(meshes, opts["uv_set"], opts["backup_set"])
+            asset.update_tool_sets(remove={"auto": meshes, "laidout": meshes, "problem": meshes})
+        self.refresh()
         self.set_status("Restored %s from %s on %d mesh(es)." % (opts["uv_set"], opts["backup_set"], n),
                         level="info" if n else "warn")
 

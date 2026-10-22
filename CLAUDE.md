@@ -183,6 +183,28 @@
         report.
       - Unwrapping (Unfold3D) is now the slow part; packing is pure maths
         (below).
+  - **UV states and colours** (`uv_states`, `show_uv_colours`,
+    `hide_uv_colours`):
+    - States, in order of precedence: handsoff > laidout > problem > auto >
+      keep > good / needs (by score) > unknown. Instanced meshes are
+      problems.
+    - The panel's scores are each row's `before` from the last Check /
+      Auto UV run; what happened since is in the tracking sets (roles
+      `uvauto`, `uvlaidout`, `uvproblem`, via `update_tool_sets` inside
+      the action's undo chunk).
+    - Colours are lambert preview shaders `unlokUV_<state>_SG`, assigned
+      in NoUndo. The real shading (`_shading_of`: SG -> face ranges) is
+      JSON in `unlokOrigShading` on the shape. `shader_face_groups` reads
+      it while coloured, so Scan isn't fooled.
+    - `hide_uv_colours` restores only meshes still on a preview SG (the
+      user's own re-shading wins), then deletes unused preview shaders.
+    - Instanced meshes are never coloured.
+    - Live: `auto_unwrap(on_unfolded=...)` colours each finished batch, and
+      `Progress.refresh_view` redraws the viewport about once a second.
+    - Auto UV Selected (`only=`) packs only the touched groups
+      (`pack_udims(only_groups=)`), excluding members that still need UVs.
+      Every Hands off mesh in the asset is excluded and its tiles avoided,
+      even ones Auto UV did earlier (regression-tested).
   - **Sections** (`section_from_group`, `move_to_section`, `delete_section`,
     `rename_section`, `prune_empty_groups`):
     - Moving keeps each mesh's material key (`_material_keys_of`; unassigned

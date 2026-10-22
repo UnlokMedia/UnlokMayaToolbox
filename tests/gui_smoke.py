@@ -365,6 +365,30 @@ def main():
           "1 Hands off" in udim.status_hint.text(), "%s | %s" % (status_col.get(rafter), udim.status_hint.text()))
     rafter_uvs = cmds.polyEditUV(rafter + ".map[*]", q=True)
 
+    # --- UV status colours, select by colour, Auto UV Selected
+    udim.colour_box.setChecked(True)  # like a click: colours the meshes
+    pump()
+    legend = {s: udim.legend[s].text() for s in udim.legend}
+    coloured = cmds.ls("unlokUV_*_SG") or []
+    check("the colour toggle colours meshes and fills the legend", coloured and
+          any(t.split()[-1] != "0" for t in legend.values()), "%s | %s" % (coloured, legend))
+    udim._select_state("handsoff")
+    check("clicking a legend entry selects those meshes", cmds.ls(selection=True, long=True) == [rafter],
+          str(cmds.ls(selection=True)))
+    other = cmds.ls("woodBrown_C_rafter0002_GEP", long=True)[0]
+    rows_before = udim.auto_tree.topLevelItemCount()
+    cmds.select(other)
+    udim.auto_uv(selected=True)
+    pump()
+    check("Auto UV Selected runs on just the selection and keeps the full list",
+          "Auto UV in" in udim.status.text() and udim.auto_tree.topLevelItemCount() == rows_before and
+          udim.states.get(other) in ("auto", "good", "keep", "problem"),
+          "%s | state %s" % (udim.status.text()[:120], udim.states.get(other)))
+    window.grab().save(os.path.join(OUT, "10b_uv_colours.png"))
+    udim.colour_box.setChecked(False)
+    pump()
+    check("unticking puts the real materials back", not cmds.ls("unlokUV_*_SG"), str(cmds.ls("unlokUV_*_SG")))
+
     # --- Smart layout through the panel: plan (map), lock a group, apply
     udim.lay_density.setValue(2048.0)
     udim.lay_map.setValue("1024")

@@ -225,7 +225,30 @@ density. The actual layout is still being built; see
 6. **Auto UV**: for assets that are modelled, named and grouped but don't
    have good UVs yet. It gives you an organised, usable base to polish from;
    it doesn't aim for perfect UVs.
-   - **Analyse** scores every mesh's UVs from 0 (none or garbage) to 1
+   - **UV status colours** (the strip at the top of the panel): tick
+     *Colour meshes by UV status* to see where you are in the viewport.
+     - **Yellow:** needs UVs.
+     - **Red:** a problem, for example Auto UV failed, or the mesh is
+       instanced.
+     - **Greens:** Good UVs, Keep UVs (your marks) and Auto UV'd.
+     - **Light blue:** laid out by Smart Layout.
+     - **Blue:** Hands off.
+
+     Meshes change colour live as Auto UV works through them. Each legend
+     entry shows a count; click it to select those meshes (e.g. select every
+     Good UVs mesh and mark it Keep UVs). The colours are temporary preview
+     materials. Your real shading is stored on each mesh, Scan keeps reading
+     it, and unticking puts it back exactly (per face too).
+   - **Tracking sets:** Auto UV records what it unwrapped in
+     `<asset>_uvAuto_SET` and what needs a human in `<asset>_uvProblem_SET`.
+     Smart Layout records what it placed in `<asset>_uvLaidOut_SET`. They
+     stay separate from your own Keep UVs / Hands off sets, so you can
+     always tell your hand-laid work from Auto UV's.
+   - **Auto UV Selected:** only the selected meshes or groups, so you can
+     work through an asset bit by bit. Packing covers just the material
+     groups they're in, around their finished members; Hands off meshes are
+     never moved.
+   - **Check UVs** (was Analyse) scores every mesh's UVs from 0 (none or garbage) to 1
      (clean) and lists them worst first. A face counts as bad if it has no
      UVs, is collapsed, folded or overlapping, or is stretched more than 4x
      compared with the rest of its own shell. Rectangulated or straightened
@@ -369,6 +392,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_uv_states.py`: UV states, status colours (and the real
+  shading coming back), tracking sets, Auto UV Selected.
 - `tests/test_sections.py`: section from group, move to section, delete
   section, split faces, later Scans, undo.
 - `tests/test_session.py`: Smart UDIM's saved progress survives a scene
