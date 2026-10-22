@@ -145,6 +145,26 @@
     - `pack_udims` puts one tile per material group, with sections on rows
       and the same column per material.
     - Backups go to `map1_backup` and are never overwritten.
+  - **UV status** (per mesh, whole meshes only):
+    - Stored as membership of two child sets of the root set, roles
+      `uvkeep` / `uvhandsoff` (`status_set`, `uv_status`, `set_uv_status`).
+      `sections()` ignores them because they have a role.
+    - Auto UV:
+      - Keep UVs meshes are scored but never unwrapped.
+      - Hands off meshes aren't scored, backed up, set-switched or packed.
+      - `pack_udims(avoid_tiles=...)` starts its rows above their tiles.
+    - Layout:
+      - `collect_shells` turns Hands off members into `fixed` footprints via
+        `uv_footprints` (reads UVs without switching the current set).
+      - `plan_layout` always takes their tiles out of the fresh-tile
+        iterator.
+      - *Pack around them*: each such tile becomes a `_TilePacker` in
+        gaps-only mode (`free_around` blocks the boxes plus pad; cached per
+        collected), offered first to the groups that own those shells and
+        then carried like any tile.
+      - *Reserve their tiles*: no packer at all, and a warning when the
+        pieces fill under half the tile.
+      - Group stats include their tiles, coverage and a `handsoff` count.
   - **Smart layout** (`collect_shells` -> `make_plan` -> `apply_layout`):
     - `collect_shells` reads every shell once (3D/UV area, points, PCA
       angle).

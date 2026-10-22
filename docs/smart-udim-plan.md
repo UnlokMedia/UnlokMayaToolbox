@@ -173,6 +173,8 @@ finished work.
   - `_stack` stacking of identical pieces
   - 2D skyline packing with gap reuse and 90-degree turns: 83% fill and
     7 tiles on the test building (the shelf packer managed 65% and 9)
+  - per-mesh UV status: Keep UVs (laid out, never unwrapped) and Hands off
+    (never touched; the layout packs around them or reserves their tiles)
 - **Still open:**
   - the UV Editor overlay (M8)
   - the UnlokRenamer sanity-check hookup (beyond the naming list)

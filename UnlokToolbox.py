@@ -3057,6 +3057,13 @@ UDIM_ORIENT = "unlokUdimOrient"
 ORIENT_TOKENS = ("up", "keep", "axis")  # per-group orientation override in set names
 
 SECTION_SUFFIX = "UDS"
+# Per-mesh UV status, stored as membership of two sets under the root set:
+#   keep     = never re-unwrap, but still categorise, scale and pack
+#   handsoff = never touch: no unwrap, no layout; the plan works around it
+UV_STATUSES = ("auto", "keep", "handsoff")
+UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "handsoff": "Hands off"}
+_STATUS_ROLE = {"keep": "uvkeep", "handsoff": "uvhandsoff"}
+_STATUS_SUFFIX = {"keep": "uvKeep_SET", "handsoff": "uvHandsOff_SET"}
 ROOT_SUFFIX = "smartUDIM_SET"
 
 
@@ -3450,6 +3457,56 @@ class SmartUdimAsset(object):
             for order, sec in enumerate(secs):
                 cmds.setAttr(sec + "." + UDIM_ORDER, order)
 
+    # ----------------------------------------------------------- UV status
+    def status_set(self, status, create=False):
+        """The root's Keep UVs / Hands off set (made on demand)."""
+        root = self.root_set()
+        if not root or status not in _STATUS_ROLE:
+            return None
+        for node in _child_sets(root):
+            if set_role(node) == _STATUS_ROLE[status]:
+                return node
+        if not create:
+            return None
+        base = re.sub(r'_?%s$' % ROOT_SUFFIX, "", short_name(root)) or "asset"
+        node = cmds.sets(empty=True, name=_unique_set_name("%s_%s" % (base, _STATUS_SUFFIX[status])))
+        _add_set_attrs(node, _STATUS_ROLE[status])
+        cmds.sets(node, add=root)
+        return node
+
+    def uv_status(self):
+        """{mesh transform: 'keep' / 'handsoff'}; meshes not listed are 'auto'.
+        Hands off wins when a mesh is in both sets."""
+        out = {}
+        for status in ("keep", "handsoff"):
+            node = self.status_set(status)
+            if node:
+                for xform in expand_members(node)[0]:
+                    out[xform] = status
+        return out
+
+    def set_uv_status(self, meshes, status):
+        """Mark whole meshes 'auto', 'keep' or 'handsoff' (one Ctrl+Z)."""
+        meshes = [m for m in meshes if cmds.objExists(m)]
+        if not meshes or status not in UV_STATUSES:
+            return 0
+        with UndoChunk("Smart UDIM UV status"):
+            for st in ("keep", "handsoff"):
+                node = self.status_set(st, create=(st == status))
+                if node is None:
+                    continue
+                members = expand_members(node)[0]
+                gone = []
+                for m in meshes:
+                    if m in members:
+                        gone.append(m)
+                        gone.extend(cmds.listRelatives(m, shapes=True, fullPath=True) or [])
+                if gone:
+                    cmds.sets(gone, remove=node)
+                if st == status:
+                    cmds.sets(meshes, add=node)
+        return len(meshes)
+
     # ---------------------------------------------------------- membership
     def assignments(self):
         """{transform: [(material set, faces or None)]} over all material sets."""
@@ -3544,7 +3601,7 @@ class SmartUdimAsset(object):
         overlaps = self.overlaps(assigned)
         return {"root": self.root_set(), "group": self.root_group(), "sections": sections,
                 "meshes": meshes, "instanced": instanced, "naming": naming,
-                "unassigned": unassigned, "overlaps": overlaps}
+                "unassigned": unassigned, "overlaps": overlaps, "status": self.uv_status()}
 
     @staticmethod
     def overlaps(assigned):
@@ -3981,6 +4038,50 @@ def _stretched_shell_faces(xform, uv_set="map1"):
     return bad
 
 
+def uv_footprints(xform, uv_set="map1", faces=None):
+    """Where a mesh's UV shells sit, without touching the mesh (no current UV
+    set switch): [(udim, (x0, y0, x1, y1) inside that tile, UV area)]. A shell
+    crossing tiles gives one clipped box per tile it touches; shells outside
+    the UDIM range (U 0-10, V >= 0) are left out."""
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return []
+    counts, ids = fn.getAssignedUVs(uv_set)
+    _, shell_of = fn.getUvShellsIds(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    boxes = {}
+    k = 0
+    for face, c in enumerate(counts):
+        if c and (faces is None or face in faces):
+            sid = shell_of[ids[k]]
+            box = boxes.get(sid)
+            if box is None:
+                box = boxes[sid] = [1e30, 1e30, -1e30, -1e30, 0.0]
+            area = 0.0
+            for i in range(c):
+                a, b = ids[k + i], ids[k + (i + 1) % c]
+                area += us[a] * vs[b] - us[b] * vs[a]
+                box[0] = min(box[0], us[a])
+                box[1] = min(box[1], vs[a])
+                box[2] = max(box[2], us[a])
+                box[3] = max(box[3], vs[a])
+            box[4] += abs(area) * 0.5
+        k += c
+    out = []
+    for u0, v0, u1, v1, area in boxes.values():
+        if u0 < -1e-6 or v0 < -1e-6 or u1 > 10.0 + 1e-6:
+            continue
+        tus = range(int(math.floor(u0 + 1e-6)), int(math.floor(max(u0, u1 - 1e-6))) + 1)
+        tvs = range(int(math.floor(v0 + 1e-6)), int(math.floor(max(v0, v1 - 1e-6))) + 1)
+        n = float(len(tus) * len(tvs))
+        for tu in tus:
+            for tv in tvs:
+                if 0 <= tu <= 9:
+                    out.append((1001 + tu + 10 * tv, (max(0.0, u0 - tu), max(0.0, v0 - tv), min(1.0, u1 - tu),
+                                                      min(1.0, v1 - tv)), area / n))
+    return out
+
+
 def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
     """Copy uv_set to backup_set on meshes that have UVs and no backup yet
     (an existing backup is never overwritten, so re-runs keep the original)."""
@@ -4079,7 +4180,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2):
     return failed
 
 
-def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048):
+def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_tiles=()):
     """Pack every material group into its own UDIM tile.
 
     Sections take bands of rows (in section order); each material keeps the
@@ -4094,6 +4195,7 @@ def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048):
                       for s in sections for m in asset.materials(s)))
     column = {k: i for i, k in enumerate(keys)}
     rows_per_section = max(1, (len(keys) + 9) // 10)
+    first_row = (max((t - 1001) // 10 for t in avoid_tiles) + 1) if avoid_tiles else 0  # above hands-off tiles
     pad = float(padding)
     placed = []
     for si, sec in enumerate(sections):
@@ -4111,7 +4213,7 @@ def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048):
                 continue
             col = column[_get(mat, UDIM_KEY) or parse_group_name(mat)["key"]]
             u0 = col % 10
-            v0 = si * rows_per_section + col // 10
+            v0 = first_row + si * rows_per_section + col // 10
             # NB: u3dLayout's box is [uMin, uMax, vMin, vMax]. scl=1 keeps shells'
             # 3D size ratio (even density in the group); the default layout
             # scale mode fits the group to the box.
@@ -4131,6 +4233,10 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
+    status = asset.uv_status()
+    handsoff = [m for m in meshes if status.get(m) == "handsoff"]  # not even scored: never touched
+    marked_keep = set(m for m in meshes if status.get(m) == "keep")
+    meshes = [m for m in meshes if status.get(m) != "handsoff"]
     rows = []
     scores = {}
     for m in meshes:
@@ -4140,13 +4246,15 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
             scores[m] = (0.0, "couldn't score: %s" % exc)
     timing["score"] = time.time() - t0
     order = sorted(meshes, key=lambda m: scores[m][0])
-    todo = [m for m in order if scores[m][0] < keep_score]
+    todo = [m for m in order if scores[m][0] < keep_score and m not in marked_keep]
+    tail = [{"mesh": m, "before": None, "reason": "marked Hands off: never unwrapped or moved", "after": None,
+             "action": "hands off"} for m in handsoff]
+    tail += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"} for m in instanced]
     if analyse_only:
         rows = [{"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": None,
-                 "action": "will unwrap" if m in todo else "keep"} for m in order]
-        rows += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"}
-                 for m in instanced]
-        return {"rows": rows, "timing": timing, "tiles": [], "backups": 0}
+                 "action": "keep UVs" if m in marked_keep else ("will unwrap" if m in todo else "keep")}
+                for m in order]
+        return {"rows": rows + tail, "timing": timing, "tiles": [], "backups": 0}
 
     backups = 0
     failed = {}
@@ -4174,8 +4282,11 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
         timing["unwrap"] = time.time() - t
         if pack:
             t = time.time()
-            tiles = pack_udims(asset, exclude=set(failed) | set(instanced),
-                               resolution=AUTO_UV_PACKING.get(packing, 1024))
+            avoid = set()
+            for m in handsoff:
+                avoid.update(t for t, _, _ in uv_footprints(m, uv_set))
+            tiles = pack_udims(asset, exclude=set(failed) | set(instanced) | set(handsoff),
+                               resolution=AUTO_UV_PACKING.get(packing, 1024), avoid_tiles=avoid)
             timing["pack"] = time.time() - t
         # scoring can switch a mesh's current UV set: keep it inside the chunk so
         # one Ctrl+Z still undoes the whole run
@@ -4188,9 +4299,11 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
             action = "unwrapped" if m in todo else "kept"
             if after < keep_score:
                 action = "check" if m in todo else "kept (check)"
+            if m in marked_keep:
+                action = "keep UVs"
             rows.append({"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": after,
                          "action": action})
-    rows += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"} for m in instanced]
+    rows += tail
     timing["total"] = time.time() - t0
     return {"rows": rows, "timing": timing, "tiles": tiles, "backups": backups}
 
@@ -4218,6 +4331,7 @@ MAP_SIZES = ("1024", "2048", "4096", "8192")
 # Main axis: longest direction along U (lying flat). Upright: world up along +V
 # (brick courses stay horizontal, walls read upright). Keep: never rotate.
 ORIENTATIONS = ("Main axis", "Upright", "Keep")
+HANDSOFF_MODES = ("Pack around them", "Reserve their tiles")
 _ORIENT_MODE = {"Main axis": "axis", "Upright": "up", "Keep": "keep"}
 _UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
               "mi": 1609.344}
@@ -4232,6 +4346,7 @@ LAYOUT_DEFAULTS = {
     "new_row_per_section": True,
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
+    "handsoff_tiles": "Pack around them",
 }
 
 
@@ -4354,6 +4469,8 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     exclude = set(exclude)
+    handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
+    fixed = []  # hands-off shells: [{"set", "key", "mesh", "udim", "box", "area"}]
     caches = {}
     claimed = set()
     groups, locked, skipped = [], [], set()
@@ -4368,12 +4485,18 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
                     "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
                     "print": _group_print(members), "old_print": _get(mat, LAYOUT_PRINT, "") or "",
                     "stack": bool(_get(mat, UDIM_STACK, False)), "orient": _get(mat, UDIM_ORIENT, "") or None,
-                    "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()]}
+                    "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()],
+                    "fixed": []}
             if _get(mat, LAYOUT_LOCK, False):
                 locked.append(info)
                 continue
             for xform, faces in members.items():
                 if xform in exclude:
+                    continue
+                if xform in handsoff:
+                    for udim, box, area in uv_footprints(xform, uv_set, faces):
+                        info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
+                                              "area": area})
                     continue
                 if xform not in caches:
                     caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
@@ -4400,7 +4523,9 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
                     shell_obj.group = mat
                     info["shells"].append(shell_obj)
             groups.append(info)
-    return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts}
+            fixed.extend(info["fixed"])
+    return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
+            "fixed": fixed, "handsoff": sorted(handsoff)}
 
 
 def _udim_tiles(start_row, count_needed, reserved):
@@ -4428,6 +4553,37 @@ class _TilePacker(object):
         self.lo = pad
         self.segs = [[pad, pad, 1.0 - pad]]  # [x, top y, width], left to right
         self.gaps = []  # [x, y, w, h] free rects below the skyline
+
+    @staticmethod
+    def free_around(boxes, pad):
+        """Disjoint free rects of a tile once `boxes` (fixed shells, tile
+        space) are blocked out with `pad` clearance, for a gaps-only packer."""
+        free = [[pad, pad, 1.0 - pad, 1.0 - pad]]
+        for x0, y0, x1, y1 in sorted(boxes):
+            bx1, by1 = x1 + pad, y1 + pad  # placed rects reserve pad right/top already
+            nxt = []
+            for fx, fy, fw, fh in free:
+                fx1, fy1 = fx + fw, fy + fh
+                if x0 >= fx1 or bx1 <= fx or y0 >= fy1 or by1 <= fy:
+                    nxt.append([fx, fy, fw, fh])
+                    continue
+                if y0 > fy:
+                    nxt.append([fx, fy, fw, y0 - fy])  # below: full width
+                if by1 < fy1:
+                    nxt.append([fx, by1, fw, fy1 - by1])  # above: full width
+                my0, my1 = max(fy, y0), min(fy1, by1)
+                if x0 > fx:
+                    nxt.append([fx, my0, x0 - fx, my1 - my0])  # left
+                if bx1 < fx1:
+                    nxt.append([bx1, my0, fx1 - bx1, my1 - my0])  # right
+            free = [r for r in nxt if r[2] > 1e-5 and r[3] > 1e-5]
+        return free
+
+    def use_free(self, free):
+        """Switch to gaps-only packing in the given free rects (a tile that
+        already holds hands-off shells)."""
+        self.segs = []
+        self.gaps = [r[:] for r in free]
 
     def find(self, w, h):
         """Best spot for a w x h rect: (score, kind, index, x, y), or None.
@@ -4510,6 +4666,26 @@ def plan_layout(collected, settings, density_scale=1.0):
     reserved = set()
     for g in collected["locked"]:
         reserved.update(g["tiles"])
+    # hands-off shells: their tiles are never handed out as fresh tiles. In
+    # "Pack around them" mode each such tile becomes a packer whose free space
+    # is what's left around them (offered first to the groups those shells
+    # belong to); in "Reserve their tiles" mode nothing else goes there.
+    fixed = collected.get("fixed") or []
+    fixed_boxes = {}
+    for fx in fixed:
+        fixed_boxes.setdefault(fx["udim"], []).append(fx["box"])
+    reserved.update(fixed_boxes)
+    pack_around = s.get("handsoff_tiles", HANDSOFF_MODES[0]) != "Reserve their tiles"
+    fixed_packers = {}
+    if pack_around and fixed_boxes:
+        cache = collected.setdefault("_free_cache", {})
+        for udim in sorted(fixed_boxes):
+            free = cache.get((udim, round(pad, 9)))
+            if free is None:
+                free = cache[(udim, round(pad, 9))] = _TilePacker.free_around(fixed_boxes[udim], pad)
+            pk = _TilePacker(((udim - 1001) % 10, (udim - 1001) // 10), pad)
+            pk.use_free(free)
+            fixed_packers[udim] = pk
     order = sorted(set(g["key"] for g in collected["groups"]))
     rank = {k: i for i, k in enumerate(order)}
     groups = sorted(collected["groups"], key=lambda g: (g["section_index"], rank[g["key"]]))
@@ -4577,9 +4753,11 @@ def plan_layout(collected, settings, density_scale=1.0):
         unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
                                    t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
         can_turn = mode == "axis"
-        packers = list(carry)
-        g_tiles = set()
-        area = 0.0
+        own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
+        packers = [fixed_packers[t] for t in own_fixed if t in fixed_packers]
+        packers += [q for q in carry if q not in packers]
+        g_tiles = set(own_fixed)
+        area = sum(fx["area"] for fx in g.get("fixed", []))
         for item in unique:
             sh, k, a, w, h = item
             w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
@@ -4631,7 +4809,7 @@ def plan_layout(collected, settings, density_scale=1.0):
         n_stacked = sum(len(v[1]) for v in stacked.values())
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
                            "density": density * compensate, "shells": len(g["shells"]), "stacked": n_stacked,
-                           "orientation": mode,
+                           "orientation": mode, "handsoff": len(g.get("fixed", [])),
                            "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
     for g in collected["locked"]:
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": g["tiles"], "coverage": None,
@@ -4641,8 +4819,16 @@ def plan_layout(collected, settings, density_scale=1.0):
         if stats[g["set"]]["changed"]:
             warnings.append("%s is locked but its geometry changed since it was laid out: unlock it to re-lay "
                             "it, or leave it if the change doesn't matter." % g["key"])
+    if fixed_boxes and not pack_around:
+        for udim in sorted(fixed_boxes):
+            used = sum((b[2] - b[0]) * (b[3] - b[1]) for b in fixed_boxes[udim])
+            if used < 0.5:
+                warnings.append("Tile %d is reserved for hands-off pieces that fill only about %d%% of it; "
+                                "set Hands-off tiles to 'Pack around them' to use the rest." % (
+                                    udim, round(used * 100)))
     return {"placements": placements, "stats": stats, "tiles": sorted(tiles_used | reserved),
-            "new_tiles": sorted(tiles_used), "warnings": warnings, "density": td, "settings": s}
+            "new_tiles": sorted(tiles_used), "warnings": warnings, "density": td, "settings": s,
+            "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around}
 
 
 def plan_fit_to_tiles(collected, settings):
@@ -4900,11 +5086,13 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     groups = _group_lookup(asset)
     meshes, _ = asset.meshes()
+    handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
     shells = []
     for xform in meshes:
         for sh in _mesh_shells(xform, uv_set, unit_scale):
             g = groups.get((xform, sh["faces"][0])) or groups.get((xform, None))
             sh["group"], sh["td"], sh["stack"], sh["locked"] = g if g else (None, 100.0, False, False)
+            sh["locked"] = sh["locked"] or xform in handsoff  # hands off keeps its own density
             shells.append(sh)
     items = {k: [] for k in VALIDATION_ORDER}
 
@@ -5193,6 +5381,7 @@ class UdimMapWidget(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setMinimumHeight(120)
         self.shells = []  # (u, v, w, h, set, key)
+        self.fixed = []  # hands-off shells, same tuple
         self.locked_tiles = set()
         self.tiles = set()
         self.labels = {}  # set -> (key, info text)
@@ -5200,6 +5389,7 @@ class UdimMapWidget(QtWidgets.QWidget):
 
     def set_plan(self, collected, plan):
         self.shells = []
+        self.fixed = []
         self.labels = {}
         if plan and collected:
             set_key_palette([g["key"] for g in collected["groups"] + collected["locked"]])
@@ -5212,11 +5402,20 @@ class UdimMapWidget(QtWidgets.QWidget):
                     p = plan["placements"].get(id(sh))
                     if p:
                         self.shells.append((p[0] + p[2], p[1] + p[3], p[6], p[7], g["set"], g["key"]))
+                for fx in g.get("fixed", []):
+                    tu, tv = (fx["udim"] - 1001) % 10, (fx["udim"] - 1001) // 10
+                    b = fx["box"]
+                    self.fixed.append((tu + b[0], tv + b[1], b[2] - b[0], b[3] - b[1], g["set"], g["key"]))
+                if g.get("fixed"):
+                    self.labels[g["set"]] = (g["key"], self.labels[g["set"]][1] + "  |  %d hands-off" % len(
+                        g["fixed"]))
             self.locked_tiles = set()
             for g in collected["locked"]:
                 self.locked_tiles.update(g["tiles"])
                 self.labels[g["set"]] = (g["key"], "%s  |  locked  |  tiles %s" % (
                     g["key"], ", ".join(str(t) for t in g["tiles"])))
+            if not plan.get("pack_around", True):
+                self.locked_tiles.update(plan.get("fixed_tiles", []))
             self.tiles = set(plan["tiles"])
         else:
             self.tiles, self.locked_tiles = set(), set()
@@ -5260,7 +5459,15 @@ class UdimMapWidget(QtWidgets.QWidget):
             x1, y0 = self._to_px(u + w, v + h)
             rect = QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
             p.fillRect(rect, _key_color(key, 150))
-        if not self.shells and not self.locked_tiles:
+        for u, v, w, h, node, key in self.fixed:  # hands off: hatched, outlined
+            x0, y1 = self._to_px(u, v)
+            x1, y0 = self._to_px(u + w, v + h)
+            rect = QtCore.QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0))
+            p.fillRect(rect, _key_color(key, 70))
+            p.fillRect(rect, QtGui.QBrush(_key_color(key, 230), QtCore.Qt.BDiagPattern))
+            p.setPen(QtGui.QPen(_key_color(key, 230)))
+            p.drawRect(rect)
+        if not self.shells and not self.locked_tiles and not self.fixed:
             p.setPen(QtGui.QColor("#8a8a8a"))
             p.drawText(self.rect(), QtCore.Qt.AlignCenter, "Press Plan to preview the layout")
         p.end()
@@ -5269,7 +5476,7 @@ class UdimMapWidget(QtWidgets.QWidget):
         t = self._tile_px()
         u = (pos.x() - 6.0) / t
         v = self.rows - (pos.y() - 6.0) / t
-        for su, sv, w, h, node, key in self.shells:
+        for su, sv, w, h, node, key in self.shells + self.fixed:
             if su <= u <= su + w and sv <= v <= sv + h:
                 return node
         udim = 1001 + int(math.floor(u)) + 10 * int(math.floor(v))
@@ -5517,23 +5724,37 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                      "meshes (or all of them when nothing is selected).")
         restore.clicked.connect(lambda *_: self.restore_backup())
         card.add(button_row(analyse, restore))
+        mark_label = QtWidgets.QLabel("Selected meshes:")
+        mark_keep = secondary_button("Keep UVs", "You've UV'd these but not laid them out: never re-unwrap them, "
+                                                 "but still sort them into groups, scale them to texel density and "
+                                                 "pack them with everything else.")
+        mark_keep.clicked.connect(lambda *_: self.mark_status("keep"))
+        mark_off = secondary_button("Hands off", "These are finished and already sit in their UDIM: never unwrap "
+                                                 "or move them. The layout plans everything else around them.")
+        mark_off.clicked.connect(lambda *_: self.mark_status("handsoff"))
+        mark_auto = secondary_button("Auto", "Back to normal: the UV score decides whether to unwrap.")
+        mark_auto.clicked.connect(lambda *_: self.mark_status("auto"))
+        card.add(button_row(mark_label, mark_keep, mark_off, mark_auto))
+        self.status_hint = hint_label("")
+        card.add(self.status_hint)
         run_auto = primary_button("Auto UV")
         run_auto.setMinimumHeight(28)
         run_auto.setToolTip("Back up, clean, unwrap what isn't laid out and pack. One Ctrl+Z undoes it all.")
         run_auto.clicked.connect(lambda *_: self.auto_uv())
         card.add(run_auto)
         self.auto_tree = QtWidgets.QTreeWidget()
-        self.auto_tree.setColumnCount(4)
-        self.auto_tree.setHeaderLabels(["Mesh", "Before", "After", "Result"])
+        self.auto_tree.setColumnCount(5)
+        self.auto_tree.setHeaderLabels(["Mesh", "Before", "After", "Result", "Status"])
         self.auto_tree.setMinimumHeight(150)
         self.auto_tree.setAlternatingRowColors(True)
         self.auto_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         ah = self.auto_tree.header()
         ah.setStretchLastSection(False)
         ah.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        for c in (1, 2, 3):
+        for c in (1, 2, 3, 4):
             ah.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.auto_tree.itemSelectionChanged.connect(self._auto_selected)
+        self.auto_tree.itemDoubleClicked.connect(self._auto_double_clicked)
         card.add(self.auto_tree)
         col.addWidget(card)
 
@@ -5567,6 +5788,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
                      "Upright: world up along +V, so brick courses stay level and walls read upright.\n"
                      "Keep: never rotate (you already straightened them).\n"
                      "Override per group in the Orient column (or _up / _keep / _axis in the set name).")
+        self.lay_handsoff = ComboField(HANDSOFF_MODES)
+        grid.add_row("Hands-off tiles", self.lay_handsoff,
+                     "What happens to the tiles your Hands off meshes sit in (step 6).\n"
+                     "Pack around them: other pieces fill the free space around them (no space wasted).\n"
+                     "Reserve their tiles: nothing else goes in those tiles. Simple and predictable, but a "
+                     "small hands-off piece can leave the rest of its tile empty.")
         self.lay_rows = CheckField("Each section starts a new row")
         self.lay_rows.setValue(True)
         grid.add_full(self.lay_rows)
@@ -5589,7 +5816,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
-                  self.lay_orient, self.lay_rows, self.lay_comp):
+                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -5747,6 +5974,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             short_name(self.snapshot["group"]), asset.name()))
         self._fill_tree()
         self._fill_naming()
+        self._fill_status_hint()
 
     # ============================================================ trees
     def _fill_tree(self):
@@ -6070,6 +6298,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
                 "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
                 "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
+                "handsoff_tiles": self.lay_handsoff.value(),
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
@@ -6119,6 +6348,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         changed = [st["key"] for st in plan["stats"].values() if st.get("changed") and not st.get("locked")]
         if changed:
             lines.append("Changed since last layout: %s." % ", ".join(sorted(set(changed))))
+        if col.get("fixed"):
+            lines.append("%d hands-off piece(s) stay put on tile(s) %s (%s)." % (
+                len(col["fixed"]), ", ".join(str(t) for t in plan.get("fixed_tiles", [])),
+                "packed around" if plan.get("pack_around") else "tiles reserved"))
         if col["skipped"]:
             lines.append("%d mesh(es) without usable UVs skipped (run Auto UV)." % len(col["skipped"]))
         lines.extend(plan["warnings"][:4])
@@ -6329,15 +6562,62 @@ class SmartUdimPanel(QtWidgets.QWidget):
                   "check": LEVEL_COLORS["warn"], "kept (check)": LEVEL_COLORS["warn"],
                   "will unwrap": LEVEL_COLORS["warn"], "failed": LEVEL_COLORS["skip"],
                   "skip": LEVEL_COLORS["skip"], "keep": LEVEL_COLORS["info"]}
+        colors.update({"keep UVs": LEVEL_COLORS["info"], "hands off": LEVEL_COLORS["info"]})
+        status = ((self.snapshot or {}).get("status")) or {}
         fmt = lambda v: "-" if v is None else "%.2f" % v  # noqa: E731
         for r in self.auto_result["rows"]:
             item = QtWidgets.QTreeWidgetItem([short_name(r["mesh"]), fmt(r["before"]), fmt(r["after"]),
-                                              r["action"]])
+                                              r["action"], UV_STATUS_LABELS[status.get(r["mesh"], "auto")]])
+            item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
             item.setData(0, QtCore.Qt.UserRole, r["mesh"])
             item.setToolTip(0, r["mesh"])
             item.setToolTip(3, r["reason"] or r["action"])
             item.setForeground(3, QtGui.QBrush(QtGui.QColor(colors.get(r["action"], LEVEL_COLORS["info"]))))
             self.auto_tree.addTopLevelItem(item)
+
+    @ui_safe
+    def mark_status(self, status):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick a root group first.", level="warn")
+            return
+        meshes = sorted(self._items_in_root(selection_items()))
+        if not meshes:
+            self.set_status("Select meshes under the asset first (a face selection marks its whole mesh).",
+                            level="warn")
+            return
+        self._apply_status(meshes, status)
+
+    def _apply_status(self, meshes, status):
+        n = self._asset().set_uv_status(meshes, status)
+        self.refresh()
+        if self.auto_result and self.auto_result.get("analysed_only"):
+            self.analyse_uvs()  # re-score with the new marks
+        else:
+            self._fill_auto()
+        if self._plan is not None:
+            self.plan_layout(quiet=True)
+        self.set_status("%d mesh(es) marked %s." % (n, UV_STATUS_LABELS[status]))
+        self._update_guidance()
+
+    @ui_safe
+    def _auto_double_clicked(self, item, column):
+        mesh = item.data(0, QtCore.Qt.UserRole)
+        if column != 4 or not mesh or self._asset() is None:
+            return
+        cur = ((self.snapshot or {}).get("status") or {}).get(mesh, "auto")
+        self._apply_status([mesh], UV_STATUSES[(UV_STATUSES.index(cur) + 1) % len(UV_STATUSES)])
+
+    def _fill_status_hint(self):
+        status = (self.snapshot or {}).get("status") or {}
+        keep = sum(1 for s in status.values() if s == "keep")
+        off = sum(1 for s in status.values() if s == "handsoff")
+        if keep or off:
+            self.status_hint.setText("Marked: %d Keep UVs (laid out, never unwrapped), %d Hands off (never "
+                                     "touched). Double-click Status below to change one." % (keep, off))
+        else:
+            self.status_hint.setText("Already UV'd some meshes? Select them and mark Keep UVs, or Hands off if "
+                                     "they're finished and in their UDIM.")
 
     def _auto_selected(self):
         try:

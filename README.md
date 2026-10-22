@@ -187,6 +187,19 @@ density. The actual layout is still being built; see
         their own rows and each material in the same column for every section
    - **Restore Backup** copies the backup set back into `map1` for the
      selected meshes, or for all of them if nothing is selected.
+   - **Meshes you've already UV'd:** select them and press one of these
+     buttons (or double-click the **Status** column to cycle). The marks
+     live in two sets under the asset's root set, `<asset>_uvKeep_SET` and
+     `<asset>_uvHandsOff_SET`, so you can also check or edit them in the
+     Outliner.
+     - **Keep UVs:** UV'd but not laid out. They're never re-unwrapped, but
+       still sorted into groups, scaled to texel density and packed with
+       everything else.
+     - **Hands off:** finished and already in their UDIM. Auto UV and the
+       layout never touch them (no unwrap, no backup copy, no moving), and
+       Auto UV's packing starts above their tiles. Validation still checks
+       them for overlaps, tile crossings and padding, but not for density.
+     - **Auto:** back to normal, where the score decides.
    - About 7 s for a 47-mesh test building that includes a 19,000-face dome.
      The whole run is one Ctrl+Z.
 
@@ -219,6 +232,13 @@ density. The actual layout is still being built; see
    - **Stacking:** in a group marked `_stack` (Stack column), identical
      pieces such as repeated windows or tiles share one spot, so they cost
      one footprint, not N. Validation knows these overlaps are intentional.
+   - **Hands-off tiles:** what happens to the tiles your Hands off meshes
+     sit in. Either way they stay exactly where they are, show hatched in
+     the map, and their tiles are never handed out as fresh tiles.
+     - *Pack around them* (default): other pieces fill the free space
+       around them, keeping the padding. Their own group gets first go.
+     - *Reserve their tiles:* nothing else goes in those tiles. The plan
+       warns when a hands-off piece fills under half its tile.
    - **Fit to tiles:** finds the highest density that fits your tile budget.
    - **Auto-compensate:** lowers only a group whose piece is bigger than a
      tile, and tells you so.
@@ -286,6 +306,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_uv_status.py`: Keep UVs / Hands off marks through Auto UV,
+  both hands-off tile modes and validation.
 - `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and
   2D packing (fill, padding, stable re-plans, speed).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,

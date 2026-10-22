@@ -331,6 +331,17 @@ def main():
     pump()
     window.grab().save(os.path.join(OUT, "10_auto_uv.png"))
 
+    # --- per-mesh UV status: mark a rafter Hands off from the selection
+    rafter = cmds.ls("woodBrown_C_rafter0001_GEP", long=True)[0]
+    cmds.select(rafter, replace=True)
+    udim.mark_status("handsoff")
+    pump()
+    status_col = {udim.auto_tree.topLevelItem(i).data(0, ns["QtCore"].Qt.UserRole):
+                  udim.auto_tree.topLevelItem(i).text(4) for i in range(udim.auto_tree.topLevelItemCount())}
+    check("Hands off button marks the selection (Status column + hint)", status_col.get(rafter) == "Hands off" and
+          "1 Hands off" in udim.status_hint.text(), "%s | %s" % (status_col.get(rafter), udim.status_hint.text()))
+    rafter_uvs = cmds.polyEditUV(rafter + ".map[*]", q=True)
+
     # --- Smart layout through the panel: plan (map), lock a group, apply
     udim.lay_density.setValue(2048.0)
     udim.lay_map.setValue("1024")
@@ -339,6 +350,15 @@ def main():
     check("Plan fills the UDIM map", len(udim.udim_map.shells) > 0 and udim.udim_map.tiles,
           "%d shells, tiles %s | %s" % (len(udim.udim_map.shells), sorted(udim.udim_map.tiles),
                                         udim.layout_summary.text()[:160]))
+    check("UDIM map shows the hands-off piece", len(udim.udim_map.fixed) > 0 and
+          "hands-off" in udim.layout_summary.text(), udim.layout_summary.text()[-200:])
+    udim.lay_handsoff.setValue("Reserve their tiles")
+    udim.plan_layout()
+    check("Hands-off tiles can be reserved instead", "tiles reserved" in udim.layout_summary.text(),
+          udim.layout_summary.text()[-200:])
+    udim.lay_handsoff.setValue("Pack around them")
+    udim.plan_layout()
+    pump()
     udim.lay_density.spin.setValue(1024.0)  # like a user edit: emits, so it live re-plans from cached shells
     deadline = time.time() + 1.0
     while time.time() < deadline:
@@ -352,6 +372,7 @@ def main():
     pump()
     check("Apply Layout writes it and the step completes", udim.step_layout.state == "done" and
           "Laid out" in udim.status.text(), udim.status.text())
+    check("Apply leaves the hands-off rafter's UVs alone", cmds.polyEditUV(rafter + ".map[*]", q=True) == rafter_uvs)
     check("locked group shows as locked in the map", bool(udim.udim_map.locked_tiles),
           str(sorted(udim.udim_map.locked_tiles)))
     scroll = udim.step_layout.parentWidget().parentWidget().parentWidget()
