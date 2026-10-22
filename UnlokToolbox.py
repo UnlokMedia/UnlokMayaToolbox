@@ -2972,20 +2972,20 @@ UR_SUFFIXES = [
 ]
 
 
+# A guide, not a fixed list: any lowercase word, then capitalised word(s)
+# (usually a colour, but woodMoulding is fine), then an optional capital
+# variant letter (glassClearA).
+UR_MATERIAL_TOKEN_RE = re.compile(r'^([a-z][a-z0-9]*)((?:[A-Z][a-z0-9]+)+)([A-Z]?)$')
+
+
 def ur_split_material_color_variant(material_color):
-    """'paintGrey' -> ('paint', 'Grey', ''); 'glassClearA' -> ('glass',
-    'Clear', 'A') (a variant: one capital letter after the colour);
-    (None, None, '') if unparseable."""
-    candidates = [(material_color, "")]
-    if len(material_color) > 1 and "A" <= material_color[-1] <= "Z":
-        candidates.append((material_color[:-1], material_color[-1]))
-    for text, variant in candidates:
-        for color in sorted(UR_COLORS, key=len, reverse=True):
-            if text.endswith(color):
-                material = text[:-len(color)]
-                if material:
-                    return material, color, variant
-    return None, None, ""
+    """'paintGrey' -> ('paint', 'Grey', ''); 'woodMoulding' -> ('wood',
+    'Moulding', ''); 'glassClearA' -> ('glass', 'Clear', 'A');
+    (None, None, '') when it isn't word + Word(s)."""
+    match = UR_MATERIAL_TOKEN_RE.match(material_color or "")
+    if not match:
+        return None, None, ""
+    return match.group(1), match.group(2), match.group(3)
 
 
 def ur_split_material_color(material_color):
@@ -3007,8 +3007,9 @@ def material_key_from_name(name):
     """Material key from a convention name, plus any naming issue.
 
     'woodGreen_C_beam0001_GEP' -> ('woodGreen', None)
+    'woodMoulding_C_trim_GEP'  -> ('woodMoulding', None)  (any word + Word(s))
     'glassClearA_F_pane0001_GEP' -> ('glassClearA', None)  (variant A: its own group)
-    'steelRusty_C_beam_GEP'    -> ('steelRusty', "unrecognised material/colour 'steelRusty'")
+    'steel_C_beam_GEP'         -> ('steel', "material token 'steel' isn't ...")
     'pCube1'                   -> (None, 'no recognised suffix (GES, GEP, ...)')
 
     A key with an issue is still used for grouping; a None key means the
@@ -3028,7 +3029,7 @@ def material_key_from_name(name):
         return None, "material token '%s' isn't materialColour (e.g. woodGreen)" % token
     material, _ = ur_split_material_color(token)
     if material is None and token not in UR_MATERIALS:
-        return token, "unrecognised material/colour '%s'" % token
+        return token, "material token '%s' isn't a word then capitalised word(s), like woodBrown" % token
     if digits:
         return token, "suffix variant '%s' (should be '%s')" % (parts[-1], base)
     return token, None

@@ -83,8 +83,12 @@ def run():
     mk = tb["material_key_from_name"]
     check("convention name -> material key", mk("|g|woodGreen_C_beam0001_GEP") == ("woodGreen", None))
     check("legacy underscore number", mk("paintGrey_C_hiResBlockA_0001_GES")[0] == "paintGrey")
-    check("custom material still usable, flagged", mk("steelRusty_C_beam_GEP")[0] == "steelRusty"
-          and "unrecognised" in mk("steelRusty_C_beam_GEP")[1])
+    check("any word + Word(s) is a valid material token (it's a guide)",
+          all(mk(n)[1] is None for n in ("steelRusty_C_beam_GEP", "woodMoulding_C_trim0001_GEP",
+                                           "metalBrushed_C_rail0001_GEP", "wood_C_beam0001_GEP")),
+          str([mk(n) for n in ("steelRusty_C_beam_GEP", "woodMoulding_C_trim0001_GEP")]))
+    check("a one-word unknown material is still usable, flagged", mk("steel_C_beam_GEP")[0] == "steel"
+          and "woodBrown" in (mk("steel_C_beam_GEP")[1] or ""))
     check("suffix variant flagged", "variant" in (mk("woodGreen_C_beam0001_GEP1")[1] or ""))
     check("material variant letters are valid and their own key",
           mk("glassClearA_F_pane0001_GEP") == ("glassClearA", None) and
@@ -92,7 +96,9 @@ def run():
           "%s / %s" % (mk("glassClearA_F_pane0001_GEP"), mk("woodBrownB_C_beam0001_GEP")))
     check("variant split", tb["ur_split_material_color_variant"]("glassClearA") == ("glass", "Clear", "A") and
           tb["ur_split_material_color_variant"]("woodBrown") == ("wood", "Brown", "") and
-          tb["ur_split_material_color_variant"]("steelRustyA")[0] is None)
+          tb["ur_split_material_color_variant"]("steelRustyA") == ("steel", "Rusty", "A") and
+          tb["ur_split_material_color_variant"]("Steel")[0] is None and
+          tb["ur_split_material_color_variant"]("steel")[0] is None)
     check("no suffix -> unusable", mk("pCube1")[0] is None)
     check("namespaced name parses", mk("asset:woodGreen_C_beam0001_GEP")[0] == "woodGreen")
     pg = tb["parse_group_name"]
