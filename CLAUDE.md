@@ -183,6 +183,13 @@
         report.
       - Unwrapping (Unfold3D) is now the slow part; packing is pure maths
         (below).
+  - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
+    `auto_uv()` -> `apply_layout()` (re-plans itself) -> `validate()`.
+    - Each step method returns its result (None when cancelled or failed),
+      and the chain stops there.
+    - The steps stay separate undo chunks: nesting them would break
+      `undo_if_last` on cancel.
+    - `confirm=False` skips the question (used by the GUI test).
   - **UV states and colours** (`uv_states`, `show_uv_colours`,
     `hide_uv_colours`):
     - States, in order of precedence: handsoff > laidout > problem > auto >

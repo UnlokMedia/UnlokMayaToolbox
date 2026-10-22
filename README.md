@@ -225,6 +225,18 @@ density. The actual layout is still being built; see
 6. **Auto UV**: for assets that are modelled, named and grouped but don't
    have good UVs yet. It gives you an organised, usable base to polish from;
    it doesn't aim for perfect UVs.
+   - **Do It All** (top of the panel): one click to Auto UV everything that
+     needs it, lay it all out and validate.
+     - It respects your sections, groups, Keep UVs / Hands off marks, locks
+       and every setting in steps 6 and 7.
+     - It scans first if there are new, ungrouped meshes.
+     - It asks once with a summary of what it'll do, then you can leave it
+       running.
+     - Esc stops it. Finished steps stay, each its own Ctrl+Z (layout, then
+       Auto UV).
+     - At the end it says how many meshes were unwrapped and laid out, how
+       many need a look, and what validation found. From there you can
+       re-lay out, add sections, or re-UV things as you go.
    - **UV status colours** (the strip at the top of the panel): tick
      *Colour meshes by UV status* to see where you are in the viewport.
      - **Yellow:** needs UVs.

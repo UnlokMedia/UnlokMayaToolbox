@@ -499,6 +499,31 @@ def main():
     check("Start Fresh forgets the saved progress", not udim.resume_label.isVisible() and
           udim.auto_result is None and udim.step_layout.state != "done", udim.status.text())
 
+    # --- Do It All on a fresh asset: Auto UV, layout and validation in one click
+    cmds.file(new=True, force=True)
+    maya.utils.processIdleEvents()
+    pump(5)
+    window.tabs.setCurrentIndex([window.tabs.tabText(i) for i in range(window.tabs.count())].index("UV"))
+    shed = cmds.group(empty=True, name="shed_GRP")
+    for wing in ("front_GRP", "back_GRP"):
+        grp = cmds.group(empty=True, name=wing, parent=shed)
+        for i, nm in enumerate(("woodBrown_C_plank%04d_GEP", "brickRed_C_wall%04d_GEP")):
+            c = cmds.polyCube(w=2, h=1, d=0.2, sx=4, name=nm % (i + 1))[0]
+            if i == 1:
+                cmds.polyMapDel(c + ".f[*]", constructionHistory=False)  # no UVs: Auto UV's job
+            cmds.parent(c, grp)
+    cmds.select(shed)
+    udim.pick_root()
+    udim.from_groups.setValue(True)
+    udim.lay_density.setValue(256.0)
+    out = udim.do_it_all(confirm=False)
+    pump()
+    check("Do It All runs Auto UV, layout and validation in one go",
+          out and udim.layout_applied and udim.validation and "Do It All finished" in udim.status.text() and
+          udim.step_layout.state == "done" and len(udim._asset().sections()) == 2,
+          udim.status.text()[:300])
+    window.grab().save(os.path.join(OUT, "14c_do_it_all.png"))
+
     # --- Log Noise: select cylinders, apply, live slider, bake
     cmds.file(new=True, force=True)
     tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]

@@ -6465,6 +6465,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
             legend.addWidget(b, i // 2, i % 2)
             self.legend[state] = b
         sl.addLayout(legend)
+        self.do_all_btn = primary_button("Do It All")
+        self.do_all_btn.setMinimumHeight(28)
+        self.do_all_btn.setToolTip("Auto UV everything that needs it, lay it all out and validate, in one go, "
+                                   "using your sections, groups, marks and every setting below. Leave it "
+                                   "running; Esc stops it (finished steps stay, each its own Ctrl+Z).")
+        self.do_all_btn.clicked.connect(lambda *_: self.do_it_all())
+        sl.addWidget(self.do_all_btn)
         tl.addWidget(strip)
         outer.addWidget(top)
 
@@ -7625,6 +7632,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
             result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
         self._update_guidance()
+        return result
 
     @ui_safe
     def validate(self):
@@ -7650,6 +7658,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.set_status("Checked %d shells in %.2fs: %d problem(s), %d warning(s)." % (
             res["shells"], res["seconds"], problems, warnings), level="warn" if problems or warnings else "info")
         self._update_guidance()
+        return res
 
     def _fill_check(self):
         self.check_tree.clear()
@@ -7904,6 +7913,75 @@ class SmartUdimPanel(QtWidgets.QWidget):
             count("check", "kept (check)"), count("failed"), len(result["tiles"]),
             ("; %d backed up to %s" % (result["backups"], self.auto_backup_name.text())) if result["backups"]
             else ""), level=level)
+        return result
+
+    def _chain_banner(self, step, total, text):
+        self.next_banner.set_text("<b>Do It All</b>, step %d of %d: %s  (Esc stops it)" % (step, total, text),
+                                  tag="WORKING", tone="active")
+        self.next_banner.repaint()
+
+    @ui_safe
+    def do_it_all(self, confirm=True):
+        """Scan (if needed), Auto UV, Plan + Apply, Validate: one click,
+        respecting sections, groups, marks and every setting."""
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick the asset's top group first (step 1).", level="warn")
+            return None
+        meshes = asset.meshes()[0]
+        settings = self._layout_settings()
+        if confirm:
+            text = ("Do It All on %s (%d meshes):\n\n"
+                    "1. Auto UV: unwrap what needs it, keep the rest%s\n"
+                    "2. Lay everything out at %s, %s maps (%s)\n"
+                    "3. Validate\n\n"
+                    "Your sections, groups and Keep UVs / Hands off marks are respected. %s"
+                    "It can take a while on big assets: Esc stops it, and finished steps stay (each is its own "
+                    "Ctrl+Z)." % (
+                        short_name(asset.root_group() or asset.name()), len(meshes),
+                        " (backed up to %s first)" % self.auto_backup_name.text() if self.auto_backup.value()
+                        else " (no backup: the Back up UVs box is off)",
+                        ("%d px/m" % settings["texel_density"]) if settings["mode"] != "Fit to tiles" else
+                        ("the best density for %d tiles" % settings["max_tiles"]), settings["map_size"],
+                        settings["orientation"].lower(),
+                        "Locked groups keep their tiles. " if any(_get(m, LAYOUT_LOCK, False)
+                                                                 for m in asset.all_material_sets()) else ""))
+            if QtWidgets.QMessageBox.question(self, "Do It All", text) != QtWidgets.QMessageBox.Yes:
+                return None
+        t0 = time.time()
+        if not asset.sections() or (self.snapshot and self.snapshot["unassigned"]):
+            self._chain_banner(1, 4, "sorting new meshes into groups")
+            self.scan()
+        self._chain_banner(2, 4, "Auto UV")
+        auto = self.auto_uv()
+        if not auto:
+            self._update_guidance()
+            return None  # cancelled or failed: auto_uv already said why
+        self._chain_banner(3, 4, "laying out")
+        self._collected = None
+        laid = self.apply_layout()
+        if not laid:
+            self._update_guidance()
+            return None
+        self._chain_banner(4, 4, "validating")
+        res = self.validate()
+        rows = auto["rows"]
+        unwrapped = sum(1 for r in rows if r["action"] in ("unwrapped", "check"))
+        trouble = sum(1 for r in rows if r["action"] in ("failed", "check", "kept (check)"))
+        left = len((self._collected or {}).get("not_ready", {}))
+        problems = sum(len(v) for k, v in (res or {"items": {}})["items"].items() if VALIDATION_LABELS[k][1] == "skip")
+        warnings = sum(len(v) for k, v in (res or {"items": {}})["items"].items() if VALIDATION_LABELS[k][1] == "warn")
+        msg = ("Do It All finished in %s: %d mesh(es) unwrapped, %d laid out into %d tile(s) at %d px/m. "
+               "Validation: %d problem(s), %d warning(s)." % (
+                   _secs(time.time() - t0), unwrapped, laid["meshes"], self.layout_applied["tiles"],
+                   round(self.layout_applied["density"]), problems, warnings))
+        if trouble or left:
+            msg += " %d mesh(es) need a look (red with colours on)%s." % (
+                trouble, ("; %d weren't ready and were left out of the layout" % left) if left else "")
+        msg += " Ctrl+Z undoes it a step at a time (layout, then Auto UV)."
+        self.set_status(msg, level="warn" if trouble or left or problems else "fixed")
+        self._update_guidance()
+        return {"auto": auto, "layout": laid, "validation": res}
 
     @ui_safe
     def restore_backup(self):
