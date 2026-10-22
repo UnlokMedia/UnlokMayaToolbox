@@ -184,6 +184,20 @@ density. The actual layout is still being built; see
    - **Start Fresh** forgets the saved reports and results. It leaves
      groups, marks, locks and UVs alone.
 2. **Scan:** sorts every mesh into sections and material groups.
+   - **Section from Group** (step 3): select one or more groups in the
+     Outliner and press it. Each becomes a section named after the group
+     (`westWing_GRP` -> `westWing`; with one group you can change the name)
+     holding every mesh inside, each in its own material group. The section
+     stays linked to the group, so meshes you add there later go into it on
+     the next Scan.
+   - **Move to Section:** highlight a section, select meshes, faces or
+     groups in the scene, press it.
+   - **Delete Section:** its meshes go back to the section of the group
+     they're in (or the first section).
+   - **Move to Group / New Material Group** do the same for material groups
+     inside a section. Every button accepts groups as well as meshes,
+     right-clicking the list offers the same actions, and empty material
+     groups are tidied away. Each action is one Ctrl+Z.
    - **Material groups:** come from the UnlokRenamer naming
      (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). A variant letter
      after the colour makes its own group (`glassClearA`, `glassClearB`).
@@ -355,6 +369,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_sections.py`: section from group, move to section, delete
+  section, split faces, later Scans, undo.
 - `tests/test_session.py`: Smart UDIM's saved progress survives a scene
   save and reopen, validation round-trips, deleted meshes drop out, and
   saving adds no undo step.

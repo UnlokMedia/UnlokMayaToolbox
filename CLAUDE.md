@@ -183,6 +183,15 @@
         report.
       - Unwrapping (Unfold3D) is now the slow part; packing is pure maths
         (below).
+  - **Sections** (`section_from_group`, `move_to_section`, `delete_section`,
+    `rename_section`, `prune_empty_groups`):
+    - Moving keeps each mesh's material key (`_material_keys_of`; unassigned
+      faces are sorted by name / shader).
+    - `section_from_group` links the section to the group (`UDIM_GROUP`),
+      so Scan's `_section_for` sorts later meshes into it.
+    - `delete_section` holds sets by uuid: `sync_names` renames them
+      mid-move.
+    - `selection_items()` expands a selected group to every mesh under it.
   - **Saved session** (`save_session`, `load_session`):
     - The panel's progress is JSON in `unlokUdimSession` on the root set:
       pre-process report, Auto UV / Analyse result, layout_applied,

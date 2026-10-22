@@ -299,6 +299,29 @@ def main():
     udim.refresh()
     tds = [udim.tree.topLevelItem(0).child(i).text(udim.COL_TD) for i in range(udim.tree.topLevelItem(0).childCount())]
     check("editing TD % in the tree renames the set", "150" in tds, str(tds))
+
+    # --- section tools: delete a section, then rebuild it from its group
+    def section_item(name):
+        for i in range(udim.tree.topLevelItemCount()):
+            if udim.tree.topLevelItem(i).text(0) == name:
+                return udim.tree.topLevelItem(i)
+        return None
+
+    def section_names():
+        return sorted(udim.tree.topLevelItem(i).text(0) for i in range(udim.tree.topLevelItemCount()))
+
+    udim.tree.clearSelection()
+    section_item("eastWing").setSelected(True)
+    udim.delete_sections()
+    pump()
+    check("Delete Section moves its meshes to another section", section_names() == ["house", "westWing"] and
+          not udim.snapshot["unassigned"], "%s | %s" % (section_names(), udim.status.text()))
+    cmds.select("|house_GRP|eastWing_GRP")
+    udim.section_from_group(name="eastWing")
+    pump()
+    check("Section from Group rebuilds it from the selected group",
+          section_names() == ["eastWing", "house", "westWing"] and section_item("eastWing").childCount() >= 3,
+          "%s | %s" % (section_names(), udim.status.text()))
     listed = {udim.naming_list.topLevelItem(i).text(0): udim.naming_list.topLevelItem(i).text(1)
               for i in range(udim.naming_list.topLevelItemCount())}
     check("naming hand-off lists the bad name (and soft issues like glassClear)",

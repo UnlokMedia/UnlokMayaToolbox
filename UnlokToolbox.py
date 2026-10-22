@@ -3628,6 +3628,142 @@ class SmartUdimAsset(object):
                     cmds.sets(meshes, add=node)
         return len(meshes)
 
+    # ------------------------------------------------------------ sections
+    @staticmethod
+    def section_name_for(group):
+        """'westWing_GRP' / 'westWing_01_GRP' -> 'westWing'."""
+        base = short_name(group)
+        return sanitize_key(re.sub(r'_\d*_?(GRP|grp|Grp)$', "", base) or base)
+
+    def section_of_group(self, group):
+        for sec in self.sections():
+            if _linked_group(sec) == long_name(group):
+                return sec
+        return None
+
+    def _material_keys_of(self, items, material_source):
+        """{key: {xform: faces or None}} for items, keeping each mesh's current
+        material group; anything not in a group yet is sorted by name / shader."""
+        assigned = self.assignments()
+        out = {}
+        for xform, sel in items.items():
+            taken = set()
+            whole = False
+            for mat, faces in assigned.get(xform, []):
+                key = _get(mat, UDIM_KEY) or parse_group_name(mat)["key"]
+                if sel is None:
+                    part = faces
+                elif faces is None:
+                    part = set(sel)
+                else:
+                    part = set(sel) & faces
+                    if not part:
+                        continue
+                if part is None:
+                    whole = True
+                else:
+                    taken |= part
+                cur = out.setdefault(key, {})
+                if part is None or cur.get(xform, set()) is None:
+                    cur[xform] = None
+                else:
+                    cur[xform] = cur.get(xform, set()) | part
+            if whole:
+                continue
+            total = cmds.polyEvaluate(xform, face=True)
+            wanted = set(range(total)) if sel is None else set(sel)
+            rest = wanted - taken
+            if not rest:
+                continue
+            for key, faces, _ in self._material_split(xform, material_source):
+                part = rest if faces is None else (rest & set(faces))
+                if not part:
+                    continue
+                cur = out.setdefault(key, {})
+                if cur.get(xform, set()) is not None:
+                    cur[xform] = None if part == set(range(total)) else (cur.get(xform, set()) | part)
+        return out
+
+    def move_to_section(self, items, section, material_source="Name, then shader", prune=True):
+        """Move meshes / faces into a section, each into the material group
+        it was in (made there if needed). One Ctrl+Z."""
+        with UndoChunk("Smart UDIM move to section"):
+            by_key = self._material_keys_of(items, material_source)
+            self._remove_items(items)
+            for key, its in by_key.items():
+                self._add_items(its, self.material_set(section, key, source="manual"))
+            if prune:
+                self.prune_empty_groups()
+            self.sync_names()
+        return sum(len(v) for v in by_key.values())
+
+    def section_from_group(self, group, name=None, material_source="Name, then shader"):
+        """A section for a group (reused if one is already linked to it),
+        holding every mesh under the group. Later Scans sort new meshes under
+        the group into it too. Returns (section, meshes moved)."""
+        group = long_name(group)
+        meshes, _ = self.meshes()
+        inside = [m for m in meshes if m == group or m.startswith(group + "|")]
+        with UndoChunk("Smart UDIM section from group"):
+            sec = self.section_of_group(group)
+            if sec is None:
+                sec = self.create_section(name or self.section_name_for(group), group=group)
+            elif name and parse_group_name(sec)["key"] != sanitize_key(name):
+                sec = self.rename_section(sec, name)
+            moved = self.move_to_section({m: None for m in inside}, sec, material_source) if inside else 0
+        return sec, moved
+
+    def rename_section(self, section, name):
+        with UndoChunk("Smart UDIM rename section"):
+            key = sanitize_key(name)
+            cmds.setAttr(section + "." + UDIM_KEY, key, type="string")
+            wanted = compose_section_set_name(key, _get(section, UDIM_TD, 100.0))
+            return cmds.rename(section, _unique_set_name(wanted, section))
+
+    def delete_section(self, section, material_source="Name, then shader"):
+        """Remove a section. Its meshes go to the section of the group they
+        live in, else the first other section. Returns the number moved."""
+        others = [s for s in self.sections() if s != section]
+        if not others:
+            raise RuntimeError("That's the only section: there's nowhere for its meshes to go.")
+        linked = [(s, _linked_group(s)) for s in others]
+        # set names change as members move (sync_names), so hold on by uuid
+        sec_id = cmds.ls(section, uuid=True)[0]
+        mat_ids = [cmds.ls(m, uuid=True)[0] for m in self.materials(section)]
+        with UndoChunk("Smart UDIM delete section"):
+            items = {}
+            for mat in self.materials(section):
+                members, _ = expand_members(mat)
+                for xform, faces in members.items():
+                    if items.get(xform, set()) is None or faces is None:
+                        items[xform] = None
+                    else:
+                        items[xform] = items.get(xform, set()) | faces
+            by_target = {}
+            for xform, faces in items.items():
+                target = self._section_for(xform, linked) or others[0]
+                by_target.setdefault(target, {})[xform] = faces
+            target_ids = {cmds.ls(t, uuid=True)[0]: its for t, its in by_target.items()}
+            for tid, its in target_ids.items():
+                self.move_to_section(its, cmds.ls(tid)[0], material_source, prune=False)
+            for uid in mat_ids + [sec_id]:
+                found = cmds.ls(uid)
+                if found:
+                    cmds.delete(found[0])
+            self.prune_empty_groups()
+            self.sync_names()
+        return len(items)
+
+    def prune_empty_groups(self):
+        """Delete material groups left with no members."""
+        gone = 0
+        for sec in self.sections():
+            for mat in self.materials(sec):
+                if not (cmds.sets(mat, q=True) or []):
+                    cmds.delete(mat)
+                    gone += 1
+        return gone
+
     # ---------------------------------------------------------- membership
     def assignments(self):
         """{transform: [(material set, faces or None)]} over all material sets."""
@@ -5657,7 +5793,8 @@ def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
 # =============================================================================
 
 def selection_items():
-    """Current scene selection as {mesh transform: None (whole) or face set}."""
+    """Current scene selection as {mesh transform: None (whole) or face set}.
+    A selected group counts as every mesh under it."""
     items = {}
     sel = cmds.ls(selection=True, long=True, flatten=False) or []
     comps = [s for s in sel if "." in s]
@@ -5666,6 +5803,10 @@ def selection_items():
             node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
         if cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
             items[node] = None
+        elif cmds.objectType(node, isAType="transform"):
+            for shape in cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True,
+                                            noIntermediate=True) or []:
+                items[long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])] = None
     if comps:
         for face in cmds.ls(cmds.polyListComponentConversion(comps, toFace=True) or [], long=True) or []:
             node, _, spec = face.partition(".")
@@ -5979,8 +6120,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
         # ---- 3. organise
         card = self.step_groups = StepCard(3, "Organise groups",
-                                           "Double-click TD % to change texel density, tick Stack for repeated "
-                                           "pieces. They're plain Maya sets, so renaming works too.")
+                                           "Sections are bands of UDIM rows (e.g. one wing each). Inside a "
+                                           "section, material groups hold the meshes that share a material. "
+                                           "Double-click a name or TD % to edit it; right-click for actions.")
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setColumnCount(7)
         self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock", "Orient"])
@@ -5995,24 +6137,42 @@ class SmartUdimPanel(QtWidgets.QWidget):
             header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemDoubleClicked.connect(self._item_double_clicked)
+        self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
         card.add(self.tree)
-        grid = QtWidgets.QGridLayout()
-        grid.setSpacing(3)
-        buttons = [
-            ("Select", "Select the meshes / faces in the highlighted groups.", self.select_members),
-            ("Assign Selection", "Move the selected meshes / faces into the highlighted material group.",
-             self.assign_selection),
-            ("New Group", "Make a material group in the highlighted section from the selected meshes / faces.",
-             self.new_group),
-            ("New Section", "Make a new section (row of UDIMs); selected meshes move into it.", self.new_section),
-            ("Move Up", "Lay this section out earlier (lower rows).", lambda: self.move_section(-1)),
-            ("Move Down", "Lay this section out later (higher rows).", lambda: self.move_section(1)),
-        ]
-        for i, (text, tip, fn) in enumerate(buttons):
-            b = secondary_button(text, tip)
-            b.clicked.connect(lambda *_, f=fn: f())
-            grid.addWidget(b, i // 3, i % 3)
-        card.add_layout(grid)
+        self._group_actions = {
+            "from_group": ("Section from Group", "Select one or more groups in the Outliner: each becomes a section "
+                                                 "named after it (westWing_GRP -> westWing) holding every mesh "
+                                                 "inside. New meshes added to the group later go there on Scan.",
+                           self.section_from_group),
+            "to_section": ("Move to Section", "Select meshes or groups in the scene, highlight a section here, "
+                                              "then press this. Meshes keep their material groups.",
+                           self.move_selection_to_section),
+            "del_section": ("Delete Section", "Remove the highlighted section. Its meshes go back to the section "
+                                              "of the group they're in, or the first section. One Ctrl+Z.",
+                            self.delete_sections),
+            "up": ("Move Up", "Lay this section out earlier (lower rows).", lambda: self.move_section(-1)),
+            "down": ("Move Down", "Lay this section out later (higher rows).", lambda: self.move_section(1)),
+            "select": ("Select", "Select the meshes / faces in the highlighted sections or groups.",
+                       self.select_members),
+            "to_group": ("Move to Group", "Move the selected meshes / faces (or everything in selected groups) "
+                                          "into the highlighted material group.", self.assign_selection),
+            "new_group": ("New Material Group", "Make a material group in the highlighted section from the "
+                                                "selected meshes / faces (or groups).", self.new_group),
+        }
+        for title, keys in (("Sections", ("from_group", "to_section", "del_section", "up", "down")),
+                            ("Material groups", ("select", "to_group", "new_group"))):
+            label = QtWidgets.QLabel(title)
+            label.setProperty("unlokHint", True)
+            card.add(label)
+            grid = QtWidgets.QGridLayout()
+            grid.setSpacing(3)
+            for i, key in enumerate(keys):
+                text, tip, fn = self._group_actions[key]
+                b = secondary_button(text, tip)
+                b.clicked.connect(lambda *_, f=fn: f())
+                grid.addWidget(b, i // 3, i % 3)
+            card.add_layout(grid)
         self.tree_hint = hint_label("")
         card.add(self.tree_hint)
         col.addWidget(card)
@@ -6780,6 +6940,92 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     asset._add_items(its, mat)
         self.refresh()
         self.set_status("Section %s made%s." % (sec, (" with %d mesh(es)" % len(items)) if items else ""))
+
+    def _tree_menu(self, pos):
+        try:
+            item = self.tree.itemAt(pos)
+            role = set_role(item.data(0, QtCore.Qt.UserRole)) if item else None
+            if item and not item.isSelected():
+                self.tree.clearSelection()
+                item.setSelected(True)
+            keys = {"section": ("to_section", "del_section", "up", "down", "select"),
+                    "material": ("to_group", "select")}.get(role, ())
+            keys = keys + ("from_group",) if "from_group" not in keys else keys
+            menu = QtWidgets.QMenu(self)
+            for key in keys:
+                text, tip, fn = self._group_actions[key]
+                act = menu.addAction(text)
+                act.setToolTip(tip)
+                act.triggered.connect(lambda *_, f=fn: f())
+            if role in ("section", "material"):
+                menu.addSeparator()
+                ren = menu.addAction("Rename")
+                ren.triggered.connect(lambda *_: self.tree.editItem(item, self.COL_NAME))
+            menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        except Exception:
+            traceback.print_exc()
+
+    @ui_safe
+    def section_from_group(self, name=None):
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick the asset's top group first (step 1).", level="warn")
+            return
+        root = asset.root_group()
+        groups = [g for g in cmds.ls(selection=True, long=True, type="transform") or []
+                  if not cmds.listRelatives(g, shapes=True) and (g == root or g.startswith(root + "|"))]
+        if not groups:
+            self.set_status("Select one or more groups (under %s) in the Outliner first." % short_name(root),
+                            level="warn")
+            return
+        if len(groups) == 1 and name is None:
+            name, ok = QtWidgets.QInputDialog.getText(self, "Section from group", "Section name:",
+                                                      text=SmartUdimAsset.section_name_for(groups[0]))
+            if not ok or not name.strip():
+                return
+        made = []
+        moved = 0
+        with UndoChunk("Smart UDIM sections from groups"):
+            for g in groups:
+                sec, n = asset.section_from_group(g, name if len(groups) == 1 else None,
+                                                  self.source_combo.value())
+                made.append(sec)
+                moved += n
+        self.refresh()
+        self.set_status("%d section(s) from groups (%s) holding %d mesh piece(s). One Ctrl+Z undoes it." % (
+            len(made), ", ".join(parse_group_name(s)["key"] or s for s in made), moved))
+
+    @ui_safe
+    def move_selection_to_section(self):
+        asset = self._asset()
+        secs = self._selected_role("section") or [
+            p for p in (self._parent_section(s) for s in self._selected_role("material")) if p]
+        if asset is None or len(set(secs)) != 1:
+            self.set_status("Highlight one section in the list first.", level="warn")
+            return
+        items = self._items_in_root(selection_items())
+        if not items:
+            self.set_status("Select meshes, faces or groups (under the root) to move.", level="warn")
+            return
+        asset.move_to_section(items, secs[0], self.source_combo.value())
+        self.refresh()
+        self.set_status("Moved %d mesh(es) into %s. One Ctrl+Z undoes it." % (
+            len(items), parse_group_name(secs[0])["key"] or secs[0]))
+
+    @ui_safe
+    def delete_sections(self):
+        asset = self._asset()
+        secs = self._selected_role("section")
+        if asset is None or not secs:
+            self.set_status("Highlight the section(s) to delete.", level="warn")
+            return
+        moved = 0
+        with UndoChunk("Smart UDIM delete sections"):
+            for sec in secs:
+                moved += asset.delete_section(sec, self.source_combo.value())
+        self.refresh()
+        self.set_status("Deleted %d section(s); %d mesh(es) moved to other sections. One Ctrl+Z undoes it." % (
+            len(secs), moved))
 
     @ui_safe
     def move_section(self, step):
