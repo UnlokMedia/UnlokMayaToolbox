@@ -135,6 +135,35 @@ windows. A 200-window wall (1,600 n-gons) takes about 10 s with the bevel
 still in its history, because every Maya poly command re-evaluates the
 history. Delete history first to halve that.
 
+### Modeling > Log Noise
+
+Turns cylinders into natural-looking logs for shack supports, posts and
+fences.
+
+1. **Select** cylinders with some height and axis subdivisions (e.g.
+   24 x 20). Selecting vertices instead, soft selection included, roughens
+   just that part of a log.
+2. **Apply to Selected:** each log gets its own random seed. One Ctrl+Z
+   undoes it.
+3. **Shape:** the sliders edit the selected logs live, like the Channel Box
+   on several nodes.
+   - Bumps, Bump size and Grain shape the surface; Grain stretches the bumps
+     along the log like wood grain.
+   - Bulge, Bend and Taper shape the log as a whole. The ends stay put when
+     it bends.
+   - Detail and Axis are under Advanced.
+   - Randomize Seeds gives each log a new seed.
+   - Everything is relative to the log's own radius and length, so it works
+     at any scale.
+4. **Finish:**
+   - **Bake** keeps the shape and forgets the settings.
+   - **Reset** puts the cylinder back.
+   - **Select Logs With Noise** finds them all.
+
+No plugin and no extra nodes: each mesh stores its original shape and
+settings in hidden attributes, so scenes open anywhere and you can come back
+and re-tweak later. About 0.13 s per update for a 3,900-vertex log.
+
 ### UV > Smart UDIM (in progress)
 
 Organises an asset for UDIM layout by **section** (one band of UDIM rows,
@@ -323,6 +352,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   ```bash
   "C:/Program Files/Autodesk/Maya2024/bin/mayapy.exe" tests/test_bevel_resolver.py
   ```
+- `tests/test_log_noise.py`: headless Log Noise tests. It checks shapes
+  against the original deformer (`contrib/log_noise`), plus undo, live edits,
+  masks, reset, bake, save/reopen and speed.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

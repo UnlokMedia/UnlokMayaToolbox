@@ -100,6 +100,20 @@
 - `RECIPES` holds one-click presets (overrides on `PS_DEFAULTS`). The user's
   benchmark jobs are roof shingles and a messy thatch/straw roof.
 
+- **Log Noise** (Modeling tab): plugin-free port of a logNoise deformer.
+  - **Why no plugin:** a node would need a plugin file written at runtime,
+    and every machine opening the scene would need it.
+  - **Storage:** the mesh shape stores `unlokLogRest` (doubleArray rest
+    points), optional `unlokLogWeights` (from a soft/vertex selection) and
+    `unlokLogNoise` (JSON settings).
+  - **Engine:** `log_noise_points` is the deformer's maths unchanged.
+    `tests/test_log_noise.py` checks it against
+    `contrib/log_noise/log_noise.py` to 1e-8.
+  - **Writes:** `_ln_write` sets vertex tweaks (`shape.pnts`) as deltas.
+  - **Undo:** apply / reset / bake are UndoChunks; slider edits run in
+    NoUndo, like Path Scatter's previews.
+  - **Topology change:** logs whose topology changed are reported, not
+    touched.
 - **Bevel Resolver** (Modeling tab): turns the n-gons a chamfer-off bevel
   leaves at its ends into quads. Engine `resolve_mesh` /
   `resolve_bevel_ngons`, panel `BevelResolverPanel`.
@@ -263,6 +277,10 @@
   headless. UI tests must run in GUI Maya (`tests/gui_smoke.py`).
 - Keeping an `MFnMesh` across a `cmds` topology edit (polySplit etc.) can
   hard-crash Maya. Make a new one from the dag path after every edit.
+- Writing vertex positions undoably: `cmds.setAttr(shape.pnts[a:b], *xyz,
+  type="float3")`. Without `type="float3"` the values are stored, but a mesh
+  with no construction history doesn't update (getPoints / pointPosition
+  stay old). Writing `.vrts` doesn't update either.
 - Poly edits keep indices: existing vertices, edges and faces keep their
   index and new ones are appended. A split edge keeps its index for one
   half; a split face keeps it for one part.

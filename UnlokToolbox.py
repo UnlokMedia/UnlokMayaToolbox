@@ -7924,12 +7924,652 @@ class BevelResolverPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Log Noise - natural-looking logs from cylinders (no plugin)
+# =============================================================================
+#
+# Ported from a logNoise deformer node, minus the node: a custom plugin needs
+# a file written into the plug-ins folder (not allowed in secure Mayas) and
+# every machine that opens the scene needs it too. Here the mesh shape keeps
+# its rest points in a hidden attribute and the noise is written as vertex
+# tweaks (shape.pnts), so scenes need nothing extra, settings can be changed
+# any time, and Reset / Bake are one click. The noise maths is unchanged, so
+# a seed gives the same shape as the deformer did.
+
+LOG_REST = "unlokLogRest"        # doubleArray: rest points, object space, x y z ...
+LOG_WEIGHTS = "unlokLogWeights"  # doubleArray: per-vertex weight (empty = 1 everywhere)
+LOG_SETTINGS = "unlokLogNoise"   # string: JSON settings
+LOG_AXES = ("Auto", "X", "Y", "Z")
+LOG_DEFAULTS = {"seed": 0, "bump": 0.04, "frequency": 2.0, "grain": 4.0, "octaves": 3, "bulge": 0.06,
+                "bend": 0.02, "taper": 0.1, "axis": "Auto"}
+LOG_MIN_VERTS = 200
+_LN_BUMP_GAIN = 2.0   # gains map each control to roughly "fraction of radius / length"
+_LN_BULGE_GAIN = 2.0
+_LN_BEND_GAIN = 3.0
+_LN_BULGE_FREQ = 0.35  # bulges per radius of length
+_LN_BEND_FREQ = 1.0    # bends across the whole length
+
+
+def _ln_lcg(state):
+    return (state * 1664525 + 1013904223) & 0xFFFFFFFF
+
+
+def _ln_make_perm():
+    perm = list(range(256))
+    s = 12345
+    for i in range(255, 0, -1):
+        s = _ln_lcg(s)
+        j = s % (i + 1)
+        perm[i], perm[j] = perm[j], perm[i]
+    return perm + perm
+
+
+_LN_P = _ln_make_perm()
+
+
+def _ln_offsets(seed, salt, count):
+    s = (seed * 2654435761 + salt * 40503 + 7) & 0xFFFFFFFF
+    for _ in range(4):
+        s = _ln_lcg(s)
+    out = []
+    for _ in range(count):
+        s = _ln_lcg(s)
+        out.append(s / 4294967296.0 * 256.0)
+    return out
+
+
+def _ln_fade(t):
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+def _ln_grad(h, x, y, z):
+    h &= 15
+    u = x if h < 8 else y
+    v = y if h < 4 else (x if h == 12 or h == 14 else z)
+    return (u if h & 1 == 0 else -u) + (v if h & 2 == 0 else -v)
+
+
+def ln_noise3(x, y, z):
+    """Improved Perlin noise (fixed permutation, same on every Python), about -1..1."""
+    fx, fy, fz = math.floor(x), math.floor(y), math.floor(z)
+    X, Y, Z = int(fx) & 255, int(fy) & 255, int(fz) & 255
+    x -= fx
+    y -= fy
+    z -= fz
+    u, v, w = _ln_fade(x), _ln_fade(y), _ln_fade(z)
+    P = _LN_P
+    A = P[X] + Y
+    AA = P[A] + Z
+    AB = P[A + 1] + Z
+    B = P[X + 1] + Y
+    BA = P[B] + Z
+    BB = P[B + 1] + Z
+    g = _ln_grad
+    x0 = g(P[AA], x, y, z) + u * (g(P[BA], x - 1, y, z) - g(P[AA], x, y, z))
+    x1 = g(P[AB], x, y - 1, z) + u * (g(P[BB], x - 1, y - 1, z) - g(P[AB], x, y - 1, z))
+    x2 = g(P[AA + 1], x, y, z - 1) + u * (g(P[BA + 1], x - 1, y, z - 1) - g(P[AA + 1], x, y, z - 1))
+    x3 = g(P[AB + 1], x, y - 1, z - 1) + u * (g(P[BB + 1], x - 1, y - 1, z - 1) - g(P[AB + 1], x, y - 1, z - 1))
+    y0 = x0 + v * (x1 - x0)
+    y1 = x2 + v * (x3 - x2)
+    return y0 + w * (y1 - y0)
+
+
+def ln_fbm(x, y, z, octaves):
+    total, amp, norm = 0.0, 1.0, 0.0
+    for _ in range(octaves):
+        total += amp * ln_noise3(x, y, z)
+        norm += amp
+        x *= 2.0
+        y *= 2.0
+        z *= 2.0
+        amp *= 0.5
+    return total / norm
+
+
+def log_noise_points(rest, settings, weights=None):
+    """The log shape for rest points [(x, y, z)] (pure maths, nothing in the
+    scene changes). weights: per-vertex 0..1, or None for everywhere.
+
+    Bumps and bulge are relative to the log's radius and bend to its length,
+    so it works at any scale. Bend is measured from the straight line
+    between the ends, so the ends stay put. Bend, bulge and taper are
+    worked out once per height ring."""
+    s = dict(LOG_DEFAULTS)
+    s.update(settings or {})
+    count = len(rest)
+    if count == 0:
+        return []
+    bump = float(s["bump"]) * _LN_BUMP_GAIN
+    freq = float(s["frequency"])
+    stretch = max(1e-6, float(s["grain"]))
+    octaves = max(1, int(s["octaves"]))
+    bulge = float(s["bulge"]) * _LN_BULGE_GAIN
+    bend = float(s["bend"]) * _LN_BEND_GAIN
+    taper = float(s["taper"])
+    lo = [min(c[k] for c in rest) for k in range(3)]
+    hi = [max(c[k] for c in rest) for k in range(3)]
+    ext = [hi[k] - lo[k] for k in range(3)]
+    # the log runs along the longest bounding-box side unless told otherwise
+    axis = s.get("axis", "Auto")
+    a = ext.index(max(ext)) if axis not in ("X", "Y", "Z") else "XYZ".index(axis)
+    b, c = (a + 1) % 3, (a + 2) % 3
+    length = ext[a]
+    radius = 0.25 * (ext[b] + ext[c])
+    out = [tuple(pt) for pt in rest]
+    if length < 1e-6 or radius < 1e-6:
+        return out
+    inv_r = 1.0 / radius
+    base = lo[a]
+    center_b = 0.5 * (lo[b] + hi[b])
+    center_c = 0.5 * (lo[c] + hi[c])
+    o = _ln_offsets(int(s["seed"]), 0, 9)
+    bend_scale = bend * length
+    end0_b, end1_b = ln_noise3(o[0], o[1], 0.37), ln_noise3(_LN_BEND_FREQ + o[0], o[1], 0.37)
+    end0_c, end1_c = ln_noise3(o[2], o[3], 0.37), ln_noise3(_LN_BEND_FREQ + o[2], o[3], 0.37)
+    rows = {}
+    for i, pt in enumerate(rest):
+        w = 1.0 if weights is None else weights[i]
+        if w == 0.0:
+            continue
+        h = pt[a] - base
+        key = round(h / length, 6)
+        row = rows.get(key)
+        if row is None:
+            t = h / length
+            off_b = ln_noise3(t * _LN_BEND_FREQ + o[0], o[1], 0.37) - (end0_b + (end1_b - end0_b) * t)
+            off_c = ln_noise3(t * _LN_BEND_FREQ + o[2], o[3], 0.37) - (end0_c + (end1_c - end0_c) * t)
+            scale = (1.0 - taper * t) * (1.0 + bulge * ln_fbm(h * inv_r * _LN_BULGE_FREQ + o[4], o[5], 0.71, 2))
+            row = rows[key] = (off_b * bend_scale, off_c * bend_scale, scale)
+        off_b, off_c, scale = row
+        db = pt[b] - center_b
+        dc = pt[c] - center_c
+        n = ln_fbm(db * inv_r * freq + o[6], dc * inv_r * freq + o[7], h * inv_r * freq / stretch + o[8], octaves)
+        k = scale * (1.0 + bump * n)
+        q = list(pt)
+        q[b] += w * (center_b + db * k + off_b - pt[b])
+        q[c] += w * (center_c + dc * k + off_c - pt[c])
+        out[i] = (q[0], q[1], q[2])
+    return out
+
+
+def _log_shape(xform):
+    shapes = cmds.listRelatives(xform, shapes=True, type="mesh", noIntermediate=True, fullPath=True) or []
+    return shapes[0] if shapes else None
+
+
+def log_selection():
+    """(logs, weights): mesh transforms in the selection, plus per-vertex
+    weights {xform: [w...]} for logs picked by components (soft selection
+    falloff included)."""
+    logs = []
+    for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if node not in logs and _log_shape(node):
+            logs.append(node)
+    weights = {}
+    if any("." in s for s in cmds.ls(selection=True) or []):
+        try:
+            rich = om.MGlobal.getRichSelection().getSelection()
+        except RuntimeError:
+            rich = om.MSelectionList()
+        for i in range(rich.length()):
+            try:
+                dag, comp = rich.getComponent(i)
+            except Exception:
+                continue
+            if comp.isNull():
+                continue
+            path = dag.fullPathName()
+            xform = long_name(cmds.listRelatives(path, parent=True, fullPath=True)[0]
+                              if dag.node().hasFn(om.MFn.kMesh) else path)
+            if xform not in logs:
+                continue
+            w = weights.setdefault(xform, [0.0] * om.MFnMesh(dag).numVertices)
+            fn = om.MFnSingleIndexedComponent(comp)
+            kind = comp.apiType()
+            if kind == om.MFn.kMeshVertComponent:
+                soft = fn.hasWeights
+                for j, v in enumerate(fn.getElements()):
+                    w[v] = max(w[v], fn.weight(j).influence if soft else 1.0)
+                continue
+            prefix = {om.MFn.kMeshPolygonComponent: "f", om.MFn.kMeshEdgeComponent: "e"}.get(kind)
+            if prefix is None:
+                continue
+            comps = ["%s.%s[%d]" % (xform, prefix, e) for e in fn.getElements()]
+            for vtx in cmds.ls(cmds.polyListComponentConversion(comps, toVertex=True) or [], flatten=True):
+                w[int(vtx.rsplit("[", 1)[1][:-1])] = 1.0  # faces / edges: their vertices, full weight
+    return logs, weights
+
+
+def has_log_noise(xform):
+    shape = _log_shape(xform)
+    return bool(shape) and cmds.attributeQuery(LOG_SETTINGS, node=shape, exists=True)
+
+
+def log_settings(xform):
+    shape = _log_shape(xform)
+    s = dict(LOG_DEFAULTS)
+    if shape and cmds.attributeQuery(LOG_SETTINGS, node=shape, exists=True):
+        try:
+            s.update(json.loads(cmds.getAttr(shape + "." + LOG_SETTINGS) or "{}"))
+        except ValueError:
+            pass
+    return s
+
+
+def logs_with_noise(nodes=None):
+    """Every mesh transform carrying Log Noise (under nodes, or in the scene)."""
+    shapes = cmds.ls(nodes, dag=True, type="mesh", long=True, noIntermediate=True) if nodes else \
+        cmds.ls(type="mesh", long=True, noIntermediate=True)
+    out = []
+    for shape in shapes or []:
+        if cmds.attributeQuery(LOG_SETTINGS, node=shape, exists=True):
+            xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
+            if xform not in out:
+                out.append(xform)
+    return out
+
+
+def _ln_points(shape):
+    return [(p.x, p.y, p.z) for p in om.MFnMesh(get_dag_path(shape)).getPoints(om.MSpace.kObject)]
+
+
+def _ln_write(shape, new):
+    """Write object-space points as vertex tweaks: one undoable setAttr per
+    5,000 vertices (type float3 is what makes a history-free mesh update)."""
+    cur = _ln_points(shape)
+    n = len(cur)
+    tweaks = [(0.0, 0.0, 0.0)] * n
+    plug = om.MFnDependencyNode(get_dag_path(shape).node()).findPlug("pnts", False)
+    for idx in plug.getExistingArrayAttributeIndices():
+        if idx < n:
+            el = plug.elementByLogicalIndex(idx)
+            tweaks[idx] = (el.child(0).asFloat(), el.child(1).asFloat(), el.child(2).asFloat())
+    for a in range(0, n, 5000):
+        b = min(n, a + 5000)
+        flat = []
+        for i in range(a, b):
+            t, c, q = tweaks[i], cur[i], new[i]
+            flat.extend((t[0] + q[0] - c[0], t[1] + q[1] - c[1], t[2] + q[2] - c[2]))
+        cmds.setAttr("%s.pnts[%d:%d]" % (shape, a, b - 1), *flat, type="float3")
+
+
+def _ln_rest(shape):
+    flat = cmds.getAttr(shape + "." + LOG_REST) or []
+    return [(flat[i], flat[i + 1], flat[i + 2]) for i in range(0, len(flat) - 2, 3)]
+
+
+def _ln_weights(shape):
+    if not cmds.attributeQuery(LOG_WEIGHTS, node=shape, exists=True):
+        return None
+    w = cmds.getAttr(shape + "." + LOG_WEIGHTS) or []
+    return list(w) or None
+
+
+def add_log_noise(logs, settings=None, weights=None, seeds=None):
+    """Give each log its noise (one Ctrl+Z). Each gets a random seed unless
+    seeds {xform: seed} says otherwise. Returns {"added", "skipped", "low"}."""
+    weights = weights or {}
+    seeds = seeds or {}
+    report = {"added": [], "skipped": [], "low": []}
+    with UndoChunk("Log Noise"):
+        for xform in logs:
+            shape = _log_shape(xform)
+            if shape is None:
+                continue
+            if has_log_noise(xform):
+                report["skipped"].append(xform)
+                continue
+            rest = _ln_points(shape)
+            if len(rest) < LOG_MIN_VERTS:
+                report["low"].append(xform)
+            s = dict(LOG_DEFAULTS)
+            s.update(settings or {})
+            s["seed"] = int(seeds.get(xform, random.randint(0, 9999)))
+            for ln, kw in ((LOG_REST, {"dataType": "doubleArray"}), (LOG_SETTINGS, {"dataType": "string"})):
+                if not cmds.attributeQuery(ln, node=shape, exists=True):
+                    cmds.addAttr(shape, longName=ln, **kw)
+            cmds.setAttr(shape + "." + LOG_REST, [c for pt in rest for c in pt], type="doubleArray")
+            w = weights.get(xform)
+            if w:
+                if not cmds.attributeQuery(LOG_WEIGHTS, node=shape, exists=True):
+                    cmds.addAttr(shape, longName=LOG_WEIGHTS, dataType="doubleArray")
+                cmds.setAttr(shape + "." + LOG_WEIGHTS, list(w), type="doubleArray")
+            cmds.setAttr(shape + "." + LOG_SETTINGS, json.dumps(s, sort_keys=True), type="string")
+            _ln_write(shape, log_noise_points(rest, s, w))
+            report["added"].append(xform)
+    return report
+
+
+def update_log_noise(changes, live=True):
+    """Change settings on logs and re-shape them. changes: {xform: {key: value}}.
+    live: slider edits, kept out of the undo queue (like Path Scatter's
+    previews); otherwise one Ctrl+Z. Returns logs whose topology changed
+    since the noise was added (left alone: Bake them, then re-apply)."""
+    stale = []
+    with (NoUndo() if live else UndoChunk("Log Noise edit")):
+        for xform, change in changes.items():
+            shape = _log_shape(xform)
+            if not shape or not has_log_noise(xform):
+                continue
+            rest = _ln_rest(shape)
+            if len(rest) != om.MFnMesh(get_dag_path(shape)).numVertices:
+                stale.append(xform)
+                continue
+            s = log_settings(xform)
+            s.update(change)
+            _ln_write(shape, log_noise_points(rest, s, _ln_weights(shape)))
+            cmds.setAttr(shape + "." + LOG_SETTINGS, json.dumps(s, sort_keys=True), type="string")
+    return stale
+
+
+def _ln_drop_attrs(shape):
+    for ln in (LOG_REST, LOG_WEIGHTS, LOG_SETTINGS):
+        if cmds.attributeQuery(ln, node=shape, exists=True):
+            cmds.deleteAttr(shape + "." + ln)
+
+
+def reset_log_noise(logs):
+    """Back to the plain cylinder and forget the noise (one Ctrl+Z)."""
+    done, stale = [], []
+    with UndoChunk("Log Noise reset"):
+        for xform in logs:
+            shape = _log_shape(xform)
+            if not shape or not has_log_noise(xform):
+                continue
+            rest = _ln_rest(shape)
+            if len(rest) != om.MFnMesh(get_dag_path(shape)).numVertices:
+                stale.append(xform)
+                continue
+            _ln_write(shape, rest)
+            _ln_drop_attrs(shape)
+            done.append(xform)
+    return done, stale
+
+
+def bake_log_noise(logs):
+    """Keep the shape, drop the stored rest shape and settings (one Ctrl+Z)."""
+    done = []
+    with UndoChunk("Log Noise bake"):
+        for xform in logs:
+            shape = _log_shape(xform)
+            if shape and has_log_noise(xform):
+                _ln_drop_attrs(shape)
+                done.append(xform)
+    return done
+
+
+class LogNoisePanel(QtWidgets.QWidget):
+    TOOL_NAME = "Log Noise"
+    TOOL_TIP = "Turn cylinders into natural-looking logs: bumps along the grain, bulges, a slight bend and taper."
+
+    FIELDS = ("bump", "frequency", "grain", "octaves", "bulge", "bend", "taper", "axis", "seed")
+
+    def __init__(self, parent=None):
+        super(LogNoisePanel, self).__init__(parent)
+        self._jobs = []
+        self._pending = set()
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(self._sync_from_selection)
+        self._edit_timer = QtCore.QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(40)
+        self._edit_timer.timeout.connect(self._apply_pending)
+        self._build()
+        self._install_jobs()
+        self._sync_from_selection()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Log Noise", "Turn cylinders into natural-looking logs (shack supports, posts, "
+                                             "fences). Nothing extra in the scene: no plugin, no nodes."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+
+        # ---- 1. select
+        card = self.step_select = StepCard(1, "Select logs", "Cylinders with some height and axis subdivisions "
+                                                             "(e.g. 24 x 20). Select vertices (soft selection "
+                                                             "too) to roughen just part of a log.")
+        self.sel_label = hint_label("")
+        card.add(self.sel_label)
+        col.addWidget(card)
+
+        # ---- 2. add
+        card = self.step_add = StepCard(2, "Add noise", "Each log gets its own random seed. One Ctrl+Z undoes it.")
+        self.apply_btn = primary_button("Apply to Selected")
+        self.apply_btn.setMinimumHeight(28)
+        self.apply_btn.setToolTip("Add the noise to every selected log that doesn't have it yet, with the "
+                                  "settings below.")
+        self.apply_btn.clicked.connect(lambda *_: self.apply())
+        card.add(self.apply_btn)
+        col.addWidget(card)
+
+        # ---- 3. shape
+        card = self.step_shape = StepCard(3, "Shape", "Edits the selected logs live (each keeps its own seed). "
+                                                      "Select several to change them together.")
+        grid = Section("", header=False)
+        self.f = {}
+        self.f["bump"] = FloatField(0.0, 1.0, 0.0, 0.3, decimals=3, step=0.01)
+        grid.add_row("Bumps", self.f["bump"], "How rough the surface is, relative to the log's radius.")
+        self.f["frequency"] = FloatField(0.01, 50.0, 0.1, 10.0, decimals=2, step=0.1)
+        grid.add_row("Bump size", self.f["frequency"], "Bumps per radius: higher = smaller, busier bumps.")
+        self.f["grain"] = FloatField(1.0, 50.0, 1.0, 10.0, decimals=1, step=0.5)
+        grid.add_row("Grain", self.f["grain"], "Stretches the bumps along the log like wood grain (1 = round "
+                                               "bumps).")
+        self.f["bulge"] = FloatField(0.0, 2.0, 0.0, 0.5, decimals=3, step=0.01)
+        grid.add_row("Bulge", self.f["bulge"], "Slow swelling and thinning along the length.")
+        self.f["bend"] = FloatField(0.0, 1.0, 0.0, 0.15, decimals=3, step=0.005)
+        grid.add_row("Bend", self.f["bend"], "How far the log wanders off straight, relative to its length. "
+                                             "The ends stay put.")
+        self.f["taper"] = FloatField(0.0, 0.9, 0.0, 0.9, decimals=2, step=0.05)
+        grid.add_row("Taper", self.f["taper"], "Thinner towards the top end.")
+        card.add(grid)
+        seed_row = QtWidgets.QWidget()
+        sl = QtWidgets.QHBoxLayout(seed_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        seed_label = QtWidgets.QLabel("Seed")
+        seed_label.setMinimumWidth(92)
+        self.f["seed"] = IntField(0, 99999, 0, 9999)
+        self.f["seed"].setToolTip("Typing a seed gives every selected log that seed (same shape on the same "
+                                  "cylinder).")
+        rand = secondary_button("Randomize Seeds", "A new random seed for each selected log (each with noise if "
+                                                   "nothing is selected).")
+        rand.clicked.connect(lambda *_: self.randomize())
+        sl.addWidget(seed_label)
+        sl.addWidget(self.f["seed"], 1)
+        sl.addWidget(rand)
+        card.add(seed_row)
+        adv = Section("Advanced", expanded=False)
+        self.f["octaves"] = IntField(1, 6)
+        adv.add_row("Detail", self.f["octaves"], "Noise octaves: more = finer detail on the bumps (slower).")
+        self.f["axis"] = ComboField(LOG_AXES)
+        adv.add_row("Axis", self.f["axis"], "The log's length direction. Auto = its longest bounding-box side.")
+        card.add(adv)
+        for key, widget in self.f.items():
+            widget.setValue(LOG_DEFAULTS[key])
+            widget.changed.connect(lambda k=key: self._queue(k))
+        col.addWidget(card)
+
+        # ---- 4. finish
+        card = self.step_finish = StepCard(4, "Finish", "Bake keeps the shape and forgets the settings. Reset "
+                                                        "puts the cylinder back. Both are one Ctrl+Z.")
+        pick = secondary_button("Select Logs With Noise", "Select every log that has Log Noise (under the "
+                                                          "selection, or in the whole scene).")
+        pick.clicked.connect(lambda *_: self.select_noisy())
+        reset = secondary_button("Reset", "Put the selected logs back to their original shape.")
+        reset.clicked.connect(lambda *_: self.reset())
+        bake = secondary_button("Bake", "Keep the selected logs as they are and drop the stored settings.")
+        bake.clicked.connect(lambda *_: self.bake())
+        card.add(button_row(pick, reset, bake))
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def _settings(self):
+        return {k: w.value() for k, w in self.f.items()}
+
+    def _selected(self):
+        logs, _ = log_selection()
+        return logs
+
+    def _sync_from_selection(self):
+        try:
+            logs = self._selected()
+            noisy = [x for x in logs if has_log_noise(x)]
+            if noisy:  # show the first selected log's settings, like the Channel Box
+                s = log_settings(noisy[0])
+                for key, widget in self.f.items():
+                    widget.setValue(s.get(key, LOG_DEFAULTS[key]))
+            low = [x for x in logs if om.MFnMesh(get_dag_path(_log_shape(x))).numVertices < LOG_MIN_VERTS]
+            if not logs:
+                text = "Nothing selected."
+            else:
+                text = "%d log(s) selected, %d with noise." % (len(logs), len(noisy))
+                if low:
+                    text += " %d have under %d vertices: add subdivisions for the noise to show." % (
+                        len(low), LOG_MIN_VERTS)
+            self.sel_label.setText(text)
+            self.step_select.set_state("done" if logs else "current")
+            self.step_add.set_state("done" if noisy and len(noisy) == len(logs) else
+                                    ("current" if logs else "todo"))
+            self.step_shape.set_state("current" if noisy else "todo")
+            self.step_finish.set_state("todo")
+            if not logs:
+                self.next_banner.set_text("Select cylinders to turn into logs (they need height and axis "
+                                          "subdivisions, e.g. 24 x 20).")
+            elif len(noisy) < len(logs):
+                self.next_banner.set_text("Press <b>Apply to Selected</b>.")
+            else:
+                self.next_banner.set_text("Shape them with the sliders in step 3 (live). <b>Bake</b> when you're "
+                                          "happy, or <b>Reset</b> to get the cylinders back.")
+        except Exception:
+            traceback.print_exc()
+
+    # ============================================================= actions
+    def _queue(self, key):
+        self._pending.add(key)
+        self._edit_timer.start()
+
+    @ui_safe
+    def _apply_pending(self):
+        keys, self._pending = self._pending, set()
+        logs = [x for x in self._selected() if has_log_noise(x)]
+        if not keys or not logs:
+            return
+        values = self._settings()
+        change = {k: values[k] for k in keys}
+        t0 = time.time()
+        stale = update_log_noise({x: change for x in logs}, live=True)
+        if stale:
+            self.set_status("%d log(s) changed topology since the noise was added: Bake them, then apply again."
+                            % len(stale), level="warn")
+        else:
+            self.set_status("Updated %d log(s) in %.2fs." % (len(logs), time.time() - t0))
+
+    @ui_safe
+    def apply(self):
+        logs, weights = log_selection()
+        if not logs:
+            self.set_status("Select some cylinders (or vertices on them) first.", level="warn")
+            return
+        s = self._settings()
+        s.pop("seed")
+        t0 = time.time()
+        report = add_log_noise(logs, s, weights)
+        msg = "Added noise to %d log(s) in %.2fs" % (len(report["added"]), time.time() - t0)
+        if report["skipped"]:
+            msg += "; %d already had it (use the sliders)" % len(report["skipped"])
+        if report["low"]:
+            msg += "; %d have under %d vertices, so the noise barely shows" % (len(report["low"]), LOG_MIN_VERTS)
+        self.set_status(msg + ". One Ctrl+Z undoes it.", level="warn" if report["low"] else "fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def randomize(self):
+        logs = [x for x in self._selected() if has_log_noise(x)] or logs_with_noise()
+        if not logs:
+            self.set_status("No logs with noise to re-seed.", level="warn")
+            return
+        update_log_noise({x: {"seed": random.randint(0, 9999)} for x in logs}, live=True)
+        self.set_status("New seeds for %d log(s)." % len(logs))
+        self._sync_from_selection()
+
+    @ui_safe
+    def select_noisy(self):
+        sel = cmds.ls(selection=True, long=True, objectsOnly=True) or []
+        logs = logs_with_noise(sel) if sel else []
+        logs = logs or logs_with_noise()
+        if logs:
+            cmds.select(logs, replace=True)
+        self.set_status("Selected %d log(s) with noise." % len(logs) if logs else "No logs with noise found.")
+
+    @ui_safe
+    def reset(self):
+        done, stale = reset_log_noise(self._selected())
+        msg = "Reset %d log(s) to their original shape." % len(done)
+        if stale:
+            msg += " %d changed topology since, so they can't be reset (Bake them instead)." % len(stale)
+        self.set_status(msg, level="warn" if stale or not done else "info")
+        self._sync_from_selection()
+
+    @ui_safe
+    def bake(self):
+        done = bake_log_noise(self._selected())
+        self.set_status("Baked %d log(s): the shape stays, the settings are gone." % len(done) if done else
+                        "Select logs with noise to bake.", level="info" if done else "warn")
+        self._sync_from_selection()
+
+    # ======================================================= scene events
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def shutdown(self):
+        self._sel_timer.stop()
+        self._edit_timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
-    ("Modeling", [PathScatterPanel, BevelResolverPanel]),
+    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

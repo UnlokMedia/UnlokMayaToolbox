@@ -402,6 +402,49 @@ def main():
     pump()
     window.grab().save(os.path.join(OUT, "14_check_handoff.png"))
 
+    # --- Log Noise: select cylinders, apply, live slider, bake
+    cmds.file(new=True, force=True)
+    tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    window.tabs.setCurrentIndex(tabs.index("Modeling"))
+    lognoise = [p for p in window.panels() if p.TOOL_NAME == "Log Noise"][0]
+    window.tabs.currentWidget().stack.setCurrentWidget(lognoise)
+    logs = []
+    for i in range(5):
+        c = cmds.polyCylinder(r=0.15, h=2, sx=24, sy=20, name="log%d" % (i + 1))[0]
+        cmds.move(i * 0.6 - 1.2, 1, 0, c)
+        logs.append(c)
+    cmds.select(logs[1:])
+    pump()
+    lognoise._sync_from_selection()
+    check("Log Noise asks to apply once logs are selected", "Apply" in lognoise.next_banner.text.text(),
+          lognoise.next_banner.text.text())
+    vtx = logs[1] + ".vtx[300]"
+    rest = cmds.pointPosition(vtx, local=True)
+    lognoise.apply()
+    pump()
+    shaped = cmds.pointPosition(vtx, local=True)
+    check("Apply to Selected shapes every selected log", all(ns["has_log_noise"](cmds.ls(l, long=True)[0])
+                                                              for l in logs[1:]) and shaped != rest and
+          "Added noise to 4" in lognoise.status.text(), lognoise.status.text())
+    lognoise.f["bend"].spin.setValue(0.12)  # like a user edit: emits, live update
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        pump(1)
+    check("a slider edits the selected logs live", cmds.pointPosition(vtx, local=True) != shaped and
+          all(ns["log_settings"](cmds.ls(l, long=True)[0])["bend"] == 0.12 for l in logs[1:]),
+          lognoise.status.text())
+    window.grab().save(os.path.join(OUT, "15_log_noise.png"))
+    cmds.select(clear=True)
+    cmds.setAttr("persp.translate", 0, 1.2, 6)
+    cmds.setAttr("persp.rotate", 0, 0, 0)
+    snap("16_log_noise_viewport.png")
+    cmds.select(logs[1:])
+    lognoise.bake()
+    pump()
+    check("Bake keeps the logs and drops the settings", not any(ns["has_log_noise"](cmds.ls(l, long=True)[0])
+                                                                 for l in logs) and
+          cmds.pointPosition(vtx, local=True) != rest, lognoise.status.text())
+
     # --- re-paste replaces the window cleanly
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), {"__name__": "__main__", "__file__": TOOLBOX})
