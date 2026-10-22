@@ -9,6 +9,7 @@ stops cleanly, with one Ctrl+Z putting the original UVs back.
 """
 
 import os
+import re
 import sys
 import time
 import traceback
@@ -73,9 +74,9 @@ def run():
     long_gaps = [(b[0] - a[0], a[1]) for a, b in zip(marks, marks[1:]) if b[0] - a[0] > 3.0]
     for gap, txt in long_gaps:
         print("   %.1fs after: %s" % (gap, txt[:110]))
-    unexplained = [g for g in long_gaps if not (("Unfolding" in g[1] and " faces)" in g[1]) or
-                                                 ("Packing" in g[1] and " piece" in g[1]))]
-    check("no unexplained silences: long waits only inside one named Unfold3D call", not unexplained,
+    named = re.compile(r" \d+ of \d+: |: re-unfolding ")  # the label says which mesh / batch / group
+    unexplained = [g for g in long_gaps if not named.search(g[1])]
+    check("no unexplained silences: every long wait is under a label naming what it's on", not unexplained,
           "%.1fs run, %d updates, %d long wait(s), unexplained: %s" % (
               total, len(log), len(long_gaps), [(round(g, 1), t[:60]) for g, t in unexplained]))
     unfold = [t for _, _, t in log if "Unfolding" in t]

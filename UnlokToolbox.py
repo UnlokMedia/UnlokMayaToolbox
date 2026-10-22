@@ -142,12 +142,15 @@ class Progress(object):
         self.pos, self.done, self._pending = 0, 0.0, 0.0
         self.update(force=True)
 
-    def item(self, detail="", weight=1.0):
+    def item(self, detail="", weight=1.0, force=False):
+        """Mark the start of the next piece of work. force: show it now even
+        if the bar updated less than 0.1 s ago, for anything that might take
+        a while (otherwise a long wait could sit under the previous label)."""
         self.done += self._pending
         self._pending = float(weight)
         self.pos += 1
         self.detail = detail
-        self.update()
+        self.update(force=force or self.pos == 1)  # a stage's first item always shows
 
     def fraction(self):
         start, share = self.span.get(self.key, (0.0, 0.0))
@@ -4011,9 +4014,6 @@ def skipped_meshes(report):
 
 AUTO_UV_STRETCH_TOL = math.log(4.0)  # face area ratio 4x off its shell's = stretched
 AUTO_UV_KEEP_SCORE = 0.85
-# Unfold3D packing grid. 1024 packs ~3x faster than 2048 with the same result
-# quality for a first pass; padding stays 8 px on a 2K map either way.
-AUTO_UV_PACKING = {"Fast": 512, "Balanced": 1024, "Best": 2048}
 
 
 def _mesh_fn(xform):
@@ -4269,7 +4269,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
     ok = []
     pr.stage("project", len(meshes), "Projecting")
     for xform in meshes:  # projection works one object at a time
-        pr.item(short_name(xform))
+        pr.item(short_name(xform), force=(cmds.polyEvaluate(xform, face=True) or 0) > 5000)
         try:
             cmds.polyAutoProjection(xform + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1,
                                     percentageSpace=0.2, scaleMode=1, constructionHistory=False)
@@ -4312,7 +4312,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
     batches = _unwrap_batches(ok)
     pr.stage("unfold", sum(n for _, n in batches), "Unfolding", items=len(batches))
     for batch in batches:  # batches, so progress moves (and Esc works) on big assets
-        pr.item(_batch_label(batch), weight=batch[1])
+        pr.item(_batch_label(batch), weight=batch[1], force=True)
         try:
             cmds.select(batch[0], replace=True)
             cmds.u3dAutoSeam(splitShells=0, cutPipes=1)  # closed shells need at least one seam
@@ -4333,7 +4333,8 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
         for face in bad:
             by_mesh.setdefault(face.split(".")[0], []).append(face)
         for batch in _unwrap_batches(sorted(by_mesh)):
-            pr.update()
+            pr.detail = "re-unfolding %s" % _batch_label(batch)
+            pr.update(force=True)
             try:
                 cmds.select([f for m in batch[0] for f in by_mesh[m]], replace=True)
                 cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
@@ -4343,15 +4344,69 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None):
     return failed
 
 
-def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_tiles=(), progress=None):
+def _pack_one_tile(shells, pad):
+    """Fit a group's shells into one tile at even texel density, as big as
+    possible. Returns ({id(shell): (x, y, k, angle)}, scale) or (None, 0).
+
+    Every shell keeps its own 3D-to-UV ratio (k = sqrt(3D area / UV area)),
+    times one scale for the whole group, found by bisection: the skyline
+    packer (_TilePacker) says whether a scale fits. Shells lie on their main
+    axis and may turn 90 degrees.
+    """
+    if not shells:
+        return {}, 0.0
+    base = []
+    for sh in shells:
+        angle, w0, h0 = sh.dims["axis"]
+        k = math.sqrt(sh.area3d / sh.area_uv)
+        base.append((sh, k, angle, w0 * k, h0 * k))
+    base.sort(key=lambda t: (-round(max(t[3], t[4]), 9), -t[3] * t[4], t[0].mesh, t[0].uv_ids[0]))
+    usable = 1.0 - 2.0 * pad
+    area = sum(w * h for _, _, _, w, h in base) or 1e-12
+    longest = max(max(w, h) for _, _, _, w, h in base) or 1e-12
+    hi = min(math.sqrt(usable * usable / area), (usable - 1e-9) / longest)
+
+    def attempt(scale):
+        pk = _TilePacker((0, 0), pad)
+        out = {}
+        for sh, k, angle, w, h in base:
+            rw, rh = w * scale + pad, h * scale + pad
+            spot, turned = pk.find(rw, rh), False
+            if abs(rw - rh) > 1e-12:
+                alt = pk.find(rh, rw)
+                if alt is not None and (spot is None or alt[0] < spot[0]):
+                    spot, turned = alt, True
+            if spot is None:
+                return None
+            pk.place(spot, rh if turned else rw, rw if turned else rh)
+            out[id(sh)] = (spot[3], spot[4], k * scale, angle + (math.pi / 2.0 if turned else 0.0))
+        return out
+
+    best = attempt(hi)
+    if best is not None:
+        return best, hi
+    lo = 0.0
+    for _ in range(16):  # ~0.002% precision on the scale
+        mid = (lo + hi) / 2.0
+        got = attempt(mid)
+        if got is None:
+            hi = mid
+        else:
+            lo, best = mid, got
+    return (best, lo) if best is not None else (None, 0.0)
+
+
+def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_tiles=(), progress=None,
+               uv_set="map1"):
     """Pack every material group into its own UDIM tile.
 
     Sections take bands of rows (in section order); each material keeps the
     same column in every section, so e.g. glass sits in the same spot for
-    every building. Texel density is even within a group (multi-tile groups
-    and density across groups are the next milestone).
+    every building. Texel density is even within a group. Pure maths plus
+    one undoable UV write per mesh: about a second where Unfold3D's
+    u3dLayout took 30+ s on a 141-mesh building. (resolution: unused, kept
+    for old callers.)
     """
-    cmds.loadPlugin("Unfold3D", quiet=True)
     exclude = set(exclude)
     sections = asset.sections()
     keys = sorted(set(_get(m, UDIM_KEY) or parse_group_name(m)["key"]
@@ -4360,31 +4415,40 @@ def pack_udims(asset, exclude=(), resolution=1024, padding=8.0 / 2048, avoid_til
     rows_per_section = max(1, (len(keys) + 9) // 10)
     first_row = (max((t - 1001) // 10 for t in avoid_tiles) + 1) if avoid_tiles else 0  # above hands-off tiles
     pad = float(padding)
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    caches, claimed = {}, set()
     placed = []
+    moves = {}  # mesh -> [(shell, tu, tv, x, y, k, angle)]
     for si, sec in enumerate(sections):
         for mat in asset.materials(sec):
             members, _ = expand_members(mat)
-            items = []
+            shells = []
             for xform, faces in members.items():
                 if xform in exclude:
                     continue
-                if faces is None:
-                    items.append(xform)
-                else:
-                    items.extend("%s.%s" % (xform, r) for r in face_ranges(faces))
-            if not items:
+                got, _ = _read_shells(xform, faces, uv_set, unit_scale, caches, claimed)
+                shells.extend(got or [])
+            if not shells:
                 continue
             if progress:
-                progress.item("%s (%d piece%s)" % (short_name(mat), len(items), "" if len(items) == 1 else "s"))
+                progress.item("%s (%d shell%s)" % (short_name(mat), len(shells), "" if len(shells) == 1 else "s"))
             col = column[_get(mat, UDIM_KEY) or parse_group_name(mat)["key"]]
             u0 = col % 10
             v0 = first_row + si * rows_per_section + col // 10
-            # NB: u3dLayout's box is [uMin, uMax, vMin, vMax]. scl=1 keeps shells'
-            # 3D size ratio (even density in the group); the default layout
-            # scale mode fits the group to the box.
-            box = [u0 + pad, u0 + 1.0 - pad, v0 + pad, v0 + 1.0 - pad]
-            cmds.u3dLayout(items, res=resolution, scl=1, rot=1, rst=90, spc=pad, mar=pad, box=box)
+            spots, _ = _pack_one_tile(shells, pad)
+            if spots is None:  # too many pieces to fit even tiny: leave this group as it is
+                continue
+            for sh in shells:
+                x, y, k, angle = spots[id(sh)]
+                moves.setdefault(sh.mesh, []).append((sh, u0, v0, x, y, k, angle))
             placed.append((mat, 1001 + u0 + 10 * v0))
+    for xform, items in moves.items():
+        fn = _mesh_fn(xform)
+        us, vs = fn.getUVs(uv_set)
+        us, vs = list(us), list(vs)
+        for sh, tu, tv, x, y, k, angle in items:
+            _place_shell(us, vs, sh, tu, tv, x, y, k, angle)
+        write_uvs(xform, uv_set, us, vs)
     return placed
 
 
@@ -4393,9 +4457,10 @@ AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("
 
 
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
-                hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing="Balanced",
+                hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing=None,
                 progress_callback=None):
-    """The whole Auto UV pass on an asset, as one Ctrl+Z.
+    """The whole Auto UV pass on an asset, as one Ctrl+Z. (packing: unused
+    since packing went pure-maths; kept for old callers.)
 
     Returns {"rows": [{mesh, before, reason, after, action}], "timing": {...},
     "tiles": [(material set, udim)], "backups": n}. Rows are worst first.
@@ -4477,7 +4542,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 avoid.update(t for t, _, _ in uv_footprints(m, uv_set))
             pr.stage("pack", len(asset.all_material_sets()), "Packing into UDIMs")
             tiles = pack_udims(asset, exclude=set(failed) | set(instanced) | set(handsoff),
-                               resolution=AUTO_UV_PACKING.get(packing, 1024), avoid_tiles=avoid, progress=pr)
+                               avoid_tiles=avoid, progress=pr, uv_set=uv_set)
             timing["pack"] = time.time() - t
         # scoring can switch a mesh's current UV set: keep it inside the chunk so
         # one Ctrl+Z still undoes the whole run
@@ -4654,6 +4719,35 @@ def _group_print(members):
     return "%d:%.4g" % (total_faces, area)
 
 
+def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
+    """LayoutShells of one set member (whole mesh or some faces). Returns
+    (shells, conflicts), or (None, 0) when the mesh has no usable UVs. A
+    shell already claimed by an earlier group is skipped and counted."""
+    if xform not in caches:
+        caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
+    cache = caches[xform]
+    if cache is None:
+        return None, 0
+    by_shell = {}
+    for f in (range(cache["nf"]) if faces is None else sorted(faces)):
+        if f < cache["nf"] and cache["face_uvs"][f]:
+            by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
+    shells, conflicts = [], 0
+    for shell, fs in by_shell.items():
+        if (xform, shell) in claimed:
+            conflicts += 1
+            continue
+        claimed.add((xform, shell))
+        uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
+        a3 = sum(cache["a3"][f] for f in fs)
+        auv = sum(cache["auv"][f] for f in fs)
+        if a3 <= 1e-12 or auv <= 1e-14:
+            continue
+        pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
+        shells.append(LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs)))
+    return shells, conflicts
+
+
 def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
@@ -4691,30 +4785,14 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
                         info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
                                               "area": area})
                     continue
-                if xform not in caches:
-                    caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
-                cache = caches[xform]
-                if cache is None:
+                shells, clash = _read_shells(xform, faces, uv_set, unit_scale, caches, claimed)
+                if shells is None:
                     skipped.add(xform)
                     continue
-                by_shell = {}
-                for f in (range(cache["nf"]) if faces is None else sorted(faces)):
-                    if f < cache["nf"] and cache["face_uvs"][f]:
-                        by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
-                for shell, fs in by_shell.items():
-                    if (xform, shell) in claimed:
-                        conflicts += 1
-                        continue
-                    claimed.add((xform, shell))
-                    uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
-                    a3 = sum(cache["a3"][f] for f in fs)
-                    auv = sum(cache["auv"][f] for f in fs)
-                    if a3 <= 1e-12 or auv <= 1e-14:
-                        continue
-                    pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
-                    shell_obj = LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs))
+                conflicts += clash
+                for shell_obj in shells:
                     shell_obj.group = mat
-                    info["shells"].append(shell_obj)
+                info["shells"].extend(shells)
             groups.append(info)
             fixed.extend(info["fixed"])
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
@@ -5100,6 +5178,21 @@ def write_uvs(xform, uv_set, us, vs):
         cmds.setAttr("%s.uvTweak[%d:%d]" % (node, a, b - 1), *flat)
 
 
+def _place_shell(us, vs, sh, tu, tv, x, y, k, angle):
+    """Rotate a shell about its centre, scale it by k and put its bounding
+    box's corner at (tu + x, tv + y). Edits us / vs in place."""
+    ca, sa = math.cos(angle), math.sin(angle)
+    pts = []
+    for u in sh.uv_ids:
+        du, dv = us[u] - sh.cx, vs[u] - sh.cy
+        pts.append(((du * ca - dv * sa) * k, (du * sa + dv * ca) * k))
+    mx = min(q[0] for q in pts)
+    my = min(q[1] for q in pts)
+    for u, (pu, pv) in zip(sh.uv_ids, pts):
+        us[u] = tu + x + (pu - mx)
+        vs[u] = tv + y + (pv - my)
+
+
 def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set="map1_backup"):
     """Write the planned layout into uv_set (one Ctrl+Z). Returns stats."""
     by_mesh = {}
@@ -5115,17 +5208,7 @@ def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set=
             us, vs = fn.getUVs(uv_set)
             us, vs = list(us), list(vs)
             for sh in shells:
-                tu, tv, x, y, k, angle = plan["placements"][id(sh)][:6]
-                ca, sa = math.cos(angle), math.sin(angle)
-                pts = []
-                for u in sh.uv_ids:
-                    du, dv = us[u] - sh.cx, vs[u] - sh.cy
-                    pts.append(((du * ca - dv * sa) * k, (du * sa + dv * ca) * k))
-                mx = min(p[0] for p in pts)
-                my = min(p[1] for p in pts)
-                for u, (pu, pv) in zip(sh.uv_ids, pts):
-                    us[u] = tu + x + (pu - mx)
-                    vs[u] = tv + y + (pv - my)
+                _place_shell(us, vs, sh, *plan["placements"][id(sh)][:6])
             write_uvs(xform, uv_set, us, vs)
         for g in collected["groups"]:
             st = plan["stats"].get(g["set"])
@@ -6015,11 +6098,6 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_pack.setToolTip("Each material group gets its own tile; sections take their own rows and a "
                                   "material keeps the same column in every section.")
         grid.add_full(self.auto_pack)
-        self.auto_packing = ComboField(list(AUTO_UV_PACKING))
-        self.auto_packing.setValue("Balanced")
-        grid.add_row("Packing", self.auto_packing,
-                     "Fast / Balanced / Best packing precision. Balanced is about 3x faster than Best and plenty "
-                     "for a first pass.")
         card.add(grid)
         analyse = secondary_button("Analyse", "Score every mesh's UVs (worst first) without changing anything.")
         analyse.clicked.connect(lambda *_: self.analyse_uvs())
@@ -6287,7 +6365,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "fix_nonmanifold": self.fix_nonmanifold, "fix_zero": self.fix_zero, "uv_set": self.uv_set,
                 "auto_backup": self.auto_backup, "auto_backup_name": self.auto_backup_name,
                 "auto_keep": self.auto_keep, "auto_angle": self.auto_angle, "auto_clean": self.auto_clean,
-                "auto_pack": self.auto_pack, "auto_packing": self.auto_packing, "lay_density": self.lay_density,
+                "auto_pack": self.auto_pack, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
                 "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
@@ -6946,8 +7024,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     backup=self.auto_backup.value(),
                     backup_set=self.auto_backup_name.text().strip() or "map1_backup",
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
-                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(),
-                    packing=self.auto_packing.value())
+                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value())
 
     def _progress_start(self):
         self.auto_progress.setValue(0)

@@ -163,6 +163,14 @@
     - `auto_unwrap` isolates failures per mesh.
     - `pack_udims` puts one tile per material group, with sections on rows
       and the same column per material.
+      - Pure maths: `_read_shells` (shared with `collect_shells`) gives
+        LayoutShells, and `_pack_one_tile` bisects one group-wide scale
+        until the skyline packer fits them all (even density, main axis,
+        90-degree turns allowed).
+      - It writes through `_place_shell` / `write_uvs`, the same code path
+        as `apply_layout`.
+      - It replaced `u3dLayout`: 46 s down to 1.7 s on the 141-mesh building,
+        with fill up from 72% to 77%.
     - Backups go to `map1_backup` and are never overwritten.
     - **Progress** (`Progress`, `Cancelled`):
       - Maya's main progress bar (Esc sets `isCancelled`) plus a panel
@@ -173,8 +181,8 @@
       - `u3dAutoSeam` / `u3dUnfold` run in batches of about 8,000 faces
         (`_unwrap_batches`) so progress moves; a single Unfold3D call can't
         report.
-      - Measured: `u3dLayout` packing is the slowest part on big assets
-        (24 s for a 36-piece group at Balanced).
+      - Unwrapping (Unfold3D) is now the slow part; packing is pure maths
+        (below).
   - **Saved session** (`save_session`, `load_session`):
     - The panel's progress is JSON in `unlokUdimSession` on the root set:
       pre-process report, Auto UV / Analyse result, layout_applied,

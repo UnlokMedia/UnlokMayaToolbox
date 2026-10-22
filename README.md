@@ -224,14 +224,16 @@ density. The actual layout is still being built; see
         projection, sew soft edges, cut hard edges and edges sharper than
         *Seam angle* as seams, Unfold3D auto-seams for closed shapes, relax,
         then extra cuts where shells are still stretched
-     4. packs each material group into its own UDIM tile, with sections on
-        their own rows and each material in the same column for every section
+     4. packs each material group into its own UDIM tile, at even density
+        and as big as fits, with sections on their own rows and each
+        material in the same column for every section. This uses the
+        toolbox's own packer: 1.7 s instead of 46 s with Unfold3D's
+        layout on a 141-mesh building, and fuller tiles (77% vs 72%).
    - **Progress:** Maya's progress bar at the bottom of the window, and the
      Auto UV step itself, show each stage, the mesh or batch it's on, a
      percentage and the time left. Press **Esc** to stop at the next mesh;
      one Ctrl+Z then undoes what was done. A long pause only happens inside
-     one Unfold3D call (a big mesh, or packing a big group), and the bar
-     names it first.
+     one Unfold3D call on a big mesh, and the bar names it first.
    - **Restore Backup** copies the backup set back into `map1` for the
      selected meshes, or for all of them if nothing is selected.
    - **Meshes you've already UV'd:** select them and press one of these
