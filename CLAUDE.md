@@ -290,6 +290,27 @@
       Colours come from `GROUP_PALETTE` via `set_key_palette` (sorted
       keys), not a hash, so groups never look alike.
 
+## Scene safety (freezes and half-done edits)
+- **Junk UVs are the main freeze risk:** every face its own shell (common
+  on un-UV'd imports). Anything that loops over shells must check
+  `oversplit()` first: more than LAYOUT_SHELL_CAP (4,000) shells, or more
+  shells than half the faces. Plan, Validate and the sheet skip such meshes
+  and report them.
+- **collect_shells(ready_only=True)** lays out only Keep / Auto UV'd / laid
+  out meshes, or ones scoring at least keep_score. Everything else goes in
+  `not_ready`.
+- **uv_quality** only runs polyUVOverlap when it can change the verdict, and
+  only on shells whose boxes overlap. On 30,000 junk shells the old version
+  didn't finish Check UVs in 6+ minutes; now it takes about 3 s.
+- **Long steps take a Progress** (Esc raises Cancelled from `item()` /
+  `update()`). Panels use `status_progress(label)` as the callback.
+- **Cancelling inside an UndoChunk:** roll back with
+  `undo_if_last(chunk_name)`, never a bare `cmds.undo()`. A run cancelled
+  before it changed anything leaves no step, and `cmds.undo()` would then
+  undo the user's previous action.
+- **Live re-plans** stop above LIVE_REPLAN_WORK (shells x packs); the user
+  presses Plan, which shows progress.
+
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
   does not return a tuple.

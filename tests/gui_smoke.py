@@ -389,9 +389,22 @@ def main():
     pump()
     check("unticking puts the real materials back", not cmds.ls("unlokUV_*_SG"), str(cmds.ls("unlokUV_*_SG")))
 
-    # --- Smart layout through the panel: plan (map), lock a group, apply
+    # --- Plan with a mesh that still has junk UVs: it's left out, and the panel says so
+    junk = cmds.polyPlane(w=2, h=2, sx=40, sy=40, name="woodGreen_C_junk0001_GEP")[0]
+    cmds.polyForceUV(junk, unitize=True)
+    cmds.polyMapCut(junk + ".e[*]", constructionHistory=False)
+    junk = cmds.ls(cmds.parent(junk, "|house_GRP|westWing_GRP")[0], long=True)[0]
+    udim.scan()
     udim.lay_density.setValue(2048.0)
     udim.lay_map.setValue("1024")
+    udim.plan_layout()
+    pump()
+    check("Plan leaves out meshes that aren't ready, and says so",
+          junk in (udim._collected or {}).get("not_ready", {}) and "Left out" in udim.layout_summary.text() and
+          "aren't ready" in udim.next_banner.text.text(),
+          "%s | %s" % (udim.layout_summary.text()[-160:], udim.next_banner.text.text()[:100]))
+    cmds.delete(junk)
+    udim.refresh()
     udim.plan_layout()
     pump()
     check("Plan fills the UDIM map", len(udim.udim_map.shells) > 0 and udim.udim_map.tiles,

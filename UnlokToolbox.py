@@ -192,6 +192,15 @@ class Progress(object):
             self.callback(self.fraction(), self.text())
 
 
+def status_progress(label):
+    """A Progress callback that writes into a panel's status label (repaint
+    only: no event processing mid-edit)."""
+    def cb(fraction, text):
+        label.setText('<span style="color:#a8a8a8">%s  |  Esc cancels</span>' % text)
+        label.repaint()
+    return cb
+
+
 def _secs(s):
     s = int(round(s))
     return "%ds" % s if s < 60 else "%dm %02ds" % (s // 60, s % 60)
@@ -3317,6 +3326,16 @@ def _linked_group(node):
     return long_name(conns[0]) if conns else None
 
 
+def undo_if_last(chunk_name):
+    """Undo the step called chunk_name, but only if it's the newest undo step.
+    A run cancelled before it changed anything leaves no step, and a blind
+    cmds.undo() would then undo the user's previous action."""
+    if cmds.undoInfo(q=True, undoName=True) == chunk_name:
+        cmds.undo()
+        return True
+    return False
+
+
 class UndoChunk(object):
     """Group a tool action into a single Ctrl+Z step."""
 
@@ -4134,19 +4153,22 @@ PREPROCESS_LABELS = {
 }
 
 
-def preprocess(meshes, instanced=(), fix_lamina=True, fix_nonmanifold=True, fix_zero_area=True, uv_set="map1"):
+def preprocess(meshes, instanced=(), fix_lamina=True, fix_nonmanifold=True, fix_zero_area=True, uv_set="map1",
+               progress=None):
     """Clean the geometry layout cares about and report UV problems.
 
     Returns {category: {transform: count}}. Everything it does (including
     the selection juggling Maya's cleanup needs) is one Ctrl+Z.
     """
     with UndoChunk("Smart UDIM pre-process"), PreserveSelection():
-        return _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set)
+        return _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set, progress)
 
 
-def _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set):
+def _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, uv_set, progress=None):
     report = {}
-    before = detect_geometry_issues(meshes)
+    if progress:
+        progress.stage("geo", len(meshes), "Checking geometry")
+    before = detect_geometry_issues(meshes, progress)
     to_fix = set()
     for cat, on in (("lamina", fix_lamina), ("nonmanifold", fix_nonmanifold), ("zeroarea", fix_zero_area)):
         if on and before[cat]:
@@ -4164,6 +4186,9 @@ def _preprocess(meshes, instanced, fix_lamina, fix_nonmanifold, fix_zero_area, u
             report["remaining"] = remaining
     if before["ngons"]:
         report["ngons"] = before["ngons"]
+    if progress:
+        progress.stage("uvs", 1, "Checking UVs")
+        progress.item("%d meshes" % len(meshes))
     for cat, items in detect_uv_issues(meshes, uv_set).items():
         if items:
             report[cat] = items
@@ -4218,7 +4243,7 @@ def _face_areas(xform, nf):
     return a3, auv
 
 
-def uv_quality(xform, uv_set="map1", check_overlap=True):
+def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP_SCORE):
     """How laid out a mesh already is: (score 0..1, reason).
 
     Score = share of the surface (by 3D area) whose UVs are fine. A face is
@@ -4281,9 +4306,33 @@ def uv_quality(xform, uv_set="map1", check_overlap=True):
             bad += a3[f]
         elif signs[f] != (wind[s] >= 0):
             bad += a3[f]  # folded over inside its shell
-    if check_overlap:
-        overlap = cmds.polyUVOverlap("%s.f[0:%d]" % (xform, nf - 1), overlappingComponents=True) or []
-        if overlap:
+    oversplit_mesh = nf > 20 and nshell > nf * 0.5
+    # The overlap test (Maya's polyUVOverlap) is the slow part, so only ask it
+    # when it can change the verdict: not for meshes that already fail, not
+    # for junk over-split UVs, and only about shells whose boxes overlap.
+    if check_overlap and not oversplit_mesh and max(0.0, 1.0 - bad / total) >= keep_score:
+        boxes = {}
+        k = 0
+        for f, c in enumerate(counts):
+            s = face_shell[f]
+            b = boxes.setdefault(s, [1e30, 1e30, -1e30, -1e30, []])
+            for i in range(c):
+                u, v = us[ids[k + i]], vs[ids[k + i]]
+                b[0], b[1], b[2], b[3] = min(b[0], u), min(b[1], v), max(b[2], u), max(b[3], v)
+            b[4].append(f)
+            k += c
+        order = sorted(boxes.values(), key=lambda b: b[0])
+        suspects = set()
+        for i, a in enumerate(order):
+            for b in order[i + 1:]:
+                if b[0] >= a[2]:
+                    break
+                if b[1] < a[3] and a[1] < b[3]:
+                    suspects.update(a[4])
+                    suspects.update(b[4])
+        if suspects:
+            comps = ["%s.%s" % (xform, r) for r in face_ranges(suspects)]
+            overlap = cmds.polyUVOverlap(comps, overlappingComponents=True) or []
             idx = set()
             for comp in overlap:
                 faces = _parse_face_spec(comp.partition(".")[2])
@@ -4291,7 +4340,7 @@ def uv_quality(xform, uv_set="map1", check_overlap=True):
                     idx.update(faces)
             bad += sum(a3[i] for i in idx if i < nf)
     score = max(0.0, 1.0 - bad / total)
-    if nf > 20 and nshell > nf * 0.5:
+    if oversplit_mesh:
         return score * 0.5, "over-split (%d shells for %d faces)" % (nshell, nf)
     if score < 1.0:
         return score, "stretched / overlapping / folded UVs"
@@ -4845,7 +4894,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
     for m in meshes:
         pr.item(short_name(m))
         try:
-            scores[m] = uv_quality(m, uv_set)
+            scores[m] = uv_quality(m, uv_set, keep_score=keep_score)
         except Exception as exc:
             scores[m] = (0.0, "couldn't score: %s" % exc)
     timing["score"] = time.time() - t0
@@ -4921,7 +4970,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 rows.append({"mesh": m, "before": scores[m][0], "reason": failed[m], "after": None,
                              "action": "failed"})
                 continue
-            after = uv_quality(m, uv_set, check_overlap=pack)[0] if (m in todo or pack) else scores[m][0]
+            after = uv_quality(m, uv_set, check_overlap=pack, keep_score=keep_score)[0]                 if (m in todo or pack) else scores[m][0]
             action = "unwrapped" if m in todo else "kept"
             if after < keep_score:
                 action = "check" if m in todo else "kept (check)"
@@ -5120,14 +5169,41 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
     return shells, conflicts
 
 
-def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: kept for old callers
+def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None, ready_only=True,
+                   keep_score=AUTO_UV_KEEP_SCORE):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
-    "conflicts": n}. Locked groups are listed with their tiles but not read.
+    "conflicts": n, "not_ready": {mesh: reason}}. Locked groups are listed
+    with their tiles but not read.
+
+    ready_only: lay out only meshes whose UVs are ready (in the Keep UVs,
+    Auto UV'd or Laid out sets, or scoring at least keep_score). Meshes that
+    still need UVs are left out and listed in not_ready, and so is any mesh
+    with junk / over-split UVs (see oversplit), which would otherwise mean
+    reading and packing thousands of tiny shells.
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     exclude = set(exclude)
+    not_ready = {}
+    checked = set()
+    trusted = asset.tool_members("auto") | asset.tool_members("laidout") | set(
+        m for m, st in asset.uv_status().items() if st == "keep")
+
+    def ready(xform):
+        if xform in checked:
+            return xform not in not_ready
+        checked.add(xform)
+        if progress:
+            progress.item(short_name(xform))
+        bad = oversplit(xform, uv_set)
+        if not bad and ready_only and xform not in trusted:
+            score = uv_quality(xform, uv_set, check_overlap=False)[0]
+            if score < keep_score:
+                bad = "needs UVs (score %.2f)" % score
+        if bad:
+            not_ready[xform] = bad
+        return not bad
     handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
     fixed = []  # hands-off shells: [{"set", "key", "mesh", "udim", "box", "area"}]
     caches = {}
@@ -5157,6 +5233,8 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
                         info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
                                               "area": area})
                     continue
+                if not ready(xform):
+                    continue
                 shells, clash = _read_shells(xform, faces, uv_set, unit_scale, caches, claimed)
                 if shells is None:
                     skipped.add(xform)
@@ -5168,7 +5246,25 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=()):  # rotate: ke
             groups.append(info)
             fixed.extend(info["fixed"])
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
-            "fixed": fixed, "handsoff": sorted(handsoff)}
+            "fixed": fixed, "handsoff": sorted(handsoff), "not_ready": not_ready}
+
+
+LAYOUT_SHELL_CAP = 4000  # more UV shells than this on one mesh = junk / over-split: layout skips it
+
+
+def oversplit(xform, uv_set="map1"):
+    """'over-split UVs (N shells for M faces)' when a mesh's UVs are junk for
+    layout purposes (thousands of shells, or most faces their own shell),
+    else ''. Cheap: one C++ shell query. Layout, validation and the sheet
+    skip such meshes instead of grinding through every shell."""
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return ""
+    nshell, _ = fn.getUvShellsIds(uv_set)
+    nf = fn.numPolygons
+    if nshell > LAYOUT_SHELL_CAP or (nf > 200 and nshell > 0.5 * nf):
+        return "over-split UVs (%s shells for %s faces)" % ("{:,}".format(nshell), "{:,}".format(nf))
+    return ""
 
 
 def _udim_tiles(start_row, count_needed, reserved):
@@ -5323,6 +5419,8 @@ def plan_layout(collected, settings, density_scale=1.0):
     if pack_around and fixed_boxes:
         cache = collected.setdefault("_free_cache", {})
         for udim in sorted(fixed_boxes):
+            if len(fixed_boxes[udim]) > 400:  # junk-UV hands-off piece: reserve the tile, don't pack around
+                continue
             free = cache.get((udim, round(pad, 9)))
             if free is None:
                 free = cache[(udim, round(pad, 9))] = _TilePacker.free_around(fixed_boxes[udim], pad)
@@ -5474,18 +5572,24 @@ def plan_layout(collected, settings, density_scale=1.0):
             "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around}
 
 
-def plan_fit_to_tiles(collected, settings):
+def plan_fit_to_tiles(collected, settings, progress=None):
     """Highest density whose layout fits in settings['max_tiles'] tiles."""
     limit = max(1, int(settings.get("max_tiles", 10)))
+
+    def attempt(scale):  # plan_layout plus a progress tick (and Esc)
+        if progress:
+            progress.item("trying %d%% of the density" % round(scale * 100))
+        return plan_layout(collected, settings, scale)
+
     lo, hi = 0.0, 1.0
-    plan = plan_layout(collected, settings, hi)
+    plan = attempt(hi)
     while len(plan["new_tiles"]) <= limit and hi < 1e4:  # find an upper bound
         lo, hi = hi, hi * 2.0
-        plan = plan_layout(collected, settings, hi)
-    best = plan_layout(collected, settings, lo) if lo > 0 else None
+        plan = attempt(hi)
+    best = attempt(lo) if lo > 0 else None
     for _ in range(18):
         mid = (lo + hi) / 2.0
-        p = plan_layout(collected, settings, mid)
+        p = attempt(mid)
         if len(p["new_tiles"]) <= limit:
             lo, best = mid, p
         else:
@@ -5493,18 +5597,18 @@ def plan_fit_to_tiles(collected, settings):
     if best is not None:  # packing isn't monotonic: a bit denser can still fit, so probe upward
         base = lo
         for i in range(1, 13):
-            p = plan_layout(collected, settings, base * (1.0 + 0.02 * i))
+            p = attempt(base * (1.0 + 0.02 * i))
             if len(p["new_tiles"]) <= limit:
                 best = p
     if best is None:
-        best = plan_layout(collected, settings, max(lo, 1e-3))
+        best = attempt(max(lo, 1e-3))
         best["warnings"].append("Couldn't fit everything into %d tiles; showing the smallest layout." % limit)
     return best
 
 
-def make_plan(collected, settings):
+def make_plan(collected, settings, progress=None):
     if settings.get("mode") == "Fit to tiles":
-        return plan_fit_to_tiles(collected, settings)
+        return plan_fit_to_tiles(collected, settings, progress)
     return plan_layout(collected, settings)
 
 
@@ -5565,8 +5669,18 @@ def _place_shell(us, vs, sh, tu, tv, x, y, k, angle):
         vs[u] = tv + y + (pv - my)
 
 
-def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set="map1_backup"):
-    """Write the planned layout into uv_set (one Ctrl+Z). Returns stats."""
+def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set="map1_backup", progress=None):
+    """Write the planned layout into uv_set (one Ctrl+Z). Returns stats.
+    With a Progress, Esc stops it and rolls back everything it wrote, then
+    raises Cancelled."""
+    try:
+        return _apply_layout(asset, collected, plan, uv_set, backup, backup_set, progress)
+    except Cancelled:
+        undo_if_last("Smart UDIM layout")  # the chunk closed on the way out: nothing stays half-written
+        raise
+
+
+def _apply_layout(asset, collected, plan, uv_set, backup, backup_set, progress):
     by_mesh = {}
     for g in collected["groups"]:
         for sh in g["shells"]:
@@ -5575,7 +5689,11 @@ def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set=
     with UndoChunk("Smart UDIM layout"), PreserveSelection():
         if backup:
             backup_uvs(sorted(by_mesh), uv_set, backup_set)
+        if progress:
+            progress.stage("write", len(by_mesh), "Writing UVs")
         for xform, shells in by_mesh.items():
+            if progress:
+                progress.item(short_name(xform))
             fn = _mesh_fn(xform)
             us, vs = fn.getUVs(uv_set)
             us, vs = list(us), list(vs)
@@ -5632,8 +5750,10 @@ VALIDATION_LABELS = {
     "tiny": ("Shells under 2 px", "warn"),
     "density": ("Density more than 10% off target", "warn"),
     "padding": ("Shells closer than the padding", "warn"),
+    "oversplit": ("Junk / over-split UVs (not checked shell by shell)", "skip"),
 }
-VALIDATION_ORDER = ("out_of_range", "crossing", "overlap", "flipped", "tiny", "density", "padding")
+VALIDATION_ORDER = ("oversplit", "out_of_range", "crossing", "overlap", "flipped", "tiny", "density", "padding")
+VALIDATION_CONFIRM_CAP = 3000  # more overlap candidates than this: report them unconfirmed (polyUVOverlap is slow)
 
 
 def layout_settings_of(asset):
@@ -5797,7 +5917,7 @@ def _group_lookup(asset):
     return out
 
 
-def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target_density=None):
+def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target_density=None, progress=None):
     """Check the finished layout. Returns {"items": {category: [item...]},
     "shells": n, "seconds": s}; each item is {"mesh", "faces", "detail"}."""
     t0 = time.time()
@@ -5810,7 +5930,14 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
     meshes, _ = asset.meshes()
     handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
     shells = []
+    junk = []
     for xform in meshes:
+        if progress:
+            progress.item(short_name(xform))
+        bad = oversplit(xform, uv_set)
+        if bad:
+            junk.append((xform, bad))
+            continue
         for sh in _mesh_shells(xform, uv_set, unit_scale):
             g = groups.get((xform, sh["faces"][0])) or groups.get((xform, None))
             sh["group"], sh["td"], sh["stack"], sh["locked"] = g if g else (None, 100.0, False, False)
@@ -5820,6 +5947,9 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
 
     def add(cat, sh, detail):
         items[cat].append({"mesh": sh["mesh"], "faces": sh["faces"], "detail": detail})
+
+    for xform, bad in junk:
+        items["oversplit"].append({"mesh": xform, "faces": [], "detail": bad + ": run Auto UV on it"})
 
     for sh in shells:
         u0, v0, u1, v1 = sh["box"]
@@ -5858,6 +5988,11 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
             elif gap < min_gap:
                 tight.update((i, j))
     flagged = set()
+    if len(candidates) > VALIDATION_CONFIRM_CAP:  # too many to confirm with Maya in reasonable time
+        for i in sorted(candidates):
+            flagged.add(i)
+            add("overlap", shells[i], "bounding boxes overlap (too many to confirm one by one)")
+        candidates = set()
     if candidates:
         comps = []
         for i in candidates:
@@ -5901,6 +6036,8 @@ def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
         for xform, faces in g["members"].items():
             fn = _mesh_fn(xform)
             if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+                continue
+            if oversplit(xform, uv_set):  # junk UVs: nothing useful to draw, and very slow to
                 continue
             counts, ids = fn.getAssignedUVs(uv_set)
             us, vs = fn.getUVs(uv_set)
@@ -6736,6 +6873,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.next_banner.set_text("Laid out into <b>%d tile(s)</b> at %d px/m. Press <b>Validate</b> in step 8, "
                                       "then save the hand-off sheet." % (
                                           self.layout_applied["tiles"], round(self.layout_applied["density"])))
+        elif self._plan is not None and (self._collected or {}).get("not_ready"):
+            n = len(self._collected["not_ready"])
+            self.next_banner.set_text("<b>%d mesh(es) aren't ready</b> (they still need UVs) and are left out of "
+                                      "this layout. Run <b>Auto UV</b> (step 6) first, or Apply to lay out the "
+                                      "rest." % n, tag="CHECK", tone="warn")
         elif auto_done and self._plan is not None:
             self.next_banner.set_text("Check the map in step 7 (hover for details), then press <b>Apply "
                                       "Layout</b>.")
@@ -7332,8 +7474,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             t0 = time.time()
-            self.report = preprocess(meshes, instanced, self.fix_lamina.value(), self.fix_nonmanifold.value(),
-                                     self.fix_zero.value(), self.uv_set.text().strip() or "map1")
+            try:
+                with Progress("Pre-process", [("geo", 70), ("uvs", 30)], status_progress(self.status)) as pr:
+                    self.report = preprocess(meshes, instanced, self.fix_lamina.value(),
+                                             self.fix_nonmanifold.value(), self.fix_zero.value(),
+                                             self.uv_set.text().strip() or "map1", progress=pr)
+            except Cancelled:
+                self.set_status("Pre-process cancelled before it changed anything.", level="warn")
+                return
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._fill_report()
@@ -7360,10 +7508,21 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_tiles_label.setEnabled(fit)
         self.lay_density.setEnabled(not fit)
 
+    LIVE_REPLAN_WORK = 60000  # shells x packs per re-plan above which settings don't re-plan live
+
+    def _plan_work(self):
+        shells = sum(len(g["shells"]) for g in (self._collected or {}).get("groups", []))
+        return shells * (46 if self.lay_mode.value() == "Fit to tiles" else 1)
+
     def _layout_settings_changed(self):
         self._update_layout_enabled()
-        if self._plan is not None:
-            self._replan_timer.start()  # live re-plan: pure math on cached shells
+        if self._plan is None:
+            return
+        if self._plan_work() > self.LIVE_REPLAN_WORK:  # too big to re-plan on every tick
+            self.layout_summary.setText("Settings changed. This layout is big, so it doesn't re-plan live: press "
+                                        "<b>Plan</b> to update the map.")
+            return
+        self._replan_timer.start()  # live re-plan: pure math on cached shells
 
     def _replan(self):
         try:
@@ -7382,8 +7541,27 @@ class SmartUdimPanel(QtWidgets.QWidget):
         settings = self._layout_settings()
         if self._collected is None:  # orientation etc. are re-plans only: no scene read
             uv_set = self.uv_set.text().strip() or "map1"
-            self._collected = collect_shells(asset, uv_set)
-        self._plan = make_plan(self._collected, settings)
+            pr = Progress("Plan", [("read", 80), ("fit", 20)], status_progress(self.status))
+            try:
+                with pr:
+                    pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
+                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value())
+                    pr.stage("fit", 46, "Finding the density")
+                    self._plan = make_plan(self._collected, settings, progress=pr)
+            except Cancelled:
+                self._collected = None
+                self.set_status("Plan cancelled after %.1fs. Nothing changed." % (time.time() - t0), level="warn")
+                return None
+        elif self._plan_work() > self.LIVE_REPLAN_WORK:  # big layout (e.g. Fit to tiles): progress + Esc
+            try:
+                with Progress("Plan", [("fit", 1)], status_progress(self.status)) as pr:
+                    pr.stage("fit", 46, "Finding the density")
+                    self._plan = make_plan(self._collected, settings, progress=pr)
+            except Cancelled:
+                self.set_status("Plan cancelled. Nothing changed.", level="warn")
+                return None
+        else:
+            self._plan = make_plan(self._collected, settings)
         self.udim_map.set_plan(self._collected, self._plan)
         self._summarise_plan(time.time() - t0)
         self._update_guidance()
@@ -7405,6 +7583,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
             lines.append("%d hands-off piece(s) stay put on tile(s) %s (%s)." % (
                 len(col["fixed"]), ", ".join(str(t) for t in plan.get("fixed_tiles", [])),
                 "packed around" if plan.get("pack_around") else "tiles reserved"))
+        if col.get("not_ready"):
+            junk = sum(1 for r in col["not_ready"].values() if r.startswith("over-split"))
+            lines.append("Left out %d mesh(es) that aren't ready: %d still need UVs, %d have junk / over-split "
+                         "UVs. Run Auto UV on them first (they show yellow / red with colours on)." % (
+                             len(col["not_ready"]), len(col["not_ready"]) - junk, junk))
         if col["skipped"]:
             lines.append("%d mesh(es) without usable UVs skipped (run Auto UV)." % len(col["skipped"]))
         lines.extend(plan["warnings"][:4])
@@ -7422,9 +7605,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         try:
             t0 = time.time()
             opts = self._auto_options()
-            result = apply_layout(asset, self._collected, self._plan, uv_set=opts["uv_set"],
-                                  backup=opts["backup"], backup_set=opts["backup_set"])
+            with Progress("Apply Layout", [("write", 1)], status_progress(self.status)) as pr:
+                result = apply_layout(asset, self._collected, self._plan, uv_set=opts["uv_set"],
+                                      backup=opts["backup"], backup_set=opts["backup_set"], progress=pr)
             seconds = time.time() - t0
+        except Cancelled:
+            self.refresh()
+            self.set_status("Apply cancelled: everything it had written was rolled back.", level="warn")
+            return
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         plan = self._plan
@@ -7446,7 +7634,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            self.validation = validate_layout(asset, self.uv_set.text().strip() or "map1")
+            with Progress("Validate", [("read", 1)], status_progress(self.status)) as pr:
+                pr.stage("read", len(asset.meshes()[0]), "Reading shells")
+                self.validation = validate_layout(asset, self.uv_set.text().strip() or "map1", progress=pr)
+        except Cancelled:
+            self.set_status("Validate cancelled.", level="warn")
+            return
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._fill_check()
@@ -8743,12 +8936,26 @@ def _br_split(name, points, history):
 
 
 def resolve_bevel_ngons(items, scope="Bevel n-gons", strip_ratio=0.3, max_loop=6, use_border=True,
-                        dry_run=False, select_unresolved=True):
+                        dry_run=False, select_unresolved=True, progress=None):
     """Resolve (or with dry_run just find) bevel n-gons on {mesh transform:
-    None (whole mesh) or set of faces}. One undo step for everything."""
+    None (whole mesh) or set of faces}. One undo step for everything. With a
+    Progress, Esc stops it and rolls everything back (raises Cancelled)."""
+    try:
+        return _resolve_bevel_ngons(items, scope, strip_ratio, max_loop, use_border, dry_run, select_unresolved,
+                                    progress)
+    except Cancelled:
+        undo_if_last("Bevel Resolver")
+        raise
+
+
+def _resolve_bevel_ngons(items, scope, strip_ratio, max_loop, use_border, dry_run, select_unresolved, progress):
     report = {}
     with UndoChunk("Bevel Resolver"):
+        if progress:
+            progress.stage("resolve", len(items), "Finding n-gons" if dry_run else "Resolving")
         for xform, faces in items.items():
+            if progress:
+                progress.item(short_name(xform))
             try:
                 report[xform] = resolve_mesh(xform, faces, scope, strip_ratio, max_loop, use_border, dry_run)
             except RuntimeError as exc:
@@ -8964,7 +9171,12 @@ class BevelResolverPanel(QtWidgets.QWidget):
         items = self._items()
         if not items:
             return
-        report = resolve_bevel_ngons(items, dry_run=True, **self.options())
+        try:
+            with Progress("Bevel Resolver", [("resolve", 1)], status_progress(self.status)) as pr:
+                report = resolve_bevel_ngons(items, dry_run=True, progress=pr, **self.options())
+        except Cancelled:
+            self.set_status("Cancelled.", level="warn")
+            return
         comps = []
         for xform, r in report.items():
             comps.extend("%s.%s" % (xform, s) for s in face_ranges(r.get("targets", [])))
@@ -8991,7 +9203,12 @@ class BevelResolverPanel(QtWidgets.QWidget):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             t0 = time.time()
-            report = resolve_bevel_ngons(items, **self.options())
+            with Progress("Bevel Resolver", [("resolve", 1)], status_progress(self.status)) as pr:
+                report = resolve_bevel_ngons(items, progress=pr, **self.options())
+        except Cancelled:
+            self.set_status("Cancelled: every cut it had made was rolled back.", level="warn")
+            self._update_guidance()
+            return
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._fill_report(report)
@@ -9371,14 +9588,30 @@ def _ln_weights(shape):
     return list(w) or None
 
 
-def add_log_noise(logs, settings=None, weights=None, seeds=None):
+LOG_PROGRESS_VERTS = 100000  # bigger edits than this show progress (and Esc works)
+
+
+def add_log_noise(logs, settings=None, weights=None, seeds=None, progress=None):
     """Give each log its noise (one Ctrl+Z). Each gets a random seed unless
-    seeds {xform: seed} says otherwise. Returns {"added", "skipped", "low"}."""
+    seeds {xform: seed} says otherwise. Returns {"added", "skipped", "low"}.
+    With a Progress, Esc rolls everything back (raises Cancelled)."""
+    try:
+        return _add_log_noise(logs, settings, weights, seeds, progress)
+    except Cancelled:
+        undo_if_last("Log Noise")
+        raise
+
+
+def _add_log_noise(logs, settings, weights, seeds, progress):
     weights = weights or {}
     seeds = seeds or {}
     report = {"added": [], "skipped": [], "low": []}
     with UndoChunk("Log Noise"):
+        if progress:
+            progress.stage("logs", len(logs), "Adding noise")
         for xform in logs:
+            if progress:
+                progress.item(short_name(xform))
             shape = _log_shape(xform)
             if shape is None:
                 continue
@@ -9406,14 +9639,18 @@ def add_log_noise(logs, settings=None, weights=None, seeds=None):
     return report
 
 
-def update_log_noise(changes, live=True):
+def update_log_noise(changes, live=True, progress=None):
     """Change settings on logs and re-shape them. changes: {xform: {key: value}}.
     live: slider edits, kept out of the undo queue (like Path Scatter's
     previews); otherwise one Ctrl+Z. Returns logs whose topology changed
     since the noise was added (left alone: Bake them, then re-apply)."""
     stale = []
     with (NoUndo() if live else UndoChunk("Log Noise edit")):
+        if progress:
+            progress.stage("logs", len(changes), "Re-shaping")
         for xform, change in changes.items():
+            if progress:
+                progress.item(short_name(xform))
             shape = _log_shape(xform)
             if not shape or not has_log_noise(xform):
                 continue
@@ -9646,7 +9883,17 @@ class LogNoisePanel(QtWidgets.QWidget):
         values = self._settings()
         change = {k: values[k] for k in keys}
         t0 = time.time()
-        stale = update_log_noise({x: change for x in logs}, live=True)
+        heavy = sum(om.MFnMesh(get_dag_path(_log_shape(x))).numVertices for x in logs) > LOG_PROGRESS_VERTS
+        if not heavy:
+            stale = update_log_noise({x: change for x in logs}, live=True)
+        else:
+            try:
+                with Progress("Log Noise", [("logs", 1)], status_progress(self.status)) as pr:
+                    stale = update_log_noise({x: change for x in logs}, live=True, progress=pr)
+            except Cancelled:
+                self.set_status("Stopped part-way: some logs have the new setting, some don't. Move the slider "
+                                "again to update them all.", level="warn")
+                return
         if stale:
             self.set_status("%d log(s) changed topology since the noise was added: Bake them, then apply again."
                             % len(stale), level="warn")
@@ -9662,7 +9909,12 @@ class LogNoisePanel(QtWidgets.QWidget):
         s = self._settings()
         s.pop("seed")
         t0 = time.time()
-        report = add_log_noise(logs, s, weights)
+        try:
+            with Progress("Log Noise", [("logs", 1)], status_progress(self.status)) as pr:
+                report = add_log_noise(logs, s, weights, progress=pr)
+        except Cancelled:
+            self.set_status("Cancelled: nothing was changed.", level="warn")
+            return
         msg = "Added noise to %d log(s) in %.2fs" % (len(report["added"]), time.time() - t0)
         if report["skipped"]:
             msg += "; %d already had it (use the sliders)" % len(report["skipped"])

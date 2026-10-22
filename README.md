@@ -294,6 +294,18 @@ density. The actual layout is still being built; see
      previews every shell coloured by material: hover for density, coverage
      and tiles, click to select a group, and locked tiles show hatched.
      Changing a setting re-plans instantly. **Apply Layout** writes it.
+   - **Plan only lays out meshes that are ready:** Keep UVs, Auto UV'd,
+     already laid out, or scoring well. Meshes that still need UVs, and
+     meshes with junk UVs (thousands of shells, or most faces their own
+     shell), are left out and listed. The banner then says to run Auto UV
+     first. On a big layout, settings no longer re-plan live on every
+     change: press Plan.
+   - **Every heavy step shows progress and stops on Esc:** Check UVs, Auto
+     UV, Plan, Apply, Validate, Pre-process, Bevel Resolver and Log Noise.
+     A cancelled Apply, Bevel Resolve or Log Noise apply rolls back
+     completely, and never undoes your previous action. Validate and the
+     hand-off sheet report junk-UV meshes instead of grinding through
+     every shell.
    - **Density:** every shell is scaled to exactly the target texel density,
      times its group's and section's TD %. A group renamed `td150_...` gets
      1.5x.
@@ -392,6 +404,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_guards.py`: junk UVs flagged fast, Plan leaves unready
+  meshes out, Esc stops every heavy step, cancelled steps roll back without
+  touching the previous undo step.
 - `tests/test_uv_states.py`: UV states, status colours (and the real
   shading coming back), tracking sets, Auto UV Selected.
 - `tests/test_sections.py`: section from group, move to section, delete
