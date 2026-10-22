@@ -343,6 +343,19 @@ def main():
     pump()
     actions = [udim.auto_tree.topLevelItem(i).text(3) for i in range(udim.auto_tree.topLevelItemCount())]
     check("Analyse lists the un-UV'd rafters first", actions[:3] == ["will unwrap"] * 3, str(actions[:6]))
+    # marking is just set membership: instant, no re-scoring
+    scored = udim.auto_result
+    third = cmds.ls("woodBrown_C_rafter0003_GEP", long=True)[0]
+    cmds.select(third)
+    t_mark = time.time()
+    udim.mark_status("keep")
+    t_mark = time.time() - t_mark
+    row = [r for r in udim.auto_result["rows"] if r["mesh"] == third][0]
+    check("Keep UVs is instant: no re-scoring, the row just updates", udim.auto_result is scored and
+          row["action"] == "keep UVs" and t_mark < 1.0, "%.2fs, %s" % (t_mark, row["action"]))
+    udim.mark_status("auto")
+    check("...and back to Auto restores 'will unwrap' from the known score",
+          [r for r in udim.auto_result["rows"] if r["mesh"] == third][0]["action"] == "will unwrap")
     udim.auto_uv()
     pump()
     actions = [udim.auto_tree.topLevelItem(i).text(3) for i in range(udim.auto_tree.topLevelItemCount())]

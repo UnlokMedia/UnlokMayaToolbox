@@ -8039,14 +8039,29 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._apply_status(meshes, status)
 
     def _apply_status(self, meshes, status):
+        """A mark is just set membership: update the sets, then the list,
+        legend and colours from what's already known. Never re-scores or
+        re-plans (that used to make every click run Check UVs / Plan again)."""
         n = self._asset().set_uv_status(meshes, status)
-        self.refresh()
         if self.auto_result and self.auto_result.get("analysed_only"):
-            self.analyse_uvs()  # re-score with the new marks
-        else:
-            self._fill_auto()
+            keep = self.auto_keep.value()
+            marked = set(meshes)
+            for r in self.auto_result.get("rows") or []:
+                if r["mesh"] not in marked:
+                    continue
+                if status == "keep":
+                    r["action"] = "keep UVs"
+                elif status == "handsoff":
+                    r["action"] = "hands off"
+                elif r.get("before") is None:
+                    r["action"] = "not checked"
+                else:
+                    r["action"] = "will unwrap" if r["before"] < keep else "keep"
+        self.refresh()  # sets, legend and colours (only meshes whose state changed get recoloured)
+        self._fill_auto()
         if self._plan is not None:
-            self.plan_layout(quiet=True)
+            self.layout_summary.setText(self.layout_summary.text() + "\nMarks changed since this plan: press "
+                                        "<b>Plan</b> to update the map (Apply re-plans by itself).")
         self._save_session()
         self.set_status("%d mesh(es) marked %s." % (n, UV_STATUS_LABELS[status]))
         self._update_guidance()
