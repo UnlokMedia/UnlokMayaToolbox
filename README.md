@@ -146,8 +146,10 @@ density. The actual layout is still being built; see
    press **Use Selected Group**.
 2. **Scan:** sorts every mesh into sections and material groups.
    - **Material groups:** come from the UnlokRenamer naming
-     (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). Meshes whose names
-     don't follow it fall back to their assigned Maya material, per face.
+     (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). A variant letter
+     after the colour makes its own group (`glassClearA`, `glassClearB`).
+     Meshes whose names don't follow it fall back to their assigned Maya
+     material, per face.
    - **Sections:** tick *New sections from top-level groups* to make each
      child group (e.g. `westWing_GRP`) its own section.
    - **Re-scanning:** only sorts new meshes; existing groups are kept.

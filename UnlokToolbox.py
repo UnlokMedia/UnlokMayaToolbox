@@ -2961,7 +2961,7 @@ UR_MATERIALS = [
 UR_COLORS = [
     "Default", "Red", "Blue", "Green", "Yellow", "White", "Black",
     "Grey", "Gray", "Cream", "Pink", "Brown", "Orange", "Purple",
-    "Tan", "Beige", "Gold", "Silver"
+    "Tan", "Beige", "Gold", "Silver", "Clear"
 ]
 
 UR_SUFFIXES = [
@@ -2972,14 +2972,27 @@ UR_SUFFIXES = [
 ]
 
 
+def ur_split_material_color_variant(material_color):
+    """'paintGrey' -> ('paint', 'Grey', ''); 'glassClearA' -> ('glass',
+    'Clear', 'A') (a variant: one capital letter after the colour);
+    (None, None, '') if unparseable."""
+    candidates = [(material_color, "")]
+    if len(material_color) > 1 and "A" <= material_color[-1] <= "Z":
+        candidates.append((material_color[:-1], material_color[-1]))
+    for text, variant in candidates:
+        for color in sorted(UR_COLORS, key=len, reverse=True):
+            if text.endswith(color):
+                material = text[:-len(color)]
+                if material:
+                    return material, color, variant
+    return None, None, ""
+
+
 def ur_split_material_color(material_color):
-    """'paintGrey' -> ('paint', 'Grey'); (None, None) if unparseable."""
-    for color in sorted(UR_COLORS, key=len, reverse=True):
-        if material_color.endswith(color):
-            material = material_color[:-len(color)]
-            if material:
-                return material, color
-    return None, None
+    """'paintGrey' -> ('paint', 'Grey'); a variant letter ('glassClearA') is
+    accepted and dropped; (None, None) if unparseable."""
+    material, color, _ = ur_split_material_color_variant(material_color)
+    return material, color
 
 
 def ur_base_suffix_of(token):
@@ -2994,6 +3007,7 @@ def material_key_from_name(name):
     """Material key from a convention name, plus any naming issue.
 
     'woodGreen_C_beam0001_GEP' -> ('woodGreen', None)
+    'glassClearA_F_pane0001_GEP' -> ('glassClearA', None)  (variant A: its own group)
     'steelRusty_C_beam_GEP'    -> ('steelRusty', "unrecognised material/colour 'steelRusty'")
     'pCube1'                   -> (None, 'no recognised suffix (GES, GEP, ...)')
 

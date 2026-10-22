@@ -30,8 +30,12 @@
 - **Film pipeline.** Don't add game-only features such as lightmap UVs,
   tiling or trim-sheet UVs, or engine export.
 - **Naming convention:** comes from the UnlokRenamer repository
-  (`../../UnlokRenamer/build`), which is reference only and must never be
-  edited.
+  (`../../UnlokRenamer/build`). Treat it as reference: edit it only when the
+  user asks for a change there (they did for material variants,
+  2026-10-22). Keep `UR_MATERIALS` / `UR_COLORS` and the split helpers here
+  in sync with it. Material tokens are material + Colour + an optional
+  capital variant letter (`glassClearA`), and each variant is its own
+  material group.
 - **Upcoming tool:** Smart UDIM. The plan and its decisions are in
   `docs/smart-udim-plan.md`.
 

@@ -86,6 +86,13 @@ def run():
     check("custom material still usable, flagged", mk("steelRusty_C_beam_GEP")[0] == "steelRusty"
           and "unrecognised" in mk("steelRusty_C_beam_GEP")[1])
     check("suffix variant flagged", "variant" in (mk("woodGreen_C_beam0001_GEP1")[1] or ""))
+    check("material variant letters are valid and their own key",
+          mk("glassClearA_F_pane0001_GEP") == ("glassClearA", None) and
+          mk("woodBrownB_C_beam0001_GEP") == ("woodBrownB", None) and mk("glassClear_F_pane_GEP")[1] is None,
+          "%s / %s" % (mk("glassClearA_F_pane0001_GEP"), mk("woodBrownB_C_beam0001_GEP")))
+    check("variant split", tb["ur_split_material_color_variant"]("glassClearA") == ("glass", "Clear", "A") and
+          tb["ur_split_material_color_variant"]("woodBrown") == ("wood", "Brown", "") and
+          tb["ur_split_material_color_variant"]("steelRustyA")[0] is None)
     check("no suffix -> unusable", mk("pCube1")[0] is None)
     check("namespaced name parses", mk("asset:woodGreen_C_beam0001_GEP")[0] == "woodGreen")
     pg = tb["parse_group_name"]
@@ -139,8 +146,8 @@ def run():
     check("nothing unassigned, no overlaps", not snap["unassigned"] and not snap["overlaps"],
           "%s %s" % (snap["unassigned"], snap["overlaps"]))
     naming = {cmds.ls(n["node"])[0].split("|")[-1]: n for n in snap["naming"]}
-    check("naming hand-off lists bad + soft names", "Mesh_final_v2" in naming and "trimPiece" in naming
-          and "glassClear_F_window0001_GEP" in naming and naming["glassClear_F_window0001_GEP"]["usable"],
+    check("naming hand-off lists bad names, not valid ones", "Mesh_final_v2" in naming and "trimPiece" in naming
+          and "glassClear_F_window0001_GEP" not in naming,  # Clear is a colour now
           str(sorted(naming)))
 
     cmds.undo()
