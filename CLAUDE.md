@@ -345,8 +345,13 @@
   `[uMin, vMin, uMax, vMax]`. Its default layout scale mode (2) fits the
   shells to the box.
 - `polyAutoProjection`, `polyMapSewMove` and `polyMapCut` only take one object
-  per call; loop over meshes. `u3dUnfold`, `u3dLayout` and `u3dAutoSeam`
-  accept many.
+  per call; loop over meshes. `u3dUnfold` and `u3dLayout` accept many.
+- **`u3dAutoSeam` fails with several meshes selected** ("Doesn't work with
+  multiple objects selected"). It only prints an error and does nothing,
+  so it looks like it worked. Run it one mesh at a time (`_auto_seam`).
+  Until 2026-10-22 every multi-mesh batch silently lost its seams. Fixing
+  it also made Auto UV much faster: 65 s down to 16 s on the 141-mesh
+  building.
 - `polyEvaluate -worldFaceArea` / `-uvFaceArea` give per-face areas in C++
   (fast scoring). `-uvFaceArea` reads the *current* UV set.
 - Switch a mesh's current UV set inside `NoUndo` (it's view state).

@@ -4641,6 +4641,18 @@ def _batch_label(batch):
     return "%d meshes (%s faces)" % (len(names), "{:,}".format(faces))
 
 
+def _auto_seam(targets):
+    """u3dAutoSeam on {mesh: [the mesh, or some of its faces]}, one mesh at a
+    time: with several meshes selected it fails ("Doesn't work with multiple
+    objects selected"), and earlier versions lost every seam that way."""
+    for mesh, comps in targets.items():
+        try:
+            cmds.select(comps, replace=True)
+            cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
+        except Exception:
+            pass
+
+
 def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=None):
     """Unwrap meshes (see the section comment). Returns {mesh: error} for any
     that failed; one bad mesh never stops the rest. With a Progress, it
@@ -4697,11 +4709,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=No
     pr.stage("unfold", sum(n for _, n in batches), "Unfolding", items=len(batches))
     for batch in batches:  # batches, so progress moves (and Esc works) on big assets
         pr.item(_batch_label(batch), weight=batch[1], force=True)
-        try:
-            cmds.select(batch[0], replace=True)
-            cmds.u3dAutoSeam(splitShells=0, cutPipes=1)  # closed shells need at least one seam
-        except Exception:
-            pass
+        _auto_seam({m: [m] for m in batch[0]})  # closed shells need at least one seam
         unfold(batch[0])
         if on_unfolded:
             on_unfolded([m for m in batch[0] if m not in failed])
@@ -4721,11 +4729,7 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=No
         for batch in _unwrap_batches(sorted(by_mesh)):
             pr.detail = "re-unfolding %s" % _batch_label(batch)
             pr.update(force=True)
-            try:
-                cmds.select([f for m in batch[0] for f in by_mesh[m]], replace=True)
-                cmds.u3dAutoSeam(splitShells=0, cutPipes=1)
-            except Exception:
-                pass
+            _auto_seam({m: by_mesh[m] for m in batch[0]})
             unfold(batch[0])
     return failed
 
@@ -4847,7 +4851,7 @@ AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("
 
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
                 hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing=None,
-                progress_callback=None, only=None, colours=False):
+                progress_callback=None, only=None, colours=False, score=True):
     """The whole Auto UV pass on an asset, as one Ctrl+Z. (packing: unused
     since packing went pure-maths; kept for old callers.)
 
@@ -4857,6 +4861,8 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     (fraction, text). Esc stops it at the next mesh: the result then has
     "cancelled" (where it stopped) and Ctrl+Z undoes what was done.
 
+    score=False skips scoring: every mesh that isn't marked Keep UVs / Hands
+    off is unwrapped (for when you know they need it).
     only: just these meshes (e.g. a selected group), packing only the
     groups they're in. colours: recolour meshes as they're unwrapped (see
     show_uv_colours). Unwrapped meshes go into the asset's Auto UV'd set,
@@ -4869,14 +4875,14 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
         with pr:
             pr.refresh_view = bool(colours)
             return _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack,
-                                analyse_only, packing, pr, only, colours)
+                                analyse_only, packing, pr, only, colours, score)
     except Cancelled:
         return {"rows": [], "timing": {"total": time.time() - pr.t0}, "tiles": [], "backups": 0,
                 "cancelled": pr.where()}
 
 
 def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack, analyse_only,
-                 packing, pr, only=None, colours=False):
+                 packing, pr, only=None, colours=False, score=True):
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
@@ -4890,8 +4896,12 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
     meshes = [m for m in meshes if status.get(m) != "handsoff"]
     rows = []
     scores = {}
-    pr.stage("score", len(meshes), "Scoring UVs")
+    score = score or analyse_only  # Check UVs always scores: that's what it's for
+    pr.stage("score", len(meshes) if score else 1, "Scoring UVs" if score else "Skipping scoring")
     for m in meshes:
+        if not score:
+            scores[m] = (0.0, "not scored (Skip scoring is on): unwrapped because it isn't marked")
+            continue
         pr.item(short_name(m))
         try:
             scores[m] = uv_quality(m, uv_set, keep_score=keep_score)
@@ -4966,8 +4976,9 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
         pr.stage("check", len(order), "Checking the result")
         for m in order:
             pr.item(short_name(m))
+            before = scores[m][0] if score else None
             if m in failed:
-                rows.append({"mesh": m, "before": scores[m][0], "reason": failed[m], "after": None,
+                rows.append({"mesh": m, "before": before, "reason": failed[m], "after": None,
                              "action": "failed"})
                 continue
             after = uv_quality(m, uv_set, check_overlap=pack, keep_score=keep_score)[0]                 if (m in todo or pack) else scores[m][0]
@@ -4976,7 +4987,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 action = "check" if m in todo else "kept (check)"
             if m in marked_keep:
                 action = "keep UVs"
-            rows.append({"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": after,
+            rows.append({"mesh": m, "before": before, "reason": scores[m][1], "after": after,
                          "action": action})
         unwrapped = [r["mesh"] for r in rows if r["action"] == "unwrapped"]
         trouble = [r["mesh"] for r in rows if r["action"] in ("failed", "check")] + list(instanced)
@@ -6657,6 +6668,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_keep.setValue(AUTO_UV_KEEP_SCORE)
         grid.add_row("Keep above", self.auto_keep,
                      "Meshes whose UVs score at least this (1 = clean, 0 = none / garbage) are kept as they are.")
+        self.auto_skip_score = CheckField("Skip scoring: unwrap every mesh that isn't marked")
+        self.auto_skip_score.setToolTip("For when you know they need UVs: no scoring, every mesh that isn't "
+                                        "marked Keep UVs or Hands off gets unwrapped (so mark anything you want "
+                                        "kept first). Auto UV Selected and Do It All follow this too. The check "
+                                        "after unwrapping still runs, so failures still show red.")
+        self.auto_skip_score.changed.connect(lambda: self.auto_keep.setEnabled(not self.auto_skip_score.value()))
+        grid.add_full(self.auto_skip_score)
         self.auto_angle = FloatField(1.0, 179.0, 10.0, 90.0, decimals=0, step=5.0)
         self.auto_angle.setValue(40.0)
         grid.add_row("Seam angle", self.auto_angle,
@@ -6955,7 +6973,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "fix_nonmanifold": self.fix_nonmanifold, "fix_zero": self.fix_zero, "uv_set": self.uv_set,
                 "auto_backup": self.auto_backup, "auto_backup_name": self.auto_backup_name,
                 "auto_keep": self.auto_keep, "auto_angle": self.auto_angle, "auto_clean": self.auto_clean,
-                "auto_pack": self.auto_pack, "lay_density": self.lay_density,
+                "auto_pack": self.auto_pack, "auto_skip_score": self.auto_skip_score, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
                 "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
@@ -6993,6 +7011,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             else:
                 w.setValue(value)
         self._update_layout_enabled()
+        self.auto_keep.setEnabled(not self.auto_skip_score.value())
         exists = cmds.objExists
         self.report = {cat: {m: n for m, n in items.items() if exists(m)}
                        for cat, items in (data.get("report") or {}).items()}
@@ -7754,7 +7773,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     backup=self.auto_backup.value(),
                     backup_set=self.auto_backup_name.text().strip() or "map1_backup",
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
-                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value())
+                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(),
+                    score=not self.auto_skip_score.value())
 
     # ------------------------------------------------------------ UV states
     def _scores(self):

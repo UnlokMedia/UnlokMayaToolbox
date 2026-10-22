@@ -150,6 +150,25 @@ def run():
     check("Auto UV Selected never moves a Hands off mesh in the same group",
           cmds.polyEditUV(off + ".map[*]", query=True) == before)
 
+    # --- Skip scoring: every unmarked mesh is unwrapped, marks still respected
+    cmds.file(new=True, force=True)
+    root, kinds, trim, asset = setup(tb)
+    by = {m.split("|")[-1]: m for m in list(kinds) + [trim]}
+    kept = by["stoneGrey_C_column0001_GEP"]
+    asset.set_uv_status([kept], "keep")
+    kept_uvs = cmds.polyEvaluate(kept, uvcoord=True)
+    res = tb["run_auto_uv"](asset, score=False, pack=False)
+    act = {r["mesh"]: r for r in res["rows"]}
+    good = by["stoneGrey_C_column0002_GEP"]  # good UVs, not marked: scoring would have kept it
+    check("Skip scoring unwraps every unmarked mesh, even ones with good UVs",
+          act[good]["action"] in ("unwrapped", "check") and act[good]["before"] is None and
+          "Scoring UVs" not in str(res.get("timing")), "%s / before %s" % (act[good]["action"], act[good]["before"]))
+    check("...but still never touches Keep UVs meshes", act[kept]["action"] == "keep UVs" and
+          cmds.polyEvaluate(kept, uvcoord=True) == kept_uvs)
+    check("Check UVs still scores when asked", all(
+        r["before"] is not None for r in tb["run_auto_uv"](asset, analyse_only=True, score=False)["rows"]
+        if r["action"] not in ("hands off", "skip")))
+
 
 try:
     run()

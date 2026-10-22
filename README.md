@@ -260,6 +260,11 @@ density. The actual layout is still being built; see
      work through an asset bit by bit. Packing covers just the material
      groups they're in, around their finished members; Hands off meshes are
      never moved.
+   - **Skip scoring** (Auto UV step): when you know the meshes need UVs,
+     tick it and Auto UV unwraps every mesh that isn't marked Keep UVs or
+     Hands off, with no scoring first. Mark anything you want kept before
+     you run it. Auto UV Selected and Do It All follow it too. The check
+     after unwrapping still runs, so failures still go red.
    - **Check UVs** (was Analyse) scores every mesh's UVs from 0 (none or garbage) to 1
      (clean) and lists them worst first. A face counts as bad if it has no
      UVs, is collapsed, folded or overlapping, or is stretched more than 4x
