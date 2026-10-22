@@ -260,11 +260,24 @@ density. The actual layout is still being built; see
      work through an asset bit by bit. Packing covers just the material
      groups they're in, around their finished members; Hands off meshes are
      never moved.
-   - **Skip scoring** (Auto UV step): when you know the meshes need UVs,
-     tick it and Auto UV unwraps every mesh that isn't marked Keep UVs or
-     Hands off, with no scoring first. Mark anything you want kept before
-     you run it. Auto UV Selected and Do It All follow it too. The check
-     after unwrapping still runs, so failures still go red.
+   - **Speed on big assets:**
+     - Meshes whose projection is already clean (every edge's UV length
+       the same multiple of its 3D length: walls, planks, boxes) skip
+       Unfold3D. On the test building that's 99 of 102 meshes.
+     - Check UVs remembers its scores with the scene and only re-scores
+       meshes that changed (47 meshes: 0.11 s, then 0.01 s).
+     - At 3,000 meshes the panel refreshes about 10x faster. It only
+       refreshes when the asset's sets or meshes actually change, so
+       undoing unrelated work doesn't touch it.
+     - Scan shows progress, and Esc rolls it back.
+   - **Auto UV doesn't score.** It unwraps every mesh that isn't marked
+     Keep UVs or Hands off.
+     - **Check UVs** is optional. Run it when some meshes may already have
+       decent UVs you forgot to mark: Auto UV then keeps the ones it found
+       good (green), as long as you don't edit them afterwards.
+     - Hands off meshes are never scored or traced shell by shell, however
+       heavy. Colours, Plan, packing and Validate stay quick: a
+       160,000-face Hands off mesh costs 0.01 to 0.2 s.
    - **Check UVs** (was Analyse) scores every mesh's UVs from 0 (none or garbage) to 1
      (clean) and lists them worst first. A face counts as bad if it has no
      UVs, is collapsed, folded or overlapping, or is stretched more than 4x
@@ -421,6 +434,12 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_speedups.py`: clean projections skip Unfold3D (same
+  quality), remembered scores and their invalidation, Scan progress and
+  Esc.
+- `tests/test_fast_reads.py`: the API readers (`expand_members`,
+  `meshes()`) match the old cmds versions, and refresh reads are fast at
+  3,000 meshes.
 - `tests/test_guards.py`: junk UVs flagged fast, Plan leaves unready
   meshes out, Esc stops every heavy step, cancelled steps roll back without
   touching the previous undo step.

@@ -356,6 +356,28 @@ def main():
     udim.mark_status("auto")
     check("...and back to Auto restores 'will unwrap' from the known score",
           [r for r in udim.auto_result["rows"] if r["mesh"] == third][0]["action"] == "will unwrap")
+    # undo only refreshes the panel when the asset itself changed
+    import maya.utils as mu
+    udim.refresh()
+    cmds.undoInfo(openChunk=True, chunkName="unrelated edit")
+    cmds.spaceLocator(name="unrelatedLoc")
+    cmds.undoInfo(closeChunk=True)
+    udim._refresh_timer.stop()
+    cmds.undo()
+    mu.processIdleEvents()
+    unrelated = udim._refresh_timer.isActive()
+    dirty_unrelated = udim._dirty
+    cmds.select(third)
+    udim.mark_status("keep")
+    udim._refresh_timer.stop()
+    cmds.undo()
+    mu.processIdleEvents()
+    related = udim._refresh_timer.isActive()
+    dirty_after_mark_undo = udim._dirty
+    pump(5)
+    check("undo skips the panel refresh for unrelated edits, but not for the asset's own",
+          not unrelated and related, "unrelated refresh %s, mark undo refresh %s, dirty %s, unrelated dirty %s" % (
+              unrelated, related, dirty_after_mark_undo, dirty_unrelated))
     udim.auto_uv()
     pump()
     actions = [udim.auto_tree.topLevelItem(i).text(3) for i in range(udim.auto_tree.topLevelItemCount())]

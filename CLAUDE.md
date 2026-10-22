@@ -297,6 +297,37 @@
       Colours come from `GROUP_PALETTE` via `set_key_palette` (sorted
       keys), not a hash, so groups never look alike.
 
+## Speed on big assets
+- `expand_members` (MFnSet.getMembers) and `SmartUdimAsset.meshes()`
+  (MItDag) use the API: 0.74 s down to 0.08 s per refresh at 3,000
+  meshes. `tests/test_fast_reads.py` checks they match the cmds versions
+  (`_expand_members_cmds` is kept as a fallback). They differ in one way:
+  every transform sharing an instanced shape is reported as instanced.
+- Panel refresh is driven by change flags:
+  - `MObjectSetMessage.addSetMembersModifiedCallback` (the OM2 name; there
+    is no ...ChangedCallback), attribute and name callbacks on the asset's
+    sets (`_watch_sets`), and node added / removed for meshes and sets.
+  - They only start the refresh timer; the panel's own bookkeeping
+    attributes are ignored. Undoing unrelated work no longer refreshes.
+- `projection_clean()`: same UV/3D length ratio on every edge of a shell
+  (within 15%), nothing flipped or collapsed. Those meshes skip Unfold3D.
+- `cached_quality()` + `mesh_fingerprint()` (counts, world area, UV sums):
+  the panel keeps `score_cache` in the saved session.
+- **The panel's Auto UV never scores** (`run_auto_uv(score="known")`):
+  - It unwraps every unmarked mesh, except ones the last Check UVs found
+    good that are unchanged since (`known_quality`).
+  - The engine default is still `score=True` (score first), so tests and
+    scripts keep the old behaviour.
+  - The after-check covers only what was unwrapped.
+- **Hands off meshes stay cheap everywhere:**
+  - never scored
+  - `uv_footprints` reads whole meshes per UV and remembers them by
+    fingerprint (`_FOOTPRINTS`)
+  - Auto UV packing only reads their top V row
+  - Validate only range-checks them
+  - one-shader meshes skip the per-face shading loop (`_shading_of`,
+    `shader_face_groups`)
+
 ## Scene safety (freezes and half-done edits)
 - **Junk UVs are the main freeze risk:** every face its own shell (common
   on un-UV'd imports). Anything that loops over shells must check
@@ -393,6 +424,11 @@
   into all quads.
 
 ## Testing
+- **Set `MAYA_DISABLE_CER=1`** for every mayapy / maya.exe test run. A Maya
+  that crashes or gets killed otherwise pops Autodesk's error-report window
+  on the user's screen (they share the machine). Always shut down cleanly
+  (`maya.standalone.uninitialize()` before `os._exit`), and keep runs few:
+  full suites plus the GUI smoke once before a push.
 Maya 2024 and 2025 are installed locally (no 2023). Run
 `mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
 `tests/test_bevel_resolver.py` for the engines, and

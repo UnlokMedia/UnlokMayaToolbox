@@ -122,9 +122,11 @@ def run():
     check("validation: no new overlaps; hands-off density isn't flagged", not others and not dens,
           "%d overlaps, %d density" % (len(others), len(dens)))
     unit = 0.01 ** 2
-    expected = sum(len(tb["_mesh_shells"](m, "map1", unit)) for m in asset.meshes()[0])
-    check("validation still checks hands-off shells (overlaps, tiles, padding)", val["shells"] == expected and
-          len(tb["_mesh_shells"](pane, "map1", unit)) > 0, "%d of %d shells checked" % (val["shells"], expected))
+    off = set(m for m, st in asset.uv_status().items() if st == "handsoff")
+    expected = sum(len(tb["_mesh_shells"](m, "map1", unit)) for m in asset.meshes()[0] if m not in off)
+    check("validation checks every shell except Hands off ones (those only get a quick range check)",
+          val["shells"] == expected and not any(it["mesh"] in off for it in val["items"]["out_of_range"]),
+          "%d of %d shells checked" % (val["shells"], expected))
 
     # --- layout: reserve their tiles
     col = tb["collect_shells"](asset)

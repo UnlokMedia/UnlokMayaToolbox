@@ -62,7 +62,7 @@ def run():
     res = tb["run_auto_uv"](asset, progress_callback=record)
     total = time.time() - t0
     stages = [s for s in ("Scoring UVs", "Checking geometry", "Backing up UVs", "Projecting", "Cutting seams",
-                          "Unfolding", "Fixing stretched shells", "Packing into UDIMs", "Checking the result")
+                          "Unfolding", "Fixing stretched shells", "Packing into UDIMs", "Checking what was unwrapped")
               if any(s in t for _, _, t in log)]
     check("every stage reports", len(stages) == 9, "%s" % stages)
     fr = [f for _, f, _ in log]
