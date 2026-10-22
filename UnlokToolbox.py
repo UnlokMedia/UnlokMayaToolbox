@@ -5281,7 +5281,8 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
 LAYOUT_LOCK = "unlokUdimLock"
 LAYOUT_TILES = "unlokUdimTiles"
 LAYOUT_PRINT = "unlokUdimPrint"
-LAYOUT_MODES = ("Fixed density", "Fit to tiles")
+FIT_ROWS = "Fit sections to rows"
+LAYOUT_MODES = (FIT_ROWS, "Fixed density", "Fit to tiles")
 MAP_SIZES = ("1024", "2048", "4096", "8192")
 # Main axis: longest direction along U (lying flat). Upright: world up along +V
 # (brick courses stay horizontal, walls read upright). Keep: never rotate.
@@ -5882,7 +5883,68 @@ def plan_fit_to_tiles(collected, settings, progress=None):
     return best
 
 
+def section_rows(collected, plan):
+    """{section index: set of UDIM rows its laid-out shells landed on}."""
+    rows = {}
+    for g in collected["groups"]:
+        got = rows.setdefault(g["section_index"], set())
+        for sh in g["shells"]:
+            pl = plan["placements"].get(id(sh))
+            if pl:
+                got.add(pl[1])
+    return rows
+
+
+def plan_fit_rows(collected, settings, progress=None):
+    """The foolproof default: the highest texel density at which every
+    section still fits on its own single row of UDIMs (the biggest section
+    decides). Every shell gets that density, times its group's / section's
+    TD %; Hands off pieces stay as they are. Same search as Fit to tiles."""
+    s = dict(settings)
+    s["new_row_per_section"] = True
+
+    def attempt(scale):
+        if progress:
+            progress.item("trying %d%% of the density" % round(scale * 100))
+        return plan_layout(collected, s, scale)
+
+    def fits(plan):
+        return all(len(r) <= 1 for r in section_rows(collected, plan).values())
+
+    lo, hi = 0.0, 1.0
+    plan = attempt(hi)
+    while fits(plan) and hi < 1e4:  # find an upper bound
+        lo, hi = hi, hi * 2.0
+        plan = attempt(hi)
+    best = attempt(lo) if lo > 0 else None
+    for _ in range(18):
+        mid = (lo + hi) / 2.0
+        p = attempt(mid)
+        if fits(p):
+            lo, best = mid, p
+        else:
+            hi = mid
+    if best is not None:  # packing isn't monotonic: a bit denser can still fit, so probe upward
+        base = lo
+        for i in range(1, 13):
+            p = attempt(base * (1.0 + 0.02 * i))
+            if fits(p):
+                best = p
+    if best is None:
+        best = attempt(max(lo, 1e-3))
+        best["warnings"].append("A section can't fit on one row of UDIMs even at a tiny density (locked or Hands "
+                                "off tiles may fill its row). Showing the smallest layout.")
+    rows = section_rows(collected, best)
+    widest = max(((len(set(1001 + p[0] + 10 * p[1] for g in collected["groups"] if g["section_index"] == si
+                                for p in (best["placements"].get(id(sh)) for sh in g["shells"]) if p)), si)
+                  for si in rows), default=(0, None))
+    best["widest_section"] = widest
+    return best
+
+
 def make_plan(collected, settings, progress=None):
+    if settings.get("mode") == FIT_ROWS:
+        return plan_fit_rows(collected, settings, progress)
     if settings.get("mode") == "Fit to tiles":
         return plan_fit_to_tiles(collected, settings, progress)
     return plan_layout(collected, settings)
@@ -7035,8 +7097,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_map.setValue(LAYOUT_DEFAULTS["map_size"])
         grid.add_row("Map size", self.lay_map, "Texture resolution of one UDIM tile.")
         self.lay_mode = ComboField(LAYOUT_MODES)
-        grid.add_row("Mode", self.lay_mode, "Fixed density: use the density above.\n"
-                                            "Fit to tiles: find the highest density that fits in Max tiles.")
+        grid.add_row("Mode", self.lay_mode, "Fit sections to rows (default, foolproof): the highest density at "
+                                            "which every section fits on its own row of UDIMs. Every shell gets "
+                                            "that same density (times its TD %).\n"
+                                            "Fixed density: use the density above.\n"
+                                            "Fit to tiles: the highest density that fits in Max tiles.")
         self.lay_tiles = IntField(1, 1000, 1, 60)
         self.lay_tiles.setValue(LAYOUT_DEFAULTS["max_tiles"])
         self.lay_tiles_label = grid.add_row("Max tiles", self.lay_tiles, "Tile budget for Fit to tiles.")
@@ -7814,16 +7879,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
-        fit = self.lay_mode.value() == "Fit to tiles"
-        self.lay_tiles.setEnabled(fit)
-        self.lay_tiles_label.setEnabled(fit)
-        self.lay_density.setEnabled(not fit)
+        mode = self.lay_mode.value()
+        self.lay_tiles.setEnabled(mode == "Fit to tiles")
+        self.lay_tiles_label.setEnabled(mode == "Fit to tiles")
+        self.lay_density.setEnabled(mode == "Fixed density")
+        self.lay_rows.setEnabled(mode != FIT_ROWS)  # that mode always gives each section its own row
 
     LIVE_REPLAN_WORK = 60000  # shells x packs per re-plan above which settings don't re-plan live
 
     def _plan_work(self):
         shells = sum(len(g["shells"]) for g in (self._collected or {}).get("groups", []))
-        return shells * (46 if self.lay_mode.value() == "Fit to tiles" else 1)
+        return shells * (1 if self.lay_mode.value() == "Fixed density" else 46)
 
     def _layout_settings_changed(self):
         self._update_layout_enabled()
@@ -7884,6 +7950,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         lines = ["%d shells from %d groups -> %d tile(s) at %d px/m (%s map), planned in %.2fs." % (
             n_shells, len(col["groups"]), len(plan["new_tiles"]), round(plan["density"]),
             plan["settings"]["map_size"], seconds)]
+        widest = plan.get("widest_section")
+        if widest and widest[1] is not None:
+            secs = sorted(set((g["section_index"], g["section"]) for g in col["groups"]))
+            name = dict(secs).get(widest[1], "")
+            lines.append("Every section fits on its own row: the widest, %s, uses %d tile(s)." % (
+                parse_group_name(name)["key"] or name, widest[0]))
         if col["locked"]:
             lines.append("%d locked group(s) keep tiles %s." % (len(col["locked"]), ", ".join(
                 str(t) for g in col["locked"] for t in g["tiles"])))
@@ -8256,8 +8328,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                         " or found good by your last Check UVs" if self._scores() else "",
                         " (backed up to %s first)" % self.auto_backup_name.text() if self.auto_backup.value()
                         else " (no backup: the Back up UVs box is off)",
-                        ("%d px/m" % settings["texel_density"]) if settings["mode"] != "Fit to tiles" else
-                        ("the best density for %d tiles" % settings["max_tiles"]), settings["map_size"],
+                        ("%d px/m" % settings["texel_density"]) if settings["mode"] == "Fixed density" else
+                        ("the best density for %d tiles" % settings["max_tiles"]) if settings["mode"] == "Fit to tiles"
+                        else "the highest density that fits each section on one row", settings["map_size"],
                         settings["orientation"].lower(),
                         "Locked groups keep their tiles. " if any(_get(m, LAYOUT_LOCK, False)
                                                                  for m in asset.all_material_sets()) else ""))

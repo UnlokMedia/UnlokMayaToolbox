@@ -430,6 +430,8 @@ def main():
     cmds.polyMapCut(junk + ".e[*]", constructionHistory=False)
     junk = cmds.ls(cmds.parent(junk, "|house_GRP|westWing_GRP")[0], long=True)[0]
     udim.scan()
+    udim.lay_mode.setValue("Fixed density")  # these checks are about a set density
+    udim._update_layout_enabled()
     udim.lay_density.setValue(2048.0)
     udim.lay_map.setValue("1024")
     udim.plan_layout()
@@ -445,6 +447,12 @@ def main():
     check("Plan fills the UDIM map", len(udim.udim_map.shells) > 0 and udim.udim_map.tiles,
           "%d shells, tiles %s | %s" % (len(udim.udim_map.shells), sorted(udim.udim_map.tiles),
                                         udim.layout_summary.text()[:160]))
+    udim.lay_mode.setValue("Fit sections to rows")
+    udim.plan_layout()
+    check("Fit sections to rows puts every section on its own row", "Every section fits on its own row"
+          in udim.layout_summary.text(), udim.layout_summary.text()[:200])
+    udim.lay_mode.setValue("Fixed density")
+    udim.plan_layout()
     check("UDIM map shows the hands-off piece", len(udim.udim_map.fixed) > 0 and
           "hands-off" in udim.layout_summary.text(), udim.layout_summary.text()[-200:])
     udim.lay_handsoff.setValue("Reserve their tiles")

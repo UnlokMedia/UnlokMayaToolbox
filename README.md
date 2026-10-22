@@ -336,6 +336,13 @@ density. The actual layout is still being built; see
      completely, and never undoes your previous action. Validate and the
      hand-off sheet report junk-UV meshes instead of grinding through
      every shell.
+   - **Mode: Fit sections to rows (the default).** It finds the highest
+     texel density at which every section still fits on its own single row
+     of UDIMs (the biggest section decides), and gives every shell that one
+     density. Groups or sections set to + / - TD % keep their offset, and
+     Hands off pieces stay as they are. The summary says which section is
+     widest and how many tiles it uses. *Fixed density* (your own px/m) and
+     *Fit to tiles* (a tile budget) are still there.
    - **Density:** every shell is scaled to exactly the target texel density,
      times its group's and section's TD %. A group renamed `td150_...` gets
      1.5x.

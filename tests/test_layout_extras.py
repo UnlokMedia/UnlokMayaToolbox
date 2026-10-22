@@ -119,6 +119,17 @@ def run():
     check("plans 1,200 shells fast", dt < 0.25, "%.0f ms, %d tiles, %.0f%% filled" % (
         dt * 1000, len(sp["new_tiles"]), efficiency(sp, synth_settings) * 100))
 
+    # --- Fit sections to rows: the default mode
+    fr = tb["make_plan"](col, dict(base, mode=tb["FIT_ROWS"]))
+    rows = tb["section_rows"](col, fr)
+    dens = set(round(st["density"], 3) for st in fr["stats"].values() if st.get("density"))
+    check("Fit sections to rows: every section on its own single row, one texel density for all",
+          rows and all(len(r) == 1 for r in rows.values()) and len(set(min(r) for r in rows.values())) == len(rows)
+          and len(dens) == 1, "rows %s, density %s px/m" % (sorted(rows.items()), sorted(dens)))
+    denser = tb["plan_layout"](col, dict(base, new_row_per_section=True), fr["density"] / base["texel_density"] * 1.06)
+    check("...at about the highest density that allows it", any(
+        len(r) > 1 for r in tb["section_rows"](col, denser).values()), "%.0f px/m" % fr["density"])
+
     # --- Upright: world up runs along +V for walls
     up_settings = dict(base, orientation="Upright")
     plan = tb["make_plan"](col, up_settings)

@@ -270,6 +270,13 @@
       - The per-group override is the `unlokUdimOrient` attribute plus the
         `_up` / `_keep` / `_axis` name token.
     - Placements are `(tile_u, tile_v, x, y, scale, angle, w, h)`.
+    - **Fit sections to rows** (`FIT_ROWS`, `plan_fit_rows`, the panel's
+      default mode):
+      - It bisects one density scale (like `plan_fit_to_tiles`) until every
+        section's placed shells sit on one UDIM row (`section_rows`), with
+        new_row_per_section forced on, then probes 2% steps upward.
+      - The engine's LAYOUT_DEFAULTS mode stays "Fixed density", so scripts
+        and tests that pass a density keep their behaviour.
     - `_stack` groups share placements for shells with the same signature
       `(uv count, w, h)` after density scaling.
     - Packing: `_TilePacker` per tile.
