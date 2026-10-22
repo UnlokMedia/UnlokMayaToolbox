@@ -402,6 +402,43 @@ def main():
     pump()
     window.grab().save(os.path.join(OUT, "14_check_handoff.png"))
 
+    # --- save, close, reopen: the panel picks up where it was
+    rows_before = udim.auto_tree.topLevelItemCount()
+    states = lambda: [c.state for c in (udim.step_prep, udim.step_auto, udim.step_layout,  # noqa: E731
+                                        udim.step_check)]
+    states_before = states()
+    udim.lay_padding.setValue(12)
+    udim.plan_layout(quiet=True)
+    udim._save_session()
+    scene = os.path.join(OUT, "udim_resume.ma")
+    cmds.file(rename=scene)
+    cmds.file(save=True, type="mayaAscii", force=True)
+    cmds.file(new=True, force=True)
+    import maya.utils
+    maya.utils.processIdleEvents()  # scriptJob events wait for idle while a script runs
+    pump(10)
+    check("a new scene clears the panel", udim._asset() is None and udim.auto_tree.topLevelItemCount() == 0,
+          udim.next_banner.text.text())
+    udim.lay_padding.setValue(4)
+    cmds.file(scene, open=True, force=True)
+    maya.utils.processIdleEvents()
+    pump(20)
+    check("reopening the scene picks up where it left off", udim._asset() is not None and
+          udim.auto_tree.topLevelItemCount() == rows_before and states() == states_before and
+          udim.resume_label.isVisible() and udim.lay_padding.value() == 12,
+          "%d rows (was %d), steps %s (were %s), padding %d | %s" % (
+              udim.auto_tree.topLevelItemCount(), rows_before, states(), states_before, udim.lay_padding.value(),
+              udim.resume_label.text()[:120]))
+    scroll = udim.step_root.parentWidget().parentWidget().parentWidget()
+    if hasattr(scroll, "ensureWidgetVisible"):
+        scroll.ensureWidgetVisible(udim.step_root)
+    pump()
+    window.grab().save(os.path.join(OUT, "14b_resumed.png"))
+    udim.start_fresh()
+    pump()
+    check("Start Fresh forgets the saved progress", not udim.resume_label.isVisible() and
+          udim.auto_result is None and udim.step_layout.state != "done", udim.status.text())
+
     # --- Log Noise: select cylinders, apply, live slider, bake
     cmds.file(new=True, force=True)
     tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]

@@ -5202,6 +5202,79 @@ def store_layout_settings(asset, plan):
     cmds.setAttr(root + "." + LAYOUT_SETTINGS_ATTR, json.dumps(data, sort_keys=True), type="string")
 
 
+SESSION_ATTR = "unlokUdimSession"
+SESSION_MAX_ITEMS = 500  # validation items kept per category
+
+
+def save_session(asset, data):
+    """Keep the panel's progress (reports, results, settings) as JSON on the
+    asset's root set, so it's saved with the scene and picked up again when
+    the scene is reopened. Kept out of the undo queue: it's bookkeeping."""
+    root = asset.root_set() if asset else None
+    if not root:
+        return
+    with NoUndo():
+        if not cmds.attributeQuery(SESSION_ATTR, node=root, exists=True):
+            cmds.addAttr(root, longName=SESSION_ATTR, dataType="string")
+        cmds.setAttr(root + "." + SESSION_ATTR, json.dumps(data, sort_keys=True), type="string")
+
+
+def load_session(asset):
+    root = asset.root_set() if asset else None
+    if not root or not cmds.attributeQuery(SESSION_ATTR, node=root, exists=True):
+        return {}
+    try:
+        data = json.loads(cmds.getAttr(root + "." + SESSION_ATTR) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def session_summary(data):
+    """'pre-process, Auto UV, layout applied' for a saved session."""
+    done = []
+    if data.get("report"):
+        done.append("pre-process")
+    auto = data.get("auto") or {}
+    if auto.get("rows"):
+        done.append("analysed" if auto.get("analysed_only") else "Auto UV")
+    if data.get("layout_applied"):
+        done.append("layout applied")
+    if data.get("validation"):
+        done.append("validated")
+    return ", ".join(done) or "set up"
+
+
+def pack_validation(res):
+    """Validation result -> JSON-friendly (faces as ranges, capped)."""
+    if not res:
+        return None
+    items = {}
+    for cat, found in res["items"].items():
+        items[cat] = [{"mesh": it["mesh"], "faces": face_ranges(it["faces"]), "detail": it["detail"]}
+                      for it in found[:SESSION_MAX_ITEMS]]
+    return {"items": items, "shells": res.get("shells", 0), "seconds": res.get("seconds", 0.0),
+            "map_size": res.get("map_size")}
+
+
+def unpack_validation(data):
+    if not data:
+        return None
+    items = {k: [] for k in VALIDATION_ORDER}
+    for cat, found in (data.get("items") or {}).items():
+        if cat not in items:
+            continue
+        for it in found:
+            if not cmds.objExists(it["mesh"]):
+                continue
+            faces = []
+            for r in it["faces"]:
+                faces.extend(_parse_face_spec(r) or [])
+            items[cat].append({"mesh": it["mesh"], "faces": faces, "detail": it["detail"]})
+    return {"items": items, "shells": data.get("shells", 0), "seconds": data.get("seconds", 0.0),
+            "map_size": data.get("map_size")}
+
+
 def _mesh_shells(xform, uv_set, unit_scale):
     """Every UV shell of a mesh: faces, uv ids, bbox, signed UV area, 3D / UV area."""
     fn = _mesh_fn(xform)
@@ -5736,11 +5809,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(self.refresh)
+        self._scene_timer = QtCore.QTimer(self)
+        self._scene_timer.setSingleShot(True)
+        self._scene_timer.setInterval(0)
+        self._scene_timer.timeout.connect(self._on_scene_changed)
+        self._callbacks = []
         self._build()
         self._install_jobs()
-        assets = SmartUdimAsset.all() if maya_main_window() is not None else []
-        if len(assets) == 1:
-            self.set_asset(assets[0])
+        self.restored = None
+        start = self.pick_startup_asset() if maya_main_window() is not None else None
+        if start is not None:
+            self.set_asset(start)
         else:
             self.refresh()
 
@@ -5764,7 +5843,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         outer.addWidget(scroll, 1)
 
         # ---- 1. asset
-        card = self.step_root = StepCard(1, "Pick the asset", "Select the asset's top group, e.g. house_GRP.")
+        card = self.step_root = StepCard(1, "Pick the asset", "Select the asset's top group, e.g. house_GRP. "
+                                                              "Your progress is saved with the scene and picked "
+                                                              "up again when you reopen it.")
         row = QtWidgets.QHBoxLayout()
         self.root_label = QtWidgets.QLabel()
         self.root_label.setWordWrap(True)
@@ -5773,6 +5854,22 @@ class SmartUdimPanel(QtWidgets.QWidget):
         row.addWidget(self.root_label, 1)
         row.addWidget(pick)
         card.add_layout(row)
+        setups = QtWidgets.QHBoxLayout()
+        self.setup_combo = _guard_focus(_Combo())
+        self.setup_combo.setToolTip("Every Smart UDIM setup in this scene, with how far it got. Pick one to "
+                                    "carry on with it.")
+        self.setup_combo.activated.connect(self._setup_chosen)
+        fresh = secondary_button("Start Fresh", "Forget this setup's saved reports and results and start the "
+                                                "steps again. Groups, marks, locks and UVs stay as they are.")
+        fresh.clicked.connect(lambda *_: self.start_fresh())
+        self.setup_label = QtWidgets.QLabel("Setups")
+        setups.addWidget(self.setup_label)
+        setups.addWidget(self.setup_combo, 1)
+        setups.addWidget(fresh)
+        card.add_layout(setups)
+        self.resume_label = hint_label("")
+        self.resume_label.setVisible(False)
+        card.add(self.resume_label)
         col.addWidget(card)
 
         # ---- 2. scan
@@ -6095,7 +6192,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         problems = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "skip") if res else 0
         warns = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "warn") if res else 0
         self.step_check.set_state("done" if res and not problems else ("current" if self.layout_applied else "todo"))
-        if not has_root:
+        if not has_root and SmartUdimAsset.all():
+            self.next_banner.set_text("This scene has Smart UDIM setups. Pick one under <b>Setups</b> in step 1 "
+                                      "to carry on, or select another top group and press <b>Use Selected "
+                                      "Group</b>.")
+        elif not has_root:
             self.next_banner.set_text("Select the asset's top group (e.g. <b>house_GRP</b>) and press "
                                       "<b>Use Selected Group</b>.")
         elif not scanned:
@@ -6156,21 +6257,148 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.asset = None
         return self.asset
 
-    def set_asset(self, asset):
+    def set_asset(self, asset, restore=True):
+        """Switch to an asset; restore=True picks up its saved progress."""
         self.asset = asset
         self.report = {}
         self.auto_result = None
-        self._fill_auto()
         self._plan = None
+        self._collected = None
         self.layout_applied = None
         self.validation = None
+        self.restored = None
         if hasattr(self, "check_tree"):
             self.check_tree.clear()
         if hasattr(self, "udim_map"):
             self.udim_map.set_plan(None, None)
             self.layout_summary.setText("")
+        if asset is not None and restore and hasattr(self, "resume_label"):
+            self._restore_session()
         self._fill_report()
         self.refresh()
+        self._fill_auto()
+        self._fill_check()
+        self._update_guidance()
+
+    # ------------------------------------------------------------ session
+    def _widgets(self):
+        """Settings that are saved with the session: name -> widget."""
+        return {"source": self.source_combo, "from_groups": self.from_groups, "fix_lamina": self.fix_lamina,
+                "fix_nonmanifold": self.fix_nonmanifold, "fix_zero": self.fix_zero, "uv_set": self.uv_set,
+                "auto_backup": self.auto_backup, "auto_backup_name": self.auto_backup_name,
+                "auto_keep": self.auto_keep, "auto_angle": self.auto_angle, "auto_clean": self.auto_clean,
+                "auto_pack": self.auto_pack, "auto_packing": self.auto_packing, "lay_density": self.lay_density,
+                "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
+                "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
+                "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
+                "sheet_size": self.sheet_size}
+
+    def _save_session(self):
+        """Called after every step, so a closed scene picks up where it was."""
+        asset = self._asset()
+        if asset is None:
+            return
+        try:
+            settings = {}
+            for name, w in self._widgets().items():
+                settings[name] = w.text() if isinstance(w, QtWidgets.QLineEdit) else w.value()
+            data = {"version": 1, "saved": time.strftime("%d %b %H:%M"), "saved_at": time.time(),
+                    "report": self.report or {},
+                    "auto": self.auto_result, "layout_applied": self.layout_applied,
+                    "validation": pack_validation(self.validation), "settings": settings}
+            save_session(asset, data)
+            self._refresh_setups()
+        except Exception:
+            traceback.print_exc()
+
+    def _restore_session(self):
+        data = load_session(self.asset)
+        if not data:
+            self.resume_label.setVisible(False)
+            return
+        for name, value in (data.get("settings") or {}).items():
+            w = self._widgets().get(name)
+            if w is None or value is None:
+                continue
+            if isinstance(w, QtWidgets.QLineEdit):
+                w.setText(str(value))
+            else:
+                w.setValue(value)
+        self._update_layout_enabled()
+        exists = cmds.objExists
+        self.report = {cat: {m: n for m, n in items.items() if exists(m)}
+                       for cat, items in (data.get("report") or {}).items()}
+        self.report = {cat: items for cat, items in self.report.items() if items}
+        auto = data.get("auto")
+        if auto and auto.get("rows"):
+            auto["rows"] = [r for r in auto["rows"] if exists(r["mesh"])]
+            auto["tiles"] = [tuple(t) for t in auto.get("tiles", [])]
+            self.auto_result = auto
+        self.layout_applied = data.get("layout_applied")
+        self.validation = unpack_validation(data.get("validation"))
+        self.restored = data
+        self.resume_label.setText("Picked up where you left off (saved %s): %s. Groups, Keep UVs / Hands off "
+                                  "marks and locks come straight from the scene's sets. Re-run Analyse or "
+                                  "Validate if you've edited meshes since." % (data.get("saved", "?"),
+                                                                              session_summary(data)))
+        self.resume_label.setVisible(True)
+        self.set_status("Picked up %s where you left off: %s." % (
+            short_name(self.asset.root_group() or self.asset.name()), session_summary(data)))
+
+    def _refresh_setups(self):
+        assets = SmartUdimAsset.all()
+        self.setup_combo.blockSignals(True)
+        self.setup_combo.clear()
+        current = self.asset.uuid if self.asset is not None else None
+        for a in assets:
+            data = load_session(a)
+            name = short_name(a.root_group() or a.name())
+            text = "%s  -  %s" % (name, session_summary(data)) + (
+                ("  (saved %s)" % data["saved"]) if data.get("saved") else "")
+            self.setup_combo.addItem(text, a.uuid)
+            if a.uuid == current:
+                self.setup_combo.setCurrentIndex(self.setup_combo.count() - 1)
+        if current is None and assets:
+            self.setup_combo.insertItem(0, "Pick a setup to carry on with...", None)
+            self.setup_combo.setCurrentIndex(0)
+        self.setup_combo.blockSignals(False)
+        multi = len(assets) > 1 or (assets and current is None)
+        self.setup_combo.setVisible(bool(multi))
+        self.setup_label.setVisible(bool(multi))
+
+    @ui_safe
+    def _setup_chosen(self, index):
+        uuid = self.setup_combo.itemData(index)
+        if not uuid:
+            return
+        for a in SmartUdimAsset.all():
+            if a.uuid == uuid and (self.asset is None or self.asset.uuid != uuid):
+                self.set_asset(a)
+                return
+
+    @ui_safe
+    def start_fresh(self):
+        asset = self._asset()
+        if asset is None:
+            return
+        save_session(asset, {})
+        self.set_asset(asset, restore=False)
+        self.resume_label.setVisible(False)
+        self.set_status("Starting fresh on %s: saved reports and results cleared (groups, marks, locks and UVs "
+                        "unchanged)." % short_name(asset.root_group() or asset.name()))
+
+    @staticmethod
+    def pick_startup_asset():
+        """The setup to open with: the one saved most recently, else the only one."""
+        assets = SmartUdimAsset.all()
+        if len(assets) == 1:
+            return assets[0]
+        best, best_t = None, 0.0
+        for a in assets:
+            t = load_session(a).get("saved_at") or 0.0
+            if t > best_t:
+                best, best_t = a, t
+        return best
 
     @ui_safe
     def refresh(self):
@@ -6178,6 +6406,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         asset = self._asset()
         if asset is None or not asset.root_group():
             self.snapshot = None
+            self._refresh_setups()
             self.root_label.setText('<span style="color:#8c8c8c">Pick the asset\'s top group</span>')
             self._fill_tree()
             self._fill_naming()
@@ -6185,6 +6414,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 self.set_status("Select the asset's top group and press 'Use Selected Group'.")
             return
         self.snapshot = asset.read()
+        self._refresh_setups()
         self.root_label.setText("<b>%s</b> &nbsp;<span style='color:#8c8c8c'>(%s)</span>" % (
             short_name(self.snapshot["group"]), asset.name()))
         self._fill_tree()
@@ -6502,6 +6732,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             QtWidgets.QApplication.restoreOverrideCursor()
         self._fill_report()
         self.refresh()
+        self._save_session()
         fixed = sum(sum(self.report.get(c, {}).values()) for c in ("lamina", "nonmanifold", "zeroarea"))
         skipped = len(skipped_meshes(self.report))
         warn = sum(len(self.report.get(c, {})) for c in ("ngons", "flipped", "remaining"))
@@ -6596,6 +6827,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.check_tree.clear()
         self.refresh()
         self.plan_layout(quiet=True)  # re-read so the map shows what's in the scene now
+        self._save_session()
         self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
             result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
         self._update_guidance()
@@ -6612,6 +6844,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._fill_check()
+        self._save_session()
         res = self.validation
         problems = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "skip")
         warnings = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "warn")
@@ -6766,6 +6999,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         result["analysed_only"] = True
         self.auto_result = result
         self._fill_auto()
+        self._save_session()
         todo = sum(1 for r in result["rows"] if r["action"] == "will unwrap")
         self.set_status("Analysed %d meshes in %.2fs: %d need unwrapping (worst first in step 6)." % (
             len(result["rows"]), time.time() - t0, todo))
@@ -6793,6 +7027,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_result = result
         self._fill_auto()
         self.refresh()
+        self._save_session()
         rows = result["rows"]
         count = lambda *acts: sum(1 for r in rows if r["action"] in acts)  # noqa: E731
         level = "warn" if count("failed", "check") else "info"
@@ -6815,7 +7050,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _fill_auto(self):
         self.auto_tree.clear()
-        if not self.auto_result:
+        if not self.auto_result:  # nothing analysed yet: still show the marks, read from the sets
+            status = ((self.snapshot or {}).get("status")) or {}
+            for mesh, st in sorted(status.items()):
+                item = QtWidgets.QTreeWidgetItem([short_name(mesh), "-", "-", "not analysed", UV_STATUS_LABELS[st]])
+                item.setData(0, QtCore.Qt.UserRole, mesh)
+                item.setToolTip(0, mesh)
+                item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
+                self.auto_tree.addTopLevelItem(item)
             return
         colors = {"unwrapped": LEVEL_COLORS["fixed"], "kept": LEVEL_COLORS["info"],
                   "check": LEVEL_COLORS["warn"], "kept (check)": LEVEL_COLORS["warn"],
@@ -6856,6 +7098,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self._fill_auto()
         if self._plan is not None:
             self.plan_layout(quiet=True)
+        self._save_session()
         self.set_status("%d mesh(es) marked %s." % (n, UV_STATUS_LABELS[status]))
         self._update_guidance()
 
@@ -6935,22 +7178,36 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._jobs = [
             cmds.scriptJob(event=["Undo", refresh]),
             cmds.scriptJob(event=["Redo", refresh]),
-            cmds.scriptJob(event=["NewSceneOpened", self._on_scene_changed]),
-            cmds.scriptJob(event=["SceneOpened", self._on_scene_changed]),
         ]
         _registry()["jobs"].extend(self._jobs)
+        # New / Open: API scene messages fire during the file command itself
+        # (scriptJob events can wait until Maya idles). Never touch the scene
+        # from inside the callback: just queue the reload on the Qt loop.
+        for msg in (om.MSceneMessage.kAfterNew, om.MSceneMessage.kAfterOpen):
+            cid = om.MSceneMessage.addCallback(msg, lambda *_: self._scene_timer.start())
+            self._callbacks.append(cid)
+            _registry()["callbacks"].append(cid)
 
     def _on_scene_changed(self):
         try:
             self._collected = None
             self._plan = None
-            assets = SmartUdimAsset.all()
-            self.set_asset(assets[0] if len(assets) == 1 else None)
+            self.set_asset(self.pick_startup_asset())
         except Exception:
             traceback.print_exc()
 
     def shutdown(self):
         self._refresh_timer.stop()
+        self._scene_timer.stop()
+        cbs = _registry()["callbacks"]
+        for cid in self._callbacks:
+            try:
+                om.MMessage.removeCallback(cid)
+            except Exception:
+                pass
+            if cid in cbs:
+                cbs.remove(cid)
+        self._callbacks = []
         reg = _registry()["jobs"]
         for job in self._jobs:
             try:

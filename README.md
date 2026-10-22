@@ -173,6 +173,16 @@ density. The actual layout is still being built; see
 
 1. **Pick the root:** select the asset's top group (e.g. `house_GRP`) and
    press **Use Selected Group**.
+   - **Your progress is saved with the scene.** Save the scene, reopen it
+     later (or reopen the toolbox), and Smart UDIM picks up where you left
+     off: the pre-process report, analysis and Auto UV results, the
+     validation report and all your settings.
+   - Groups, Keep UVs / Hands off marks and locks come straight from the
+     scene's sets, as before.
+   - **More than one setup in a scene:** the most recently used one opens;
+     switch between them under **Setups**.
+   - **Start Fresh** forgets the saved reports and results. It leaves
+     groups, marks, locks and UVs alone.
 2. **Scan:** sorts every mesh into sections and material groups.
    - **Material groups:** come from the UnlokRenamer naming
      (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). A variant letter
@@ -343,6 +353,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_validation_handoff.py`: headless validation + hand-off sheet
   tests (breaks shells on purpose and checks each problem is found;
   `--sheet PATH` saves the rendered sheet).
+- `tests/test_session.py`: Smart UDIM's saved progress survives a scene
+  save and reopen, validation round-trips, deleted meshes drop out, and
+  saving adds no undo step.
 - `tests/test_auto_uv_progress.py`: Auto UV progress on a 141-mesh
   building (every stage reports, no unexplained silences, Esc cancels
   cleanly, one Ctrl+Z after a cancel).

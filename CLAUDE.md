@@ -175,6 +175,18 @@
         report.
       - Measured: `u3dLayout` packing is the slowest part on big assets
         (24 s for a 36-piece group at Balanced).
+  - **Saved session** (`save_session`, `load_session`):
+    - The panel's progress is JSON in `unlokUdimSession` on the root set:
+      pre-process report, Auto UV / Analyse result, layout_applied,
+      validation (`pack_validation`: faces as ranges, 500 items per category)
+      and every setting widget (`_widgets()`).
+    - It's written after each step, inside NoUndo.
+    - `set_asset` restores it. `pick_startup_asset` opens the setup saved
+      most recently (`saved_at`).
+    - Scene New / Open use `om.MSceneMessage` kAfterNew / kAfterOpen, which
+      only start a QTimer. scriptJob NewSceneOpened / SceneOpened events
+      didn't reach the panel during a scripted GUI session (the GUI test
+      opens scenes from a script).
   - **UV status** (per mesh, whole meshes only):
     - Stored as membership of two child sets of the root set, roles
       `uvkeep` / `uvhandsoff` (`status_set`, `uv_status`, `set_uv_status`).
