@@ -15058,7 +15058,21 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self._install_jobs()
         clear_rope_previews()  # left over from a toolbox that didn't close cleanly
         self._rebuild_stale()
-        self._sync_from_selection()
+        # no sync here: the panel only previews while it's the tool on screen (showEvent)
+
+    def showEvent(self, event):
+        super(RopeLashingPanel, self).showEvent(event)
+        self._sel_timer.start()
+
+    def hideEvent(self, event):
+        # another tool or tab took over: the preview goes with this panel
+        super(RopeLashingPanel, self).hideEvent(event)
+        self._pin = None
+        self._mode = "idle"
+        try:
+            clear_rope_previews()
+        except Exception:
+            traceback.print_exc()
 
     # ============================================================== layout
     def _build(self):
@@ -15272,6 +15286,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self._pin = {"uuids": [cmds.ls(x, uuid=True)[0] for x in logs], "target": target}
 
     def _sync_from_selection(self):
+        if not self.isVisible():  # another tool is in use: never preview behind its back
+            return
         try:
             ropes, logs, target = rope_selection()
             if ropes:  # show the first selected lashing's settings, like the Channel Box

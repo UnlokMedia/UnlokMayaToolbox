@@ -211,9 +211,11 @@ for stilt shacks, fences and frames.
      selected it ties those (**Lash Selected**); with nothing selected it
      ties the previewed ones (**Lash Preview**). So either select logs, set
      things up and Lash, or preview, deselect, tweak, then Lash.
-   - *Selecting logs previews them straight away* is on by default. Turn it
-     off for big frames, or to click around without moving the preview;
-     **Preview Selected** then puts it on the selected logs.
+   - *Selecting logs previews them straight away* is on by default, but only
+     while Rope Lashing is the tool on screen: opening the toolbox or using
+     another tool never makes a preview, and switching away removes it.
+     Turn it off for big frames, or to click around without moving the
+     preview; **Preview Selected** then puts it on the selected logs.
    - **Clear Preview** removes it. The preview isn't undoable, can't be
      selected and is never saved with the scene. For big frames it shows
      the first 12 lashings (Lash still ties them all).

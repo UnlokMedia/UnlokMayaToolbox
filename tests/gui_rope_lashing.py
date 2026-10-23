@@ -81,14 +81,35 @@ def main():
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), ns)
     import __main__
+
+    # --- opening the toolbox with logs selected must not lash or preview anything
+    cmds.file(new=True, force=True)
+    cmds.select(log("pre_a", move=(0, 1.5, 0)), log("pre_b", rot=(0, 0, 90), move=(0, 2.0, 0.3)))
+    ns["show"]()
+    pump(20)
+    check("opening the toolbox with logs selected makes nothing", not ns["rope_previews"]() and
+          not ns["ropes_in"](), "%d previews" % len(ns["rope_previews"]()))
+
     window = getattr(__main__, ns["REGISTRY_KEY"])["window"]
     panel = [p for p in window.panels() if p.TOOL_NAME == "Rope Lashing"][0]
     names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
     window.tabs.setCurrentIndex(names.index("Modeling"))
     page = window.pages[names.index("Modeling")]
     [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Rope Lashing"][0].click()
-    pump()
+    pump(20)
     check("Rope Lashing panel is in the Modeling tab", panel.isVisible())
+    check("switching to Rope Lashing previews the selected logs", len(ns["rope_previews"]()) == 1)
+    [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Log Noise"][0].click()
+    pump(5)
+    check("switching to another tool removes the preview", not ns["rope_previews"]())
+    window.tabs.setCurrentIndex(names.index("UV"))
+    pump(5)
+    cmds.select(cmds.ls("pre_a", "pre_b", long=True))
+    pump(20)
+    check("selecting logs while another tab is open previews nothing", not ns["rope_previews"]())
+    window.tabs.setCurrentIndex(names.index("Modeling"))
+    [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Rope Lashing"][0].click()
+    pump(20)
 
     cmds.file(new=True, force=True)
     view = cmds.getPanel(type="modelPanel")
