@@ -215,6 +215,31 @@ def run():
     check("Log Noise logs: rope centre never under the bumpy surface", inside == 0 and self_c > 0.75,
           "%d inside, self %.2f" % (inside, self_c))
 
+    # --- live preview: same rope as Lash, not undoable, never saved
+    cmds.file(new=True, force=True)
+    post = log("post", move=(0, 1.5, 0))
+    beam = log("beam", rot=(0, 0, 90), move=(0, 2.0, 0.3))
+    cmds.select(post)
+    rep = tb["show_rope_previews"]([post, beam], {"style": "Smooth tube"})
+    prev = rep["made"]
+    check("preview: one mesh, selection untouched", len(prev) == 1 and cmds.ls(selection=True, long=True) == [post])
+    pv = mesh_fn(tb, prev[0]).numVertices
+    tb["show_rope_previews"]([post, beam], {"style": "Smooth tube", "lashing": "Diagonal"})
+    check("preview: a new setting replaces it", len(tb["rope_previews"]()) == 1 and
+          cmds.getAttr(tb["rope_previews"]()[0] + "." + tb["ROPE_PREVIEW_ATTR"]) == "Diagonal")
+    path = os.path.join(folder, "preview.mb")
+    cmds.file(rename=path)
+    cmds.file(save=True, type="mayaBinary", force=True)
+    cmds.file(new=True, force=True)
+    cmds.file(path, open=True, force=True)
+    check("preview: never saved with the scene", not tb["rope_previews"]() and cmds.objExists("post"))
+    post, beam = cmds.ls("post", long=True)[0], cmds.ls("beam", long=True)[0]
+    tb["show_rope_previews"]([post, beam], {"style": "Smooth tube"})
+    tb["clear_rope_previews"]()
+    rep = tb["lash"]([post, beam], {"style": "Smooth tube"})
+    check("Lash keeps exactly what the preview showed", mesh_fn(tb, rep["made"][0]).numVertices == pv and
+          not tb["rope_previews"]())
+
     # --- presets live in an optionVar
     var = tb["ROPE_PRESET_VAR"]
     old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None

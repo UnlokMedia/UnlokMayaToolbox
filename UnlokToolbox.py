@@ -14681,7 +14681,7 @@ def rope_selection():
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
         if cmds.objectType(node, isAType="shape"):
             node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
-        if not _log_shape(node) or node in ropes or node in logs:
+        if not _log_shape(node) or node in ropes or node in logs or                 cmds.attributeQuery(ROPE_PREVIEW_ATTR, node=node, exists=True):
             continue
         if is_rope(node):
             ropes.append(node)
@@ -14743,8 +14743,14 @@ def _rope_group():
 def _rope_write(xform, path, settings):
     """Put the rope geometry on xform's mesh (API, not undoable: callers
     run it in NoUndo, outside the undo chunk)."""
-    pts, counts, conn, us, vs, uvi = rope_mesh(path, settings)
     shape = _log_shape(xform)
+    count = _rope_fill(shape, rope_mesh(path, settings))
+    cmds.setAttr(shape + "." + ROPE_VERTS, count)
+    return count
+
+
+def _rope_fill(shape, mesh):
+    pts, counts, conn, us, vs, uvi = mesh
     dag = get_dag_path(shape)
     mat = dag.inclusiveMatrix()
     if mat.isEquivalent(om.MMatrix()):
@@ -14762,7 +14768,6 @@ def _rope_write(xform, path, settings):
     fn.setEdgeSmoothings(list(range(ne)), [True] * ne)
     fn.cleanupEdgeSmoothing()
     fn.updateSurface()
-    cmds.setAttr(shape + "." + ROPE_VERTS, len(pts))
     return len(pts)
 
 
@@ -14779,7 +14784,8 @@ def _rope_poles(data):
 def lash(logs, settings=None, target=None, select=False, progress=None):
     """Lash logs together (one Ctrl+Z). Two logs: lashed whatever the gap.
     More: every pair that touches or crosses. Each lashing gets its own
-    random seed unless settings has one. select: select the new lashings
+    seed (the same for the same pair of logs, as in the preview) unless
+    settings has one. select: select the new lashings
     (inside the same undo step). Returns {"made", "skipped", "kinds"}.
     With a Progress, Esc rolls everything back."""
     try:
@@ -14789,7 +14795,17 @@ def lash(logs, settings=None, target=None, select=False, progress=None):
         raise
 
 
-def _lash(logs, settings, target, select, progress):
+def _rope_pair_seed(a, b):
+    """A seed that stays put for a pair of logs, so a preview and the
+    lashing it turns into wobble the same way."""
+    text = "|".join(sorted((short_name(a), short_name(b))))
+    return sum((i + 1) * ord(c) for i, c in enumerate(text)) % 9999 + 1
+
+
+def _rope_plan(logs, settings, target, progress=None, limit=None):
+    """Work out every lashing for logs (pure maths plus ray casts): the
+    pairs, their paths and settings. Returns (built, report) with built
+    [(path, settings)]; limit stops after that many lashings."""
     s = dict(ROPE_DEFAULTS)
     s.update(settings or {})
     report = {"made": [], "skipped": [], "kinds": {}}
@@ -14800,33 +14816,45 @@ def _lash(logs, settings, target, select, progress):
         except ValueError as exc:
             report["skipped"].append((short_name(x), str(exc)))
     if len(poles) < 2:
-        return report
+        return [], report
     if len(poles) == 2:
         pairs = [(0, 1)]
     else:
         pairs, far = rope_pairs(poles)
         report["skipped"] += [("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)), why)
                               for i, j, why in far]
+    report["pairs"] = len(pairs)
+    if limit is not None:
+        pairs = pairs[:limit]
     if progress:
         progress.stage("ties", len(pairs), "Tying")
     built = []
     for i, j in pairs:
+        label = "%s + %s" % (short_name(poles[i].node), short_name(poles[j].node))
         if progress:
-            progress.item("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)))
+            progress.item(label)
         one = dict(s)
         if not s.get("seed"):
-            one["seed"] = random.randint(1, 9999)
+            one["seed"] = _rope_pair_seed(poles[i].node, poles[j].node)
         try:
             path = rope_path([poles[i], poles[j]], one, target if len(poles) == 2 else None)
         except ValueError as exc:
-            report["skipped"].append(("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)), str(exc)))
+            report["skipped"].append((label, str(exc)))
             continue
         built.append((path, one))
+        report["kinds"][path["kind"]] = report["kinds"].get(path["kind"], 0) + 1
         J = path["joint"]
         if J["gap"] > min(J["rA"], J["rB"]):
-            report.setdefault("far", []).append("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)))
+            report.setdefault("far", []).append(label)
+    return built, report
+
+
+def _lash(logs, settings, target, select, progress):
+    built, report = _rope_plan(logs, settings, target, progress)
+    report["kinds"] = {}
     if not built:
         return report
+    two = len(logs) == 2
     made = []
     with UndoChunk("Rope Lashing"):
         group = _rope_group()
@@ -14839,7 +14867,7 @@ def _lash(logs, settings, target, select, progress):
             cmds.addAttr(shape, longName=ROPE_VERTS, attributeType="long", defaultValue=0)
             data = dict(one)
             data["poles"] = [cmds.ls(p, uuid=True)[0] for p in path["poles"]]
-            data["target"] = list(target) if target is not None and len(poles) == 2 else None
+            data["target"] = list(target) if target is not None and two else None
             data["kind"] = path["kind"]
             cmds.setAttr(shape + "." + ROPE_SETTINGS, json.dumps(data, sort_keys=True), type="string")
             made.append((node, path, one))
@@ -14851,6 +14879,58 @@ def _lash(logs, settings, target, select, progress):
             cmds.xform(node, centerPivots=True)
             report["made"].append(node)
             report["kinds"][path["kind"]] = report["kinds"].get(path["kind"], 0) + 1
+    return report
+
+
+ROPE_PREVIEW_ATTR = "unlokRopePreview"  # tag on preview transforms
+ROPE_PREVIEW_MAX = 12  # lashings shown at once in a live preview
+
+
+def rope_previews():
+    return [x for x in cmds.ls("*.%s" % ROPE_PREVIEW_ATTR, objectsOnly=True, long=True) or []
+            if cmds.objExists(x)]
+
+
+def clear_rope_previews():
+    found = rope_previews()
+    if found:
+        with NoUndo():
+            cmds.delete(found)
+    return len(found)
+
+
+def show_rope_previews(logs, settings=None, target=None, limit=ROPE_PREVIEW_MAX):
+    """Live preview: the lashings Lash would tie on logs, as meshes that
+    aren't undoable, can't be selected, are never saved with the scene and
+    leave the selection alone. Replaces any earlier preview. Returns the
+    plan's report ("made": the preview nodes, "pairs": all pairs found)."""
+    built, report = _rope_plan(logs, settings, target, limit=limit)
+    clear_rope_previews()
+    with NoUndo():
+        for path, one in built:
+            mod = om.MDagModifier()
+            xobj = mod.createNode("transform")
+            mod.renameNode(xobj, "ropeLashPreview1")
+            mod.doIt()
+            pts, counts, conn, us, vs, uvi = rope_mesh(path, one)
+            fn = om.MFnMesh()
+            sobj = fn.create(om.MPointArray(pts), counts, conn, us, vs, xobj)
+            fn.assignUVs(counts, uvi)
+            ne = fn.numEdges
+            fn.setEdgeSmoothings(list(range(ne)), [True] * ne)
+            fn.cleanupEdgeSmoothing()
+            fn.updateSurface()
+            for obj in (xobj, sobj):
+                om.MFnDependencyNode(obj).setDoNotWrite(True)  # never saved with the scene
+            xform = long_name(om.MDagPath.getAPathTo(xobj).fullPathName())
+            shape = om.MDagPath.getAPathTo(sobj).fullPathName()
+            cmds.addAttr(xform, longName=ROPE_PREVIEW_ATTR, dataType="string")
+            cmds.setAttr(xform + "." + ROPE_PREVIEW_ATTR, path["kind"], type="string")
+            cmds.setAttr(xform + ".hiddenInOutliner", True)
+            cmds.setAttr(xform + ".overrideEnabled", True)
+            cmds.setAttr(xform + ".overrideDisplayType", 2)  # reference: shaded, not selectable
+            cmds.sets(shape, edit=True, forceElement="initialShadingGroup")
+            report["made"].append(xform)
     return report
 
 
@@ -14959,6 +15039,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
         super(RopeLashingPanel, self).__init__(parent)
         self._jobs = []
         self._pending = set()
+        self._mode = "idle"  # idle / preview (logs selected, live) / edit (lashings selected)
+        self._preview = {}  # the last preview's report (its kinds go in the banner)
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
@@ -14973,6 +15055,7 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
         self._build()
         self._install_jobs()
+        clear_rope_previews()  # left over from a toolbox that didn't close cleanly
         self._rebuild_stale()
         self._sync_from_selection()
 
@@ -14997,32 +15080,47 @@ class RopeLashingPanel(QtWidgets.QWidget):
         # ---- 1. select
         card = self.step_select = StepCard(1, "Select logs", "Two logs that touch or cross, or a whole frame "
                                                              "(every touching pair gets its own lashing). Logs side "
-                                                             "by side: also pick a vertex to say where.")
+                                                             "by side: also pick a vertex to say where. Select a "
+                                                             "lashing instead to edit it.")
         self.sel_label = hint_label("")
         card.add(self.sel_label)
         col.addWidget(card)
 
-        # ---- 2. lash
-        card = self.step_lash = StepCard(2, "Lash", "Auto picks the lashing from the angle: Square across, "
-                                                    "Diagonal at a slant, Round side by side.")
-        grid = Section("", header=False)
-        self.f["lashing"] = ComboField(ROPE_LASHINGS)
-        grid.add_row("Lashing", self.f["lashing"],
-                     "Square: wraps in front of the crossbar and behind the upright, then fraps.\n"
-                     "Diagonal: wraps on one diagonal, then the other (crossings that don't touch, X braces).\n"
-                     "Round: tight wraps around two logs side by side. Sheer: adds fraps between them "
-                     "(A-frames).\nBands: plain wraps, no knots (background).")
-        card.add(grid)
-        self.lash_btn = primary_button("Lash Selected")
-        self.lash_btn.setMinimumHeight(28)
-        self.lash_btn.setToolTip("Tie the selected logs with the settings below. One Ctrl+Z undoes it.")
-        self.lash_btn.clicked.connect(lambda *_: self.lash())
-        card.add(self.lash_btn)
-        col.addWidget(card)
-
-        # ---- 3. rope
-        card = self.step_rope = StepCard(3, "Rope", "Edits the selected lashings live. Select several to change "
-                                                    "them together.")
+        # ---- 2. lashing and rope: everything here shows live
+        card = self.step_rope = StepCard(2, "Lashing and rope", "Every change shows straight away: on the "
+                                                                "preview, or on the selected lashings.")
+        prow = QtWidgets.QWidget()
+        pl = QtWidgets.QHBoxLayout(prow)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(4)
+        plabel = QtWidgets.QLabel("Preset")
+        plabel.setMinimumWidth(92)
+        self.preset_combo = _Combo()
+        _guard_focus(self.preset_combo)
+        self.preset_combo.setToolTip("Pick a preset to load it (onto the preview or the selected lashings).")
+        self.preset_combo.activated.connect(lambda *_: self.load_preset())
+        save = secondary_button("Save...", "Keep the current settings as a preset of your own (kept in Maya's "
+                                           "preferences, for every scene).")
+        save.clicked.connect(lambda *_: self.save_preset())
+        delete = secondary_button("Delete", "Remove the chosen preset (your own presets only).")
+        delete.clicked.connect(lambda *_: self.delete_preset())
+        pl.addWidget(plabel)
+        pl.addWidget(self.preset_combo, 1)
+        pl.addWidget(save)
+        pl.addWidget(delete)
+        card.add(prow)
+        self._fill_presets()
+        card.add(hint_label("Lashing"))
+        self.f["lashing"] = SegmentField(ROPE_LASHINGS)
+        self.f["lashing"].setToolTip(
+            "Auto: from the angle (Square across, Diagonal at a slant, Round side by side).\n"
+            "Square: wraps in front of the crossbar and behind the upright, then fraps.\n"
+            "Diagonal: wraps on one diagonal, then the other (X braces).\n"
+            "Round: tight wraps around two logs side by side.\n"
+            "Sheer: wraps, then fraps between the legs (A-frames).\n"
+            "Bands: plain wraps, no knots (background).")
+        card.add(self.f["lashing"])
+        card.add(hint_label("Rope"))
         self.f["style"] = SegmentField(ROPE_STYLES)
         self.f["style"].setToolTip("3 strands: real laid rope, for close-ups (heaviest).\nTwisted: one tube "
                                    "shaped like laid rope (the all-rounder).\nSmooth tube: lightest, for the "
@@ -15055,8 +15153,9 @@ class RopeLashingPanel(QtWidgets.QWidget):
         seed_label = QtWidgets.QLabel("Seed")
         seed_label.setMinimumWidth(92)
         self.f["seed"] = IntField(0, 99999, 0, 9999)
-        self.f["seed"].setToolTip("Typing a seed gives every selected lashing that seed.")
-        rand = secondary_button("Randomize", "A new random wobble for each selected lashing.")
+        self.f["seed"].spin.setSpecialValueText("Auto")
+        self.f["seed"].setToolTip("The wobble's random seed. Auto: each pair of logs keeps its own.")
+        rand = secondary_button("Randomize", "A new random wobble (each selected lashing gets its own).")
         rand.clicked.connect(lambda *_: self.randomize())
         sl.addWidget(seed_label)
         sl.addWidget(self.f["seed"], 1)
@@ -15083,28 +15182,30 @@ class RopeLashingPanel(QtWidgets.QWidget):
             widget.changed.connect(lambda k=key: self._queue(k))
         col.addWidget(card)
 
-        # ---- 4. presets
-        card = self.step_presets = StepCard(4, "Presets", "Load one before Lash, or onto selected lashings. "
-                                                          "Your own presets are kept in Maya's preferences.")
-        self.preset_combo = _Combo()
-        _guard_focus(self.preset_combo)
-        card.add(self.preset_combo)
-        load = secondary_button("Load", "Put the preset's settings in the fields (and on the selected lashings).")
-        load.clicked.connect(lambda *_: self.load_preset())
-        save = secondary_button("Save As...", "Keep the current settings as a preset of your own.")
-        save.clicked.connect(lambda *_: self.save_preset())
-        delete = secondary_button("Delete", "Remove one of your own presets.")
-        delete.clicked.connect(lambda *_: self.delete_preset())
-        card.add(button_row(load, save, delete))
+        # ---- 3. lash
+        card = self.step_lash = StepCard(3, "Lash", "Keeps what the preview shows as real lashings. One Ctrl+Z "
+                                                    "undoes it.")
+        self.live = CheckField("Live preview on the selected logs")
+        self.live.setValue(True)
+        self.live.setToolTip("Show the lashing on the selected logs while you pick the settings (nothing is kept "
+                             "until Lash Selected). Turn off for big frames if it gets slow.")
+        self.live.changed.connect(lambda: self._sync_from_selection())
+        card.add(self.live)
+        self.lash_btn = primary_button("Lash Selected")
+        self.lash_btn.setMinimumHeight(28)
+        self.lash_btn.setToolTip("Tie the selected logs with the settings above. One Ctrl+Z undoes it.")
+        self.lash_btn.clicked.connect(lambda *_: self.lash())
+        card.add(self.lash_btn)
         col.addWidget(card)
-        self._fill_presets()
 
-        # ---- 5. finish
-        card = self.step_finish = StepCard(5, "Finish", "Refit after moving logs. Bake keeps the mesh and forgets "
-                                                        "the settings.")
+        # ---- 4. finish
+        card = self.step_finish = StepCard(4, "Finish", "Refit to Logs re-ties lashings after their logs moved "
+                                                        "(each keeps its own settings). Bake keeps the mesh and "
+                                                        "forgets the settings.")
         pick = secondary_button("Select Lashings", "Select the lashings tied to the selected logs (or all of them).")
         pick.clicked.connect(lambda *_: self.select_ropes())
-        refit = secondary_button("Refit", "Re-tie the selected lashings to their logs as they are now.")
+        refit = secondary_button("Refit to Logs", "Re-tie the selected lashings (or all) to their logs as they are "
+                                                  "now. Settings don't change: edit them in step 2.")
         refit.clicked.connect(lambda *_: self.refit())
         bake = secondary_button("Bake", "Keep the selected lashings as plain meshes (one Ctrl+Z).")
         bake.clicked.connect(lambda *_: self.bake())
@@ -15151,9 +15252,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
             if len(logs) == 2:
                 try:
                     J = rope_joint(RopePole(logs[0]), RopePole(logs[1]), target)
-                    kind = rope_lashing_kind(self._settings(), J["angle"])
                     rmin = min(J["rA"], J["rB"])
-                    text = "2 logs at %.0f\u00b0: %s lashing." % (J["angle"], kind)
+                    text = "2 logs at %.0f deg." % J["angle"]
                     if J["gap"] > rmin:
                         text += " They're %.1f radii apart: the rope will span the gap." % (J["gap"] / rmin)
                 except ValueError as exc:
@@ -15168,20 +15268,64 @@ class RopeLashingPanel(QtWidgets.QWidget):
                 text = (text + " %d lashing(s) selected." % len(ropes)).strip()
             self.sel_label.setText(text)
             ready = len(logs) >= 2
-            self.step_select.set_state("done" if ready or ropes else "current")
-            self.step_lash.set_state("current" if ready else "todo")
-            self.step_rope.set_state("current" if ropes else "todo")
-            self.step_presets.set_state("todo")
-            self.step_finish.set_state("todo")
-            if ready:
-                self.next_banner.set_text("Pick a preset or style if you like, then press <b>Lash Selected</b>.")
-            elif ropes:
-                self.next_banner.set_text("Tweak the selected lashings in step 3 (live). <b>Refit</b> after moving "
-                                          "their logs.")
+            if ropes:
+                mode = "edit"
+            elif ready and self.live.value():
+                mode = "preview"
             else:
-                self.next_banner.set_text("Select two logs that touch or cross (or a whole frame of them).")
+                mode = "idle"
+            self._mode = mode
+            if mode == "preview":
+                self._refresh_preview()
+            elif clear_rope_previews():
+                self.set_status("Preview cleared.")
+            self.step_select.set_state("done" if ready or ropes else "current")
+            self.step_rope.set_state("current" if mode != "idle" else ("done" if ready else "todo"))
+            self.step_lash.set_state("current" if ready else "todo")
+            self.step_finish.set_state("todo")
+            self._update_banner()
         except Exception:
             traceback.print_exc()
+
+    def _update_banner(self):
+        ropes, logs, _ = rope_selection()
+        if self._mode == "edit":
+            self.next_banner.set_text("Changes in step 2 apply straight away to the %d selected lashing(s). "
+                                      "<b>Refit to Logs</b> after moving their logs." % len(ropes),
+                                      tag="EDITING", tone="active")
+        elif self._mode == "preview":
+            kinds = ", ".join(sorted(self._preview.get("kinds", {}))) or "No"
+            self.next_banner.set_text("<b>%s</b> lashing shown on the selected logs. Click the lashing types and "
+                                      "rope styles to compare, then <b>Lash Selected</b> to keep it." % kinds,
+                                      tag="PREVIEW", tone="active")
+        elif len(logs) >= 2:
+            self.next_banner.set_text("Set up the lashing in step 2, then press <b>Lash Selected</b>.")
+        else:
+            self.next_banner.set_text("Select two logs that touch or cross (or a whole frame of them), or a "
+                                      "lashing to edit.")
+
+    def _refresh_preview(self):
+        """Re-draw the preview for the selected logs with the current fields."""
+        logs, target = rope_selection()[1:]
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = show_rope_previews(logs, self._settings(), target)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._preview = report
+        shown = len(report["made"])
+        if not shown:
+            why = report["skipped"][0][1] if report["skipped"] else "no logs touch or cross"
+            self.set_status("Nothing to preview (%s)." % why, level="warn")
+        else:
+            msg = "Preview: %d lashing(s) in %.2fs." % (shown, time.time() - t0)
+            level = "info"
+            if report.get("pairs", shown) > shown:
+                msg += " Showing the first %d of %d: Lash Selected ties them all." % (shown, report["pairs"])
+                level = "warn"
+            self.set_status(msg, level)
+        self._update_banner()
 
     # ============================================================= actions
     def _queue(self, key):
@@ -15191,8 +15335,13 @@ class RopeLashingPanel(QtWidgets.QWidget):
     @ui_safe
     def _apply_pending(self):
         keys, self._pending = self._pending, set()
+        if not keys:
+            return
+        if self._mode == "preview":
+            self._refresh_preview()
+            return
         ropes = rope_selection()[0]
-        if not keys or not ropes:
+        if not ropes:
             return
         values = self._settings()
         change = {k: values[k] for k in keys}
@@ -15221,14 +15370,14 @@ class RopeLashingPanel(QtWidgets.QWidget):
         if len(logs) < 2:
             self.set_status("Select at least two logs (mesh objects) first.", level="warn")
             return
-        s = self._settings()
-        s.pop("seed")
+        clear_rope_previews()
         t0 = time.time()
         try:
             with Progress("Rope Lashing", [("ties", 1)], status_progress(self.status)) as pr:
-                report = lash(logs, s, target, select=True, progress=pr)
+                report = lash(logs, self._settings(), target, select=True, progress=pr)
         except Cancelled:
             self.set_status("Cancelled: nothing was changed.", level="warn")
+            self._sync_from_selection()
             return
         made = report["made"]
         if not made:
@@ -15248,9 +15397,13 @@ class RopeLashingPanel(QtWidgets.QWidget):
 
     @ui_safe
     def randomize(self):
+        if self._mode == "preview":
+            self.f["seed"].setValue(random.randint(1, 9999))
+            self._refresh_preview()
+            return
         ropes = rope_selection()[0]
         if not ropes:
-            self.set_status("Select lashings to re-seed.", level="warn")
+            self.set_status("Select logs (preview) or lashings to re-seed.", level="warn")
             return
         t0 = time.time()
         report = update_ropes({x: {"seed": random.randint(1, 9999)} for x in ropes})
@@ -15294,13 +15447,16 @@ class RopeLashingPanel(QtWidgets.QWidget):
             return
         s["seed"] = self.f["seed"].value()
         self._show(s)
+        if self._mode == "preview":
+            self._refresh_preview()
+            return
         ropes = rope_selection()[0]
         if ropes:
             t0 = time.time()
             keys = [k for k in ROPE_KEYS if k != "seed"]
             self._report_update(update_ropes({x: {k: s[k] for k in keys} for x in ropes}), "'%s' on" % name, t0)
         else:
-            self.set_status("Loaded '%s'. Select logs and Lash." % name)
+            self.set_status("Loaded '%s'. Select logs to see it." % name)
 
     @ui_safe
     def save_preset(self):
@@ -15344,6 +15500,10 @@ class RopeLashingPanel(QtWidgets.QWidget):
     def shutdown(self):
         for timer in (self._sel_timer, self._edit_timer, self._redo_timer):
             timer.stop()
+        try:
+            clear_rope_previews()
+        except Exception:
+            traceback.print_exc()
         reg = _registry()["jobs"]
         for job in self._jobs:
             try:

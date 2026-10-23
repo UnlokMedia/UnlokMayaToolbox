@@ -182,6 +182,12 @@
     `createInPlace` in NoUndo. A redo brings the plane back, and the
     panel's Redo scriptJob runs `rebuild_stale_ropes` (4 verts / 1 face and
     `unlokRopeVerts` != 4). Live edits are NoUndo, like Log Noise.
+  - **Live preview** (`show_rope_previews`): with logs selected, the panel
+    shows what Lash would make. Same `_rope_plan` as `lash` (seeds come
+    from `_rope_pair_seed`, so preview and result match). Meshes are made
+    through the API in NoUndo, `setDoNotWrite`, reference display (not
+    selectable) and tagged `unlokRopePreview`; the selection never changes,
+    so no SelectionChanged loop. `lash` and leaving preview mode clear them.
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
 - **Smart UDIM** (UV tab):

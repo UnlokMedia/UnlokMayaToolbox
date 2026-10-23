@@ -172,36 +172,46 @@ for stilt shacks, fences and frames.
 1. **Select** two logs that touch or cross. Select a whole frame instead and
    every pair that touches or crosses gets its own lashing (pairs that only
    meet at a log's end are skipped). For logs side by side, also select a
-   vertex or edge to say where along them the lashing goes.
-2. **Lash Selected** (one Ctrl+Z). *Auto* picks the lashing from the angle:
-   - **Square** (crossing near 90 degrees): clove hitch on the upright,
-     3 wraps in front of the crossbar and behind the upright, 2 frapping
-     turns between the logs, clove hitch on the crossbar.
-   - **Diagonal** (crossing at a slant, X braces): a hitch around both logs,
-     3 wraps on each diagonal, 2 fraps, clove hitch.
-   - **Round** (side by side): clove hitch around both, 7 tight wraps,
-     clove hitch.
-   - **Sheer** (A-frames): wraps, then fraps between the legs, with a hitch
-     on each leg (when the legs touch there's no room between them, so the
-     hitches go around both and there are no fraps).
-   - **Bands:** plain wraps, no knots (background).
-3. **Rope** (live on the selected lashings):
-   - **Style:** *3 strands* is real laid rope for close-ups; *Twisted* is one
+   vertex or edge to say where along them the lashing goes. Select an
+   existing lashing to edit it.
+2. **Lashing and rope:** everything here shows straight away. With logs
+   selected and *Live preview* on, a preview lashing appears on them (the
+   banner says **PREVIEW**) and follows every click, so you can flip
+   between lashing types and rope styles to compare. With lashings
+   selected, the same controls edit them live (the banner says
+   **EDITING**).
+   - **Preset:** picking one loads it. Built in: Standard, Hero
+     (close-ups), Background (light), Thin twine and Heavy rope.
+     **Save...** keeps your own in Maya's preferences (an optionVar, so no
+     files), ready for any scene.
+   - **Lashing** (one click each). *Auto* picks from the angle:
+     - **Square** (crossing near 90 degrees): clove hitch on the upright,
+       3 wraps in front of the crossbar and behind the upright, 2 frapping
+       turns between the logs, clove hitch on the crossbar.
+     - **Diagonal** (crossing at a slant, X braces): a hitch around both
+       logs, 3 wraps on each diagonal, 2 fraps, clove hitch.
+     - **Round** (side by side): clove hitch around both, 7 tight wraps,
+       clove hitch.
+     - **Sheer** (A-frames): wraps, then fraps between the legs, with a
+       hitch on each leg (when the legs touch there's no room between them,
+       so the hitches go around both and there are no fraps).
+     - **Bands:** plain wraps, no knots (background).
+   - **Rope:** *3 strands* is real laid rope for close-ups; *Twisted* is one
      tube shaped like laid rope (the all-rounder); *Smooth tube* is the
      light background version.
    - **Thickness** is relative to the thinner log, so a preset suits any log
-     size.
-   - Wraps, Fraps (Auto follows the recipes above), clove hitches on / off,
-     Tails (the cut ends), Wobble and Seed.
+     size. Wraps, Fraps (Auto follows the recipes above), clove hitches on /
+     off, Tails (the cut ends), Wobble and Seed (Auto: each pair of logs
+     keeps its own, so the preview and the result match).
    - Advanced: Bite (how far it presses into the wood), Sides, Segment
      length and Lay (how tight the strands twist).
-4. **Presets:** built-in Standard, Hero (close-ups), Background (light),
-   Thin twine and Heavy rope. **Save As...** keeps your own in Maya's
-   preferences (an optionVar, so no files), ready for any scene. Load one
-   before Lash, or onto selected lashings.
-5. **Finish:** **Refit** re-ties lashings to logs you've moved. **Bake**
-   keeps the mesh and forgets the settings. **Select Lashings** finds the
-   ones tied to the selected logs.
+3. **Lash Selected** keeps exactly what the preview showed (one Ctrl+Z). The
+   preview itself isn't undoable, can't be selected and is never saved with
+   the scene. For big frames it shows the first 12 lashings; turn *Live
+   preview* off if it gets slow.
+4. **Finish:** **Refit to Logs** re-ties lashings to logs you've moved (each
+   keeps its own settings). **Bake** keeps the mesh and forgets the
+   settings. **Select Lashings** finds the ones tied to the selected logs.
 
 How it stays accurate:
 - The rope is pressed onto each log's real surface (ray casts), so bent,

@@ -103,9 +103,29 @@ def main():
     cmds.select(post, beam)
     pump()
     panel._sync_from_selection()
-    check("selecting two logs says which lashing", "Square" in panel.sel_label.text(), panel.sel_label.text())
-    check("NEXT banner asks to Lash", "Lash Selected" in panel.next_banner.text.text(),
-          panel.next_banner.text.text())
+    pump()
+    previews = ns["rope_previews"]()
+    check("selecting two logs shows a live preview", len(previews) == 1 and
+          panel.next_banner.tag.text() == "PREVIEW" and "Square" in panel.next_banner.text.text(),
+          "%d previews | %s" % (len(previews), panel.next_banner.text.text()))
+    check("the preview leaves the selection alone", sorted(cmds.ls(selection=True, long=True)) == sorted([post, beam]),
+          str(cmds.ls(selection=True)))
+    check("the preview can't be picked or saved", previews and
+          cmds.getAttr(previews[0] + ".overrideDisplayType") == 2)
+    for i, kind in enumerate(("Diagonal", "Bands", "Square")):
+        panel.f["lashing"].buttons[kind].click()
+        panel._apply_pending()
+        pump()
+        shown = [cmds.getAttr(x + "." + ns["ROPE_PREVIEW_ATTR"]) for x in ns["rope_previews"]()]
+        check("clicking %s re-draws the preview" % kind, shown == [kind], str(shown))
+        frame_on(ns["rope_previews"]()[0], persp)
+        cmds.select(post, beam)
+        snap("00_preview_%d_%s.png" % (i, kind))
+    panel.f["lashing"].buttons["Auto"].click()
+    panel._apply_pending()
+    pump()
+    n_preview = verts(ns["rope_previews"]()[0])
+    window.grab().save(os.path.join(OUT, "00_panel_preview.png"))
 
     panel.lash()
     pump()
@@ -114,8 +134,10 @@ def main():
     check("status reports the lashing", "Tied 1 lashing" in panel.status.text(), panel.status.text())
     rope = ropes[0]
     panel._sync_from_selection()
-    check("the new lashing is selected, step 3 is current", panel.step_rope.state == "current",
-          panel.next_banner.text.text())
+    check("the new lashing is selected and being edited", panel.step_rope.state == "current" and
+          panel.next_banner.tag.text() == "EDITING", panel.next_banner.text.text())
+    check("Lash keeps exactly what the preview showed", verts(rope) == n_preview and not ns["rope_previews"](),
+          "%d vs %d verts" % (verts(rope), n_preview))
     frame_on(rope, persp)
     snap("01_square_twisted.png")
     frame_on(rope, persp, direction=(0.001, 0.001, 1.0))
@@ -205,7 +227,14 @@ def main():
     frame_on(made[0], persp)
     snap("06_frame_closeup.png")
 
+    cmds.select(logs[0], logs[4])
+    panel.live.setValue(False)
+    panel._sync_from_selection()
+    check("Live preview off: no preview", not ns["rope_previews"]() and panel.next_banner.tag.text() == "NEXT")
+    panel.live.setValue(True)
     cmds.select(clear=True)
+    panel._sync_from_selection()
+    check("deselecting clears the preview", not ns["rope_previews"]())
     panel.lash()
     check("no selection gives a warning", "Select" in panel.status.text(), panel.status.text())
 
