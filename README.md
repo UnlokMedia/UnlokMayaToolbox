@@ -283,6 +283,84 @@ that fill 0..1 at one texel density, with no overlaps. Ropes are named
 tube, 0.5 s twisted and 0.8 s in 3 strands. A frame of 8 joints takes about
 2 to 5 s.
 
+### Modeling > Thatch Roof
+
+Thatched roofs from a box: the right shape for a cottage, barn, shed or
+roundhouse, built the way thatch is laid, with stacked UVs for straw
+textures.
+
+1. **Box:** press **Create Box**. With the building selected, the box sits
+   on top of it (footprint = the building, bottom on its top); otherwise
+   it's a 6 x 3 x 4 m box at the origin. Move, rotate and scale it to the
+   roof: the footprint is the wall tops, the bottom is the eave line and
+   the top is the ridge. It's a wireframe that never renders. Any mesh works
+   as a box (its bounding box).
+2. **Make Roof** (one Ctrl+Z) thatches the selected box. From then on the
+   roof **follows its box**: move or scale the box and the roof rebuilds a
+   moment after you stop (undoing the move puts it back). Selecting the
+   roof or its box puts the roof on the panel (the banner says
+   **EDITING**); it stays there when you deselect it, so you can look at it
+   and keep tweaking.
+3. **Roof shape** (live):
+   - **Preset:** Cottage (hipped), Gabled cottage, Half-hipped, Tiered,
+     Roundhouse, Lean-to shed. Presets set the shape; how the straw is made
+     (step 4) stays.
+   - **Ridge** (two slopes), **Lean-to** (one slope, high along the box's -
+     side) or **Cone** (round, elliptical in a long box: use a square box
+     over a round wall).
+   - **+ end / - end:** **Gable** (flat, upright), **Hip** (slopes in) or
+     **Half-hip** (upright below, hipped near the top). *Hip pitch* makes
+     hips steeper or shallower than the sides; *Half-hip at* sets where the
+     half-hip starts. *Ridge along* picks the ridge's direction (Auto: the
+     box's longer side).
+   - **Overhang, Thickness, Softness** (how round the ridge and hips are),
+     **Sag** (old thatch dips; below 0 it bellies out) and **Lumps**.
+   - **Levels:** tiers from the eaves to the ridge cap; each level's bottom
+     edge stands proud of the one below by *Level lip*. One level is a plain
+     roof with a rounded eave lip.
+   - **Ridge cap:** *Top depth* (how far down it reaches; 0 = none), *Cap
+     thickness*, and the cut of its lower edge: **Straight**, **Scallops**
+     or **Points**, with their size and depth.
+   - Sizes are fractions of the roof's span (its width across the ridge), so
+     settings and presets suit any roof size; tooltips give real-world
+     figures for a 5 m span.
+4. **Thatch:**
+   - **Surface:** one closed, displaced mesh with straw grooves running down
+     every face (fanning round the hips), lightest to render. *Strands* and
+     *Strand width* set the grooves; *Resolution* (grid points across the
+     span) sets the detail.
+   - **Planes:** straw cards for an alpha-mapped straw texture, laid up the
+     slope over an **underlay** (a plain thatch shell, its own mesh for its
+     own material), each lifted at its butt and tucked in at its top so the
+     course above covers it. The bottom course hangs over the eaves.
+   - **3D Pieces:** little tapered bundles with a cut butt end, for
+     close-ups.
+   - Pieces: *Density* (1 covers the roof about three deep), *Width*,
+     *Length*, *Messiness* (random turn, roll and size), *Lift*, *Bend*,
+     *Segments*; 3D pieces also *Sides* and *Flatness*.
+   - **UV stacks:** every plane / piece has the same UVs (planes fill 0..1;
+     3D pieces have the body in the left 78% and the butt in the corner).
+     With 2+ *Stacks* each piece picks one at random, in **UDIM tiles**
+     (stack 1 in 1001, stack 2 in 1002...) or **Atlas columns** (side by
+     side in 0..1), so two or three straw textures mix across the roof.
+     *Mirror half the pieces* flips the texture on about half of them (the
+     UVs are mirrored: fine for colour, careful with normal maps).
+   - *Seed* / **Randomize** for the lumps, straw and pieces.
+5. **Finish:** **Select Box**, **Rebuild** (from the box as it is now: handy
+   after editing the box's vertices) and **Bake** (one Ctrl+Z): the roof
+   stays as plain meshes and the box goes.
+
+Roofs are `thatchRoof0001_GRP` holding `strawThatch_C_thatchRoof0001_GEP`
+(the surface, or the planes / pieces) and `strawUnderlay_C_thatchRoof0001_GEP`
+(hidden for a surface), next to the box. **With Smart UDIM:** the surface and
+the underlay are marked **Keep UVs** when scanned; stacked planes and pieces
+are marked **Hands off**, since laying them out would unstack them (their
+stack tiles are kept free). Marking one Auto yourself sticks.
+
+**Speed:** on a 6 x 4 m roof at the defaults, a surface takes about 0.6 s
+(56,000 faces), planes 1 s (3,500 planes) and 3D pieces 1.4 s (92,000
+faces). Lower *Resolution* while you shape the roof if edits feel slow.
+
 ### UV > Smart UDIM (in progress)
 
 **Finding your way:** only the step you're on stays open (plus any step
@@ -735,6 +813,16 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/gui_rope_lashing.py`: drives the Rope Lashing panel in a real Maya
   session and saves close-ups to `tests/_out/rope_lashing`. Launch it like
   the smoke test below, with `tests/run_gui_rope_lashing.mel`.
+- `tests/test_thatch_roof.py`: headless Thatch Roof tests. Every roof shape
+  and end type in each style: closed shells facing out, the roof on its box,
+  UVs (0..1 for the surface, stacks in their tiles / columns), undo / redo
+  (with the rebuild), save / reopen, live edits, following the box, bake,
+  the Smart UDIM marks and speed.
+- `tests/gui_thatch_roof.py`: drives the Thatch Roof panel in a real Maya
+  session (box on a house, Make Roof, live edits, following the box, presets,
+  undo / redo, bake) and saves pictures of every shape and style to
+  `tests/_out/thatch_roof`. Launch it like the smoke test below, with
+  `tests/run_gui_thatch_roof.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

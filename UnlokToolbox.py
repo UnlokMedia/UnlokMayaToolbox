@@ -18,6 +18,9 @@ Modeling
     Log Noise     - turn cylinders into natural-looking logs.
     Rope Lashing  - tie logs together the way real lashings are tied
                     (square, diagonal, round, sheer), with clean UVs.
+    Thatch Roof   - thatched roofs from a box: gable / hip / half-hip ends,
+                    levels, a cut ridge cap; a displaced surface or straw
+                    planes / 3D pieces on stacked UVs.
 UV
     Smart UDIM    - sort an asset into UDIM sections and material groups
                     (plain Maya sets, UnlokRenamer naming), clean geometry
@@ -3449,6 +3452,9 @@ UV_STATUSES = ("auto", "keep", "handsoff")
 # Bool on a mesh shape: a tool made its UVs (Rope Lashing), so Scan marks it
 # Keep UVs: never re-unwrapped or scored, still laid out.
 UV_READY_ATTR = "unlokUvReady"
+# Bool on a mesh shape: its UVs are stacked on purpose (Thatch Roof's planes and
+# pieces), so Scan marks it Hands off instead: layout would unstack it.
+UV_STACKED_ATTR = "unlokUvStacked"
 UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "handsoff": "Hands off"}
 # Tool-owned tracking sets (also under the root): what Auto UV unwrapped, what
 # Smart Layout laid out, and what needs a human (Auto UV failed / still bad).
@@ -3997,8 +4003,9 @@ class SmartUdimAsset(object):
             else:  # Auto on purpose: a tool's "UVs ready" tag mustn't turn it back into Keep UVs on the next Scan
                 for m in meshes:
                     for shape in cmds.listRelatives(m, shapes=True, fullPath=True) or []:
-                        if cmds.attributeQuery(UV_READY_ATTR, node=shape, exists=True):
-                            cmds.deleteAttr(shape + "." + UV_READY_ATTR)
+                        for attr in (UV_READY_ATTR, UV_STACKED_ATTR):
+                            if cmds.attributeQuery(attr, node=shape, exists=True):
+                                cmds.deleteAttr(shape + "." + attr)
         return len(meshes)
 
     # ------------------------------------------------------------ sections
@@ -4347,8 +4354,17 @@ class SmartUdimAsset(object):
             return 0
         status = self.uv_status()
         new = [m for m in meshes if m in tagged and m not in status]
-        if new:
-            self.set_uv_status(new, "keep")
+        stacked = []
+        for m in new:
+            for shape in cmds.listRelatives(m, shapes=True, fullPath=True) or []:
+                if cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True) and                         cmds.getAttr(shape + "." + UV_STACKED_ATTR):
+                    stacked.append(m)
+                    break
+        if stacked:
+            self.set_uv_status(stacked, "handsoff")
+        keep = [m for m in new if m not in stacked]
+        if keep:
+            self.set_uv_status(keep, "keep")
         return len(new)
 
     def _create_default_sections(self, group, meshes, from_groups):
@@ -16555,12 +16571,1632 @@ class RopeLashingPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Thatch Roof - thatched roofs from a box
+# =============================================================================
+#
+# A box marks the roof: its footprint is the wall tops, its bottom the eaves
+# and its top the ridge. The roof is a height field in "roof space" (x along
+# the ridge, y up from the eaves, z across): side and end planes meet in a
+# smooth minimum, so hips and the ridge round over the way thatch does. The
+# slope is stepped into levels (each stands proud of the one below at its
+# lip) under a ridge cap whose lower edge can be cut into scallops or points.
+# The thatch is a displaced closed shell, or straw planes / 3D bundles laid
+# up the slope over an underlay, all on stacked UVs (one stack or several).
+# Pure maths on a grid; meshes are built like Rope Lashing's (seed planes in
+# the undo chunk, filled through the API in NoUndo).
+
+THATCH_SETTINGS = "unlokThatch"      # string on the roof group: JSON settings, box uuid and frame
+THATCH_BAKED = "unlokThatchBaked"    # string on a baked roof group: its old data, only so a redo can rebuild it
+THATCH_PART = "unlokThatchPart"      # string on each roof mesh: "straw" or "underlay"
+THATCH_VERTS = "unlokThatchVerts"    # long on each roof mesh: vertex count of the last build
+THATCH_BOX_ATTR = "unlokThatchBox"   # bool on a box the tool made
+THATCH_MATERIAL = "strawThatch"      # material tokens in the mesh names (UnlokRenamer convention)
+THATCH_UNDER_MATERIAL = "strawUnderlay"
+THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
+THATCH_ENDS = ("Gable", "Hip", "Half-hip")
+THATCH_AXES = ("Auto", "X", "Z")
+THATCH_STYLES = ("Surface", "Planes", "3D Pieces")
+THATCH_PATTERNS = ("Straight", "Scallops", "Points")
+THATCH_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
+THATCH_DEFAULTS = {
+    "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "half_hip": 0.55,
+    "overhang": 0.08, "thickness": 0.07, "softness": 0.5, "sag": 0.15, "lumps": 0.3,
+    "levels": 3, "lip": 0.35, "top": 0.16, "cap": 0.6, "pattern": "Scallops", "pattern_size": 0.07,
+    "pattern_depth": 0.5,
+    "style": "Surface", "resolution": 120, "strands": 0.5, "strand_width": 0.006,
+    "density": 1.0, "piece_width": 0.02, "piece_length": 0.16, "mess": 0.35, "lift": 0.4, "bend": 0.2,
+    "segments": 4, "sides": 6, "flatness": 0.35, "underlay": True,
+    "stacks": 1, "stack_layout": "UDIM tiles", "mirror": False, "seed": 1,
+}
+THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
+# Presets only set the roof's shape: how the thatch is made (style, pieces, stacks) stays as it is.
+THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density", "piece_width", "piece_length",
+                    "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "stacks", "stack_layout",
+                    "mirror", "seed")
+THATCH_PRESETS = {
+    "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
+    "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
+    "Half-hipped": {"end_a": "Half-hip", "end_b": "Half-hip", "levels": 2},
+    "Tiered": {"levels": 4, "lip": 0.6, "softness": 0.35, "top": 0.12, "pattern": "Straight", "sag": 0.05},
+    "Roundhouse": {"shape": "Cone", "levels": 2, "top": 0.12, "cap": 0.5, "pattern": "Straight",
+                   "overhang": 0.06},
+    "Lean-to shed": {"shape": "Lean-to", "end_a": "Gable", "end_b": "Gable", "levels": 1, "top": 0.1,
+                     "pattern": "Straight"},
+}
+THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
+THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
+THATCH_UNITS = {"mm": 1000.0, "cm": 100.0, "m": 1.0, "km": 0.001, "in": 39.37, "ft": 3.281, "yd": 1.094}
+
+
+def _th_smin(a, b, k):
+    """Smooth minimum (polynomial): rounds the crease where two planes meet."""
+    m = a if a < b else b
+    h = k - abs(a - b)
+    return m - h * h * 0.25 / k if h > 0.0 else m
+
+
+def _th_sabs(x, r):
+    """|x| with the point rounded off within r (exact beyond r, so the planes stay put)."""
+    x = abs(x)
+    return x if x >= r else 0.5 * (x * x / r + r)
+
+
+def _th_hash(ix, iy, seed):
+    n = (ix * 374761393 + iy * 668265263 + seed * 982451653) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    return ((n ^ (n >> 16)) & 0xFFFF) * (2.0 / 65535.0) - 1.0
+
+
+def _th_noise(x, y, seed, wrap=0):
+    """Smooth 2D value noise, -1..1. wrap: the lattice repeats every wrap cells in x."""
+    fx, fy = math.floor(x), math.floor(y)
+    ix, iy = int(fx), int(fy)
+    tx, ty = x - fx, y - fy
+    tx = tx * tx * (3.0 - 2.0 * tx)
+    ty = ty * ty * (3.0 - 2.0 * ty)
+    ix1 = ix + 1
+    if wrap:
+        ix %= wrap
+        ix1 %= wrap
+    a = _th_hash(ix, iy, seed)
+    b = _th_hash(ix1, iy, seed)
+    c = _th_hash(ix, iy + 1, seed)
+    d = _th_hash(ix1, iy + 1, seed)
+    return a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty
+
+
+class ThatchField(object):
+    """The roof as a height field in roof space (pure maths): x along the
+    ridge, y up from the eaves, z across. L, W: half the box's length and
+    width, H its height. Sizes in the settings are fractions of the span
+    (the box's width across the ridge; a cone's mean diameter)."""
+
+    def __init__(self, L, W, H, settings):
+        s = dict(THATCH_DEFAULTS)
+        s.update(settings or {})
+        self.s = s
+        self.L, self.W, self.H = L, W, H = max(L, 1e-4), max(W, 1e-4), max(H, 1e-4)
+        self.shape = s["shape"] if s["shape"] in THATCH_SHAPES else "Ridge"
+        self.cone = self.shape == "Cone"
+        self.R = 0.5 * (L + W)
+        self.span = span = 2.0 * (self.R if self.cone else W)
+        o = max(0.0, float(s["overhang"])) * span
+        self.T = max(1e-5, float(s["thickness"]) * span)
+        soft = clamp(float(s["softness"]), 0.0, 1.0)
+        self.k = max(1e-6, soft * 0.2 * H)
+        self.rr = soft * 0.15 * W
+        self.apex = soft * 0.12
+        self.ms = H / (self.R if self.cone else (2.0 * W if self.shape == "Lean-to" else W))
+        self.slope = math.hypot(H, H / self.ms)
+        self.ends = [None, None]  # end A (+x), end B (-x): [sign, pitch, h0, ridge end, pitch ratio] or None
+        self.x0, self.x1 = -(L + o), L + o
+        if not self.cone:
+            for e, (sign, key) in enumerate(((1.0, "end_a"), (-1.0, "end_b"))):
+                kind = s[key]
+                if kind not in ("Hip", "Half-hip"):
+                    continue
+                me = self.ms * max(0.25, float(s["hip_pitch"]))
+                h0 = 0.0 if kind == "Hip" else clamp(float(s["half_hip"]), 0.05, 0.95) * H
+                lr = L - (H - h0) / me  # where the hip reaches the ridge height (past the middle on a long hip)
+                self.ends[e] = [sign, me, h0, lr, me / self.ms]
+                oe = o * self.ms / me if kind == "Hip" else o  # level eaves round a hip
+                if sign > 0:
+                    self.x1 = L + oe
+                else:
+                    self.x0 = -(L + oe)
+            a, b = self.ends
+            if a and b and a[3] + b[3] < 0.0:  # two hips that meet before the ridge: split where they cross
+                xm = (a[2] - b[2] + (a[1] - b[1]) * L) / (a[1] + b[1])
+                a[3], b[3] = xm, -xm
+        self.z0 = -W if self.shape == "Lean-to" else -(W + o)
+        self.z1 = W + o
+        self.rho = 1.0 + o / self.R  # cone: the eave edge (1 = the box)
+        self.sag = float(s["sag"]) * 0.04 * span
+        self.lumps = float(s["lumps"]) * 0.012 * span
+        self.lam = 0.2 * span
+        self.seed = int(s["seed"])
+        self.t_low = -o * self.ms / H  # height fraction at the eave edge
+        top = clamp(float(s["top"]), 0.0, 0.8)
+        self.t_cap = 1.0 - top if top > 1e-4 else None
+        self.cap_th = max(0.0, float(s["cap"])) * self.T
+        self.levels = max(1, int(s["levels"]))
+        self.lip = max(0.0, float(s["lip"])) * self.T
+        ps = width = max(1e-4, float(s["pattern_size"]) * span)
+        if self.cone:  # a whole number of scallops round the crown (sized where the cap's edge is)
+            crown = 2.0 * math.pi * self.R * max(0.05, top)
+            n = max(3, int(round(crown / ps)))
+            ps, width = 2.0 * math.pi * self.R / n, crown / n
+        self.ps = ps
+        self.pattern = s["pattern"] if s["pattern"] in THATCH_PATTERNS else "Straight"
+        self.pd = clamp(float(s["pattern_depth"]), 0.0, 2.0) * width * self.ms / H if self.pattern != "Straight" else 0.0
+        sw = max(1e-4, float(s["strand_width"]) * span)
+        self.wrap = 0
+        if self.cone:  # strand noise repeats exactly once round the cone
+            self.wrap = max(5, 5 * int(round(2.0 * math.pi * self.R / (5.0 * sw))))
+            sw = 2.0 * math.pi * self.R / self.wrap
+        self.sw = sw
+        self.strand_amp = max(0.0, float(s["strands"])) * 0.25 * self.T
+        self.edge = 0.01  # width of a lip / the cap's edge in height fractions (set from the grid)
+
+    def height(self, x, z):
+        """Height of the roof's base surface: planes, rounding, sag and lumps."""
+        H = self.H
+        if self.cone:
+            r = math.sqrt((x / self.L) ** 2 + (z / self.W) ** 2)
+            h = H * (1.0 - _th_sabs(r, self.apex)) if self.apex else H * (1.0 - r)
+        else:
+            if self.shape == "Ridge":
+                q = _th_sabs(z, self.rr) if self.rr else abs(z)
+            else:
+                q = z - self.z0
+            h = H - self.ms * q
+            for e in self.ends:
+                if e is None:
+                    continue
+                sign, me, h0 = e[0], e[1], e[2]
+                he = h0 + me * (self.L - sign * x)
+                k = self.k * (0.3 + 0.7 * _rl_smooth01(min(h, he) / (0.4 * H)))  # crisper near the eaves
+                h = _th_smin(h, he, k)
+        if self.sag:
+            h -= self.sag * math.sin(math.pi * clamp(h / H, 0.0, 1.0))
+        if self.lumps:
+            lam = self.lam
+            h += self.lumps * (_th_noise(x / lam, z / lam, self.seed) +
+                               0.5 * _th_noise(2.0 * x / lam + 17.3, 2.0 * z / lam, self.seed + 1)) / 1.5
+        return h
+
+    def along(self, x, z):
+        """Distance along the contours (round hips and the cone): where
+        the strands and the cap's pattern sit. The same on both slopes, so
+        nothing jumps at the ridge."""
+        if self.cone:
+            return math.atan2(z / self.W, x / self.L) * self.R
+        q = abs(z) if self.shape == "Ridge" else z - self.z0
+        for e in self.ends:
+            if e is None:
+                continue
+            sign, lr, f = e[0], e[3], e[4]
+            xe = sign * x
+            if xe > lr:
+                dx = (xe - lr) * f
+                return sign * (lr + math.hypot(dx, q) * math.atan2(dx, q) / f)
+        return x
+
+    def strand_along(self, x, z):
+        """Where a strand sits across the slope: constant straight down each
+        face (along x on the sides, across z on a hipped end), blended over
+        the rounded hip. On a cone: the angle (strands run to the apex)."""
+        if self.cone:
+            return math.atan2(z / self.W, x / self.L) * self.R * self.rho
+        q = abs(z) if self.shape == "Ridge" else z - self.z0
+        hs = self.H - self.ms * q
+        p = x
+        for e in self.ends:
+            if e is None:
+                continue
+            sign, me, h0, lr, f = e
+            w = 0.5 + 0.5 * (hs - h0 - me * (self.L - sign * x)) / self.k
+            if w > 0.0:
+                w = min(1.0, w)
+                p = p * (1.0 - w) + w * sign * (lr + q / f)
+        return p
+
+    def down(self, t):
+        """Distance down the slope from the top for a height fraction."""
+        return (1.0 - min(t, 1.0)) * self.slope
+
+    def drop(self, p):
+        """How far below the cap line its cut edge hangs here (height fraction)."""
+        if not self.pd:
+            return 0.0
+        f = (p / self.ps + 0.5) % 1.0
+        if self.pattern == "Scallops":
+            return self.pd * math.sqrt(max(0.0, 1.0 - (2.0 * f - 1.0) ** 2))
+        return self.pd * (1.0 - abs(2.0 * f - 1.0))
+
+    def shell(self, t, p):
+        """Extra thickness along the normal: the level lips and the ridge cap."""
+        top = self.t_cap if self.t_cap is not None else 1.0
+        band = (top - self.t_low) / self.levels
+        off = 0.0
+        if band > 1e-6 and self.lip:
+            u = max(0.0, (t - self.t_low) / band)
+            k = math.floor(u)
+            f = 1.0 if k >= self.levels else u - k
+            off = self.lip * (1.0 - f) ** 1.5 * _rl_smooth01(f * band / self.edge)
+        if self.t_cap is not None:
+            c = _rl_smooth01((t - (self.t_cap - self.drop(p))) / self.edge)
+            if c > 0.0:
+                off = off * (1.0 - c) + c * self.cap_th
+        return off
+
+    def strands(self, p, d):
+        """Fine straw running down the slope, plus the bundles it's laid in."""
+        if not self.strand_amp:
+            return 0.0
+        sw = self.sw
+        a = _th_noise(p / sw, d / (sw * 16.0), self.seed + 7, self.wrap)
+        b = _th_noise(p / (sw * 5.0), d / (sw * 40.0), self.seed + 11, self.wrap // 5)
+        return self.strand_amp * (0.6 * a + 0.4 * b)
+
+    def fallback_up(self, x, z):
+        """Up the slope where the surface is level (the ridge, the apex)."""
+        if self.cone:
+            return _rl_norm((-x, 0.0, -z), (1.0, 0.0, 0.0))
+        if self.shape == "Lean-to":
+            return (0.0, 0.0, -1.0)
+        return (0.0, 0.0, -1.0 if z > 0.0 else 1.0)
+
+
+def _th_grid(F, res):
+    """The roof sampled on a grid. A rectangle (rows across z, columns along
+    x) or, for a cone, rings out from the apex (row 0: the apex, repeated)
+    by angle (columns wrap). Per point: base position and normal, height
+    fraction t, along p, down d and the shell offset."""
+    cell = F.span / max(8.0, float(res))
+    while True:
+        if F.cone:
+            nr = max(4, int(round(F.R * F.rho / cell)))
+            nc = max(12, int(round(2.0 * math.pi * F.R * F.rho / cell)))
+            npts = (nr + 1) * nc
+        else:
+            nr = max(4, int(round((F.z1 - F.z0) / cell)))
+            if F.shape == "Ridge":
+                nr += nr % 2  # the ridge falls on a row
+            nc = max(4, int(round((F.x1 - F.x0) / cell))) + 1
+            npts = (nr + 1) * nc
+        if npts <= THATCH_MAX_GRID:
+            break
+        cell *= 1.15
+    F.edge = max(0.006, 1.6 * F.ms * cell / F.H)
+    X, Z, P, TT, PP, PS = [], [], [], [], [], []
+    for i in range(nr + 1):
+        for j in range(nc):
+            if F.cone:
+                rho = F.rho * i / nr
+                th = -math.pi + 2.0 * math.pi * j / nc
+                x, z = F.L * rho * math.cos(th), F.W * rho * math.sin(th)
+                p = th * F.R
+                ps = th * F.R * F.rho
+            else:
+                x = F.x0 + (F.x1 - F.x0) * j / (nc - 1)
+                z = F.z0 + (F.z1 - F.z0) * i / nr
+                p = F.along(x, z)
+                ps = F.strand_along(x, z)
+            h = F.height(x, z)
+            X.append(x)
+            Z.append(z)
+            P.append((x, h, z))
+            TT.append(h / F.H)
+            PP.append(p)
+            PS.append(ps)
+    N = []
+    for i in range(nr + 1):
+        ia, ib = max(0, i - 1), min(nr, i + 1)
+        for j in range(nc):
+            if F.cone:
+                ja, jb = (j - 1) % nc, (j + 1) % nc
+            else:
+                ja, jb = max(0, j - 1), min(nc - 1, j + 1)
+            ti = _rl_sub(P[ib * nc + j], P[ia * nc + j])
+            tj = _rl_sub(P[i * nc + jb], P[i * nc + ja])
+            n = _rl_cross(ti, tj)
+            if n[1] < 0.0:
+                n = _rl_mul(n, -1.0)
+            N.append(_rl_norm(n, (0.0, 1.0, 0.0)) if _rl_len(n) > 1e-12 else (0.0, 1.0, 0.0))
+    if F.cone:  # the apex: straight up
+        for j in range(nc):
+            N[j] = (0.0, 1.0, 0.0)
+    D = [F.down(t) for t in TT]
+    OFF = [F.shell(t, p) for t, p in zip(TT, PP)]
+    SP = [_rl_add(q, _rl_mul(n, off)) for q, n, off in zip(P, N, OFF)]
+    return {"nr": nr, "nc": nc, "cone": F.cone, "X": X, "Z": Z, "P": P, "N": N, "T": TT, "PP": PP, "PS": PS,
+            "D": D, "OFF": OFF, "SP": SP}
+
+
+def _th_cell(G, F, x, z):
+    """(i, j, fi, fj) of the grid cell holding (x, z), or None off the roof."""
+    nr, nc = G["nr"], G["nc"]
+    if G["cone"]:
+        rho = math.sqrt((x / F.L) ** 2 + (z / F.W) ** 2)
+        gi = rho / F.rho * nr
+        if gi > nr:
+            return None
+        gj = (math.atan2(z / F.W, x / F.L) + math.pi) / (2.0 * math.pi) * nc
+        i = min(nr - 1, int(gi))
+        j = int(gj) % nc
+        return i, j, gi - i, gj - math.floor(gj)
+    gi = (z - F.z0) / (F.z1 - F.z0) * nr
+    gj = (x - F.x0) / (F.x1 - F.x0) * (nc - 1)
+    if gi < 0.0 or gj < 0.0 or gi > nr or gj > nc - 1:
+        return None
+    i, j = min(nr - 1, int(gi)), min(nc - 2, int(gj))
+    return i, j, gi - i, gj - j
+
+
+def _th_sample(G, i, j, fi, fj):
+    """(shell point, base normal, (x, z), height fraction) inside grid cell (i, j)."""
+    nc = G["nc"]
+    j1 = (j + 1) % nc if G["cone"] else j + 1
+    a, b, c, d = i * nc + j, i * nc + j1, (i + 1) * nc + j, (i + 1) * nc + j1
+    w = ((1.0 - fi) * (1.0 - fj), (1.0 - fi) * fj, fi * (1.0 - fj), fi * fj)
+    SP, N, T = G["SP"], G["N"], G["T"]
+    pos = tuple(SP[a][k] * w[0] + SP[b][k] * w[1] + SP[c][k] * w[2] + SP[d][k] * w[3] for k in range(3))
+    nrm = tuple(N[a][k] * w[0] + N[b][k] * w[1] + N[c][k] * w[2] + N[d][k] * w[3] for k in range(3))
+    xz = (G["X"][a] * w[0] + G["X"][b] * w[1] + G["X"][c] * w[2] + G["X"][d] * w[3],
+          G["Z"][a] * w[0] + G["Z"][b] * w[1] + G["Z"][c] * w[2] + G["Z"][d] * w[3])
+    return pos, _rl_norm(nrm, (0.0, 1.0, 0.0)), xz, T[a] * w[0] + T[b] * w[1] + T[c] * w[2] + T[d] * w[3]
+
+
+def _th_pack(shells, us, vs, pad=0.008):
+    """Lay UV shells ([uv ids]) side by side in rows inside 0..1, one scale for all."""
+    boxes = []
+    for ids in shells:
+        u = [us[k] for k in ids]
+        v = [vs[k] for k in ids]
+        boxes.append((min(u), min(v), max(u) - min(u), max(v) - min(v)))
+    gap = 0.02 * max(max(b[2], b[3]) for b in boxes)
+    width = max(max(b[2] for b in boxes), math.sqrt(sum(b[2] * b[3] for b in boxes)) * 1.2)
+    order = sorted(range(len(shells)), key=lambda k: -boxes[k][3])
+    x = y = row = 0.0
+    place = {}
+    for k in order:
+        w, h = boxes[k][2], boxes[k][3]
+        if x > 0.0 and x + w > width:
+            x, y, row = 0.0, y + row + gap, 0.0
+        place[k] = (x, y)
+        x += w + gap
+        row = max(row, h)
+    total = max(max(place[k][0] + boxes[k][2] for k in place), y + row)
+    scale = (1.0 - 2.0 * pad) / total
+    for k, ids in enumerate(shells):
+        u0, v0 = boxes[k][0], boxes[k][1]
+        px, py = place[k]
+        for i in ids:
+            us[i] = pad + (us[i] - u0 + px) * scale
+            vs[i] = pad + (vs[i] - v0 + py) * scale
+
+
+def _th_shell_mesh(F, G, strands=True, inset=0.0):
+    """Closed thatch shell from the grid: the outer surface (levels, cap and,
+    with strands, the straw), the underside (thickness down the normal) and
+    the cut edge round it. UVs: the slopes run down V (straw direction), the
+    underside mirrors them, the edge is a strip; all packed into 0..1.
+    Returns (points in roof space, counts, connects, us, vs, uv ids)."""
+    nr, nc, cone = G["nr"], G["nc"], G["cone"]
+    P, N, SP, PP, PS, D = G["P"], G["N"], G["SP"], G["PP"], G["PS"], G["D"]
+    T = F.T
+    outer = []
+    for k in range(len(P)):
+        off = -inset
+        if strands:
+            off += F.strands(PS[k], D[k])
+        outer.append(_rl_add(SP[k], _rl_mul(N[k], off)) if off else SP[k])
+    # the underside: halfway between straight down and square to the slope, keeping the
+    # thickness across it. Square to the slope folded over itself where a hip rounds tighter
+    # than the thatch is thick; straight down cut the eaves into a tall upright band.
+    inner = []
+    for q, n in zip(P, N):
+        d = _rl_norm((n[0], n[1] + 1.0, n[2]))
+        inner.append(_rl_sub(q, _rl_mul(d, T / max(0.3, _rl_dot(d, n)))))
+    if cone:  # one apex point each
+        vid = lambda i, j: 0 if i == 0 else 1 + (i - 1) * nc + j % nc  # noqa: E731
+        pts = [outer[0]] + outer[nc:]
+        base_in = len(pts)
+        pts += [inner[0]] + inner[nc:]
+    else:
+        vid = lambda i, j: i * nc + j  # noqa: E731
+        pts = outer + inner
+        base_in = len(outer)
+    counts, conn, uvi, us, vs, shells = [], [], [], [], [], []
+
+    def grid_uvs(rows, sign, cols):
+        """uv ids [row][col] for one slope: u = sign * along, v = down."""
+        first = len(us)
+        ids = {}
+        for i in rows:
+            for j in range(cols):
+                g = i * nc + (j % nc)
+                if cone:
+                    us.append(sign * (-math.pi + 2.0 * math.pi * j / nc) * F.R)
+                else:
+                    us.append(sign * PP[g])
+                vs.append(D[g])
+                ids[(i, j)] = len(us) - 1
+        shells.append(list(range(first, len(us))))
+        return ids
+
+    def face(vs_, uvs_):
+        counts.append(len(vs_))
+        conn.extend(vs_)
+        uvi.extend(uvs_)
+
+    for side, base in ((1.0, 0), (-1.0, base_in)):  # outer, then the underside (reversed, UVs mirrored)
+        if cone:
+            uv = grid_uvs(range(1, nr + 1), side, nc + 1)
+            first = len(us)
+            apex = []
+            for j in range(nc):
+                us.append(side * (-math.pi + 2.0 * math.pi * (j + 0.5) / nc) * F.R)
+                vs.append(D[0])
+                apex.append(len(us) - 1)
+            shells[-1].extend(range(first, len(us)))
+            for j in range(nc):
+                a, b = base + vid(1, j + 1), base + vid(1, j)
+                if side > 0:
+                    face((base, a, b), (apex[j], uv[(1, j + 1)], uv[(1, j)]))
+                else:
+                    face((base, b, a), (apex[j], uv[(1, j)], uv[(1, j + 1)]))
+                for i in range(1, nr):
+                    q = (base + vid(i, j), base + vid(i, j + 1), base + vid(i + 1, j + 1), base + vid(i + 1, j))
+                    u = (uv[(i, j)], uv[(i, j + 1)], uv[(i + 1, j + 1)], uv[(i + 1, j)])
+                    if side < 0:
+                        q, u = q[::-1], u[::-1]
+                    face(q, u)
+            continue
+        if F.shape == "Ridge":  # a seam along the ridge: each slope is one shell, both the right way round
+            mid = nr // 2
+            parts = [(range(0, mid + 1), side), (range(mid, nr + 1), -side)]
+        else:
+            parts = [(range(0, nr + 1), -side)]
+        for rows, sign in parts:
+            uv = grid_uvs(rows, sign, nc)
+            for i in list(rows)[:-1]:
+                for j in range(nc - 1):
+                    q = (base + vid(i, j), base + vid(i + 1, j), base + vid(i + 1, j + 1), base + vid(i, j + 1))
+                    u = (uv[(i, j)], uv[(i + 1, j)], uv[(i + 1, j + 1)], uv[(i, j + 1)])
+                    if side < 0:
+                        q, u = q[::-1], u[::-1]
+                    face(q, u)
+    # the cut edge: one strip round the border, cut into columns as wide as a slope's shell
+    if cone:
+        loop = [(nr, j) for j in range(nc)]
+    else:
+        loop = ([(0, j) for j in range(nc - 1)] + [(i, nc - 1) for i in range(nr)] +
+                [(nr, j) for j in range(nc - 1, 0, -1)] + [(i, 0) for i in range(nr, 0, -1)])
+    n = len(loop)
+    acc = [0.0]
+    for k in range(n):
+        a, b = loop[k], loop[(k + 1) % n]
+        acc.append(acc[-1] + _rl_len(_rl_sub(pts[vid(*b)], pts[vid(*a)])))
+    width = max(max(us[k] for k in s) - min(us[k] for k in s) for s in shells)
+    cuts = max(1, int(math.ceil(acc[-1] / max(width, 1e-6))))
+    chunk = acc[-1] / cuts
+    cur, ids = -1, None
+    for k in range(n):
+        c = min(cuts - 1, int((acc[k] + acc[k + 1]) * 0.5 / chunk))
+        if c != cur:
+            cur = c
+            shells.append([])
+            ids = {}
+        for m in (k, k + 1):
+            if m not in ids:
+                s0 = acc[m] - c * chunk
+                ids[m] = len(us)
+                us.extend((s0, s0))
+                vs.extend((0.0, T))
+                shells[-1].extend((len(us) - 2, len(us) - 1))
+        a, b = vid(*loop[k]), vid(*loop[(k + 1) % n])
+        face((a, b, base_in + b, base_in + a), (ids[k], ids[k + 1], ids[k + 1] + 1, ids[k] + 1))
+    _th_pack(shells, us, vs)
+    return pts, counts, conn, us, vs, uvi
+
+
+def _th_pieces_mesh(F, G, s):
+    """Straw planes or 3D bundles laid up the slope over the shell, butts
+    down, each lifted at its butt and tucked in at its top so the courses
+    above cover it. Every piece has the same UVs (a stack); with several
+    stacks each piece picks one at random. Returns (mesh, pieces, capped)."""
+    three_d = s["style"] == "3D Pieces"
+    span = F.span
+    w0 = max(1e-4, float(s["piece_width"]) * span)
+    l0 = max(1e-4, float(s["piece_length"]) * span)
+    seg = max(1, int(s["segments"]))
+    sides = max(3, int(s["sides"]))
+    mess = clamp(float(s["mess"]), 0.0, 2.0)
+    stacks = max(1, int(s["stacks"]))
+    columns = s["stack_layout"] == "Atlas columns"
+    seed = int(s["seed"])
+    per_piece = (seg + 1) * sides if three_d else 2 * (seg + 1)
+    nr, nc, P = G["nr"], G["nc"], G["P"]
+    # pieces per unit area: density 1 covers the roof about three layers deep
+    rate = max(0.0, float(s["density"])) / (w0 * l0 * 0.3)
+    cells = []
+    total = 0.0
+    for i in range(nr):
+        for j in range(nc if G["cone"] else nc - 1):
+            j1 = (j + 1) % nc
+            a, b, c, d = P[i * nc + j], P[i * nc + j1], P[(i + 1) * nc + j], P[(i + 1) * nc + j1]
+            area = 0.5 * (_rl_len(_rl_cross(_rl_sub(b, a), _rl_sub(c, a))) +
+                          _rl_len(_rl_cross(_rl_sub(c, d), _rl_sub(b, d))))
+            cells.append((i, j, area))
+            total += area
+    capped = False
+    if total * rate * per_piece > THATCH_MAX_VERTS:
+        rate = THATCH_MAX_VERTS / (total * per_piece)
+        capped = True
+    pts, counts, conn, us, vs, uvi = [], [], [], [], [], []
+    pieces = 0
+    yaw_max = math.radians(25.0) * mess
+    for i, j, area in cells:
+        expect = area * rate
+        n_here = int(expect)
+        r0 = _rand12(seed, i, j, 0)
+        if r0[0] < expect - n_here:
+            n_here += 1
+        for m in range(n_here):
+            r = r0 if m == 0 else _rand12(seed, i, j, m)
+            pos, nrm, (x, z), t_butt = _th_sample(G, i, j, r[1], r[2])
+            ws = w0 * (1.0 + (r[5] - 0.5) * 0.6 * mess)
+            ls = l0 * (1.0 + (r[4] - 0.5) * 0.6 * mess)
+            yaw = (r[3] - 0.5) * 2.0 * yaw_max
+            cy, sy = math.cos(yaw), math.sin(yaw)
+
+            def up_dir(n_, x_, z_):
+                u = (-n_[0], -n_[2])
+                ln = math.hypot(u[0], u[1])
+                if ln < 0.02:
+                    f = F.fallback_up(x_, z_)
+                    u = (f[0], f[2])
+                    ln = math.hypot(u[0], u[1]) or 1.0
+                u = (u[0] / ln, u[1] / ln)
+                return (u[0] * cy - u[1] * sy, u[0] * sy + u[1] * cy)
+
+            direction = up_dir(nrm, x, z)
+            line = [(pos, nrm)]
+            step = ls / seg
+            for _ in range(seg):
+                along = -(nrm[0] * direction[0] + nrm[2] * direction[1]) / max(0.05, nrm[1])
+                k = step / math.sqrt(1.0 + along * along)
+                x += direction[0] * k
+                z += direction[1] * k
+                cell = _th_cell(G, F, x, z)
+                if cell is None:  # off the roof's edge: carry straight on
+                    p1, n1 = line[-1]
+                    p0 = line[-2][0] if len(line) > 1 else _rl_sub(p1, (direction[0] * k, 0.0, direction[1] * k))
+                    line.append((_rl_add(p1, _rl_sub(p1, p0)), n1))
+                    continue
+                pos, nrm = _th_sample(G, *cell)[:2]
+                new = up_dir(nrm, x, z)
+                if new[0] * direction[0] + new[1] * direction[1] > 0.3:  # follow round hips, never back over the ridge
+                    direction = _rl_norm((direction[0] + new[0], 0.0, direction[1] + new[1]))
+                    direction = (direction[0], direction[2])
+                line.append((pos, nrm))
+            th = 0.5 * ws * clamp(float(s["flatness"]), 0.05, 1.0) if three_d else 0.0
+            lift = float(s["lift"]) * 0.2 * ls * (0.5 + r[6])
+            bend = float(s["bend"]) * (0.5 + r[10]) * 0.06 * ls
+            tuck = 0.04 * ls
+            Q, Nn = [], []
+            for k, (p_, n_) in enumerate(line):
+                v = k / float(seg)
+                off = th + lift * (1.0 - v) ** 1.5 + bend * math.sin(math.pi * v) - tuck * v
+                Q.append(_rl_add(p_, _rl_mul(n_, off)))
+                Nn.append(n_)
+            near = (t_butt - F.t_low) * F.slope / (0.4 * ls)
+            if near < 1.0:  # the bottom course hangs over the eaves, hiding the underlay's edge
+                back = _rl_mul(_rl_norm(_rl_sub(Q[1], Q[0])), -0.4 * ls * (1.0 - max(0.0, near)))
+                Q = [_rl_add(q_, back) for q_ in Q]
+            roll = (r[7] - 0.5) * math.radians(30.0) * mess
+            stack = min(stacks - 1, int(r[8] * stacks))
+            flip = bool(s["mirror"]) and r[9] < 0.5
+            base = len(pts)
+            uvbase = len(us)
+            frames = []
+            for k in range(seg + 1):
+                t = _rl_norm(_rl_sub(Q[min(seg, k + 1)], Q[max(0, k - 1)]))
+                n_ = _rl_norm(_rl_perp(t, Nn[k]), _rl_any_perp(t))
+                b = _rl_cross(n_, t)
+                if roll:
+                    b, n_ = (_rl_add(_rl_mul(b, math.cos(roll)), _rl_mul(n_, math.sin(roll))),
+                             _rl_sub(_rl_mul(n_, math.cos(roll)), _rl_mul(b, math.sin(roll))))
+                frames.append((t, n_, b))
+
+            def u_of(u):
+                u = 1.0 - u if flip else u
+                return (u + stack) / stacks if columns else u + stack
+
+            if not three_d:
+                for k in range(seg + 1):
+                    v = k / float(seg)
+                    half = 0.5 * ws * (1.0 - 0.25 * v)
+                    b = frames[k][2]
+                    pts.append(_rl_sub(Q[k], _rl_mul(b, half)))
+                    pts.append(_rl_add(Q[k], _rl_mul(b, half)))
+                    us.extend((u_of(1.0), u_of(0.0)))
+                    vs.extend((v, v))
+                for k in range(seg):
+                    a = 2 * k
+                    q = (a, a + 2, a + 3, a + 1)
+                    counts.append(4)
+                    conn.extend(base + x_ for x_ in q)
+                    uvi.extend(uvbase + x_ for x_ in q)
+            else:
+                body = 0.78
+                for k in range(seg + 1):
+                    v = k / float(seg)
+                    taper = 1.0 - 0.45 * v
+                    t, n_, b = frames[k]
+                    for jj in range(sides):
+                        ph = 2.0 * math.pi * jj / sides
+                        pts.append(_rl_add(Q[k], _rl_add(_rl_mul(b, 0.5 * ws * taper * math.cos(ph)),
+                                                         _rl_mul(n_, th * taper * math.sin(ph)))))
+                    for jj in range(sides + 1):
+                        us.append(u_of(body * jj / sides))
+                        vs.append(v)
+                row = sides + 1
+                for k in range(seg):
+                    for jj in range(sides):
+                        j1 = (jj + 1) % sides
+                        q = (base + k * sides + jj, base + k * sides + j1, base + (k + 1) * sides + j1,
+                             base + (k + 1) * sides + jj)
+                        u = (uvbase + k * row + jj, uvbase + k * row + jj + 1, uvbase + (k + 1) * row + jj + 1,
+                             uvbase + (k + 1) * row + jj)
+                        counts.append(4)
+                        conn.extend(q)
+                        uvi.extend(u)
+                # the butt (the cut end you see) and the tucked-in top, in the stack's corner
+                for k, cv, order in ((0, 0.11, range(sides - 1, -1, -1)), (seg, 0.33, range(sides))):
+                    first = len(us)
+                    for jj in range(sides):
+                        ph = 2.0 * math.pi * jj / sides
+                        mirror = -1.0 if k == 0 else 1.0
+                        us.append(u_of(0.89 + mirror * 0.09 * math.cos(ph)))
+                        vs.append(cv + 0.09 * math.sin(ph))
+                    q = [base + k * sides + jj for jj in order]
+                    u = [first + jj for jj in order]
+                    counts.append(sides)
+                    conn.extend(q)
+                    uvi.extend(u)
+            pieces += 1
+    return (pts, counts, conn, us, vs, uvi), pieces, capped
+
+
+def thatch_build(frame, settings):
+    """Everything a roof is made of (pure maths): {"straw": mesh,
+    "underlay": mesh or None, "pieces", "capped", "field"} with meshes as
+    (world points, counts, connects, us, vs, uv ids)."""
+    s = dict(THATCH_DEFAULTS)
+    s.update(settings or {})
+    F = ThatchField(frame["L"], frame["W"], frame["H"], s)
+    G = _th_grid(F, int(s["resolution"]))
+    out = {"pieces": 0, "capped": False, "field": F, "underlay": None}
+    if s["style"] in ("Planes", "3D Pieces"):
+        straw, out["pieces"], out["capped"] = _th_pieces_mesh(F, G, s)
+        if s["underlay"]:
+            inset = 0.1 * float(s["piece_width"]) * F.span * float(s["flatness"]) if s["style"] == "3D Pieces" \
+                else 0.01 * F.T
+            out["underlay"] = _th_to_world(frame, _th_shell_mesh(F, G, strands=False, inset=inset))
+    else:
+        straw = _th_shell_mesh(F, G, strands=True)
+    out["straw"] = _th_to_world(frame, straw)
+    return out
+
+
+def _th_to_world(frame, mesh):
+    pts = mesh[0]
+    o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
+    world = [(o[0] + a[0] * p[0] + y[0] * p[1] + c[0] * p[2],
+              o[1] + a[1] * p[0] + y[1] * p[1] + c[1] * p[2],
+              o[2] + a[2] * p[0] + y[2] * p[1] + c[2] * p[2]) for p in pts]
+    return (world,) + tuple(mesh[1:])
+
+
+def thatch_frame(box, ridge="Auto"):
+    """The roof's frame from a box (any transform: its mesh's bounding box,
+    or a unit cube): {"o": middle of the bottom face, "a": along the ridge,
+    "y": up, "c": across (unit vectors, world space), "L", "W": half the
+    length and width, "H": height}."""
+    m = cmds.xform(box, q=True, matrix=True, worldSpace=True)
+    lo, hi = (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)
+    shape = _log_shape(box)
+    if shape:
+        lo = cmds.getAttr(shape + ".boundingBoxMin")[0]
+        hi = cmds.getAttr(shape + ".boundingBoxMax")[0]
+    rows = [tuple(m[0:3]), tuple(m[4:7]), tuple(m[8:11])]
+    edge = [_rl_mul(rows[k], hi[k] - lo[k]) for k in range(3)]
+    mid = [(lo[k] + hi[k]) * 0.5 for k in range(3)]
+    o = tuple(m[12 + i] + rows[0][i] * mid[0] + rows[1][i] * lo[1] + rows[2][i] * mid[2] for i in range(3))
+    sx, sy, sz = [_rl_len(e) for e in edge]
+    if min(sx, sy, sz) < 1e-6:
+        raise ValueError("the box is flat: give it some height")
+    up = _rl_norm(edge[1])
+    along_x = ridge == "X" or (ridge != "Z" and sx >= sz)
+    a = _rl_norm(_rl_perp(up, edge[0] if along_x else edge[2]))
+    return {"o": o, "a": a, "y": up, "c": _rl_cross(a, up), "L": 0.5 * (sx if along_x else sz),
+            "W": 0.5 * (sz if along_x else sx), "H": sy}
+
+
+def _th_same_frame(f, g, tol=1e-5):
+    if not f or not g:
+        return False
+    for k in ("o", "a", "y", "c"):
+        if any(abs(p - q) > tol * max(1.0, abs(p)) for p, q in zip(f[k], g[k])):
+            return False
+    return all(abs(f[k] - g[k]) <= tol * max(1.0, abs(f[k])) for k in ("L", "W", "H"))
+
+
+# ------------------------------------------------------------- scene side
+
+def is_thatch_roof(node):
+    """A live roof group (not baked)."""
+    return bool(node) and cmds.objExists(node) and cmds.attributeQuery(THATCH_SETTINGS, node=node, exists=True)
+
+
+def _th_attr(root):
+    for attr in (THATCH_SETTINGS, THATCH_BAKED):
+        if cmds.attributeQuery(attr, node=root, exists=True):
+            return attr
+    return None
+
+
+def thatch_data(root):
+    """{settings..., "box": uuid, "frame": the box's frame at the last build}"""
+    data = dict(THATCH_DEFAULTS)
+    attr = _th_attr(root)
+    if attr:
+        try:
+            data.update(json.loads(cmds.getAttr(root + "." + attr) or "{}"))
+        except ValueError:
+            pass
+    return data
+
+
+def thatch_settings_only(data):
+    return {k: data.get(k, THATCH_DEFAULTS[k]) for k in THATCH_KEYS}
+
+
+def thatch_roofs(baked=False):
+    """Every roof group in the scene (with baked=True, baked ones too)."""
+    attrs = (THATCH_SETTINGS, THATCH_BAKED) if baked else (THATCH_SETTINGS,)
+    found = []
+    for attr in attrs:
+        for node in cmds.ls(["*." + attr, "*:*." + attr], objectsOnly=True, long=True) or []:
+            if node not in found and cmds.objectType(node, isAType="transform"):
+                found.append(node)
+    return found
+
+
+def thatch_parts(root):
+    """{"straw": transform, "underlay": transform} under a roof group."""
+    parts = {}
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        shape = _log_shape(child)
+        if shape and cmds.attributeQuery(THATCH_PART, node=shape, exists=True):
+            parts[cmds.getAttr(shape + "." + THATCH_PART)] = child
+    return parts
+
+
+def thatch_box(root):
+    """The box a roof follows, or None (deleted)."""
+    uid = thatch_data(root).get("box")
+    found = cmds.ls(uid, long=True) if uid else None
+    return found[0] if found else None
+
+
+def _th_root_up(node):
+    """The roof group node belongs to (itself or a parent), baked or not."""
+    while node:
+        if _th_attr(node):
+            return node
+        parent = cmds.listRelatives(node, parent=True, fullPath=True)
+        node = parent[0] if parent else None
+    return None
+
+
+def thatch_selection():
+    """(roofs, boxes): live roofs picked by any of their parts or their box,
+    and the other selected meshes (each could be a box)."""
+    roofs, boxes = [], []
+    by_box = None
+    for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if not node or node in boxes:
+            continue
+        root = _th_root_up(node)
+        if root:
+            if is_thatch_roof(root) and root not in roofs:
+                roofs.append(root)
+            continue  # a baked roof is plain geometry now: never a box
+        if by_box is None:
+            by_box = {}
+            for r in thatch_roofs():
+                uid = thatch_data(r).get("box")
+                if uid:
+                    by_box.setdefault(uid, r)
+        uid = (cmds.ls(node, uuid=True) or [None])[0]
+        if uid in by_box:
+            if by_box[uid] not in roofs:
+                roofs.append(by_box[uid])
+        elif _log_shape(node) or cmds.attributeQuery(THATCH_BOX_ATTR, node=node, exists=True):
+            boxes.append(node)
+    return roofs, boxes
+
+
+def _th_free_number(pattern):
+    i = 1
+    while cmds.objExists(pattern % i):
+        i += 1
+    return i
+
+
+def create_thatch_box(around=None):
+    """A box to mark the roof (one Ctrl+Z): wireframe, never renders, selected.
+    around: nodes to sit it on (footprint = their bounding box, bottom on
+    their top); otherwise a 6 x 3 x 4 m box (in scene units) at the origin."""
+    with UndoChunk("Thatch box"):
+        name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+        node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
+        shape = _log_shape(node)
+        cmds.addAttr(node, longName=THATCH_BOX_ATTR, attributeType="bool", defaultValue=True)
+        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                     "visibleInRefractions"):
+            if cmds.attributeQuery(attr, node=shape, exists=True):
+                cmds.setAttr(shape + "." + attr, False)
+        cmds.setAttr(node + ".overrideEnabled", True)
+        cmds.setAttr(node + ".overrideShading", False)  # wireframe: the roof shows through
+        if around:
+            bb = cmds.exactWorldBoundingBox(around)
+            sx, sz = max(bb[3] - bb[0], 1e-3), max(bb[5] - bb[2], 1e-3)
+            h = 0.55 * min(sx, sz)
+            cmds.xform(node, worldSpace=True, translation=((bb[0] + bb[3]) * 0.5, bb[4] + h * 0.5,
+                                                           (bb[2] + bb[5]) * 0.5))
+            cmds.xform(node, scale=(sx, h, sz))
+        else:
+            k = THATCH_UNITS.get(cmds.currentUnit(q=True, linear=True), 1.0)
+            cmds.xform(node, translation=(0.0, 4.0 * k, 0.0), scale=(6.0 * k, 3.0 * k, 4.0 * k))
+        cmds.select(node, replace=True)
+    return node
+
+
+def _th_placeholder(frame):
+    """A tiny hidden quad for a part a roof doesn't use (a mesh can't be empty)."""
+    o, a, c = frame["o"], frame["a"], frame["c"]
+    e = 1e-3 * max(frame["W"], 1e-3)
+    pts = [_rl_add(o, _rl_add(_rl_mul(a, e * dx), _rl_mul(c, e * dz))) for dx, dz in ((-1, 1), (1, 1), (1, -1), (-1, -1))]
+    return pts, [4], [0, 1, 2, 3], [0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0], [0, 1, 2, 3]
+
+
+def _th_write(root, frame, s, built):
+    """Put the built geometry on the roof's meshes (API, not undoable:
+    callers run it in NoUndo). Returns the face count."""
+    faces = 0
+    for part, node in thatch_parts(root).items():
+        shape = _log_shape(node)
+        mesh = built.get(part)
+        used = bool(mesh and mesh[1])
+        count = _rope_fill(shape, mesh if used else _th_placeholder(frame))
+        cmds.setAttr(shape + "." + THATCH_VERTS, count)
+        if cmds.getAttr(node + ".visibility") != used:
+            cmds.setAttr(node + ".visibility", used)
+        if part == "straw" and cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True):
+            cmds.setAttr(shape + "." + UV_STACKED_ATTR, s["style"] != "Surface")
+        if used:
+            faces += len(mesh[1])
+    return faces
+
+
+def make_thatch_roof(box, settings=None, select=False):
+    """Thatch the roof a box marks (one Ctrl+Z). The roof follows the box:
+    rebuild it with update_thatch_roofs. Returns {"root", "pieces",
+    "capped", "faces"}. Raises ValueError for a flat box."""
+    s = dict(THATCH_DEFAULTS)
+    s.update(settings or {})
+    frame = thatch_frame(box, s["ridge"])
+    built = thatch_build(frame, s)
+    parent = cmds.listRelatives(box, parent=True, fullPath=True)
+    with UndoChunk("Thatch Roof"):
+        num = _th_free_number("thatchRoof%04d_GRP")
+        if parent:
+            root = long_name(cmds.group(empty=True, parent=parent[0], name="thatchRoof%04d_GRP" % num))
+        else:
+            root = long_name(cmds.group(empty=True, world=True, name="thatchRoof%04d_GRP" % num))
+        cmds.addAttr(root, longName=THATCH_SETTINGS, dataType="string")
+        data = dict(s)
+        data["box"] = cmds.ls(box, uuid=True)[0]
+        data["frame"] = frame
+        cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+        for part, material in (("straw", THATCH_MATERIAL), ("underlay", THATCH_UNDER_MATERIAL)):
+            node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
+                                            constructionHistory=False,
+                                            name="%s_C_thatchRoof%04d_GEP" % (material, num))[0])
+            node = long_name(cmds.parent(node, root)[0])
+            shape = _log_shape(node)
+            cmds.addAttr(shape, longName=THATCH_PART, dataType="string")
+            cmds.setAttr(shape + "." + THATCH_PART, part, type="string")
+            cmds.addAttr(shape, longName=THATCH_VERTS, attributeType="long", defaultValue=0)
+            cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
+            if part == "straw":
+                cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=False)
+        if select:
+            cmds.select(root, replace=True)
+    with NoUndo():
+        faces = _th_write(root, frame, s, built)
+        for node in thatch_parts(root).values():
+            cmds.xform(node, centerPivots=True)
+    return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces}
+
+
+def update_thatch_roofs(changes):
+    """Rebuild roofs with changed settings ({root: {key: value}}; {} just
+    refits to the box as it is now). Like the other tools' live edits these
+    stay out of the undo queue (API geometry can't be undone anyway). A roof
+    whose box is gone keeps its last frame. Returns {"done", "lost",
+    "errors", "pieces", "capped", "faces"}."""
+    report = {"done": [], "lost": [], "errors": [], "pieces": 0, "capped": False, "faces": 0}
+    for root, change in changes.items():
+        if not is_thatch_roof(root):
+            continue
+        data = thatch_data(root)
+        data.update(change)
+        s = thatch_settings_only(data)
+        box = thatch_box(root)
+        frame = data.get("frame")
+        if box:
+            try:
+                frame = thatch_frame(box, s["ridge"])
+            except ValueError as exc:
+                report["errors"].append((root, str(exc)))
+                continue
+        elif data.get("box"):
+            report["lost"].append(root)
+        if not frame:
+            report["errors"].append((root, "no box to build from"))
+            continue
+        built = thatch_build(frame, s)
+        data.update(s)
+        data["frame"] = frame
+        with NoUndo():
+            cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+            report["faces"] += _th_write(root, frame, s, built)
+        report["pieces"] += built["pieces"]
+        report["capped"] = report["capped"] or built["capped"]
+        report["done"].append(root)
+    return report
+
+
+def thatch_box_moved(root):
+    """True when the roof's box has moved or changed size since the last build."""
+    box = thatch_box(root)
+    if not box:
+        return False
+    data = thatch_data(root)
+    try:
+        return not _th_same_frame(thatch_frame(box, data.get("ridge", "Auto")), data.get("frame"))
+    except ValueError:
+        return False
+
+
+def rebuild_stale_thatch():
+    """Roofs (baked ones too) whose meshes are back to their 1-face seed
+    planes (a redo of Thatch Roof re-creates them without the API-built
+    geometry): build them again. Returns the roofs rebuilt."""
+    stale = []
+    for root in thatch_roofs(baked=True):
+        for node in thatch_parts(root).values():
+            shape = _log_shape(node)
+            fn = om.MFnMesh(get_dag_path(shape))
+            if fn.numVertices == 4 and fn.numPolygons == 1 and cmds.getAttr(shape + "." + THATCH_VERTS) != 4:
+                stale.append(root)
+                break
+    live = [r for r in stale if is_thatch_roof(r)]
+    if live:
+        update_thatch_roofs({r: {} for r in live})
+    with NoUndo():
+        for root in stale:
+            if root in live:
+                continue
+            data = thatch_data(root)
+            frame = data.get("frame")
+            if frame:
+                s = thatch_settings_only(data)
+                _th_write(root, frame, s, thatch_build(frame, s))
+    return stale
+
+
+def bake_thatch(roofs):
+    """Keep roofs as plain meshes (one Ctrl+Z): the tool stops editing them
+    and deletes the boxes it made that no other roof follows. The settings
+    move to a hidden attribute only a redo uses. Returns (baked, boxes
+    removed)."""
+    done, gone = [], []
+    with UndoChunk("Thatch bake"):
+        boxes = set()
+        for root in roofs:
+            if not is_thatch_roof(root):
+                continue
+            box = thatch_box(root)
+            if box:
+                boxes.add(box)
+            if cmds.attributeQuery(THATCH_BAKED, node=root, exists=True):
+                cmds.deleteAttr(root + "." + THATCH_BAKED)
+            cmds.renameAttr(root + "." + THATCH_SETTINGS, THATCH_BAKED)
+            done.append(root)
+        still = set(thatch_box(r) for r in thatch_roofs())
+        for box in boxes:
+            if box not in still and cmds.attributeQuery(THATCH_BOX_ATTR, node=box, exists=True):
+                gone.append(short_name(box))
+                cmds.delete(box)
+    return done, gone
+
+
+def thatch_preset(name):
+    """Settings a preset sets (the roof's shape; how the thatch is made stays), or None."""
+    over = THATCH_PRESETS.get(name)
+    if over is None:
+        return None
+    s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
+    s.update(over)
+    return s
+
+
+class ThatchRoofPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Thatch Roof"
+    TOOL_TIP = "Thatched roofs from a box: gable, hip or half-hip ends, levels, a cut ridge, as a surface or " \
+               "as straw planes / 3D pieces on stacked UVs."
+
+    def __init__(self, parent=None):
+        super(ThatchRoofPanel, self).__init__(parent)
+        self._jobs = []
+        self._box_jobs = []
+        self._pending = set()
+        self._root = None  # uuid of the roof being edited: it stays when you deselect it
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._sync_from_selection))
+        self._edit_timer = QtCore.QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(60)
+        self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
+        self._box_timer = QtCore.QTimer(self)
+        self._box_timer.setSingleShot(True)
+        self._box_timer.setInterval(150)  # rebuilds once a box drag pauses
+        self._box_timer.timeout.connect(_guarded(self._box_timer, self._follow_box))
+        self._redo_timer = QtCore.QTimer(self)
+        self._redo_timer.setSingleShot(True)
+        self._redo_timer.setInterval(50)
+        self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
+        self._build()
+        self._install_jobs()
+        self._rebuild_stale()
+        self._sync_from_selection()
+
+    def showEvent(self, event):
+        super(ThatchRoofPanel, self).showEvent(event)
+        self._sel_timer.start()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Thatch Roof", "Draw a box over the walls, press Make Roof, then shape it live: "
+                                               "ends, levels, the ridge, and the straw itself."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+        self.f = {}
+        self._rows = {}
+
+        def row(grid, key, label, widget, tip):
+            self.f[key] = widget
+            self._rows[key] = (grid.add_row(label, widget, tip), widget)
+
+        # ---- 1. box
+        card = self.step_box = StepCard(1, "Box", "The box is the roof: footprint over the wall tops, bottom at the "
+                                                  "eaves, top at the ridge. Select the building first to sit the "
+                                                  "box on it. Any mesh works as a box (its bounding box).")
+        self.sel_label = hint_label("")
+        card.add(self.sel_label)
+        self.box_btn = primary_button("Create Box")
+        self.box_btn.setMinimumHeight(28)
+        self.box_btn.setToolTip("A wireframe box that never renders. With meshes selected it sits on top of them; "
+                                "move, rotate and scale it to the roof's area.")
+        self.box_btn.clicked.connect(lambda *_: self.create_box())
+        card.add(self.box_btn)
+        col.addWidget(card)
+
+        # ---- 2. make
+        card = self.step_make = StepCard(2, "Make roof", "Thatches the selected box with the settings below (one "
+                                                         "Ctrl+Z). The roof follows the box when you move or scale "
+                                                         "it.")
+        self.make_btn = primary_button("Make Roof")
+        self.make_btn.setMinimumHeight(28)
+        self.make_btn.setToolTip("Build a thatched roof on the selected box (or mesh). Then every setting edits it "
+                                 "live.")
+        self.make_btn.clicked.connect(lambda *_: self.make_roof())
+        card.add(self.make_btn)
+        self.follow = CheckField("The roof follows its box as you move or scale it")
+        self.follow.setValue(True)
+        self.follow.setToolTip("On: the roof rebuilds a moment after the box stops moving. Off: press Rebuild.")
+        self.follow.changed.connect(lambda: self._watch_box())
+        card.add(self.follow)
+        col.addWidget(card)
+
+        # ---- 3. shape
+        card = self.step_shape = StepCard(3, "Roof shape", "Edits the roof live (the selected one, or the last one "
+                                                           "you made). Sizes are fractions of the roof's span.")
+        prow = QtWidgets.QWidget()
+        pl = QtWidgets.QHBoxLayout(prow)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(4)
+        plabel = QtWidgets.QLabel("Preset")
+        plabel.setMinimumWidth(92)
+        self.preset_combo = _Combo()
+        _guard_focus(self.preset_combo)
+        self.preset_combo.addItems(list(THATCH_PRESETS))
+        self.preset_combo.setToolTip("Pick a preset to load it. Presets set the roof's shape; how the straw is "
+                                     "made (step 4) stays.")
+        self.preset_combo.activated.connect(lambda *_: self.load_preset())
+        pl.addWidget(plabel)
+        pl.addWidget(self.preset_combo, 1)
+        card.add(prow)
+        self.f["shape"] = SegmentField(THATCH_SHAPES)
+        self.f["shape"].setToolTip("Ridge: two slopes meeting at a ridge.\nLean-to: one slope, high along the "
+                                   "box's -side (a shed against a wall).\nCone: a round roof (roundhouse), "
+                                   "elliptical in a long box.")
+        card.add(self.f["shape"])
+        grid = Section("", header=False)
+        row(grid, "ridge", "Ridge along", SegmentField(THATCH_AXES),
+            "Which way the ridge runs in the box. Auto: along its longer side.")
+        row(grid, "end_a", "+ end", SegmentField(THATCH_ENDS),
+            "The end of the ridge on the box's + side. Gable: a flat, upright end. Hip: it slopes in too. "
+            "Half-hip: upright below, hipped near the top.")
+        row(grid, "end_b", "- end", SegmentField(THATCH_ENDS), "The end of the ridge on the box's - side.")
+        row(grid, "hip_pitch", "Hip pitch", FloatField(0.25, 4.0, 0.5, 2.5, decimals=2, step=0.05),
+            "How steep the hipped ends are next to the sides (1 = the same, 2 = twice as steep: a longer ridge).")
+        row(grid, "half_hip", "Half-hip at", FloatField(0.05, 0.95, 0.05, 0.95, decimals=2, step=0.05),
+            "How high up a half-hip starts (fraction of the roof's height).")
+        row(grid, "overhang", "Overhang", FloatField(0.0, 0.5, 0.0, 0.25, decimals=3, step=0.005),
+            "How far the eaves and verges reach past the box (0.08 = 40 cm on a 5 m span).")
+        row(grid, "thickness", "Thickness", FloatField(0.005, 0.3, 0.01, 0.15, decimals=3, step=0.005),
+            "Thatch thickness (0.07 = 35 cm on a 5 m span, about right for long straw).")
+        row(grid, "softness", "Softness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How round the ridge and hips are: thatch is never sharp.")
+        row(grid, "sag", "Sag", FloatField(-1.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
+            "Old thatch dips between the eaves and the ridge; below 0 it bellies out.")
+        row(grid, "lumps", "Lumps", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "Slow, uneven swells across the roof.")
+        card.add(grid)
+        sec = Section("Levels")
+        row(sec, "levels", "Levels", IntField(1, 12, 1, 8),
+            "Tiers from the eaves up to the ridge cap. Each one's bottom edge stands proud of the one below.")
+        row(sec, "lip", "Level lip", FloatField(0.0, 2.0, 0.0, 1.2, decimals=2, step=0.05),
+            "How far each level stands out at its bottom edge (fraction of the thickness). 1 level: the eave's "
+            "rounded lip.")
+        card.add(sec)
+        sec = Section("Ridge cap")
+        row(sec, "top", "Top depth", FloatField(0.0, 0.8, 0.0, 0.4, decimals=3, step=0.01),
+            "How far down from the ridge the cap reaches (fraction of the roof's height). 0: no cap.")
+        row(sec, "cap", "Cap thickness", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How far the cap stands out (fraction of the thickness).")
+        row(sec, "pattern", "Cut edge", SegmentField(THATCH_PATTERNS),
+            "The cap's lower edge: straight, scallops or points (block-cut ridges).")
+        row(sec, "pattern_size", "Pattern size", FloatField(0.005, 0.5, 0.02, 0.2, decimals=3, step=0.005),
+            "Width of each scallop / point (fraction of the span).")
+        row(sec, "pattern_depth", "Pattern depth", FloatField(0.0, 2.0, 0.0, 1.2, decimals=2, step=0.05),
+            "How far the scallops / points hang down, relative to their width.")
+        card.add(sec)
+        col.addWidget(card)
+
+        # ---- 4. thatch
+        card = self.step_thatch = StepCard(4, "Thatch", "Surface: one displaced mesh. Planes / 3D Pieces: straw "
+                                                        "laid in courses over an underlay, all on the same stacked "
+                                                        "UVs.")
+        self.f["style"] = SegmentField(THATCH_STYLES)
+        self.f["style"].setToolTip("Surface: a closed, displaced shell with straw grooves (lightest).\nPlanes: "
+                                   "flat straw cards for an alpha-mapped straw texture.\n3D Pieces: little "
+                                   "tapered bundles with a cut butt end (close-ups).")
+        card.add(self.f["style"])
+        grid = Section("", header=False)
+        row(grid, "resolution", "Resolution", IntField(16, 600, 30, 300),
+            "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
+            "while you shape the roof.")
+        card.add(grid)
+        sec = self.surf_sec = Section("Straw")
+        row(sec, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How deep the straw grooves running down the slope are.")
+        row(sec, "strand_width", "Strand width", FloatField(0.001, 0.05, 0.002, 0.02, decimals=4, step=0.0005),
+            "Width of each groove (fraction of the span). Needs resolution to show.")
+        card.add(sec)
+        sec = self.piece_sec = Section("Pieces")
+        row(sec, "density", "Density", FloatField(0.05, 6.0, 0.1, 3.0, decimals=2, step=0.05),
+            "How many pieces: 1 covers the roof about three layers deep.")
+        row(sec, "piece_width", "Width", FloatField(0.002, 0.2, 0.005, 0.08, decimals=4, step=0.001),
+            "Width of a piece (fraction of the span: 0.02 = 10 cm on 5 m).")
+        row(sec, "piece_length", "Length", FloatField(0.01, 0.5, 0.02, 0.25, decimals=3, step=0.005),
+            "Length up the slope (fraction of the span).")
+        row(sec, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Random turn, roll and size of each piece.")
+        row(sec, "lift", "Lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How far each butt end stands off the roof (the top end is tucked in).")
+        row(sec, "bend", "Bend", FloatField(-2.0, 3.0, -1.0, 1.5, decimals=2, step=0.05),
+            "Bows each piece outwards (below 0: inwards).")
+        row(sec, "segments", "Segments", IntField(1, 12, 1, 8),
+            "Segments along each piece, so it can follow the roof's curve.")
+        row(sec, "sides", "Sides", IntField(3, 16, 3, 12), "3D pieces: sides round each bundle.")
+        row(sec, "flatness", "Flatness", FloatField(0.05, 1.0, 0.05, 1.0, decimals=2, step=0.05),
+            "3D pieces: thickness of a bundle across its width (1 = round).")
+        self.f["underlay"] = CheckField("Underlay under the pieces")
+        self.f["underlay"].setToolTip("A plain thatch shell under the pieces, so no gaps show (a mesh of its own, "
+                                      "for its own material).")
+        sec.add_full(self.f["underlay"])
+        card.add(sec)
+        sec = self.stack_sec = Section("UV stacks")
+        row(sec, "stacks", "Stacks", IntField(1, 16, 1, 8),
+            "Every piece has the same UVs. With 2+ stacks each piece picks one at random: one straw texture per "
+            "stack.")
+        row(sec, "stack_layout", "Layout", SegmentField(THATCH_STACK_LAYOUTS),
+            "UDIM tiles: stack 1 in 1001, stack 2 in 1002...\nAtlas columns: the stacks share 0..1, side by side "
+            "(one texture with the straw images in columns).")
+        self.f["mirror"] = CheckField("Mirror half the pieces")
+        self.f["mirror"].setToolTip("Flips the texture on every other piece (at random) so repeats show less. "
+                                    "The UVs are mirrored: fine for colour, careful with normal maps.")
+        sec.add_full(self.f["mirror"])
+        card.add(sec)
+        seed_row = QtWidgets.QWidget()
+        sl = QtWidgets.QHBoxLayout(seed_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        seed_label = QtWidgets.QLabel("Seed")
+        seed_label.setMinimumWidth(92)
+        self.f["seed"] = IntField(0, 99999, 0, 9999)
+        self.f["seed"].setToolTip("Random seed for the lumps, straw and pieces.")
+        rand = secondary_button("Randomize", "A new random seed.")
+        rand.clicked.connect(lambda *_: self.randomize())
+        sl.addWidget(seed_label)
+        sl.addWidget(self.f["seed"], 1)
+        sl.addWidget(rand)
+        card.add(seed_row)
+        col.addWidget(card)
+        for key, widget in self.f.items():
+            widget.setValue(THATCH_DEFAULTS[key])
+            widget.changed.connect(lambda k=key: self._queue(k))
+
+        # ---- 5. finish
+        card = self.step_finish = StepCard(5, "Finish", "Bake keeps the roof as plain meshes and removes its box. "
+                                                        "One Ctrl+Z.")
+        pick = secondary_button("Select Box", "Select the box of the roof you're editing.")
+        pick.clicked.connect(lambda *_: self.select_box())
+        rebuild = secondary_button("Rebuild", "Rebuild the roof from its box as it is now (or every roof).")
+        rebuild.clicked.connect(lambda *_: self.rebuild())
+        bake = secondary_button("Bake", "Keep the roof as plain meshes (the selected roofs, or the one you're "
+                                        "editing): the tool stops editing it and deletes its box.")
+        bake.clicked.connect(lambda *_: self.bake())
+        card.add(button_row(pick, rebuild, bake))
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+        self._update_rows()
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def _settings(self):
+        return {k: w.value() for k, w in self.f.items()}
+
+    def _show(self, settings):
+        for key, widget in self.f.items():
+            widget.setValue(settings.get(key, THATCH_DEFAULTS[key]))
+        self._update_rows()
+
+    def _update_rows(self):
+        s = self._settings()
+        cone = s["shape"] == "Cone"
+        ends = (s["end_a"], s["end_b"])
+        three = s["style"] == "3D Pieces"
+        shown = {"ridge": not cone, "end_a": not cone, "end_b": not cone,
+                 "hip_pitch": not cone and ends != ("Gable", "Gable"), "half_hip": not cone and "Half-hip" in ends,
+                 "sides": three, "flatness": three}
+        for key, on in shown.items():
+            label, widget = self._rows[key]
+            label.setVisible(on)
+            widget.setVisible(on)
+        surface = s["style"] == "Surface"
+        self.surf_sec.setVisible(surface)
+        self.piece_sec.setVisible(not surface)
+        self.stack_sec.setVisible(not surface)
+
+    def target(self):
+        """The roof being edited (selected, or the last one), or None."""
+        if not self._root:
+            return None
+        found = cmds.ls(self._root, long=True) or []
+        if not found or not is_thatch_roof(found[0]):
+            self._root = None
+            return None
+        return found[0]
+
+    def _pin(self, root):
+        uid = cmds.ls(root, uuid=True)[0] if root else None
+        if uid != self._root:
+            self._root = uid
+            self._watch_box()
+
+    def _sync_from_selection(self):
+        if not self.isVisible():
+            return
+        try:
+            roofs, boxes = thatch_selection()
+            if roofs:
+                self._pin(roofs[0])
+                self._show(thatch_settings_only(thatch_data(roofs[0])))
+                if thatch_box_moved(roofs[0]):  # moved while the toolbox was closed
+                    self._box_timer.start()
+            elif boxes:
+                self._pin(None)  # a new box: Make Roof uses it
+            root = self.target()
+            if roofs:
+                text = "Editing %s." % short_name(roofs[0])
+                if len(roofs) > 1:
+                    text += " %d roofs selected: settings change them all." % len(roofs)
+            elif boxes:
+                text = "Box: %s." % short_name(boxes[0])
+                if len(boxes) > 1:
+                    text = "%d meshes selected: Make Roof uses the first (%s) as the box; Create Box sits a " \
+                           "new box on all of them." % (len(boxes), short_name(boxes[0]))
+            elif root:
+                text = "Editing %s (deselected: it stays on the panel)." % short_name(root)
+            else:
+                text = "Nothing selected."
+            self.sel_label.setText(text)
+            self.step_box.set_state("done" if boxes or root else "current")
+            self.step_make.set_state("current" if boxes else ("done" if root else "todo"))
+            for step in (self.step_shape, self.step_thatch):
+                step.set_state("current" if root else "todo")
+            self.step_finish.set_state("todo")
+            tool_box = bool(boxes) and cmds.attributeQuery(THATCH_BOX_ATTR, node=boxes[0], exists=True)
+            self.box_btn.setProperty("unlokPrimary", not tool_box and not root)
+            self.make_btn.setProperty("unlokPrimary", tool_box)
+            repolish(self.box_btn, self.make_btn)
+            if root:
+                self.next_banner.set_text("Every change in steps 3 and 4 rebuilds <b>%s</b>. Move or scale its "
+                                          "box and it follows. <b>Bake</b> when you're done." % short_name(root),
+                                          tag="EDITING", tone="active")
+            elif boxes and cmds.attributeQuery(THATCH_BOX_ATTR, node=boxes[0], exists=True):
+                self.next_banner.set_text("Scale the box to the roof's area (bottom at the eaves, top at the "
+                                          "ridge), then press <b>Make Roof</b>.")
+            elif boxes:
+                self.next_banner.set_text("Press <b>Create Box</b> to sit a box on the selection, or <b>Make "
+                                          "Roof</b> to use %s's bounding box as the roof." % short_name(boxes[0]))
+            else:
+                self.next_banner.set_text("Press <b>Create Box</b> (select the building first to sit it on top), "
+                                          "or select a roof to edit it.")
+        except Exception:
+            traceback.print_exc()
+
+    # ============================================================= actions
+    def _queue(self, key):
+        self._update_rows()
+        self._pending.add(key)
+        self._edit_timer.start()
+
+    def _edit_roofs(self):
+        roofs = thatch_selection()[0]
+        root = self.target()
+        if not roofs and root:
+            roofs = [root]
+        return roofs
+
+    @ui_safe
+    def _apply_pending(self):
+        keys, self._pending = self._pending, set()
+        roofs = self._edit_roofs()
+        if not keys or not roofs:
+            return
+        values = self._settings()
+        self._rebuild({r: {k: values[k] for k in keys} for r in roofs}, "Updated")
+
+    def _rebuild(self, changes, verb):
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = update_thatch_roofs(changes)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if "ridge" in set(k for c in changes.values() for k in c):
+            self._watch_box()
+        msg = "%s %d roof(s) in %.2fs: %s faces" % (verb, len(report["done"]), time.time() - t0,
+                                                   "{:,}".format(report["faces"]))
+        if report["pieces"]:
+            msg += ", %s pieces" % "{:,}".format(report["pieces"])
+        msg += "."
+        level = "info"
+        if report["capped"]:
+            msg += " Capped at %s vertices: lower Density or raise Width / Length." % "{:,}".format(THATCH_MAX_VERTS)
+            level = "warn"
+        if report["lost"]:
+            msg += " %d lost their box (deleted?): they stay where they are." % len(report["lost"])
+            level = "warn"
+        if report["errors"]:
+            msg += " %s." % report["errors"][0][1]
+            level = "warn"
+        self.set_status(msg, level)
+        return report
+
+    @ui_safe
+    def create_box(self):
+        around = [n for n in cmds.ls(selection=True, objectsOnly=True, long=True) or []
+                  if cmds.objectType(n, isAType="transform") and not _th_root_up(n)]  # groups too
+        box = create_thatch_box(around or None)
+        self._pin(None)
+        self.set_status("Made %s%s. Move and scale it to the roof's area, then Make Roof." % (
+            short_name(box), " on the selection" if around else ""), level="fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def make_roof(self):
+        roofs, boxes = thatch_selection()
+        if not boxes:
+            if roofs:
+                self.set_status("%s already has a roof: its settings are on the panel. Bake it to start another "
+                                "on the same box." % short_name(thatch_box(roofs[0]) or roofs[0]), level="warn")
+            else:
+                self.set_status("Select a box first (Create Box makes one).", level="warn")
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = make_thatch_roof(boxes[0], self._settings())
+        except ValueError as exc:
+            self.set_status("Can't use %s: %s." % (short_name(boxes[0]), exc), level="warn")
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._pin(report["root"])
+        msg = "Made %s in %.2fs: %s faces" % (short_name(report["root"]), time.time() - t0,
+                                             "{:,}".format(report["faces"]))
+        if report["pieces"]:
+            msg += ", %s pieces" % "{:,}".format(report["pieces"])
+        self.set_status(msg + ". One Ctrl+Z undoes it.", level="warn" if report["capped"] else "fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def randomize(self):
+        self.f["seed"].setValue(random.randint(1, 9999))
+        self._queue("seed")
+
+    @ui_safe
+    def load_preset(self):
+        name = self.preset_combo.currentText()
+        s = thatch_preset(name)
+        if s is None:
+            return
+        self._show(dict(self._settings(), **s))
+        roofs = self._edit_roofs()
+        if roofs:
+            self._rebuild({r: dict(s) for r in roofs}, "'%s' on" % name)
+        else:
+            self.set_status("Loaded '%s': Make Roof uses it." % name)
+
+    @ui_safe
+    def select_box(self):
+        root = (self._edit_roofs() or [None])[0]
+        box = thatch_box(root) if root else None
+        if box:
+            cmds.select(box, replace=True)
+            self.set_status("Selected %s." % short_name(box))
+        else:
+            self.set_status("No roof box to select (select a roof, or it was deleted).", level="warn")
+
+    @ui_safe
+    def rebuild(self):
+        roofs = self._edit_roofs() or thatch_roofs()
+        if not roofs:
+            self.set_status("No roofs to rebuild.", level="warn")
+            return
+        self._rebuild({r: {} for r in roofs}, "Rebuilt")
+
+    @ui_safe
+    def bake(self):
+        roofs = self._edit_roofs()
+        if not roofs:
+            self.set_status("Select a roof to bake.", level="warn")
+            return
+        done, gone = bake_thatch(roofs)
+        self._pin(None)
+        msg = "Baked %d roof(s): plain meshes now" % len(done)
+        if gone:
+            msg += ", removed %s" % ", ".join(gone)
+        self.set_status(msg + ". One Ctrl+Z undoes it.", level="fixed")
+        self._sync_from_selection()
+
+    def _rebuild_stale(self):
+        try:
+            stale = rebuild_stale_thatch()
+            if stale:
+                self.set_status("Rebuilt %d roof(s) brought back by a redo." % len(stale))
+        except Exception:
+            traceback.print_exc()
+
+    def _follow_box(self):
+        try:
+            root = self.target()
+            if root and self.follow.value() and thatch_box_moved(root):
+                self._rebuild({root: {}}, "Followed the box:")
+        except Exception:
+            traceback.print_exc()
+
+    # ======================================================= scene events
+    def _kill(self, jobs):
+        reg = _registry()["jobs"]
+        for job in jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+
+    def _watch_box(self):
+        """Rebuild the roof being edited when its box moves (the jobs only
+        start a timer; the roof is rebuilt once the drag pauses)."""
+        self._kill(self._box_jobs)
+        self._box_jobs = []
+        root = self.target()
+        box = thatch_box(root) if root else None
+        if not box or not self.follow.value() or maya_main_window() is None:
+            return
+        for attr in ("translate", "rotate", "scale", "shear"):
+            self._box_jobs.append(cmds.scriptJob(attributeChange=[box + "." + attr, lambda: self._box_timer.start()],
+                                                 killWithScene=True))
+        _registry()["jobs"].extend(self._box_jobs)
+
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def shutdown(self):
+        for timer in (self._sel_timer, self._edit_timer, self._box_timer, self._redo_timer):
+            timer.stop()
+        self._kill(self._jobs + self._box_jobs)
+        self._jobs, self._box_jobs = [], []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
-    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel]),
+    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

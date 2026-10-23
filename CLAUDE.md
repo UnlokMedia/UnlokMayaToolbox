@@ -267,6 +267,52 @@
     rope near what moved (`dirty`).
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
+- **Thatch Roof** (Modeling tab): a roof from a box. Engine `ThatchField`
+  (pure maths) -> `_th_grid` -> `_th_shell_mesh` / `_th_pieces_mesh`, all in
+  `thatch_build`; scene side `make_thatch_roof`, `update_thatch_roofs`,
+  `rebuild_stale_thatch`, `bake_thatch`; panel `ThatchRoofPanel`.
+  - **Frame** (`thatch_frame`): the box's world matrix and its mesh's local
+    bounding box give roof space: x along the ridge, y up from the eaves
+    (the box's bottom), z across; L / W half the length / width, H height.
+    Settings sizes are fractions of the span (2W; a cone's mean diameter).
+  - **Height field** (`ThatchField.height`): side planes (`_th_sabs` rounds
+    the ridge only within its radius: `sqrt(z^2 + r^2) - r` lifted the whole
+    slope by r, so side eaves sat 20 cm above hip eaves and the eave lip
+    jumped at the corners) smooth-minned (`_th_smin`) with each hipped end's
+    plane. A hip's eave overhang is scaled by the pitch ratio so the eaves
+    stay level. Two hips that meet before the ridge split where they cross.
+  - **Height fraction t** (h / H) drives the levels (`shell`: each level's
+    lip stands proud at its bottom, decays up it) and the ridge cap (`t_cap`
+    minus `drop(p)`, the scallop / point cut).
+  - **Three coordinates across the slope:** `along` (arc length round the
+    hip apex: UVs and the cap pattern; injective, so UVs never overlap),
+    `strand_along` (constant straight down each face, blended over the
+    hip by the smin weight: the straw grooves; the first version used the
+    arc-length one and the straws spiralled on hips) and, on a cone, the
+    angle. The plane-wise one can't be the UV: end and side points overlap.
+  - **Underside:** halfway between straight down and the normal, scaled to
+    keep the thickness across the slope. Along the normal it folded at hips
+    rounder than the thatch is thick (ears at the eave corners); straight
+    down made a tall upright eave band.
+  - **Pieces:** per grid cell, expected count = area x rate (density 1 =
+    about three deep), dithered by `_rand12`. Each walks up the slope
+    (re-sampling the grid with `_th_cell` / `_th_sample`, never turning back
+    over the ridge), lifted at the butt and tucked at the top; the bottom
+    course is pushed down over the eaves. Every piece has the same UV
+    layout; the stack offsets U by a tile or a column. Capped at
+    `THATCH_MAX_VERTS`.
+  - **Undo:** like Rope Lashing: the group and two seed planes ("straw",
+    "underlay") inside the chunk, filled in NoUndo (`_th_write` via
+    `_rope_fill`). An unused underlay is a hidden 4-vertex placeholder
+    (`THATCH_VERTS` = 4, so it's not stale).
+  - **Following the box:** the panel's attributeChange scriptJobs on the
+    box's translate / rotate / scale / shear only restart a 150 ms timer;
+    `thatch_box_moved` compares the stored frame. Selecting a roof also
+    checks it (moves made while the toolbox was closed).
+  - **UV hand-off:** both meshes get `unlokUvReady`; the straw also gets
+    `UV_STACKED_ATTR` (True for planes / pieces). `_mark_tool_uvs` marks
+    stacked meshes Hands off, the rest Keep UVs; `set_uv_status(..., "auto")`
+    deletes both tags.
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -691,10 +737,12 @@
   closing or skipping it is fine. Add `-log <file>` to see Maya's output.
 Maya 2024 and 2025 are installed locally (no 2023). Run
 `mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
-`tests/test_bevel_resolver.py` for the engines (plus `tests/test_log_noise.py`
-and `tests/test_rope_lashing.py`), and
+`tests/test_bevel_resolver.py` for the engines (plus `tests/test_log_noise.py`,
+`tests/test_rope_lashing.py` and `tests/test_thatch_roof.py`), and
 `tests/bench_scatter.py [--profile]` for speed. The Bevel Resolver GUI test
 is `tests/run_gui_bevel_resolver.mel` (screenshots in
 `tests/_out/bevel_resolver`). For the UI, launch GUI Maya
 with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
-the output folder.
+the output folder. Thatch Roof's GUI test is `tests/run_gui_thatch_roof.mel`
+(pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
+`cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
