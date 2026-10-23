@@ -15,12 +15,16 @@ Modeling
                     randomness and bake to instances, copies or one mesh.
     Bevel Resolver - turn the n-gons a chamfer-off bevel leaves at its ends
                      into clean SubD quads, mesh-wide or on a selection.
+    Log Noise     - turn cylinders into natural-looking logs.
+    Rope Lashing  - tie logs together the way real lashings are tied
+                    (square, diagonal, round, sheer), with clean UVs.
 UV
     Smart UDIM    - sort an asset into UDIM sections and material groups
                     (plain Maya sets, UnlokRenamer naming), clean geometry
                     and report UV problems before layout.
 """
 
+import bisect
 import functools
 import heapq
 import itertools
@@ -2013,18 +2017,43 @@ STYLE = """
 #UnlokToolboxWindow QLabel[unlokNextTag="true"][unlokTone="done"] { color: #9ad89d; }
 #UnlokToolboxWindow QLabel[unlokNextTag="true"][unlokTone="active"] { color: #f0a560; }
 
+#UnlokToolboxWindow QWidget[unlokColumn="true"] { background: #2c2c2c; }
+
+#UnlokToolboxWindow QFrame[unlokPanel="true"] {
+    background: #363636; border: 1px solid #444444; border-radius: 6px; }
+
 #UnlokToolboxWindow QFrame[unlokStep="true"] {
-    background: #4b4b4b; border: 1px solid #3a3a3a; border-radius: 6px; }
-#UnlokToolboxWindow QFrame[unlokStep="true"][unlokState="current"] { border: 1px solid %(accent)s; }
+    background: #3a3a3a; border: 1px solid #474747; border-left: 4px solid #5c5c5c; border-radius: 6px; }
+#UnlokToolboxWindow QFrame[unlokStep="true"][unlokState="current"] {
+    background: #3a4241; border: 1px solid %(accent)s; border-left: 4px solid %(accent)s; }
+#UnlokToolboxWindow QFrame[unlokStep="true"][unlokState="done"] { border-left: 4px solid #4f9a57; }
+#UnlokToolboxWindow QFrame[unlokStep="true"][unlokTone="warn"] { border-left: 4px solid #e0b050; }
+#UnlokToolboxWindow QFrame[unlokStepHead="true"] { background: transparent; border: none; border-radius: 4px; }
+#UnlokToolboxWindow QFrame[unlokStepHead="true"]:hover { background: rgba(255, 255, 255, 14); }
 #UnlokToolboxWindow QLabel[unlokBadge="true"] {
-    background: #5f5f5f; color: #dddddd; border-radius: 11px; font-weight: 700; }
+    background: #555555; color: #dddddd; border-radius: 11px; font-weight: 700; }
 #UnlokToolboxWindow QLabel[unlokBadge="true"][unlokState="current"] { background: %(accent)s; color: white; }
 #UnlokToolboxWindow QLabel[unlokBadge="true"][unlokState="done"] { background: #3f6b45; color: #c8f0cb; }
-#UnlokToolboxWindow QLabel[unlokStepTitle="true"] { font-size: 12px; font-weight: 700; color: #e6e6e6; }
-#UnlokToolboxWindow QLabel[unlokStepTitle="true"][unlokState="done"] { color: #b8b8b8; }
+#UnlokToolboxWindow QLabel[unlokStepTitle="true"] { font-size: 12px; font-weight: 700; color: #ececec; }
+#UnlokToolboxWindow QLabel[unlokStepTitle="true"][unlokState="done"] { color: #c4c4c4; }
+#UnlokToolboxWindow QLabel[unlokStepTitle="true"][unlokState="todo"] { color: #bdbdbd; }
+#UnlokToolboxWindow QLabel[unlokChevron="true"] { color: #8c8c8c; font-size: 11px; }
+#UnlokToolboxWindow QLabel[unlokSummary="true"] { color: #9a9a9a; }
+#UnlokToolboxWindow QLabel[unlokSummary="true"][unlokTone="done"] { color: #8fcf94; }
+#UnlokToolboxWindow QLabel[unlokSummary="true"][unlokTone="warn"] { color: #f0c870; }
+
+#UnlokToolboxWindow QToolButton[unlokNav="true"] {
+    background: #444444; color: #cfcfcf; border: 1px solid #505050; border-radius: 4px; padding: 2px 0px;
+    font-weight: 700; }
+#UnlokToolboxWindow QToolButton[unlokNav="true"]:hover { background: #505050; }
+#UnlokToolboxWindow QToolButton[unlokNav="true"][unlokState="current"] {
+    background: %(accent)s; color: white; border: 1px solid %(accent)s; }
+#UnlokToolboxWindow QToolButton[unlokNav="true"][unlokState="done"] { background: #3f6b45; color: #c8f0cb; }
+#UnlokToolboxWindow QToolButton[unlokNav="true"][unlokTone="warn"] { border: 1px solid #e0b050; }
 
 #UnlokToolboxWindow QToolButton[unlokSection="true"] {
-    border: none; border-top: 1px solid #5a5a5a; color: #d0d0d0; font-weight: 600; padding: 6px 0px 4px 0px; }
+    border: none; border-top: 1px solid #4c4c4c; color: #7fd6c9; font-weight: 600; padding: 6px 0px 4px 0px; }
+#UnlokToolboxWindow QToolButton[unlokSection="true"]:hover { color: #a6eadf; }
 #UnlokToolboxWindow QPushButton[unlokPrimary="true"] {
     background: %(accent)s; color: white; font-weight: 700; padding: 6px 12px; border-radius: 4px; border: none; }
 #UnlokToolboxWindow QPushButton[unlokPrimary="true"]:hover { background: %(hover)s; }
@@ -2370,44 +2399,79 @@ class NextBanner(QtWidgets.QFrame):
             repolish(self, self.tag)
 
 
+class _ClickFrame(QtWidgets.QFrame):
+    clicked = QtCore.Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+        super(_ClickFrame, self).mousePressEvent(event)
+
+
 class StepCard(QtWidgets.QFrame):
     """A numbered workflow step: badge, title, one-line explanation, body.
 
-    State: 'todo' (grey badge), 'current' (accent badge + outline) or
-    'done' (tick).
+    State: 'todo' (grey), 'current' (accent badge, outline and strip) or
+    'done' (tick, green strip). Click the header to fold the body away;
+    folded, the header shows a one-line summary instead of the explanation.
+    auto=True (progressive disclosure): the card opens when it becomes the
+    current step (or has a warning) and folds when it's done or not yet
+    reached, until you open or close it yourself.
     """
 
-    def __init__(self, number, title, subtitle="", parent=None):
+    stateChanged = QtCore.Signal()
+
+    def __init__(self, number, title, subtitle="", parent=None, auto=False):
         super(StepCard, self).__init__(parent)
         self.number = number
+        self.auto = auto
         self.setProperty("unlokStep", True)
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(10, 9, 10, 10)
-        lay.setSpacing(7)
-        head = QtWidgets.QHBoxLayout()
+        lay.setContentsMargins(8, 6, 10, 8)
+        lay.setSpacing(6)
+        self.head = _ClickFrame()
+        self.head.setProperty("unlokStepHead", True)
+        self.head.setCursor(QtCore.Qt.PointingHandCursor)
+        self.head.setToolTip("Click to open or fold this step.")
+        self.head.clicked.connect(self.toggle)
+        head = QtWidgets.QHBoxLayout(self.head)
+        head.setContentsMargins(2, 3, 2, 3)
         head.setSpacing(9)
         self.badge = QtWidgets.QLabel(str(number))
         self.badge.setProperty("unlokBadge", True)
         self.badge.setFixedSize(22, 22)
         self.badge.setAlignment(QtCore.Qt.AlignCenter)
         titles = QtWidgets.QVBoxLayout()
-        titles.setSpacing(0)
+        titles.setSpacing(1)
         self.title = QtWidgets.QLabel(title)
         self.title.setProperty("unlokStepTitle", True)
         titles.addWidget(self.title)
         self.subtitle = QtWidgets.QLabel(subtitle)
         self.subtitle.setWordWrap(True)
         self.subtitle.setProperty("unlokHint", True)
-        self.subtitle.setVisible(bool(subtitle))
+        self._has_subtitle = bool(subtitle)
         titles.addWidget(self.subtitle)
+        self.summary = QtWidgets.QLabel("")
+        self.summary.setWordWrap(True)
+        self.summary.setProperty("unlokSummary", True)
+        titles.addWidget(self.summary)
+        self.chevron = QtWidgets.QLabel()
+        self.chevron.setProperty("unlokChevron", True)
         head.addWidget(self.badge, 0, QtCore.Qt.AlignTop)
         head.addLayout(titles, 1)
-        lay.addLayout(head)
-        self.body = QtWidgets.QVBoxLayout()
+        head.addWidget(self.chevron, 0, QtCore.Qt.AlignTop)
+        lay.addWidget(self.head)
+        self.content = QtWidgets.QWidget()
+        self.body = QtWidgets.QVBoxLayout(self.content)
+        self.body.setContentsMargins(2, 0, 0, 0)
         self.body.setSpacing(5)
-        lay.addLayout(self.body)
+        lay.addWidget(self.content)
         self.state = None
+        self.tone = None
+        self.expanded = True
+        self._user = None  # the user's own open / fold, until the state changes
         self.set_state("todo")
+        self._show()
 
     def add(self, widget, stretch=0):
         self.body.addWidget(widget, stretch)
@@ -2417,6 +2481,46 @@ class StepCard(QtWidgets.QFrame):
         self.body.addLayout(layout)
         return layout
 
+    def _show(self):
+        self.content.setVisible(self.expanded)
+        self.subtitle.setVisible(self._has_subtitle and self.expanded)
+        self.summary.setVisible(bool(self.summary.text()) and not self.expanded)
+        self.chevron.setText(u"\u25be" if self.expanded else u"\u25b8")
+
+    def _auto_open(self):
+        return self.state == "current" or self.tone == "warn"
+
+    def set_expanded(self, on, user=False):
+        if user:
+            self._user = bool(on)
+        if bool(on) != self.expanded:
+            self.expanded = bool(on)
+            self._show()
+            self.stateChanged.emit()
+
+    def toggle(self):
+        self.set_expanded(not self.expanded, user=True)
+
+    def enable_auto(self):
+        """Turn on progressive disclosure (see the class docstring)."""
+        self.auto = True
+        self._user = None
+        self.set_expanded(self._auto_open())
+
+    def set_summary(self, text, tone=None):
+        """The line shown while folded (e.g. what this step found)."""
+        changed = tone != self.tone
+        self.summary.setText(text or "")
+        if changed:
+            self.tone = tone
+            for w in (self, self.summary):
+                w.setProperty("unlokTone", tone or "")
+            repolish(self, self.summary)
+            if self.auto and self._user is None:
+                self.set_expanded(self._auto_open())
+            self.stateChanged.emit()
+        self._show()
+
     def set_state(self, state):
         if state == self.state:
             return
@@ -2425,6 +2529,48 @@ class StepCard(QtWidgets.QFrame):
         for w in (self, self.badge, self.title):
             w.setProperty("unlokState", state)
         repolish(self, self.badge, self.title)
+        if self.auto:
+            self._user = None
+            self.set_expanded(self._auto_open())
+        self.stateChanged.emit()
+
+
+class StepNav(QtWidgets.QWidget):
+    """A strip of numbered chips, one per step card: coloured by state,
+    tooltip = title; click opens that step and scrolls to it."""
+
+    def __init__(self, cards, scroll, parent=None):
+        super(StepNav, self).__init__(parent)
+        self.cards, self.scroll = cards, scroll
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        self.chips = []
+        for card in cards:
+            chip = QtWidgets.QToolButton()
+            chip.setProperty("unlokNav", True)
+            chip.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            chip.setMinimumHeight(22)
+            chip.setCursor(QtCore.Qt.PointingHandCursor)
+            chip.clicked.connect(lambda *_, c=card: self.go(c))
+            lay.addWidget(chip)
+            self.chips.append(chip)
+            card.stateChanged.connect(self.sync)
+        self.sync()
+
+    def sync(self):
+        for card, chip in zip(self.cards, self.chips):
+            chip.setText(u"\u2713" if card.state == "done" else str(card.number))
+            chip.setToolTip("Step %d: %s%s" % (card.number, card.title.text(),
+                                               (" - %s" % card.summary.text()) if card.summary.text() else ""))
+            if chip.property("unlokState") != card.state or chip.property("unlokTone") != (card.tone or ""):
+                chip.setProperty("unlokState", card.state)
+                chip.setProperty("unlokTone", card.tone or "")
+                repolish(chip)
+
+    def go(self, card):
+        card.set_expanded(True, user=True)
+        QtCore.QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(card, 0, 40))
 
 
 def scroll_column():
@@ -2435,9 +2581,12 @@ def scroll_column():
     scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     body = QtWidgets.QWidget()
     body.setProperty("unlokColumn", True)
+    body.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+    scroll.viewport().setProperty("unlokColumn", True)
+    scroll.viewport().setAttribute(QtCore.Qt.WA_StyledBackground, True)
     lay = QtWidgets.QVBoxLayout(body)
-    lay.setContentsMargins(6, 2, 6, 8)
-    lay.setSpacing(8)
+    lay.setContentsMargins(6, 6, 6, 10)
+    lay.setSpacing(10)
     scroll.setWidget(body)
     return scroll, lay
 
@@ -9299,7 +9448,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
         strip = QtWidgets.QFrame()
-        strip.setProperty("unlokStep", True)
+        strip.setProperty("unlokPanel", True)
         sl = QtWidgets.QVBoxLayout(strip)
         sl.setContentsMargins(8, 6, 8, 6)
         sl.setSpacing(4)
@@ -9307,7 +9456,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.colour_box.setToolTip("Gives every mesh a temporary preview material so you can see in the viewport "
                                    "what still needs UVs (yellow), what's done (greens), what's laid out (light "
                                    "blue) and what has a problem (red). Meshes change colour live as Auto UV "
-                                   "works. Untick to get your real materials back.")
+                                   "works. A legend with counts appears below: click an entry to select those "
+                                   "meshes. Untick to get your real materials back.")
         self.colour_box.changed.connect(self._colours_toggled)
         sl.addWidget(self.colour_box)
         legend = QtWidgets.QGridLayout()
@@ -9325,7 +9475,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
             b.clicked.connect(lambda *_, s=state: self._select_state(s))
             legend.addWidget(b, i // 2, i % 2)
             self.legend[state] = b
-        sl.addLayout(legend)
+        self.legend_box = QtWidgets.QWidget()  # shown while colours are on (progressive disclosure)
+        self.legend_box.setLayout(legend)
+        legend.setContentsMargins(0, 0, 0, 0)
+        self.legend_box.setVisible(False)
+        sl.addWidget(self.legend_box)
         self.do_all_btn = primary_button("Do It All")
         self.do_all_btn.setMinimumHeight(28)
         self.do_all_btn.setToolTip("Auto UV everything that needs it, lay it all out and validate, in one go, "
@@ -9372,7 +9526,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         # ---- 2. scan
         card = self.step_scan = StepCard(2, "Scan", "Sorts every mesh into sections (rows of UDIMs) and material "
                                                     "groups. Re-scanning only sorts new meshes.")
-        grid = Section("", header=False)
+        grid = Section("Options", expanded=False)
         self.source_combo = ComboField(MATERIAL_SOURCES)
         self.source_combo.setToolTip("Where material groups come from for meshes that aren't in a group yet.\n"
                                      "Name: the UnlokRenamer convention (woodGreen_C_beam0001_GEP).\n"
@@ -9472,7 +9626,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         # ---- 5. pre-process
         card = self.step_prep = StepCard(5, "Pre-process", "Fixes geometry that breaks layout and checks UVs. "
                                                            "N-gons are only reported. One Ctrl+Z undoes it.")
-        grid = Section("", header=False)
+        grid = Section("Options", expanded=False)
         self.fix_lamina = CheckField("Fix lamina faces")
         self.fix_nonmanifold = CheckField("Fix non-manifold geometry")
         self.fix_zero = CheckField("Remove zero-area faces")
@@ -9499,10 +9653,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         col.addWidget(card)
 
         # ---- 6. auto UV
-        card = self.step_auto = StepCard(6, "Auto UV", "For assets without good UVs: unwraps the meshes that "
-                                                       "aren't laid out yet (worst first), keeps the ones that are, "
-                                                       "and packs everything by section and material.")
-        grid = Section("", header=False)
+        card = self.step_auto = StepCard(6, "Auto UV", "Unwraps the meshes that aren't marked Keep UVs / Hands "
+                                                       "off and fits each into its UDIM tile. Click a mesh to see "
+                                                       "why it's the colour it is.")
+        grid = Section("Options", expanded=False)
         backup_row = QtWidgets.QWidget()
         bl2 = QtWidgets.QHBoxLayout(backup_row)
         bl2.setContentsMargins(0, 0, 0, 0)
@@ -9652,6 +9806,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_map = ComboField(MAP_SIZES)
         self.lay_map.setValue(LAYOUT_DEFAULTS["map_size"])
         grid.add_row("Map size", self.lay_map, "Texture resolution of one UDIM tile.")
+        more = Section("More options", expanded=False)
         self.lay_mode = ComboField(LAYOUT_MODES)
         grid.add_row("Mode", self.lay_mode, "Fit sections to rows (default, foolproof): the highest density at "
                                             "which every section fits on its own row of UDIMs. Every shell gets "
@@ -9663,29 +9818,30 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_tiles_label = grid.add_row("Max tiles", self.lay_tiles, "Tile budget for Fit to tiles.")
         self.lay_padding = IntField(0, 128, 0, 32)
         self.lay_padding.setValue(LAYOUT_DEFAULTS["padding_px"])
-        grid.add_row("Padding px", self.lay_padding, "Gap between shells and around each tile, in pixels.")
+        more.add_row("Padding px", self.lay_padding, "Gap between shells and around each tile, in pixels.")
         self.lay_growth = FloatField(0.0, 100.0, 0.0, 50.0, decimals=0, step=5.0)
-        grid.add_row("Spare room %", self.lay_growth, "Leave this much extra space around every shell so small "
+        more.add_row("Spare room %", self.lay_growth, "Leave this much extra space around every shell so small "
                                                       "model changes still fit without moving anything.")
         self.lay_orient = ComboField(ORIENTATIONS)
-        grid.add_row("Orientation", self.lay_orient,
+        more.add_row("Orientation", self.lay_orient,
                      "Main axis: each shell's longest direction along U, lying flat (packs tightest).\n"
                      "Upright: world up along +V, so brick courses stay level and walls read upright.\n"
                      "Keep: never rotate (you already straightened them).\n"
                      "Override per group in the Orient column (or _up / _keep / _axis in the set name).")
         self.lay_handsoff = ComboField(HANDSOFF_MODES)
-        grid.add_row("Hands-off tiles", self.lay_handsoff,
+        more.add_row("Hands-off tiles", self.lay_handsoff,
                      "What happens to the tiles your Hands off meshes sit in (step 6).\n"
                      "Pack around them: other pieces fill the free space around them (no space wasted).\n"
                      "Reserve their tiles: nothing else goes in those tiles. Simple and predictable, but a "
                      "small hands-off piece can leave the rest of its tile empty.")
         self.lay_rows = CheckField("Each section starts a new row")
         self.lay_rows.setValue(True)
-        grid.add_full(self.lay_rows)
+        more.add_full(self.lay_rows)
         self.lay_comp = CheckField("Auto-compensate pieces bigger than a tile")
         self.lay_comp.setValue(True)
-        grid.add_full(self.lay_comp)
+        more.add_full(self.lay_comp)
         card.add(grid)
+        card.add(more)
         plan_btn = secondary_button("Plan", "Preview the layout in the map below without changing anything. The "
                                             "search runs in the background (Maya stays usable) and shows live in "
                                             "the UV Viewer.")
@@ -9748,6 +9904,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
         col.addWidget(card)
         self._update_layout_enabled()
         col.addStretch(1)
+        # progressive disclosure: only the step you're on (or one with a
+        # warning) stays open; the strip of numbers jumps to any step
+        self.steps = [self.step_root, self.step_scan, self.step_groups, self.naming_section, self.step_prep,
+                      self.step_auto, self.step_layout, self.step_check]
+        for c in self.steps:
+            c.enable_auto()
+        self.step_nav = StepNav(self.steps, scroll)
+        self.step_nav.setToolTip("Jump to a step (green = done, teal = now, amber = needs a look).")
+        tl.insertWidget(2, self.step_nav)
 
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
@@ -9777,6 +9942,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         problems = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "skip") if res else 0
         warns = sum(len(v) for k, v in res["items"].items() if VALIDATION_LABELS[k][1] == "warn") if res else 0
         self.step_check.set_state("done" if res and not problems else ("current" if self.layout_applied else "todo"))
+        self._summarise_steps(snap, asset, has_root, scanned, prepped, skipped, auto_done, res, problems, warns)
         if not has_root and SmartUdimAsset.all():
             self.next_banner.set_text("This scene has Smart UDIM setups. Pick one under <b>Setups</b> in step 1 "
                                       "to carry on, or select another top group and press <b>Use Selected "
@@ -9836,6 +10002,55 @@ class SmartUdimPanel(QtWidgets.QWidget):
         else:
             self.next_banner.set_text("Press <b>Auto UV</b> (step 6) to unwrap what isn't laid out and pack it "
                                       "all into UDIMs, or <b>Analyse</b> to see the worst meshes first.")
+
+    def _summarise_steps(self, snap, asset, has_root, scanned, prepped, skipped, auto_done, res, problems, warns):
+        """One line per step, shown while it's folded (progressive disclosure)."""
+        root = asset.root_set() if asset is not None else None
+        self.step_root.set_summary(short_name(root) if has_root and root else "No asset picked yet",
+                                   "done" if has_root else None)
+        if not scanned:
+            self.step_scan.set_summary("Not scanned yet")
+        elif snap["unassigned"]:
+            self.step_scan.set_summary("%d new mesh(es) to sort: Scan again" % len(snap["unassigned"]), "warn")
+        else:
+            self.step_scan.set_summary("%d section(s), %d mesh(es) sorted" % (
+                len(snap["sections"]), len(snap.get("meshes") or ())), "done")
+        if scanned and snap["overlaps"]:
+            self.step_groups.set_summary("%d mesh(es) are in two groups" % len(snap["overlaps"]), "warn")
+        else:
+            self.step_groups.set_summary("Groups are clean" if scanned else "", "done" if scanned else None)
+        if has_root and snap["naming"]:
+            self.naming_section.set_summary("%d name(s) break the naming convention" % len(snap["naming"]),
+                                            "warn")
+        else:
+            self.naming_section.set_summary("Names are fine" if has_root else "", "done" if has_root else None)
+        if not self.report:
+            self.step_prep.set_summary("Not run yet (optional)")
+        elif skipped:
+            self.step_prep.set_summary("%d mesh(es) will be skipped" % len(skipped), "warn")
+        else:
+            self.step_prep.set_summary("Geometry is clean", "done")
+        if auto_done:
+            rows = self.auto_result["rows"]
+            n = lambda *acts: sum(1 for r in rows if r["action"] in acts)  # noqa: E731
+            bad = sum(1 for s in (self.states or {}).values() if s == "problem")
+            self.step_auto.set_summary("%d unwrapped, %d kept%s" % (
+                n("unwrapped", "check"), n("kept", "keep UVs", "kept (check)"),
+                (", %d problem(s): click to see why" % bad) if bad else ""), "warn" if bad else "done")
+        else:
+            self.step_auto.set_summary("Not run yet")
+        if self.layout_applied:
+            self.step_layout.set_summary("Laid out: %d tile(s) at %d px/m" % (
+                self.layout_applied["tiles"], round(self.layout_applied["density"])), "done")
+        elif self._plan is not None:
+            self.step_layout.set_summary("Planned, not applied yet")
+        else:
+            self.step_layout.set_summary("")
+        if res:
+            self.step_check.set_summary("%d problem(s), %d warning(s)" % (problems, warns),
+                                        "warn" if problems else "done")
+        else:
+            self.step_check.set_summary("")
 
     # ============================================================ state
     def set_status(self, text, level="info"):
@@ -10862,6 +11077,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         counts = {}
         for s in states.values():
             counts[s] = counts.get(s, 0) + 1
+        self.legend_box.setVisible(self.colour_box.isChecked())
         for state, b in self.legend.items():
             n = counts.get(state, 0)
             b.setText("%s  %d" % (UV_STATE_INFO[state][0], n))
@@ -10873,6 +11089,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 self._applied.update(changed)
 
     def _colours_toggled(self):
+        self.legend_box.setVisible(self.colour_box.isChecked())
         try:
             asset = self._asset()
             if asset is None:
@@ -11289,12 +11506,16 @@ class SmartUdimPanel(QtWidgets.QWidget):
             parts = ", ".join("%d %s" % (n, UV_STATE_INFO.get(s, (s,))[0]) for s, n in sorted(counts.items()))
             self.inspect_label.setText("<b>%d meshes selected</b>: %s.%s" % (
                 len(meshes), parts, " Fix re-unwraps the problem ones." if probs else ""))
+            if probs and not self.step_auto.expanded:
+                self.step_auto.set_expanded(True, user=True)
             self.fix_btn.setText("Fix %d problem(s)" % len(probs) if probs else "Fix")
             self.fix_btn.setEnabled(bool(probs))
             self.inspect_row.setVisible(True)
             return
         m = meshes[0]
         state = states.get(m, "unknown")
+        if state == "problem" and not self.step_auto.expanded:
+            self.step_auto.set_expanded(True, user=True)
         label, colour, meaning = UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])
         diag = None
         fn = _mesh_fn(m)
@@ -13426,12 +13647,1722 @@ class LogNoisePanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Rope Lashing
+# =============================================================================
+#
+# Ties logs together the way pioneering lashings do. Select two logs that
+# touch or cross (or a whole frame: every touching pair gets lashed) and
+# press Lash. The kind of lashing follows the angle between the logs:
+#   Square   (crossing, near 90 deg): clove hitch on the upright, 3 wraps
+#            "in a square" (in front of the crossbar, behind the upright),
+#            2 frapping turns between the logs, clove hitch on the crossbar.
+#   Diagonal (crossing at an angle): a hitch around both logs on one
+#            diagonal, 3 wraps on each diagonal, 2 fraps, a clove hitch.
+#   Round    (side by side): clove hitch around both, 7 tight wraps, clove
+#            hitch. Sheer: hitch on one log, wraps, fraps between the logs,
+#            hitch on the other (A-frames, sheer legs).
+#   Bands    plain wraps, no knots (background).
+# The path is made of loops around the logs' cross-sections, pressed onto
+# the real surface by ray casts (bent and Log Noise logs too). Each later
+# pass of rope rides over the earlier rope it crosses (collision lift),
+# which is what makes the hitches and fraps read as knots.
+#
+# The rope mesh keeps its settings (JSON) and its logs' uuids, so sliders
+# re-tie it live and Refit follows logs that moved. Maya can't undo a mesh
+# built through the API, so Lash makes a 1-face polyPlane inside the undo
+# chunk and fills it outside. A redo brings that plane back, and
+# rebuild_stale_ropes() (Redo scriptJob) re-ties it from its settings.
+
+ROPE_SETTINGS = "unlokRope"        # string on the rope shape: JSON settings + logs (uuids)
+ROPE_VERTS = "unlokRopeVerts"      # long on the rope shape: vertex count of the last build
+ROPE_GROUP = "lashings_GRP"
+ROPE_MATERIAL = "ropeNatural"      # material token in the rope's name (UnlokRenamer convention)
+ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user presets as JSON
+ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands")
+ROPE_STYLES = ("3 strands", "Twisted", "Smooth tube")
+ROPE_DEFAULTS = {"lashing": "Auto", "style": "Twisted", "thickness": 0.1, "wraps": 0, "fraps": -1,
+                 "hitches": True, "tail": 0.3, "bite": 0.15, "wobble": 0.25, "seed": 0, "sides": 0,
+                 "spacing": 0.0, "lay": 3.5}
+ROPE_KEYS = tuple(sorted(ROPE_DEFAULTS))
+ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4}
+ROPE_AUTO_FRAPS = {"Square": 2, "Diagonal": 2, "Round": 0, "Sheer": 2, "Bands": 0}
+ROPE_AUTO_SIDES = {"3 strands": 8, "Twisted": 18, "Smooth tube": 10}
+ROPE_AUTO_SPACING = {"3 strands": 0.2, "Twisted": 0.25, "Smooth tube": 0.5}  # sample step / rope diameter
+ROPE_PRESETS = {  # built in; user presets are kept in the ROPE_PRESET_VAR optionVar
+    "Standard": {},
+    "Hero (close-ups)": {"style": "3 strands", "sides": 8, "spacing": 0.15},
+    "Background (light)": {"style": "Smooth tube", "sides": 6, "spacing": 0.8, "hitches": False, "tail": 0.0,
+                           "wobble": 0.1},
+    "Thin twine": {"thickness": 0.05, "wraps": 6, "fraps": 3},
+    "Heavy rope": {"style": "3 strands", "thickness": 0.18},
+}
+ROPE_PARALLEL_DEG = 25.0   # logs closer to parallel than this get a Round / Sheer lashing
+ROPE_SQUARE_DEG = 55.0     # crossing steeper than this: Square, otherwise Diagonal
+ROPE_PAIR_REACH = 0.5      # many logs: pairs with a gap under this x the thinner radius get lashed
+ROPE_MAX_SAMPLES = 60000   # path samples per lashing (a guard against absurd settings)
+
+
+def _rl_add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _rl_sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _rl_mul(a, k):
+    return (a[0] * k, a[1] * k, a[2] * k)
+
+
+def _rl_dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _rl_cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _rl_len(a):
+    return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+
+
+def _rl_norm(a, fallback=(1.0, 0.0, 0.0)):
+    n = _rl_len(a)
+    return (a[0] / n, a[1] / n, a[2] / n) if n > 1e-12 else fallback
+
+
+def _rl_lerp(a, b, f):
+    return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f)
+
+
+def _rl_perp(a, v):
+    """v without its component along unit a."""
+    return _rl_sub(v, _rl_mul(a, _rl_dot(a, v)))
+
+
+def _rl_any_perp(a):
+    ref = (0.0, 1.0, 0.0) if abs(a[1]) < 0.9 else (1.0, 0.0, 0.0)
+    return _rl_norm(_rl_cross(ref, a))
+
+
+def _rl_slerp(a, b, f):
+    """Unit vectors a -> b by angle (a and b not opposite)."""
+    c = clamp(_rl_dot(a, b), -1.0, 1.0)
+    ang = math.acos(c)
+    if ang < 1e-4:
+        return _rl_norm(_rl_lerp(a, b, f))
+    s = math.sin(ang)
+    ka, kb = math.sin((1.0 - f) * ang) / s, math.sin(f * ang) / s
+    return _rl_norm((a[0] * ka + b[0] * kb, a[1] * ka + b[1] * kb, a[2] * ka + b[2] * kb))
+
+
+def _rl_smooth01(x):
+    x = clamp(x, 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _rl_median(values):
+    v = sorted(values)
+    return v[len(v) // 2] if v else 0.0
+
+
+class RopePole(object):
+    """A log as the rope sees it: a straight main axis (for the joint maths)
+    plus per-slice centres and radii, so bent, tapered and Log Noise logs
+    still get rope that sits on them. Holds an MFnMesh: build it, use it and
+    drop it inside one action (never across a scene change)."""
+
+    SLICES = 24
+
+    def __init__(self, xform):
+        shape = _log_shape(xform)
+        if not shape:
+            raise ValueError("%s has no mesh" % short_name(xform))
+        self.node = xform
+        self.fn = om.MFnMesh(get_dag_path(shape))
+        raw = self.fn.getPoints(om.MSpace.kWorld)
+        step = max(1, len(raw) // 20000)
+        pts = [(raw[i].x, raw[i].y, raw[i].z) for i in range(0, len(raw), step)]
+        if len(pts) < 4:
+            raise ValueError("%s has too few vertices" % short_name(xform))
+        inv = 1.0 / len(pts)
+        c = (sum(p[0] for p in pts) * inv, sum(p[1] for p in pts) * inv, sum(p[2] for p in pts) * inv)
+        cov = [0.0] * 6  # xx xy xz yy yz zz
+        lo = list(pts[0])
+        hi = list(pts[0])
+        for p in pts:
+            x, y, z = p[0] - c[0], p[1] - c[1], p[2] - c[2]
+            cov[0] += x * x
+            cov[1] += x * y
+            cov[2] += x * z
+            cov[3] += y * y
+            cov[4] += y * z
+            cov[5] += z * z
+            for k in range(3):
+                lo[k] = min(lo[k], p[k])
+                hi[k] = max(hi[k], p[k])
+        ext = [hi[k] - lo[k] for k in range(3)]
+        k = ext.index(max(ext))
+        a = tuple(1.0 if i == k else 0.0 for i in range(3))
+        for _ in range(60):  # power iteration: the main axis of the points
+            a = _rl_norm((cov[0] * a[0] + cov[1] * a[1] + cov[2] * a[2],
+                          cov[1] * a[0] + cov[3] * a[1] + cov[4] * a[2],
+                          cov[2] * a[0] + cov[4] * a[1] + cov[5] * a[2]), a)
+        ts = [_rl_dot(_rl_sub(p, c), a) for p in pts]
+        self.c, self.a = c, a
+        self.t0, self.t1 = min(ts), max(ts)
+        length = self.t1 - self.t0
+        if length < 1e-6:
+            raise ValueError("%s is flat" % short_name(xform))
+        n = self.SLICES
+        # slice borders go in the widest gap near each even border: a border
+        # through a ring of vertices would pull a half ring's centre sideways
+        order = sorted(ts)
+        reach = max(8, len(order) // n)
+        borders = []
+        for k in range(1, n):
+            i = bisect.bisect_left(order, self.t0 + length * k / n)
+            lo, hi = max(0, i - reach), min(len(order) - 1, i + reach)
+            j = max(range(lo, hi), key=lambda m: order[m + 1] - order[m]) if hi > lo else lo
+            borders.append(0.5 * (order[j] + order[min(j + 1, len(order) - 1)]))
+        borders.sort()
+        sums = [[0.0, 0.0, 0.0, 0.0, 0] for _ in range(n)]
+        which = []
+        for p, t in zip(pts, ts):
+            i = bisect.bisect_right(borders, t)
+            which.append(i)
+            s = sums[i]
+            s[0] += p[0]
+            s[1] += p[1]
+            s[2] += p[2]
+            s[3] += t
+            s[4] += 1
+        centres = [(s[0] / s[4], s[1] / s[4], s[2] / s[4]) if s[4] else None for s in sums]
+        dists = [[] for _ in range(n)]
+        for p, i in zip(pts, which):
+            dists[i].append(_rl_len(_rl_perp(a, _rl_sub(p, centres[i]))))
+        self.ts, self.cs, self.rs = [], [], []
+        for i in range(n):
+            if sums[i][4]:
+                self.ts.append(sums[i][3] / sums[i][4])
+                self.cs.append(centres[i])
+                self.rs.append(_rl_median(dists[i]))
+        mid = self.rs[len(self.rs) // 5: len(self.rs) - len(self.rs) // 5] or self.rs
+        self.r = max(1e-6, _rl_median(mid))
+        self.rs = [r if r > 0.3 * self.r else self.r for r in self.rs]  # a cap's middle slice
+        self.accel = self.fn.autoUniformGridParams()
+
+    def _slot(self, t):
+        ts = self.ts
+        if len(ts) == 1:
+            return 0, 0, 0.0
+        i = bisect.bisect_right(ts, t) - 1
+        i = min(max(i, 0), len(ts) - 2)
+        f = (t - ts[i]) / (ts[i + 1] - ts[i]) if ts[i + 1] > ts[i] else 0.0
+        return i, i + 1, f
+
+    def center(self, t):
+        i, j, f = self._slot(t)
+        if f < 0.0 or f > 1.0:  # beyond the end slices: carry on along the axis
+            k = i if f < 0.0 else j
+            return _rl_add(self.cs[k], _rl_mul(self.a, t - self.ts[k]))
+        return _rl_lerp(self.cs[i], self.cs[j], f)
+
+    def radius(self, t):
+        i, j, f = self._slot(t)
+        f = clamp(f, 0.0, 1.0)
+        return self.rs[i] + (self.rs[j] - self.rs[i]) * f
+
+    def closest_t(self, p):
+        return _rl_dot(_rl_sub(p, self.c), self.a)
+
+    def surface(self, t, d):
+        """Distance from the centre line at t to the outermost surface along
+        unit direction d (a ray cast), or the fitted radius on a miss."""
+        q = self.center(t)
+        r = self.radius(t)
+        try:
+            hit = self.fn.allIntersections(om.MFloatPoint(q[0], q[1], q[2]), om.MFloatVector(d[0], d[1], d[2]),
+                                           om.MSpace.kWorld, r * 4.0, False, accelParams=self.accel)
+        except RuntimeError:
+            hit = None
+        if hit and len(hit[1]):
+            far = max(hit[1])
+            if 0.25 * r < far < 3.0 * r:
+                return far
+        return r
+
+
+def _rl_closest(p0, u, q0, v):
+    """Closest points of segments p0 + s*u and q0 + t*v (s, t in 0..1)."""
+    r = _rl_sub(p0, q0)
+    a, e, b = _rl_dot(u, u), _rl_dot(v, v), _rl_dot(u, v)
+    c, f = _rl_dot(u, r), _rl_dot(v, r)
+    den = a * e - b * b
+    s = clamp((b * f - c * e) / den, 0.0, 1.0) if den > 1e-12 else 0.0
+    t = (b * s + f) / e if e > 1e-12 else 0.0
+    if t < 0.0:
+        t, s = 0.0, clamp(-c / a, 0.0, 1.0) if a > 1e-12 else 0.0
+    elif t > 1.0:
+        t, s = 1.0, clamp((b - c) / a, 0.0, 1.0) if a > 1e-12 else 0.0
+    return s, t
+
+
+def rope_joint(pa, pb, target=None):
+    """How two logs meet: params tA / tB on their axes, the centres there,
+    the unit direction n from A to B, the gap between the surfaces and the
+    angle between the logs (degrees, 0..90). target (a point) places a
+    side-by-side lashing along the logs."""
+    cosang = abs(_rl_dot(pa.a, pb.a))
+    angle = math.degrees(math.acos(min(1.0, cosang)))
+    if angle < ROPE_PARALLEL_DEG:
+        e0 = pa.closest_t(_rl_add(pb.c, _rl_mul(pb.a, pb.t0)))
+        e1 = pa.closest_t(_rl_add(pb.c, _rl_mul(pb.a, pb.t1)))
+        lo, hi = max(pa.t0, min(e0, e1)), min(pa.t1, max(e0, e1))
+        if target is not None:
+            ta = clamp(pa.closest_t(target), min(lo, hi), max(lo, hi))
+        else:
+            ta = 0.5 * (lo + hi)
+        tb = pb.closest_t(pa.center(ta))
+    else:
+        p0 = _rl_add(pa.c, _rl_mul(pa.a, pa.t0))
+        q0 = _rl_add(pb.c, _rl_mul(pb.a, pb.t0))
+        s, t = _rl_closest(p0, _rl_mul(pa.a, pa.t1 - pa.t0), q0, _rl_mul(pb.a, pb.t1 - pb.t0))
+        ta = pa.t0 + s * (pa.t1 - pa.t0)
+        tb = pb.t0 + t * (pb.t1 - pb.t0)
+    ca, cb = pa.center(ta), pb.center(tb)
+    dist = _rl_len(_rl_sub(cb, ca))
+    side = _rl_cross(pa.a, pb.a)
+    n = _rl_norm(_rl_sub(cb, ca), _rl_norm(side, _rl_any_perp(pa.a)))
+    if dist < 1e-6 * max(pa.r, pb.r) and _rl_len(side) > 1e-6:
+        n = _rl_norm(side)
+    ra, rb = pa.radius(ta), pb.radius(tb)
+    return {"tA": ta, "tB": tb, "cA": ca, "cB": cb, "n": n, "D": dist, "gap": dist - ra - rb, "rA": ra,
+            "rB": rb, "angle": angle,
+            "inside": (pa.t0 + 0.5 * rb <= ta <= pa.t1 - 0.5 * rb and pb.t0 + 0.5 * ra <= tb <= pb.t1 - 0.5 * ra)}
+
+
+def rope_lashing_kind(settings, angle):
+    """The lashing a joint gets: the setting, made to fit the angle (a Square
+    can't tie logs side by side, a Round can't tie a crossing)."""
+    kind = settings.get("lashing", "Auto")
+    parallel = angle < ROPE_PARALLEL_DEG
+    if kind == "Auto":
+        return "Round" if parallel else ("Square" if angle >= ROPE_SQUARE_DEG else "Diagonal")
+    if parallel and kind in ("Square", "Diagonal"):
+        return "Round"
+    if not parallel and kind in ("Round", "Sheer"):
+        return "Diagonal"
+    return kind
+
+
+class _RopeTie(object):
+    """Builds one lashing's path as samples (S, u, pole): S a point on a log
+    surface (pole >= 0) or the rope centre minus u * rr (pole -1), u the
+    direction the rope sits / lifts towards. The rope centre is S + u * rr."""
+
+    def __init__(self, poles, rr, step):
+        self.poles = poles
+        self.rr = rr
+        self.d = 2.06 * rr  # side-by-side turns: one rope diameter plus a little room
+        self.h = step
+
+    # ------------------------------------------------------------ pieces
+    def section(self, i, origin, p, t_guess):
+        """Log i's cross-section in the plane through origin with normal p:
+        (centre, how it moves per unit along p, semi-axes E1, E2, i)."""
+        pole = self.poles[i]
+        a = pole.a
+        ap = _rl_dot(a, p)
+        if abs(ap) < 0.2:
+            ap = 0.2 if ap >= 0.0 else -0.2
+        cen = pole.center(t_guess)
+        s = _rl_dot(_rl_sub(origin, cen), p) / ap
+        c0 = _rl_add(cen, _rl_mul(a, s))
+        r = pole.radius(t_guess + s)
+        major = _rl_norm(_rl_perp(p, a), _rl_any_perp(p))
+        return (c0, _rl_mul(a, 1.0 / ap), _rl_mul(major, r / abs(ap)),
+                _rl_mul(_rl_norm(_rl_cross(p, major)), r), i)
+
+    def ring(self, centre, p, radius):
+        """A free cross-section: a circle (rope bundles for frapping)."""
+        e1 = _rl_any_perp(p)
+        return (centre, p, _rl_mul(e1, radius), _rl_mul(_rl_cross(p, e1), radius), -1)
+
+    def loop(self, items, origin, p, turns, zfun, toward=None, swell=None):
+        """Rope around the convex hull of items (sections in the plane
+        through origin, normal p), turning right-handed about p. zfun(angle
+        so far) moves the plane along p; swell(angle) pushes the rope out
+        (a spiral). Starts (and so ends) on the side facing toward."""
+        e1 = None
+        if toward is not None:
+            e1 = _rl_norm(_rl_perp(p, _rl_sub(toward, origin)), None)
+        if e1 is None:
+            e1 = _rl_any_perp(p)
+        e2 = _rl_cross(p, e1)
+        reach = max(_rl_len(_rl_sub(it[0], origin)) + max(_rl_len(it[2]), _rl_len(it[3])) for it in items)
+        total = 2.0 * math.pi * turns
+        steps = max(int(24 * turns), int(total * (reach + self.rr) / (0.5 * self.h)))
+        out = []
+        for k in range(steps + 1):
+            ang = total * k / steps
+            u = _rl_add(_rl_mul(e1, math.cos(ang)), _rl_mul(e2, math.sin(ang)))
+            z = zfun(ang)
+            best = None
+            for c0, adv, E1, E2, pole in items:
+                c = _rl_add(c0, _rl_mul(adv, z))
+                a1, a2 = _rl_dot(E1, u), _rl_dot(E2, u)
+                e = math.sqrt(a1 * a1 + a2 * a2) or 1e-12
+                score = _rl_dot(c, u) + e
+                if best is None or score > best[0]:
+                    best = (score, _rl_add(c, _rl_add(_rl_mul(E1, a1 / e), _rl_mul(E2, a2 / e))), pole)
+            point = best[1] if swell is None else _rl_add(best[1], _rl_mul(u, swell(ang)))
+            out.append((point, u, best[2]))
+        return out
+
+    def arc(self, i, ta, tb, e0, em):
+        """Half a turn around log i, from side e0 over em to -e0, sliding
+        from axis param ta to tb."""
+        pole = self.poles[i]
+        steps = max(8, int(math.pi * (pole.r + self.rr) / (0.5 * self.h)))
+        out = []
+        for k in range(steps + 1):
+            f = float(k) / steps
+            ang = math.pi * f
+            u = _rl_add(_rl_mul(e0, math.cos(ang)), _rl_mul(em, math.sin(ang)))
+            t = ta + (tb - ta) * f
+            out.append((_rl_add(pole.center(t), _rl_mul(u, pole.radius(t))), u, i))
+        return out
+
+    def linear(self, pitch):
+        return lambda ang: pitch * ang / (2.0 * math.pi)
+
+    def clove_z(self):
+        """Clove hitch over two turns: the end starts tucked between the
+        turns, turn one, a diagonal riding over the end (the X), turn two."""
+        d = self.d
+        q = 0.5 * math.pi
+
+        def z(ang):
+            if ang < q:
+                return 0.5 * d * (1.0 - _rl_smooth01(ang / q))
+            if ang < 3.5 * q:
+                return 0.0
+            if ang < 4.5 * q:
+                return 1.05 * d * _rl_smooth01((ang - 3.5 * q) / q)
+            return 1.05 * d
+        return z
+
+    def clove(self, items_of, origin, p, toward):
+        """Clove hitch: two turns around items_of(origin, p) starting at origin."""
+        return self.loop(items_of(origin, p), origin, p, 2, self.clove_z(), toward)
+
+    def clove_on(self, i, t, sign, toward):
+        pole = self.poles[i]
+        p = _rl_mul(pole.a, sign)
+        origin = pole.center(t)
+        return self.clove(lambda o, pp: [self.section(i, o, pp, t)], origin, p, toward)
+
+    def extent(self, samples, i, tc, sign):
+        """How far samples bound to log i reach from tc, towards sign."""
+        pole = self.poles[i]
+        best = 0.0
+        for S, _, pi in samples:
+            if pi == i:
+                best = max(best, sign * (pole.closest_t(S) - tc))
+        return best
+
+    def fraps(self, samples, ca, n, z_lo, z_hi, turns, toward):
+        """Frapping turns: around the rope crossing the gap between the logs
+        (the slab z_lo..z_hi along n from ca), squeezing the wraps."""
+        if turns <= 0 or len(samples) < 2:
+            return []
+        zmid = 0.5 * (z_lo + z_hi)
+        e1 = _rl_any_perp(n)
+        e2 = _rl_cross(n, e1)
+        pts2 = []
+        rr = self.rr
+        prev = None
+        for S, u, _ in samples:
+            x = _rl_add(S, _rl_mul(u, rr))
+            z = _rl_dot(_rl_sub(x, ca), n)
+            if prev is not None and (prev[1] - zmid) * (z - zmid) <= 0.0 and prev[1] != z:
+                f = (zmid - prev[1]) / (z - prev[1])
+                q = _rl_sub(_rl_lerp(prev[0], x, f), ca)
+                pts2.append((_rl_dot(q, e1), _rl_dot(q, e2)))
+            prev = (x, z)
+        hull = _rl_hull2(pts2)
+        if not hull:
+            return []
+        # each turn lies outside the last (there's no room along n where the logs touch)
+        origin = _rl_add(ca, _rl_mul(n, zmid))
+        items = [self.ring(_rl_add(origin, _rl_add(_rl_mul(e1, x), _rl_mul(e2, y))), n, rr) for x, y in hull]
+        return self.loop(items, origin, n, turns, lambda ang: 0.0, toward, swell=self.linear(self.d))
+
+
+def _rl_hull2(points):
+    """Convex hull of 2D points (monotone chain), counter-clockwise."""
+    pts = sorted(set((round(x, 9), round(y, 9)) for x, y in points))
+    if len(pts) < 3:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _rl_square(tie, J, wraps, fraps, hitches):
+    """Square lashing on logs 0 (upright) and 1 (crossbar, on the n side)."""
+    A, B = tie.poles
+    n, rr, d = J["n"], tie.rr, tie.d
+    ma = _rl_norm(_rl_cross(n, A.a), _rl_any_perp(A.a))
+    mb = _rl_norm(_rl_cross(n, B.a), _rl_any_perp(B.a))
+    mm, bma, amb = _rl_dot(ma, mb), _rl_dot(B.a, ma), _rl_dot(A.a, mb)
+    if abs(bma) < 0.2:
+        bma = 0.2 if bma >= 0.0 else -0.2
+    if abs(amb) < 0.2:
+        amb = 0.2 if amb >= 0.0 else -0.2
+    ra, rb = J["rA"] + rr, J["rB"] + rr
+    ta, tb = J["tA"], J["tB"]
+
+    def corner(ea, eb, k):
+        # where the rope leaves the crossbar (side eb) for the upright (side ea)
+        rak, rbk = ra + k * d, rb + k * d
+        return tb + (ea * rak - eb * rbk * mm) / bma, ta + (eb * rbk - ea * rak * mm) / amb
+
+    neg_n = _rl_mul(n, -1.0)
+    out = []
+    for k in range(wraps):
+        s1, t1 = corner(-1, -1, k)
+        s2, t2 = corner(-1, 1, k)
+        s3, t3 = corner(1, 1, k)
+        s4, t4 = corner(1, -1, k)
+        t1n = corner(-1, -1, k + 1)[1]
+        out += tie.arc(1, s1, s2, _rl_mul(mb, -1.0), n)       # in front of the crossbar, upwards
+        out += tie.arc(0, t2, t3, _rl_mul(ma, -1.0), neg_n)   # behind the upright, across
+        out += tie.arc(1, s3, s4, mb, n)                      # in front of the crossbar, downwards
+        out += tie.arc(0, t4, t1n, ma, neg_n)                 # behind the upright, back
+    frap = tie.fraps(out, J["cA"], n, J["rA"], J["D"] - J["rB"], fraps, out[-1][0])
+    start, end = [], []
+    if hitches:
+        low = tie.extent(out, 0, ta, -1.0)
+        s1, t1 = corner(-1, -1, 0)  # the standing part runs up the upright's side to the first wrap
+        start = tie.clove_on(0, ta - low - 2.6 * d, 1.0, _rl_add(A.center(t1), _rl_mul(ma, -1.0)))
+        far = tie.extent(out, 1, tb, 1.0)
+        end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0])
+    return start + out + frap + end
+
+
+def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
+    """Diagonal lashing: wraps on one diagonal, then the other, then fraps."""
+    A, B = tie.poles
+    n, d = J["n"], tie.d
+    a = _rl_norm(_rl_perp(n, A.a), A.a)
+    b = _rl_norm(_rl_perp(n, B.a), B.a)
+    if _rl_dot(a, b) < 0.0:
+        b = _rl_mul(b, -1.0)
+    mid = _rl_lerp(J["cA"], J["cB"], 0.5)
+    ta, tb = J["tA"], J["tB"]
+
+    def items(o, p):
+        return [tie.section(0, o, p, ta), tie.section(1, o, p, tb)]
+
+    diagonals = [_rl_norm(_rl_add(a, b)), _rl_norm(_rl_sub(a, b))][:2 if both else 1]
+    out = []
+    first = None
+    for w in diagonals:
+        p = _rl_norm(_rl_cross(n, w))
+        z0 = -0.5 * wraps * d
+        origin = _rl_add(mid, _rl_mul(p, z0))
+        toward = out[-1][0] if out else None
+        piece = tie.loop(items(origin, p), origin, p, wraps, tie.linear(d), toward)
+        if first is None:
+            first = (p, z0)
+        out += piece
+    if not both:
+        return out
+    frap = tie.fraps(out, J["cA"], n, J["rA"], J["D"] - J["rB"], fraps, out[-1][0])
+    start, end = [], []
+    if hitches:  # the start hitch sits around both logs, on the first diagonal (timber hitch's place)
+        p, z0 = first
+        origin = _rl_add(mid, _rl_mul(p, z0 - 1.6 * d))
+        start = tie.clove(items, origin, p, out[0][0])
+        far = tie.extent(out, 0, ta, 1.0)
+        end = tie.clove_on(0, ta + far + 1.6 * d, 1.0, (frap or out)[-1][0])
+    return start + out + frap + end
+
+
+def _rl_round(tie, J, wraps, fraps, hitches, sheer):
+    """Round (or sheer) lashing around two logs side by side."""
+    A, B = tie.poles
+    d = tie.d
+    w = _rl_norm(_rl_add(A.a, B.a) if _rl_dot(A.a, B.a) >= 0.0 else _rl_sub(A.a, B.a))
+    mid = _rl_lerp(J["cA"], J["cB"], 0.5)
+    ta, tb = J["tA"], J["tB"]
+
+    def both(o, p):
+        return [tie.section(0, o, p, ta), tie.section(1, o, p, tb)]
+
+    z0 = -0.5 * wraps * d
+    origin = _rl_add(mid, _rl_mul(w, z0))
+    out = tie.loop(both(origin, w), origin, w, wraps, tie.linear(d))
+    room = J["gap"] >= d  # rope fits between the legs (touching legs would get pushed apart)
+    frap = tie.fraps(out, J["cA"], J["n"], J["rA"], J["D"] - J["rB"], fraps, out[-1][0]) if sheer and room else []
+    start, end = [], []
+    if hitches:
+        o0 = _rl_add(mid, _rl_mul(w, z0 - 2.4 * d))
+        o1 = _rl_add(mid, _rl_mul(w, -z0 + 1.3 * d))
+        last = (frap or out)[-1][0]
+        if sheer and room:  # on one leg, then on the other
+            sa = 1.0 if _rl_dot(A.a, w) >= 0.0 else -1.0
+            sb = 1.0 if _rl_dot(B.a, w) >= 0.0 else -1.0
+            start = tie.clove_on(0, A.closest_t(o0), sa, out[0][0])
+            end = tie.clove_on(1, B.closest_t(o1), sb, last)
+        else:
+            start = tie.clove(both, o0, w, out[0][0])
+            end = tie.clove(both, o1, w, last)
+    return start + out + frap + end
+
+
+def rope_path(poles, settings, target=None):
+    """The rope centre line for a lashing of two logs (pure maths plus ray
+    casts on the logs; nothing in the scene changes).
+
+    Returns {"points", "up", "scale", "radius", "kind", "joint"}: rope centres,
+    lift directions, per-point radius scale (tapered ends) and the rope
+    radius. Raises ValueError when the logs can't be lashed."""
+    s = dict(ROPE_DEFAULTS)
+    s.update(settings or {})
+    pa, pb = poles
+    J = rope_joint(pa, pb, target)
+    kind = rope_lashing_kind(s, J["angle"])
+    if kind in ("Square", "Diagonal") and abs(_rl_dot(pb.a, (0.0, 1.0, 0.0))) > abs(_rl_dot(pa.a, (0.0, 1.0, 0.0))):
+        pa, pb = pb, pa  # the upright is log 0 (the clove hitch starts on it)
+        J = rope_joint(pa, pb, target)
+    rmin = min(J["rA"], J["rB"])
+    rr = max(1e-5, float(s["thickness"]) * rmin)
+    spacing = float(s["spacing"]) or ROPE_AUTO_SPACING.get(s["style"], 0.25)
+    step = max(0.02, spacing) * 2.0 * rr
+    wraps = int(s["wraps"]) or ROPE_AUTO_WRAPS[kind]
+    fraps = ROPE_AUTO_FRAPS[kind] if int(s["fraps"]) < 0 else int(s["fraps"])
+    hitches = bool(s["hitches"]) and kind != "Bands"
+    tie = _RopeTie([pa, pb], rr, step)
+    if kind == "Square":
+        raw = _rl_square(tie, J, wraps, fraps, hitches)
+    elif kind == "Diagonal":
+        raw = _rl_diagonal(tie, J, wraps, fraps, hitches)
+    elif kind == "Bands" and J["angle"] >= ROPE_PARALLEL_DEG:
+        raw = _rl_diagonal(tie, J, wraps, 0, False, both=False)
+    else:
+        raw = _rl_round(tie, J, wraps, fraps if kind == "Sheer" else 0, hitches, kind == "Sheer")
+    pts, ups, scale = _rl_finish(tie, raw, s)
+    return {"points": pts, "up": ups, "scale": scale, "radius": rr, "kind": kind, "joint": J,
+            "poles": [pa.node, pb.node]}
+
+
+def _rl_finish(tie, raw, s):
+    """Raw samples -> even rope centres pressed onto the logs, with tails,
+    a little wobble and every crossing riding over the earlier rope."""
+    poles, rr, h = tie.poles, tie.rr, tie.h
+    sink = rr * (1.0 - clamp(float(s["bite"]), 0.0, 0.9))
+    # 1. dense: same-log stretches follow the log (angle + axis), others are straight
+    dense = [raw[0]]
+    for a, b in zip(raw, raw[1:]):
+        ca = _rl_add(a[0], _rl_mul(a[1], rr))
+        cb = _rl_add(b[0], _rl_mul(b[1], rr))
+        m = max(1, int(_rl_len(_rl_sub(cb, ca)) / (0.5 * h)))
+        if a[2] == b[2] and a[2] >= 0:
+            pole = poles[a[2]]
+            t0, t1 = pole.closest_t(a[0]), pole.closest_t(b[0])
+            d0 = _rl_norm(_rl_perp(pole.a, _rl_sub(a[0], pole.center(t0))), a[1])
+            d1 = _rl_norm(_rl_perp(pole.a, _rl_sub(b[0], pole.center(t1))), b[1])
+            for k in range(1, m + 1):
+                f = float(k) / m
+                t = t0 + (t1 - t0) * f
+                dd = _rl_slerp(d0, d1, f)
+                dense.append((_rl_add(pole.center(t), _rl_mul(dd, pole.radius(t))),
+                              _rl_norm(_rl_lerp(a[1], b[1], f), dd), a[2]))
+        else:
+            for k in range(1, m + 1):
+                f = float(k) / m
+                dense.append((_rl_lerp(a[0], b[0], f), _rl_norm(_rl_lerp(a[1], b[1], f), a[1]),
+                              a[2] if f < 0.5 and a[2] == b[2] else -1))
+        if len(dense) > 4 * ROPE_MAX_SAMPLES:
+            raise ValueError("the rope is far too long for its thickness (thicker rope or fewer wraps)")
+    # 2. even spacing along the ideal centres
+    cen = [_rl_add(S, _rl_mul(u, rr)) for S, u, _ in dense]
+    acc = [0.0]
+    for p, q in zip(cen, cen[1:]):
+        acc.append(acc[-1] + _rl_len(_rl_sub(q, p)))
+    total = acc[-1]
+    count = max(2, int(total / h) + 1)
+    if count > ROPE_MAX_SAMPLES:
+        raise ValueError("the rope is far too long for its thickness (thicker rope or fewer wraps)")
+    samples = []
+    j = 0
+    for k in range(count):
+        want = total * k / (count - 1)
+        while j < len(acc) - 2 and acc[j + 1] < want:
+            j += 1
+        span = acc[j + 1] - acc[j]
+        f = (want - acc[j]) / span if span > 1e-12 else 0.0
+        a, b = dense[j], dense[j + 1]
+        samples.append((_rl_lerp(a[0], b[0], f), _rl_norm(_rl_lerp(a[1], b[1], f), a[1]),
+                        a[2] if a[2] == b[2] else -1))
+    # 3. press onto the real surfaces; a taut rope bridges dips (max filter)
+    n = len(samples)
+    X, U = [None] * n, [s_[1] for s_ in samples]
+    surf = [None] * n
+    for i, (S, u, pi) in enumerate(samples):
+        if pi < 0:
+            X[i] = _rl_add(S, _rl_mul(u, rr))
+            continue
+        pole = poles[pi]
+        t = pole.closest_t(S)
+        q = pole.center(t)
+        dd = _rl_norm(_rl_perp(pole.a, _rl_sub(S, q)), u)
+        surf[i] = (q, dd, pole.surface(t, dd))
+    win = max(1, int(round(2.0 * rr / h)))
+    i = 0
+    while i < n:
+        if surf[i] is None:
+            i += 1
+            continue
+        j = i
+        while j < n and surf[j] is not None and samples[j][2] == samples[i][2]:
+            j += 1
+        vals = [surf[k][2] for k in range(i, j)]
+        tall = [max(vals[max(0, k - win): k + win + 1]) for k in range(len(vals))]
+        even = [sum(tall[max(0, k - win): k + win + 1]) / len(tall[max(0, k - win): k + win + 1])
+                for k in range(len(tall))]
+        for k in range(i, j):
+            q, dd, _ = surf[k]
+            X[k] = _rl_add(_rl_add(q, _rl_mul(dd, max(vals[k - i], even[k - i]))), _rl_mul(U[k], sink))
+        i = j
+    # 4. rope never cuts through a log it isn't lying on
+    own = [smp[2] for smp in samples]
+    _rl_avoid(poles, X, U, own, sink)
+    # 5. tails: the cut ends stick out a little past the hitches
+    tail = max(0.0, float(s["tail"])) * 2.0 * min(p.r for p in poles)
+    if tail > 0.0 and n >= 4:
+        m = max(1, int(tail / h))
+        k = min(3, n - 1)
+        head_dir = _rl_norm(_rl_sub(X[0], X[k]), U[0])
+        end_dir = _rl_norm(_rl_sub(X[-1], X[-1 - k]), U[-1])
+        X = [_rl_add(X[0], _rl_mul(head_dir, h * j)) for j in range(m, 0, -1)] + X + \
+            [_rl_add(X[-1], _rl_mul(end_dir, h * j)) for j in range(1, m + 1)]
+        U = [U[0]] * m + U + [U[-1]] * m
+        own = [-1] * m + own + [-1] * m
+        n = len(X)
+        _rl_avoid(poles, X, U, own, sink)
+    # 6. wobble: real rope never lies perfectly
+    wob = clamp(float(s["wobble"]), 0.0, 2.0) * rr
+    o = _ln_offsets(int(s["seed"]), 7, 6)
+    freq = 1.0 / (6.0 * rr)
+    acc = 0.0
+    scale = []
+    for i in range(n):
+        if i:
+            acc += _rl_len(_rl_sub(X[i], X[i - 1]))
+        x = acc * freq
+        tng = _rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)]), U[i])
+        side = _rl_norm(_rl_cross(tng, U[i]), U[i])
+        if wob > 0.0:
+            X[i] = _rl_add(X[i], _rl_add(_rl_mul(U[i], 0.25 * wob * (1.0 + ln_noise3(x + o[0], o[1], 0.3))),
+                                         _rl_mul(side, 0.35 * wob * ln_noise3(x + o[2], o[3], 0.3))))
+        scale.append(1.0 + 0.12 * clamp(float(s["wobble"]), 0.0, 2.0) * ln_noise3(x * 0.7 + o[4], o[5], 0.6))
+    # 7. later rope rides over earlier rope (that's how knots and fraps look)
+    for _ in range(4):  # a lift can push rope into the other log: settle the two
+        X = _rl_ride_over(X, U, rr, h)
+        if not _rl_avoid(poles, X, U, own, sink):
+            break
+    # 8. relax kinks, keep out of the other log, then taper the cut ends
+    for _ in range(2):
+        X = [X[0]] + [_rl_add(_rl_mul(X[i], 0.6), _rl_mul(_rl_add(X[i - 1], X[i + 1]), 0.2))
+                      for i in range(1, n - 1)] + [X[-1]]
+    _rl_avoid(poles, X, U, own, sink)
+    taper = max(1, int(1.5 * rr / h))
+    for i in range(min(taper, n)):
+        k = 0.78 + 0.22 * _rl_smooth01(float(i) / taper)
+        scale[i] *= k
+        scale[n - 1 - i] *= k
+    return X, U, scale
+
+
+def _rl_avoid(poles, X, U, own, sink, near=1.4):
+    """Push rope points out of every log but the one they lie on (own[i];
+    -1 for free rope), onto its real surface (a ray cast when close).
+    Returns how many points moved."""
+    moved = 0
+    for i in range(len(X)):
+        p = X[i]
+        for k, pole in enumerate(poles):
+            if k == own[i]:
+                continue
+            t = pole.closest_t(p)
+            if not pole.t0 - pole.r <= t <= pole.t1 + pole.r:
+                continue
+            v = _rl_perp(pole.a, _rl_sub(p, pole.center(t)))
+            dist = _rl_len(v)
+            if dist >= near * pole.radius(t) + sink:
+                continue
+            dd = _rl_norm(v, U[i])
+            need = pole.surface(t, dd) + sink
+            if dist < need:
+                p = _rl_add(p, _rl_mul(dd, need - dist))
+                moved += 1
+        X[i] = p
+    return moved
+
+
+def _rl_ride_over(X, U, rr, h, passes=10):
+    """Lift each rope point along U until it clears every earlier point
+    (two radii apart), with ramps so the rope climbs instead of jumping."""
+    n = len(X)
+    dia = 2.0 * rr
+    dia2 = dia * dia
+    skip = int(3.0 * dia / h) + 2
+    inv = 1.0 / dia  # grid cell = one rope diameter
+    floor, sqrt = math.floor, math.sqrt
+    near = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    lift = [0.0] * n
+    slope = 0.35 * h
+    for _ in range(passes):
+        P = [(x[0] + u[0] * k, x[1] + u[1] * k, x[2] + u[2] * k) for x, u, k in zip(X, U, lift)]
+        grid = {}
+        add = [0.0] * n
+        moved = False
+        for i in range(n):
+            px, py, pz = P[i]
+            kx, ky, kz = int(floor(px * inv)), int(floor(py * inv)), int(floor(pz * inv))
+            need = 0.0
+            ux, uy, uz = U[i]
+            last = i - skip
+            for dx, dy, dz in near:
+                for j in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                    if j > last:
+                        continue
+                    q = P[j]
+                    wx, wy, wz = px - q[0], py - q[1], pz - q[2]
+                    c = wx * wx + wy * wy + wz * wz - dia2
+                    if c >= 0.0:
+                        continue
+                    bb = wx * ux + wy * uy + wz * uz
+                    need = max(need, -bb + sqrt(max(0.0, bb * bb - c)))
+            if need > 1e-6 * rr:
+                k = add[i] = need * 1.03
+                px, py, pz = px + ux * k, py + uy * k, pz + uz * k
+                P[i] = (px, py, pz)
+                kx, ky, kz = int(floor(px * inv)), int(floor(py * inv)), int(floor(pz * inv))
+                moved = True
+            grid.setdefault((kx, ky, kz), []).append(i)
+        if not moved:
+            break
+        for i in range(1, n):  # ramps both ways
+            add[i] = max(add[i], add[i - 1] - slope)
+        for i in range(n - 2, -1, -1):
+            add[i] = max(add[i], add[i + 1] - slope)
+        for _ in range(2):  # round off the ramps' corners
+            add = [add[0]] + [max(add[i], (add[i - 1] + 2.0 * add[i] + add[i + 1]) * 0.25)
+                              for i in range(1, n - 1)] + [add[-1]]
+        for i in range(n):
+            lift[i] += add[i]
+    return [_rl_add(X[i], _rl_mul(U[i], lift[i])) for i in range(n)]
+
+
+def _rl_frames(X, up0=None):
+    """Rotation-minimising frames along a polyline: tangents T, normals N
+    and B = T x N (so N, B, T is right-handed)."""
+    n = len(X)
+    T = [_rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)])) for i in range(n)]
+    N = _rl_norm(_rl_perp(T[0], up0), None) if up0 is not None else None
+    N = N or _rl_any_perp(T[0])
+    Ns, Bs = [], []
+    for t in T:
+        N = _rl_norm(_rl_perp(t, N), _rl_any_perp(t))
+        Ns.append(N)
+        Bs.append(_rl_cross(t, N))
+    return T, Ns, Bs
+
+
+def _rl_profile(sides, twisted):
+    """Radius per ring vertex: round, or three strands laid together."""
+    if not twisted:
+        return [1.0] * sides
+    rs, dc = 0.464, 0.536  # three touching circles inside a unit circle
+    out = []
+    for j in range(sides):
+        th = 2.0 * math.pi * j / sides
+        best = 0.0
+        for k in range(3):
+            dlt = th - 2.0 * math.pi * k / 3.0
+            sn = dc * math.sin(dlt)
+            if abs(sn) <= rs:
+                best = max(best, dc * math.cos(dlt) + math.sqrt(rs * rs - sn * sn))
+        out.append(1.0 - 0.38 * (1.0 - best))
+    return out
+
+
+def rope_mesh(path, settings):
+    """Sweep the rope: (points, counts, connects, us, vs, uv_ids). UVs are
+    straight strips (U around, V along) cut into columns that fill 0..1 at
+    one texel density."""
+    s = dict(ROPE_DEFAULTS)
+    s.update(settings or {})
+    style = s["style"] if s["style"] in ROPE_STYLES else "Twisted"
+    X, scale, rr = path["points"], path["scale"], path["radius"]
+    sides = int(s["sides"]) or ROPE_AUTO_SIDES[style]
+    if style == "Twisted":
+        sides = max(9, int(round(sides / 3.0)) * 3)
+    sides = max(3, sides)
+    lay = max(1.0, float(s["lay"])) * 2.0 * rr
+    T, N, B = _rl_frames(X, path["up"][0])
+    acc = [0.0]
+    for p, q in zip(X, X[1:]):
+        acc.append(acc[-1] + _rl_len(_rl_sub(q, p)))
+    twist = [2.0 * math.pi * a / lay for a in acc]
+    tubes = []  # (rings, centres, tangents, radius)
+    if style == "3 strands":
+        rs, dc = 0.464 * rr * 1.1, 0.536 * rr
+        for k in range(3):
+            off = 2.0 * math.pi * k / 3.0
+            C = [_rl_add(X[i], _rl_mul(_rl_add(_rl_mul(N[i], math.cos(twist[i] + off)),
+                                               _rl_mul(B[i], math.sin(twist[i] + off))), dc * scale[i]))
+                 for i in range(len(X))]
+            Tk, Nk, Bk = _rl_frames(C, N[0])
+            rings = []
+            for i in range(len(C)):
+                r = rs * scale[i]
+                rings.append([_rl_add(C[i], _rl_add(_rl_mul(Nk[i], r * math.cos(2.0 * math.pi * j / sides)),
+                                                    _rl_mul(Bk[i], r * math.sin(2.0 * math.pi * j / sides))))
+                              for j in range(sides)])
+            tubes.append((rings, C, Tk, rs))
+    else:
+        prof = _rl_profile(sides, style == "Twisted")
+        spin = twist if style == "Twisted" else [0.0] * len(X)
+        rings = []
+        for i in range(len(X)):
+            r = rr * scale[i]
+            ring = []
+            for j in range(sides):
+                th = 2.0 * math.pi * j / sides + spin[i]
+                ring.append(_rl_add(X[i], _rl_add(_rl_mul(N[i], r * prof[j] * math.cos(th)),
+                                                  _rl_mul(B[i], r * prof[j] * math.sin(th)))))
+            rings.append(ring)
+        tubes.append((rings, X, T, rr))
+    return _rl_assemble(tubes, sides)
+
+
+def _rl_assemble(tubes, sides, pad=0.004):
+    pts, counts, conn, us, vs, uvi = [], [], [], [], [], []
+    infos = []
+    for rings, C, _, r in tubes:
+        acc = [0.0]
+        for p, q in zip(C, C[1:]):
+            acc.append(acc[-1] + _rl_len(_rl_sub(q, p)))
+        infos.append((acc, 2.0 * math.pi * r))
+    area = sum(a[-1] * c for a, c in infos)
+    height = max(math.sqrt(area), max(c for _, c in infos) * 2.0)
+    cuts = [max(1, int(math.ceil(a[-1] / height - 1e-9))) for a, _ in infos]
+    cols = sum(cuts)
+    width = sum(m * c for m, (_, c) in zip(cuts, infos))
+    gap = min(pad, 0.25 / (cols + 1))
+    k = min((1.0 - gap * (cols + 1)) / width, (1.0 - 4.0 * gap) / height)
+    ucur = gap
+    for (rings, C, Tn, r), (acc, circ), m in zip(tubes, infos, cuts):
+        nr = len(rings)
+        base = len(pts)
+        for ring in rings:
+            pts.extend(ring)
+        w = circ * k
+        bounds = [0]
+        for c in range(1, m):
+            want = acc[-1] * c / m
+            bounds.append(min(range(bounds[-1] + 1, nr - 1), key=lambda i: abs(acc[i] - want))
+                          if bounds[-1] + 1 < nr - 1 else nr - 1)
+        bounds.append(nr - 1)
+        first_row = last_row = None
+        for c in range(m):
+            r0, r1 = bounds[c], bounds[c + 1]
+            if r1 <= r0:
+                continue
+            uvbase = len(us)
+            v0 = 2.0 * gap
+            for ri in range(r0, r1 + 1):
+                v = v0 + (acc[ri] - acc[r0]) * k
+                for j in range(sides + 1):
+                    us.append(ucur + w * j / sides)
+                    vs.append(v)
+            if first_row is None:
+                first_row = (uvbase, v0)
+            last_row = (uvbase + (r1 - r0) * (sides + 1), v0 + (acc[r1] - acc[r0]) * k)
+            row = sides + 1
+            for ri in range(r0, r1):
+                a0 = base + ri * sides
+                ub = uvbase + (ri - r0) * row
+                for j in range(sides):
+                    j1 = (j + 1) % sides
+                    counts.append(4)
+                    conn.extend((a0 + j, a0 + j1, a0 + sides + j1, a0 + sides + j))
+                    uvi.extend((ub + j, ub + j + 1, ub + row + j + 1, ub + row + j))
+            ucur += w + gap
+        # domed caps on the cut ends
+        lift = 0.35 * w / sides
+        for ring_i, sign, (ub, v) in ((0, -1.0, first_row), (nr - 1, 1.0, last_row)):
+            centre = _rl_add(C[ring_i], _rl_mul(Tn[ring_i], sign * 0.35 * r))
+            ci = len(pts)
+            pts.append(centre)
+            cu = len(us)
+            us.append(us[ub] + 0.5 * w)
+            vs.append(v + sign * lift)
+            a0 = base + ring_i * sides
+            for j in range(sides):
+                j1 = (j + 1) % sides
+                counts.append(3)
+                if sign < 0.0:
+                    conn.extend((ci, a0 + j1, a0 + j))
+                    uvi.extend((cu, ub + j + 1, ub + j))
+                else:
+                    conn.extend((ci, a0 + j, a0 + j1))
+                    uvi.extend((cu, ub + j, ub + j + 1))
+    return pts, counts, conn, us, vs, uvi
+
+
+# ------------------------------------------------------------- scene side
+
+def is_rope(xform):
+    shape = _log_shape(xform)
+    return bool(shape) and cmds.attributeQuery(ROPE_SETTINGS, node=shape, exists=True)
+
+
+def rope_data(xform):
+    """{settings..., "poles": [uuid, uuid], "target": point or None, "kind": str}"""
+    shape = _log_shape(xform)
+    data = dict(ROPE_DEFAULTS)
+    if shape and cmds.attributeQuery(ROPE_SETTINGS, node=shape, exists=True):
+        try:
+            data.update(json.loads(cmds.getAttr(shape + "." + ROPE_SETTINGS) or "{}"))
+        except ValueError:
+            pass
+    return data
+
+
+def rope_settings_only(data):
+    return {k: data.get(k, ROPE_DEFAULTS[k]) for k in ROPE_KEYS}
+
+
+def ropes_in(nodes=None):
+    """Every rope transform (under nodes, or in the scene)."""
+    shapes = cmds.ls(nodes, dag=True, type="mesh", long=True, noIntermediate=True) if nodes else \
+        cmds.ls(type="mesh", long=True, noIntermediate=True)
+    out = []
+    for shape in shapes or []:
+        if cmds.attributeQuery(ROPE_SETTINGS, node=shape, exists=True):
+            xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
+            if xform not in out:
+                out.append(xform)
+    return out
+
+
+def rope_selection():
+    """(ropes, logs, target): selected rope transforms, other selected mesh
+    transforms, and the centre of any selected components (it places a
+    lashing along logs that lie side by side)."""
+    ropes, logs = [], []
+    for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if not _log_shape(node) or node in ropes or node in logs:
+            continue
+        if is_rope(node):
+            ropes.append(node)
+        else:
+            logs.append(node)
+    target = None
+    comps = [c for c in cmds.ls(selection=True, flatten=False) or [] if "." in c]
+    if comps:
+        verts = cmds.ls(cmds.polyListComponentConversion(comps, toVertex=True) or [], flatten=True) or []
+        if verts:
+            acc = [0.0, 0.0, 0.0]
+            for v in verts[:5000]:
+                p = cmds.pointPosition(v, world=True)
+                for k in range(3):
+                    acc[k] += p[k]
+            m = float(min(len(verts), 5000))
+            target = (acc[0] / m, acc[1] / m, acc[2] / m)
+    return ropes, logs, target
+
+
+def rope_pairs(poles, reach=ROPE_PAIR_REACH):
+    """Pairs of logs (index pairs) that touch or cross, for lashing a whole
+    frame in one go, plus [(i, j, why)] pairs left out."""
+    pairs, skipped = [], []
+    for i in range(len(poles)):
+        for j in range(i + 1, len(poles)):
+            a, b = poles[i], poles[j]
+            # cheap reject: bounding spheres
+            ca = _rl_add(a.c, _rl_mul(a.a, 0.5 * (a.t0 + a.t1)))
+            cb = _rl_add(b.c, _rl_mul(b.a, 0.5 * (b.t0 + b.t1)))
+            if _rl_len(_rl_sub(ca, cb)) > 0.5 * (a.t1 - a.t0 + b.t1 - b.t0) + 2.0 * (a.r + b.r):
+                continue
+            J = rope_joint(a, b)
+            if J["gap"] > reach * min(J["rA"], J["rB"]):
+                continue
+            if not J["inside"]:
+                skipped.append((i, j, "they meet at a log's end"))
+                continue
+            pairs.append((i, j))
+    return pairs, skipped
+
+
+def _rope_unique_name():
+    i = 1
+    while True:
+        name = "%s_C_lashing%04d_GEP" % (ROPE_MATERIAL, i)
+        if not cmds.objExists(name):
+            return name
+        i += 1
+
+
+def _rope_group():
+    found = [g for g in cmds.ls(ROPE_GROUP, long=True) or [] if cmds.objectType(g) == "transform"]
+    if found:
+        return found[0]
+    return long_name(cmds.group(empty=True, world=True, name=ROPE_GROUP))
+
+
+def _rope_write(xform, path, settings):
+    """Put the rope geometry on xform's mesh (API, not undoable: callers
+    run it in NoUndo, outside the undo chunk)."""
+    pts, counts, conn, us, vs, uvi = rope_mesh(path, settings)
+    shape = _log_shape(xform)
+    dag = get_dag_path(shape)
+    mat = dag.inclusiveMatrix()
+    if mat.isEquivalent(om.MMatrix()):
+        arr = om.MPointArray(pts)
+    else:
+        inv = dag.inclusiveMatrixInverse()
+        arr = om.MPointArray([om.MPoint(p[0], p[1], p[2]) * inv for p in pts])
+    fn = om.MFnMesh(dag)
+    fn.createInPlace(arr, counts, conn)
+    fn = om.MFnMesh(get_dag_path(shape))  # a fresh function set after the topology change
+    fn.clearUVs()
+    fn.setUVs(us, vs)
+    fn.assignUVs(counts, uvi)
+    ne = fn.numEdges
+    fn.setEdgeSmoothings(list(range(ne)), [True] * ne)
+    fn.cleanupEdgeSmoothing()
+    fn.updateSurface()
+    cmds.setAttr(shape + "." + ROPE_VERTS, len(pts))
+    return len(pts)
+
+
+def _rope_poles(data):
+    nodes = []
+    for uid in data.get("poles") or []:
+        found = cmds.ls(uid, long=True) or []
+        if not found or not _log_shape(found[0]):
+            return None
+        nodes.append(found[0])
+    return nodes if len(nodes) == 2 else None
+
+
+def lash(logs, settings=None, target=None, select=False, progress=None):
+    """Lash logs together (one Ctrl+Z). Two logs: lashed whatever the gap.
+    More: every pair that touches or crosses. Each lashing gets its own
+    random seed unless settings has one. select: select the new lashings
+    (inside the same undo step). Returns {"made", "skipped", "kinds"}.
+    With a Progress, Esc rolls everything back."""
+    try:
+        return _lash(logs, settings, target, select, progress)
+    except Cancelled:
+        undo_if_last("Rope Lashing")
+        raise
+
+
+def _lash(logs, settings, target, select, progress):
+    s = dict(ROPE_DEFAULTS)
+    s.update(settings or {})
+    report = {"made": [], "skipped": [], "kinds": {}}
+    poles = []
+    for x in logs:
+        try:
+            poles.append(RopePole(x))
+        except ValueError as exc:
+            report["skipped"].append((short_name(x), str(exc)))
+    if len(poles) < 2:
+        return report
+    if len(poles) == 2:
+        pairs = [(0, 1)]
+    else:
+        pairs, far = rope_pairs(poles)
+        report["skipped"] += [("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)), why)
+                              for i, j, why in far]
+    if progress:
+        progress.stage("ties", len(pairs), "Tying")
+    built = []
+    for i, j in pairs:
+        if progress:
+            progress.item("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)))
+        one = dict(s)
+        if not s.get("seed"):
+            one["seed"] = random.randint(1, 9999)
+        try:
+            path = rope_path([poles[i], poles[j]], one, target if len(poles) == 2 else None)
+        except ValueError as exc:
+            report["skipped"].append(("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)), str(exc)))
+            continue
+        built.append((path, one))
+        J = path["joint"]
+        if J["gap"] > min(J["rA"], J["rB"]):
+            report.setdefault("far", []).append("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)))
+    if not built:
+        return report
+    made = []
+    with UndoChunk("Rope Lashing"):
+        group = _rope_group()
+        for path, one in built:
+            node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
+                                            constructionHistory=False, name=_rope_unique_name())[0])
+            node = long_name(cmds.parent(node, group)[0])
+            shape = _log_shape(node)
+            cmds.addAttr(shape, longName=ROPE_SETTINGS, dataType="string")
+            cmds.addAttr(shape, longName=ROPE_VERTS, attributeType="long", defaultValue=0)
+            data = dict(one)
+            data["poles"] = [cmds.ls(p, uuid=True)[0] for p in path["poles"]]
+            data["target"] = list(target) if target is not None and len(poles) == 2 else None
+            data["kind"] = path["kind"]
+            cmds.setAttr(shape + "." + ROPE_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+            made.append((node, path, one))
+        if select:
+            cmds.select([m[0] for m in made], replace=True)
+    with NoUndo():
+        for node, path, one in made:
+            _rope_write(node, path, one)
+            cmds.xform(node, centerPivots=True)
+            report["made"].append(node)
+            report["kinds"][path["kind"]] = report["kinds"].get(path["kind"], 0) + 1
+    return report
+
+
+def update_ropes(changes):
+    """Re-tie ropes with changed settings ({xform: {key: value}}; {} just
+    refits to the logs as they are now). Like Log Noise's sliders these
+    edits stay out of the undo queue (the geometry can't be undone anyway).
+    Returns {"done", "lost", "errors"} (lost: a log was deleted)."""
+    report = {"done": [], "lost": [], "errors": []}
+    with NoUndo():
+        for xform, change in changes.items():
+            if not is_rope(xform):
+                continue
+            data = rope_data(xform)
+            data.update(change)
+            nodes = _rope_poles(data)
+            if nodes is None:
+                report["lost"].append(xform)
+                continue
+            target = data.get("target")
+            try:
+                path = rope_path([RopePole(x) for x in nodes], rope_settings_only(data),
+                                 tuple(target) if target else None)
+            except ValueError as exc:
+                report["errors"].append((xform, str(exc)))
+                continue
+            data["kind"] = path["kind"]
+            shape = _log_shape(xform)
+            cmds.setAttr(shape + "." + ROPE_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+            _rope_write(xform, path, rope_settings_only(data))
+            report["done"].append(xform)
+    return report
+
+
+def rebuild_stale_ropes():
+    """Ropes that are back to their 1-face seed plane (a redo of Lash
+    re-creates it without the API-built geometry): re-tie them."""
+    stale = []
+    for xform in ropes_in():
+        shape = _log_shape(xform)
+        fn = om.MFnMesh(get_dag_path(shape))
+        if fn.numVertices == 4 and fn.numPolygons == 1 and cmds.getAttr(shape + "." + ROPE_VERTS) != 4:
+            stale.append(xform)
+    if stale:
+        update_ropes({x: {} for x in stale})
+    return stale
+
+
+def bake_ropes(ropes):
+    """Keep the meshes, forget the settings (one Ctrl+Z)."""
+    done = []
+    with UndoChunk("Rope bake"):
+        for xform in ropes:
+            shape = _log_shape(xform)
+            if shape and is_rope(xform):
+                for ln in (ROPE_SETTINGS, ROPE_VERTS):
+                    if cmds.attributeQuery(ln, node=shape, exists=True):
+                        cmds.deleteAttr(shape + "." + ln)
+                done.append(xform)
+    return done
+
+
+def rope_user_presets():
+    if not cmds.optionVar(exists=ROPE_PRESET_VAR):
+        return {}
+    try:
+        data = json.loads(cmds.optionVar(q=ROPE_PRESET_VAR) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def rope_save_preset(name, settings):
+    """Keep a preset in Maya's prefs (an optionVar: Maya saves it, the tool
+    writes no files)."""
+    data = rope_user_presets()
+    data[name] = {k: settings[k] for k in ROPE_KEYS if k in settings and k != "seed"}
+    cmds.optionVar(stringValue=(ROPE_PRESET_VAR, json.dumps(data, sort_keys=True)))
+
+
+def rope_delete_preset(name):
+    data = rope_user_presets()
+    if data.pop(name, None) is not None:
+        cmds.optionVar(stringValue=(ROPE_PRESET_VAR, json.dumps(data, sort_keys=True)))
+        return True
+    return False
+
+
+def rope_preset(name):
+    """Full settings for a preset (built in or the user's), or None."""
+    over = ROPE_PRESETS.get(name)
+    if over is None:
+        over = rope_user_presets().get(name)
+    if over is None:
+        return None
+    s = dict(ROPE_DEFAULTS)
+    s.update(over)
+    return s
+
+
+class RopeLashingPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Rope Lashing"
+    TOOL_TIP = "Tie logs together with rope, the way real lashings are tied (square, diagonal, round, sheer)."
+
+    def __init__(self, parent=None):
+        super(RopeLashingPanel, self).__init__(parent)
+        self._jobs = []
+        self._pending = set()
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._sync_from_selection))
+        self._edit_timer = QtCore.QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(60)
+        self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
+        self._redo_timer = QtCore.QTimer(self)
+        self._redo_timer.setSingleShot(True)
+        self._redo_timer.setInterval(50)
+        self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
+        self._build()
+        self._install_jobs()
+        self._rebuild_stale()
+        self._sync_from_selection()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Rope Lashing", "Tie logs together the way it's done for real: clove hitches, "
+                                                "wraps and frapping turns, with clean UVs. No plugin, no nodes."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+        self.f = {}
+
+        # ---- 1. select
+        card = self.step_select = StepCard(1, "Select logs", "Two logs that touch or cross, or a whole frame "
+                                                             "(every touching pair gets its own lashing). Logs side "
+                                                             "by side: also pick a vertex to say where.")
+        self.sel_label = hint_label("")
+        card.add(self.sel_label)
+        col.addWidget(card)
+
+        # ---- 2. lash
+        card = self.step_lash = StepCard(2, "Lash", "Auto picks the lashing from the angle: Square across, "
+                                                    "Diagonal at a slant, Round side by side.")
+        grid = Section("", header=False)
+        self.f["lashing"] = ComboField(ROPE_LASHINGS)
+        grid.add_row("Lashing", self.f["lashing"],
+                     "Square: wraps in front of the crossbar and behind the upright, then fraps.\n"
+                     "Diagonal: wraps on one diagonal, then the other (crossings that don't touch, X braces).\n"
+                     "Round: tight wraps around two logs side by side. Sheer: adds fraps between them "
+                     "(A-frames).\nBands: plain wraps, no knots (background).")
+        card.add(grid)
+        self.lash_btn = primary_button("Lash Selected")
+        self.lash_btn.setMinimumHeight(28)
+        self.lash_btn.setToolTip("Tie the selected logs with the settings below. One Ctrl+Z undoes it.")
+        self.lash_btn.clicked.connect(lambda *_: self.lash())
+        card.add(self.lash_btn)
+        col.addWidget(card)
+
+        # ---- 3. rope
+        card = self.step_rope = StepCard(3, "Rope", "Edits the selected lashings live. Select several to change "
+                                                    "them together.")
+        self.f["style"] = SegmentField(ROPE_STYLES)
+        self.f["style"].setToolTip("3 strands: real laid rope, for close-ups (heaviest).\nTwisted: one tube "
+                                   "shaped like laid rope (the all-rounder).\nSmooth tube: lightest, for the "
+                                   "background.")
+        card.add(self.f["style"])
+        grid = Section("", header=False)
+        self.f["thickness"] = FloatField(0.01, 1.0, 0.02, 0.3, decimals=3, step=0.005)
+        grid.add_row("Thickness", self.f["thickness"], "Rope diameter as a fraction of the thinner log's "
+                                                       "diameter (0.1 = a 3 cm rope on a 30 cm log).")
+        self.f["wraps"] = IntField(0, 24, 0, 12)
+        self.f["wraps"].spin.setSpecialValueText("Auto")
+        grid.add_row("Wraps", self.f["wraps"], "Wrapping turns (per diagonal for Diagonal). Auto: 3 for Square "
+                                               "and Diagonal, 7 for Round, 8 for Sheer.")
+        self.f["fraps"] = IntField(-1, 8, -1, 6)
+        self.f["fraps"].spin.setSpecialValueText("Auto")
+        grid.add_row("Fraps", self.f["fraps"], "Frapping turns between the logs that pull the wraps tight. "
+                                               "Auto: 2 (none for Round and Bands).")
+        self.f["hitches"] = CheckField("Clove hitches at the start and end")
+        grid.add_full(self.f["hitches"])
+        self.f["tail"] = FloatField(0.0, 3.0, 0.0, 1.0, decimals=2, step=0.05)
+        grid.add_row("Tails", self.f["tail"], "How far the cut ends stick out, as a fraction of the log's "
+                                              "diameter.")
+        self.f["wobble"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
+        grid.add_row("Wobble", self.f["wobble"], "Hand-tied irregularity: the rope wanders and swells a little.")
+        card.add(grid)
+        seed_row = QtWidgets.QWidget()
+        sl = QtWidgets.QHBoxLayout(seed_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        seed_label = QtWidgets.QLabel("Seed")
+        seed_label.setMinimumWidth(92)
+        self.f["seed"] = IntField(0, 99999, 0, 9999)
+        self.f["seed"].setToolTip("Typing a seed gives every selected lashing that seed.")
+        rand = secondary_button("Randomize", "A new random wobble for each selected lashing.")
+        rand.clicked.connect(lambda *_: self.randomize())
+        sl.addWidget(seed_label)
+        sl.addWidget(self.f["seed"], 1)
+        sl.addWidget(rand)
+        card.add(seed_row)
+        adv = Section("Advanced", expanded=False)
+        self.f["bite"] = FloatField(0.0, 0.8, 0.0, 0.5, decimals=2, step=0.05)
+        adv.add_row("Bite", self.f["bite"], "How far the rope presses into the wood (fraction of its radius).")
+        self.f["sides"] = IntField(0, 48, 0, 32)
+        self.f["sides"].spin.setSpecialValueText("Auto")
+        adv.add_row("Sides", self.f["sides"], "Edges around the rope (per strand for 3 strands). Auto: 8 per "
+                                              "strand, 18 twisted, 10 smooth.")
+        self.f["spacing"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
+        self.f["spacing"].spin.setSpecialValueText("Auto")
+        adv.add_row("Segment", self.f["spacing"], "Length of each segment along the rope, as a fraction of its "
+                                                  "diameter (smaller = smoother and heavier). Auto: 0.2 for 3 "
+                                                  "strands, 0.25 twisted, 0.5 smooth.")
+        self.f["lay"] = FloatField(1.0, 12.0, 1.5, 8.0, decimals=2, step=0.1)
+        adv.add_row("Lay", self.f["lay"], "How tightly the strands twist: rope diameters per full turn (real "
+                                          "rope: about 3.5).")
+        card.add(adv)
+        for key, widget in self.f.items():
+            widget.setValue(ROPE_DEFAULTS[key])
+            widget.changed.connect(lambda k=key: self._queue(k))
+        col.addWidget(card)
+
+        # ---- 4. presets
+        card = self.step_presets = StepCard(4, "Presets", "Load one before Lash, or onto selected lashings. "
+                                                          "Your own presets are kept in Maya's preferences.")
+        self.preset_combo = _Combo()
+        _guard_focus(self.preset_combo)
+        card.add(self.preset_combo)
+        load = secondary_button("Load", "Put the preset's settings in the fields (and on the selected lashings).")
+        load.clicked.connect(lambda *_: self.load_preset())
+        save = secondary_button("Save As...", "Keep the current settings as a preset of your own.")
+        save.clicked.connect(lambda *_: self.save_preset())
+        delete = secondary_button("Delete", "Remove one of your own presets.")
+        delete.clicked.connect(lambda *_: self.delete_preset())
+        card.add(button_row(load, save, delete))
+        col.addWidget(card)
+        self._fill_presets()
+
+        # ---- 5. finish
+        card = self.step_finish = StepCard(5, "Finish", "Refit after moving logs. Bake keeps the mesh and forgets "
+                                                        "the settings.")
+        pick = secondary_button("Select Lashings", "Select the lashings tied to the selected logs (or all of them).")
+        pick.clicked.connect(lambda *_: self.select_ropes())
+        refit = secondary_button("Refit", "Re-tie the selected lashings to their logs as they are now.")
+        refit.clicked.connect(lambda *_: self.refit())
+        bake = secondary_button("Bake", "Keep the selected lashings as plain meshes (one Ctrl+Z).")
+        bake.clicked.connect(lambda *_: self.bake())
+        card.add(button_row(pick, refit, bake))
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+
+    def _fill_presets(self, current=None):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItems(list(ROPE_PRESETS))
+        user = sorted(rope_user_presets())
+        if user:
+            self.preset_combo.insertSeparator(self.preset_combo.count())
+            self.preset_combo.addItems(user)
+        if current:
+            i = self.preset_combo.findText(current)
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
+        self.preset_combo.blockSignals(False)
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def _settings(self):
+        return {k: w.value() for k, w in self.f.items()}
+
+    def _show(self, settings):
+        for key, widget in self.f.items():
+            widget.setValue(settings.get(key, ROPE_DEFAULTS[key]))
+
+    def _sync_from_selection(self):
+        try:
+            ropes, logs, target = rope_selection()
+            if ropes:  # show the first selected lashing's settings, like the Channel Box
+                self._show(rope_data(ropes[0]))
+            if len(logs) == 2:
+                try:
+                    J = rope_joint(RopePole(logs[0]), RopePole(logs[1]), target)
+                    kind = rope_lashing_kind(self._settings(), J["angle"])
+                    rmin = min(J["rA"], J["rB"])
+                    text = "2 logs at %.0f\u00b0: %s lashing." % (J["angle"], kind)
+                    if J["gap"] > rmin:
+                        text += " They're %.1f radii apart: the rope will span the gap." % (J["gap"] / rmin)
+                except ValueError as exc:
+                    text = "Can't use these: %s." % exc
+            elif len(logs) > 2:
+                text = "%d logs: every pair that touches or crosses gets a lashing." % len(logs)
+            elif logs:
+                text = "1 log selected: add the one it should be tied to."
+            else:
+                text = "" if ropes else "Nothing selected."
+            if ropes:
+                text = (text + " %d lashing(s) selected." % len(ropes)).strip()
+            self.sel_label.setText(text)
+            ready = len(logs) >= 2
+            self.step_select.set_state("done" if ready or ropes else "current")
+            self.step_lash.set_state("current" if ready else "todo")
+            self.step_rope.set_state("current" if ropes else "todo")
+            self.step_presets.set_state("todo")
+            self.step_finish.set_state("todo")
+            if ready:
+                self.next_banner.set_text("Pick a preset or style if you like, then press <b>Lash Selected</b>.")
+            elif ropes:
+                self.next_banner.set_text("Tweak the selected lashings in step 3 (live). <b>Refit</b> after moving "
+                                          "their logs.")
+            else:
+                self.next_banner.set_text("Select two logs that touch or cross (or a whole frame of them).")
+        except Exception:
+            traceback.print_exc()
+
+    # ============================================================= actions
+    def _queue(self, key):
+        self._pending.add(key)
+        self._edit_timer.start()
+
+    @ui_safe
+    def _apply_pending(self):
+        keys, self._pending = self._pending, set()
+        ropes = rope_selection()[0]
+        if not keys or not ropes:
+            return
+        values = self._settings()
+        change = {k: values[k] for k in keys}
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = update_ropes({x: change for x in ropes})
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._report_update(report, "Updated", t0)
+
+    def _report_update(self, report, verb, t0):
+        msg = "%s %d lashing(s) in %.2fs." % (verb, len(report["done"]), time.time() - t0)
+        level = "info"
+        if report["lost"]:
+            msg += " %d lost a log (deleted?): Bake them to keep them as they are." % len(report["lost"])
+            level = "warn"
+        if report["errors"]:
+            msg += " %s" % report["errors"][0][1]
+            level = "warn"
+        self.set_status(msg, level)
+
+    @ui_safe
+    def lash(self):
+        logs, target = rope_selection()[1:]
+        if len(logs) < 2:
+            self.set_status("Select at least two logs (mesh objects) first.", level="warn")
+            return
+        s = self._settings()
+        s.pop("seed")
+        t0 = time.time()
+        try:
+            with Progress("Rope Lashing", [("ties", 1)], status_progress(self.status)) as pr:
+                report = lash(logs, s, target, select=True, progress=pr)
+        except Cancelled:
+            self.set_status("Cancelled: nothing was changed.", level="warn")
+            return
+        made = report["made"]
+        if not made:
+            why = "; ".join("%s: %s" % w for w in report["skipped"][:3]) or "no logs touch or cross"
+            self.set_status("Nothing tied (%s)." % why, level="warn")
+            return
+        kinds = ", ".join("%d %s" % (n, k) for k, n in sorted(report["kinds"].items()))
+        msg = "Tied %d lashing(s) (%s) in %.2fs. One Ctrl+Z undoes it." % (len(made), kinds, time.time() - t0)
+        level = "fixed"
+        if report.get("far"):
+            msg += " The logs are well apart, so the rope spans the gap."
+            level = "warn"
+        if report["skipped"]:
+            msg += " Skipped %d: %s." % (len(report["skipped"]), report["skipped"][0][1])
+            level = "warn"
+        self.set_status(msg, level)
+
+    @ui_safe
+    def randomize(self):
+        ropes = rope_selection()[0]
+        if not ropes:
+            self.set_status("Select lashings to re-seed.", level="warn")
+            return
+        t0 = time.time()
+        report = update_ropes({x: {"seed": random.randint(1, 9999)} for x in ropes})
+        self._report_update(report, "New wobble for", t0)
+        self._sync_from_selection()
+
+    @ui_safe
+    def refit(self):
+        ropes = rope_selection()[0] or ropes_in()
+        if not ropes:
+            self.set_status("No lashings to refit.", level="warn")
+            return
+        t0 = time.time()
+        self._report_update(update_ropes({x: {} for x in ropes}), "Refitted", t0)
+
+    @ui_safe
+    def select_ropes(self):
+        ropes, logs, _ = rope_selection()
+        found = ropes
+        if logs:
+            uids = set(u for x in logs for u in cmds.ls(x, uuid=True))
+            found = [r for r in ropes_in() if uids & set(rope_data(r).get("poles") or [])]
+        elif not ropes:
+            found = ropes_in()
+        if found:
+            cmds.select(found, replace=True)
+        self.set_status("Selected %d lashing(s)." % len(found) if found else "No lashings found.")
+
+    @ui_safe
+    def bake(self):
+        done = bake_ropes(rope_selection()[0])
+        self.set_status("Baked %d lashing(s): plain meshes now." % len(done) if done else
+                        "Select lashings to bake.", level="info" if done else "warn")
+        self._sync_from_selection()
+
+    @ui_safe
+    def load_preset(self):
+        name = self.preset_combo.currentText()
+        s = rope_preset(name)
+        if s is None:
+            return
+        s["seed"] = self.f["seed"].value()
+        self._show(s)
+        ropes = rope_selection()[0]
+        if ropes:
+            t0 = time.time()
+            keys = [k for k in ROPE_KEYS if k != "seed"]
+            self._report_update(update_ropes({x: {k: s[k] for k in keys} for x in ropes}), "'%s' on" % name, t0)
+        else:
+            self.set_status("Loaded '%s'. Select logs and Lash." % name)
+
+    @ui_safe
+    def save_preset(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save Rope Preset", "Preset name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in ROPE_PRESETS:
+            self.set_status("'%s' is a built-in preset: pick another name." % name, level="warn")
+            return
+        rope_save_preset(name, self._settings())
+        self._fill_presets(name)
+        self.set_status("Saved preset '%s'." % name, level="fixed")
+
+    @ui_safe
+    def delete_preset(self):
+        name = self.preset_combo.currentText()
+        if name in ROPE_PRESETS:
+            self.set_status("Built-in presets can't be deleted.", level="warn")
+            return
+        if rope_delete_preset(name):
+            self._fill_presets()
+            self.set_status("Deleted preset '%s'." % name)
+
+    def _rebuild_stale(self):
+        try:
+            stale = rebuild_stale_ropes()
+            if stale:
+                self.set_status("Re-tied %d lashing(s) brought back by a redo." % len(stale))
+        except Exception:
+            traceback.print_exc()
+
+    # ======================================================= scene events
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def shutdown(self):
+        for timer in (self._sel_timer, self._edit_timer, self._redo_timer):
+            timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
-    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel]),
+    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

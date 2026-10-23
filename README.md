@@ -164,7 +164,68 @@ No plugin and no extra nodes: each mesh stores its original shape and
 settings in hidden attributes, so scenes open anywhere and you can come back
 and re-tweak later. About 0.13 s per update for a 3,900-vertex log.
 
+### Modeling > Rope Lashing
+
+Ties logs together with rope the way pioneering lashings are really tied,
+for stilt shacks, fences and frames.
+
+1. **Select** two logs that touch or cross. Select a whole frame instead and
+   every pair that touches or crosses gets its own lashing (pairs that only
+   meet at a log's end are skipped). For logs side by side, also select a
+   vertex or edge to say where along them the lashing goes.
+2. **Lash Selected** (one Ctrl+Z). *Auto* picks the lashing from the angle:
+   - **Square** (crossing near 90 degrees): clove hitch on the upright,
+     3 wraps in front of the crossbar and behind the upright, 2 frapping
+     turns between the logs, clove hitch on the crossbar.
+   - **Diagonal** (crossing at a slant, X braces): a hitch around both logs,
+     3 wraps on each diagonal, 2 fraps, clove hitch.
+   - **Round** (side by side): clove hitch around both, 7 tight wraps,
+     clove hitch.
+   - **Sheer** (A-frames): wraps, then fraps between the legs, with a hitch
+     on each leg (when the legs touch there's no room between them, so the
+     hitches go around both and there are no fraps).
+   - **Bands:** plain wraps, no knots (background).
+3. **Rope** (live on the selected lashings):
+   - **Style:** *3 strands* is real laid rope for close-ups; *Twisted* is one
+     tube shaped like laid rope (the all-rounder); *Smooth tube* is the
+     light background version.
+   - **Thickness** is relative to the thinner log, so a preset suits any log
+     size.
+   - Wraps, Fraps (Auto follows the recipes above), clove hitches on / off,
+     Tails (the cut ends), Wobble and Seed.
+   - Advanced: Bite (how far it presses into the wood), Sides, Segment
+     length and Lay (how tight the strands twist).
+4. **Presets:** built-in Standard, Hero (close-ups), Background (light),
+   Thin twine and Heavy rope. **Save As...** keeps your own in Maya's
+   preferences (an optionVar, so no files), ready for any scene. Load one
+   before Lash, or onto selected lashings.
+5. **Finish:** **Refit** re-ties lashings to logs you've moved. **Bake**
+   keeps the mesh and forgets the settings. **Select Lashings** finds the
+   ones tied to the selected logs.
+
+How it stays accurate:
+- The rope is pressed onto each log's real surface (ray casts), so bent,
+  tapered and Log Noise logs work.
+- Every later pass of rope rides over the earlier rope it crosses, which is
+  what makes the hitches and fraps read as knots.
+- Rope never cuts through a log.
+
+UVs are straight strips (U around the rope, V along it) cut into columns
+that fill 0..1 at one texel density, with no overlaps. Ropes are named
+`ropeNatural_C_lashing0001_GEP` and grouped under `lashings_GRP`.
+
+**Speed:** a square lashing on 30 cm logs takes about 0.2 s as a smooth
+tube, 0.5 s twisted and 0.8 s in 3 strands. A frame of 8 joints takes about
+2 to 5 s.
+
 ### UV > Smart UDIM (in progress)
+
+**Finding your way:** only the step you're on stays open (plus any step
+that needs a look, marked amber). Finished steps fold to a one-line
+summary. The strip of numbers under the NEXT banner jumps to any step:
+green ticks are done, teal is now. Click any step's title to open or fold
+it. Each step's settings sit under **Options**, and the UV-status legend
+appears when you tick *Colour meshes by UV status*.
 
 Organises an asset for UDIM layout by **section** (one band of UDIM rows,
 e.g. west wing / east wing) and **material group**, at consistent texel
@@ -602,6 +663,13 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_log_noise.py`: headless Log Noise tests. It checks shapes
   against the original deformer (`contrib/log_noise`), plus undo, live edits,
   masks, reset, bake, save/reopen and speed.
+- `tests/test_rope_lashing.py`: headless Rope Lashing tests. Every lashing
+  and rope style is checked for clearance from itself and the logs, UVs in
+  0..1 without overlaps, undo / redo (with the re-tie), save / reopen, live
+  edits, refit, a whole frame, Log Noise logs, presets and speed.
+- `tests/gui_rope_lashing.py`: drives the Rope Lashing panel in a real Maya
+  session and saves close-ups to `tests/_out/rope_lashing`. Launch it like
+  the smoke test below, with `tests/run_gui_rope_lashing.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

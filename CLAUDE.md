@@ -83,7 +83,21 @@
 - **UI pattern:** each tool panel has a `ToolHeader`, a `NextBanner`
   ("NEXT: the one thing to do now", updated by `_update_guidance()`) and
   numbered `StepCard`s (todo / current / done). Advanced options go in
-  collapsed `Section`s inside step cards.
+  collapsed `Section`s inside step cards ("Options").
+  - **Look:** the page is darker (`unlokColumn`); cards have a coloured
+    left strip by state (grey todo, teal current, green done, amber
+    `unlokTone="warn"`). Section headers are teal.
+  - **Folding:** every `StepCard` folds when its header is clicked. Folded,
+    it shows `set_summary(text, tone)` instead of its explanation.
+  - **Progressive disclosure:** `card.enable_auto()` (Smart UDIM only) opens
+    a card when it becomes current or gets a "warn" summary, and folds it
+    when it's done or not yet reached, until the user opens or closes it
+    themselves; that choice lasts until the state changes.
+  - `StepNav` (Smart UDIM's strip of numbered chips) jumps to a step.
+  - Smart UDIM fills the summaries in `_summarise_steps`. Its UV legend
+    only shows while colours are on.
+  - **Tests:** checks that a widget inside a card is shown use
+    `not w.isHidden()`, since `isVisible()` is False inside a folded card.
 - Stroke preview must stay cheap per mouse move:
   - One preview curve (1,024 CVs, never saved, hidden in the Outliner) is made
     when Draw Path starts, and only its CVs are moved through the API.
@@ -143,6 +157,33 @@
     with coincident corners (Maya's bevel makes these where recesses touch
     or a bevel runs off a box corner), unpaired odd faces, no clean split.
 
+- **Rope Lashing** (Modeling tab): ties logs with real lashing recipes.
+  Engine `rope_path` (pure maths plus ray casts) -> `rope_mesh`; scene side
+  `lash`, `update_ropes`, `rebuild_stale_ropes`; panel `RopeLashingPanel`.
+  - **Logs:** `RopePole` fits a straight main axis (joint maths) plus
+    per-slice centres and radii (bent / Log Noise logs). Slice borders
+    snap into the widest gap between vertex rings: a border through a ring
+    pulls that half ring's centre sideways (13 cm on a tilted log).
+  - **Path:** `_RopeTie` builds samples (S on a log surface or free, u the
+    side the rope sits on, log index). Loops are the convex hull of the
+    logs' cross-sections in a plane (ellipses: support points); Square uses
+    half-turn arcs per log with corners solved for any angle. Fraps are a
+    spiral around where the wraps cross the gap between the logs (no room
+    to stack them along it where logs touch).
+  - **Finish** (`_rl_finish`): even resample -> press onto the real surface
+    (ray casts, max filter = a taut rope bridges dips) -> `_rl_avoid` (out
+    of the *other* log) -> tails -> wobble -> `_rl_ride_over` (later rope
+    lifts over earlier rope, with ramps) alternating with `_rl_avoid`.
+  - **Mesh:** strips with U around, V along, cut into columns that fill
+    0..1. Twisted rotates the ring with the lay so the grooves follow edge
+    loops.
+  - **Undo:** API meshes can't be undone, so `lash` makes a 1-face
+    polyPlane plus the settings JSON inside the chunk, then fills it with
+    `createInPlace` in NoUndo. A redo brings the plane back, and the
+    panel's Redo scriptJob runs `rebuild_stale_ropes` (4 verts / 1 face and
+    `unlokRopeVerts` != 4). Live edits are NoUndo, like Log Noise.
+  - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
+    (Maya writes its prefs; the tool writes no files).
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -548,6 +589,12 @@
   n-gons it leaves are where a bevelled edge chain ends. Closed loops miter
   into all quads.
 
+- Building a mesh undoably from Python: `setAttr -type polyFaces` only
+  works while a file loads (live it errors or leaves an empty mesh), and
+  `MFnMesh.create(parent=<empty mesh node>)` fails. What works: an
+  undoable `polyPlane(ch=False)` seed, then `MFnMesh.createInPlace` on it
+  (see Rope Lashing).
+
 ## Testing
 - **Set `MAYA_DISABLE_CER=1`** for every mayapy / maya.exe test run. A Maya
   that crashes or gets killed otherwise pops Autodesk's error-report window
@@ -561,7 +608,8 @@
   closing or skipping it is fine. Add `-log <file>` to see Maya's output.
 Maya 2024 and 2025 are installed locally (no 2023). Run
 `mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
-`tests/test_bevel_resolver.py` for the engines, and
+`tests/test_bevel_resolver.py` for the engines (plus `tests/test_log_noise.py`
+and `tests/test_rope_lashing.py`), and
 `tests/bench_scatter.py [--profile]` for speed. The Bevel Resolver GUI test
 is `tests/run_gui_bevel_resolver.mel` (screenshots in
 `tests/_out/bevel_resolver`). For the UI, launch GUI Maya

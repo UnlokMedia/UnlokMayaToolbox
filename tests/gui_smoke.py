@@ -332,6 +332,15 @@ def main():
     check("pre-process report shows n-gons", any("N-gons" in c for c in cats), "%s | %s" % (cats, udim.status.text()))
     pump()
     window.grab().save(os.path.join(OUT, "09_smart_udim_panel.png"))
+    open_steps = [c.number for c in udim.steps if c.expanded]
+    check("progressive disclosure: only the current step (and ones needing a look) are open",
+          udim.step_scan.state == "done" and not udim.step_scan.expanded and udim.step_scan.summary.text(),
+          "open %s, scan summary %r" % (open_steps, udim.step_scan.summary.text()))
+    udim.step_nav.go(udim.step_scan)
+    pump()
+    check("the step strip opens a folded step", udim.step_scan.expanded)
+    udim.step_scan.toggle()
+    pump()
 
     # --- Auto UV through the panel: analyse, then unwrap + pack
     for i in range(3):
@@ -434,7 +443,7 @@ def main():
     pump()
     txt = udim.inspect_label.text()
     check("clicking a red mesh shows why it's red and what to do", "Why it" in txt and "Fix:" in txt and
-          udim.inspect_row.isVisible(), txt[:300])
+          not udim.inspect_row.isHidden(), txt[:300])
     hit = udim._auto_items.get(victim)
     check("...and highlights its row in the list", hit is not None and hit[0].isSelected())
     udim.problems_only.setChecked(True)
@@ -597,7 +606,7 @@ def main():
     pump(20)
     check("reopening the scene picks up where it left off", udim._asset() is not None and
           udim.auto_tree.topLevelItemCount() == rows_before and states() == states_before and
-          udim.resume_label.isVisible() and udim.lay_padding.value() == 12,
+          not udim.resume_label.isHidden() and udim.lay_padding.value() == 12,
           "%d rows (was %d), steps %s (were %s), padding %d | %s" % (
               udim.auto_tree.topLevelItemCount(), rows_before, states(), states_before, udim.lay_padding.value(),
               udim.resume_label.text()[:120]))
@@ -608,7 +617,7 @@ def main():
     window.grab().save(os.path.join(OUT, "14b_resumed.png"))
     udim.start_fresh()
     pump()
-    check("Start Fresh forgets the saved progress", not udim.resume_label.isVisible() and
+    check("Start Fresh forgets the saved progress", udim.resume_label.isHidden() and
           udim.auto_result is None and udim.step_layout.state != "done", udim.status.text())
 
     # --- Do It All on a fresh asset: Auto UV, layout and validation in one click
