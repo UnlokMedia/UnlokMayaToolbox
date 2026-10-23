@@ -240,6 +240,56 @@ def run():
     check("Lash keeps exactly what the preview showed", mesh_fn(tb, rep["made"][0]).numVertices == pv and
           not tb["rope_previews"]())
 
+    # --- baked lashings: plain meshes, never logs, and a redo still rebuilds them
+    cmds.file(new=True, force=True)
+    post = log("post", move=(0, 1.5, 0))
+    beam = log("beam", rot=(0, 0, 90), move=(0, 2.0, 0.3))
+    rep = tb["lash"]([post, beam], {"style": "Smooth tube"}, bake=True)
+    node = rep["made"][0]
+    nb = mesh_fn(tb, node).numVertices
+    check("lash(bake=True): a plain mesh, not a lashing", nb > 100 and not tb["is_rope"](node) and
+          not tb["ropes_in"]())
+    cmds.undo()
+    check("one Ctrl+Z removes the baked lashing", not cmds.objExists(node))
+    cmds.redo()
+    tb["rebuild_stale_ropes"]()
+    check("redo rebuilds the baked lashing too", mesh_fn(tb, node).numVertices == nb and not tb["is_rope"](node),
+          "%d vs %d" % (mesh_fn(tb, node).numVertices, nb))
+    cmds.select(node, post, beam)
+    ropes, logs, _ = tb["rope_selection"]()
+    check("a baked lashing is never taken for a log", not ropes and sorted(logs) == sorted([post, beam]), str(logs))
+    live = tb["lash"]([post, beam], {"style": "Smooth tube"})["made"][0]
+    tb["bake_ropes"]([live])
+    cmds.undo()
+    check("undoing a bake makes it a lashing again", tb["is_rope"](live))
+
+    # --- Smart UDIM: lashings come in as Keep UVs (never re-unwrapped or scored, still laid out)
+    cmds.file(new=True, force=True)
+    shack = cmds.ls(cmds.group(empty=True, name="shack_GRP"), long=True)[0]
+    post = cmds.ls(cmds.parent(log("wood_C_post_GEP", move=(0, 1.5, 0)), shack)[0], long=True)[0]
+    beam = cmds.ls(cmds.parent(log("wood_C_beam_GEP", rot=(0, 0, 90), move=(0, 2.0, 0.3)), shack)[0], long=True)[0]
+    baked_rope = tb["lash"]([post, beam], {"style": "Smooth tube"}, bake=True)["made"][0]
+    live_rope = tb["lash"]([post, beam], {"style": "Smooth tube", "lashing": "Bands"})["made"][0]
+    ropes = [cmds.ls(cmds.parent(r, shack)[0], long=True)[0] for r in (baked_rope, live_rope)]
+    def uv_layout(r):  # UV count and shells: an unwrap changes them, packing only moves the shells
+        return mesh_fn(tb, r).numUVs(), cmds.polyEvaluate(r, uvShell=True)
+    uvs_before = {r: uv_layout(r) for r in ropes}
+    asset = tb["SmartUdimAsset"].for_group(shack)
+    res = asset.scan()
+    st = asset.uv_status()
+    check("Scan marks lashings Keep UVs, logs stay Auto", all(st.get(r) == "keep" for r in ropes) and
+          post not in st and res.get("ready") == 2, "%s ready=%s" % (st, res.get("ready")))
+    auto = tb["run_auto_uv"](asset)
+    rows = {r["mesh"]: r for r in auto.get("rows", [])}
+    same = all(uv_layout(r) == uvs_before[r] for r in ropes)
+    check("Auto UV doesn't re-unwrap or score lashings (only packs them)", same and
+          all("Keep" in rows.get(r, {}).get("reason", "Keep") for r in ropes),
+          str([rows.get(r, {}).get("reason") for r in ropes]))
+    asset.set_uv_status([ropes[0]], "auto")
+    asset.scan()
+    check("marking a lashing Auto sticks through the next Scan", ropes[0] not in asset.uv_status() and
+          asset.uv_status().get(ropes[1]) == "keep")
+
     # --- presets live in an optionVar
     var = tb["ROPE_PRESET_VAR"]
     old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None

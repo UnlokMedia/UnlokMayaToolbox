@@ -191,6 +191,14 @@
     (`_pin`: uuids + target), so it survives deselecting; selecting other
     logs (live on) re-pins, selecting lashings (edit mode), Clear Preview
     and Lash drop it. Lash with no logs selected ties the pinned logs.
+  - **Bake** renames the settings attr to `unlokRopeBaked` (not deleted), so
+    a redo's empty seed plane can still be rebuilt (`rebuild_stale_ropes`
+    handles both). Baked ropes are never taken for logs (`_rope_extra`). The
+    panel's Bake with nothing selected lashes the preview (`lash(bake=True)`)
+    and bakes every lashing inside one outer UndoChunk.
+  - **UV hand-off:** rope shapes get `unlokUvReady` (UV_READY_ATTR). Smart
+    UDIM's scan (`_mark_tool_uvs`) marks tagged meshes with no status Keep
+    UVs; `set_uv_status(..., "auto")` deletes the tag so the choice sticks.
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
 - **Smart UDIM** (UV tab):

@@ -3442,6 +3442,9 @@ SECTION_SUFFIX = "UDS"
 #   keep     = never re-unwrap, but still categorise, scale and pack
 #   handsoff = never touch: no unwrap, no layout; the plan works around it
 UV_STATUSES = ("auto", "keep", "handsoff")
+# Bool on a mesh shape: a tool made its UVs (Rope Lashing), so Scan marks it
+# Keep UVs: never re-unwrapped or scored, still laid out.
+UV_READY_ATTR = "unlokUvReady"
 UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "handsoff": "Hands off"}
 # Tool-owned tracking sets (also under the root): what Auto UV unwrapped, what
 # Smart Layout laid out, and what needs a human (Auto UV failed / still bad).
@@ -3987,6 +3990,11 @@ class SmartUdimAsset(object):
                     cmds.sets(meshes, add=node)
             if status in ("keep", "handsoff"):  # you've decided about these: drop any old problem flag
                 self.update_tool_sets(remove={"problem": meshes})
+            else:  # Auto on purpose: a tool's "UVs ready" tag mustn't turn it back into Keep UVs on the next Scan
+                for m in meshes:
+                    for shape in cmds.listRelatives(m, shapes=True, fullPath=True) or []:
+                        if cmds.attributeQuery(UV_READY_ATTR, node=shape, exists=True):
+                            cmds.deleteAttr(shape + "." + UV_READY_ATTR)
         return len(meshes)
 
     # ------------------------------------------------------------ sections
@@ -4320,7 +4328,24 @@ class SmartUdimAsset(object):
             for mat, items in batches.items():
                 self._add_items(items, mat)
             self.sync_names()
-        return {"added": added, "meshes": len(meshes), "instanced": len(instanced)}
+            ready = self._mark_tool_uvs(meshes)
+        return {"added": added, "meshes": len(meshes), "instanced": len(instanced), "ready": ready}
+
+    def _mark_tool_uvs(self, meshes):
+        """Meshes whose UVs a tool made (UV_READY_ATTR) and that have no UV
+        status yet become Keep UVs. A mark you've set yourself is left alone."""
+        tagged = set()
+        for shape in cmds.ls("*." + UV_READY_ATTR, objectsOnly=True, long=True) or []:
+            parent = cmds.listRelatives(shape, parent=True, fullPath=True)
+            if parent:
+                tagged.add(long_name(parent[0]))
+        if not tagged:
+            return 0
+        status = self.uv_status()
+        new = [m for m in meshes if m in tagged and m not in status]
+        if new:
+            self.set_uv_status(new, "keep")
+        return len(new)
 
     def _create_default_sections(self, group, meshes, from_groups):
         if from_groups:
@@ -10430,9 +10455,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
             QtWidgets.QApplication.restoreOverrideCursor()
         self.refresh()
         naming = len(self.snapshot["naming"]) if self.snapshot else 0
-        self.set_status("Scanned %d meshes in %.2fs: %d newly grouped%s." % (
+        self.set_status("Scanned %d meshes in %.2fs: %d newly grouped%s%s." % (
             result["meshes"], time.time() - t0, result["added"],
-            (", %d naming issue(s) (see below)" % naming) if naming else ""))
+            (", %d naming issue(s) (see below)" % naming) if naming else "",
+            (", %d with tool-made UVs marked Keep UVs" % result["ready"]) if result.get("ready") else ""))
         return result
 
     @ui_safe
@@ -13675,6 +13701,7 @@ class LogNoisePanel(QtWidgets.QWidget):
 
 ROPE_SETTINGS = "unlokRope"        # string on the rope shape: JSON settings + logs (uuids)
 ROPE_VERTS = "unlokRopeVerts"      # long on the rope shape: vertex count of the last build
+ROPE_BAKED = "unlokRopeBaked"      # string on a baked rope: its old settings, only so a redo can rebuild it
 ROPE_GROUP = "lashings_GRP"
 ROPE_MATERIAL = "ropeNatural"      # material token in the rope's name (UnlokRenamer convention)
 ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user presets as JSON
@@ -14660,6 +14687,13 @@ def rope_settings_only(data):
     return {k: data.get(k, ROPE_DEFAULTS[k]) for k in ROPE_KEYS}
 
 
+def _rope_extra(xform):
+    """A lashing preview or a baked lashing: never a log to tie."""
+    shape = _log_shape(xform)
+    return cmds.attributeQuery(ROPE_PREVIEW_ATTR, node=xform, exists=True) or \
+        bool(shape) and cmds.attributeQuery(ROPE_BAKED, node=shape, exists=True)
+
+
 def ropes_in(nodes=None):
     """Every rope transform (under nodes, or in the scene)."""
     shapes = cmds.ls(nodes, dag=True, type="mesh", long=True, noIntermediate=True) if nodes else \
@@ -14681,7 +14715,7 @@ def rope_selection():
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
         if cmds.objectType(node, isAType="shape"):
             node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
-        if not _log_shape(node) or node in ropes or node in logs or                 cmds.attributeQuery(ROPE_PREVIEW_ATTR, node=node, exists=True):
+        if not _log_shape(node) or node in ropes or node in logs or _rope_extra(node):
             continue
         if is_rope(node):
             ropes.append(node)
@@ -14781,15 +14815,16 @@ def _rope_poles(data):
     return nodes if len(nodes) == 2 else None
 
 
-def lash(logs, settings=None, target=None, select=False, progress=None):
+def lash(logs, settings=None, target=None, select=False, progress=None, bake=False):
     """Lash logs together (one Ctrl+Z). Two logs: lashed whatever the gap.
     More: every pair that touches or crosses. Each lashing gets its own
     seed (the same for the same pair of logs, as in the preview) unless
     settings has one. select: select the new lashings
-    (inside the same undo step). Returns {"made", "skipped", "kinds"}.
-    With a Progress, Esc rolls everything back."""
+    (inside the same undo step). bake: make them baked lashings straight
+    away (plain meshes). Returns {"made", "skipped", "kinds"}. With a
+    Progress, Esc rolls everything back."""
     try:
-        return _lash(logs, settings, target, select, progress)
+        return _lash(logs, settings, target, select, progress, bake)
     except Cancelled:
         undo_if_last("Rope Lashing")
         raise
@@ -14849,7 +14884,7 @@ def _rope_plan(logs, settings, target, progress=None, limit=None):
     return built, report
 
 
-def _lash(logs, settings, target, select, progress):
+def _lash(logs, settings, target, select, progress, bake=False):
     built, report = _rope_plan(logs, settings, target, progress)
     report["kinds"] = {}
     if not built:
@@ -14863,13 +14898,15 @@ def _lash(logs, settings, target, select, progress):
                                             constructionHistory=False, name=_rope_unique_name())[0])
             node = long_name(cmds.parent(node, group)[0])
             shape = _log_shape(node)
-            cmds.addAttr(shape, longName=ROPE_SETTINGS, dataType="string")
+            attr = ROPE_BAKED if bake else ROPE_SETTINGS
+            cmds.addAttr(shape, longName=attr, dataType="string")
             cmds.addAttr(shape, longName=ROPE_VERTS, attributeType="long", defaultValue=0)
+            cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
             data = dict(one)
             data["poles"] = [cmds.ls(p, uuid=True)[0] for p in path["poles"]]
             data["target"] = list(target) if target is not None and two else None
             data["kind"] = path["kind"]
-            cmds.setAttr(shape + "." + ROPE_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+            cmds.setAttr(shape + "." + attr, json.dumps(data, sort_keys=True), type="string")
             made.append((node, path, one))
         if select:
             cmds.select([m[0] for m in made], replace=True)
@@ -14966,29 +15003,50 @@ def update_ropes(changes):
 
 
 def rebuild_stale_ropes():
-    """Ropes that are back to their 1-face seed plane (a redo of Lash
-    re-creates it without the API-built geometry): re-tie them."""
-    stale = []
-    for xform in ropes_in():
-        shape = _log_shape(xform)
+    """Lashings (baked ones too) that are back to their 1-face seed plane (a
+    redo of Lash re-creates it without the API-built geometry): re-tie them."""
+    stale, baked = [], []
+    for shape in cmds.ls(type="mesh", long=True, noIntermediate=True) or []:
+        attr = ROPE_SETTINGS if cmds.attributeQuery(ROPE_SETTINGS, node=shape, exists=True) else \
+            (ROPE_BAKED if cmds.attributeQuery(ROPE_BAKED, node=shape, exists=True) else None)
+        if attr is None or not cmds.attributeQuery(ROPE_VERTS, node=shape, exists=True):
+            continue
         fn = om.MFnMesh(get_dag_path(shape))
         if fn.numVertices == 4 and fn.numPolygons == 1 and cmds.getAttr(shape + "." + ROPE_VERTS) != 4:
-            stale.append(xform)
+            xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
+            (stale if attr == ROPE_SETTINGS else baked).append(xform)
     if stale:
         update_ropes({x: {} for x in stale})
-    return stale
+    with NoUndo():
+        for xform in baked:
+            shape = _log_shape(xform)
+            try:
+                data = json.loads(cmds.getAttr(shape + "." + ROPE_BAKED) or "{}")
+                nodes = _rope_poles(data)
+                if nodes is None:
+                    continue
+                target = data.get("target")
+                s = rope_settings_only(dict(ROPE_DEFAULTS, **data))
+                _rope_write(xform, rope_path([RopePole(x) for x in nodes], s, tuple(target) if target else None), s)
+            except (ValueError, RuntimeError):
+                traceback.print_exc()
+    return stale + baked
 
 
 def bake_ropes(ropes):
-    """Keep the meshes, forget the settings (one Ctrl+Z)."""
+    """Keep the meshes as plain meshes: the tool stops treating them as
+    lashings (one Ctrl+Z). The settings move to a hidden attribute that
+    only a redo uses (to rebuild the mesh a redo of Lash leaves empty)."""
     done = []
     with UndoChunk("Rope bake"):
         for xform in ropes:
             shape = _log_shape(xform)
             if shape and is_rope(xform):
-                for ln in (ROPE_SETTINGS, ROPE_VERTS):
-                    if cmds.attributeQuery(ln, node=shape, exists=True):
-                        cmds.deleteAttr(shape + "." + ln)
+                if cmds.attributeQuery(ROPE_BAKED, node=shape, exists=True):
+                    cmds.deleteAttr(shape + "." + ROPE_BAKED)
+                cmds.renameAttr(shape + "." + ROPE_SETTINGS, ROPE_BAKED)
+                if not cmds.attributeQuery(UV_READY_ATTR, node=shape, exists=True):  # lashed before the tag
+                    cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
                 done.append(xform)
     return done
 
@@ -15231,7 +15289,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
         refit = secondary_button("Refit to Logs", "Re-tie the selected lashings (or all) to their logs as they are "
                                                   "now. Settings don't change: edit them in step 2.")
         refit.clicked.connect(lambda *_: self.refit())
-        bake = secondary_button("Bake", "Keep the selected lashings as plain meshes (one Ctrl+Z).")
+        bake = secondary_button("Bake", "Turn lashings into plain meshes (one Ctrl+Z): the selected ones, or "
+                                        "with none selected every lashing plus the preview.")
         bake.clicked.connect(lambda *_: self.bake())
         card.add(button_row(pick, refit, bake))
         col.addWidget(card)
@@ -15513,9 +15572,24 @@ class RopeLashingPanel(QtWidgets.QWidget):
 
     @ui_safe
     def bake(self):
-        done = bake_ropes(rope_selection()[0])
-        self.set_status("Baked %d lashing(s): plain meshes now." % len(done) if done else
-                        "Select lashings to bake.", level="info" if done else "warn")
+        selected = rope_selection()[0]
+        logs, target = (None, None) if selected else self._pin_logs()
+        if not selected and not logs and not ropes_in():
+            self.set_status("No lashings or preview to bake.", level="warn")
+            return
+        t0 = time.time()
+        made = []
+        with UndoChunk("Rope bake"):  # one Ctrl+Z for the preview's lashing and the bake
+            if logs:
+                self._pin = None
+                clear_rope_previews()
+                made = lash(logs, self._settings(), target, bake=True)["made"]
+            done = bake_ropes(selected or ropes_in())
+        msg = "Baked %d lashing(s)" % (len(done) + len(made))
+        if made:
+            msg += " (%d from the preview)" % len(made)
+        self.set_status(msg + " in %.2fs: plain meshes now. One Ctrl+Z undoes it." % (time.time() - t0),
+                        level="fixed")
         self._sync_from_selection()
 
     @ui_safe

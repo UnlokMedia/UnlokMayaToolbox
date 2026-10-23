@@ -282,6 +282,25 @@ def main():
     panel.lash()
     check("no selection gives a warning", "Select" in panel.status.text(), panel.status.text())
 
+    # --- Bake with nothing selected: the preview plus every lashing, in one Ctrl+Z
+    def baked():
+        return [s for s in cmds.ls(type="mesh", long=True) or []
+                if cmds.attributeQuery(ns["ROPE_BAKED"], node=s, exists=True)]
+    cmds.select(logs[1], logs[4])
+    panel._sync_from_selection()
+    cmds.select(clear=True)
+    panel._sync_from_selection()
+    check("a preview is showing with nothing selected", len(ns["rope_previews"]()) == 1)
+    panel.bake()
+    pump()
+    check("Bake with nothing selected bakes the preview and every lashing",
+          not ns["rope_previews"]() and not ns["ropes_in"]() and len(baked()) == 9,
+          "%d baked | %s" % (len(baked()), panel.status.text()))
+    cmds.undo()
+    pump()
+    check("one Ctrl+Z undoes the whole bake", len(ns["ropes_in"]()) == 8 and not baked(),
+          "%d lashings, %d baked" % (len(ns["ropes_in"]()), len(baked())))
+
 
 def run():
     try:

@@ -220,8 +220,16 @@ for stilt shacks, fences and frames.
      selected and is never saved with the scene. For big frames it shows
      the first 12 lashings (Lash still ties them all).
 4. **Finish:** **Refit to Logs** re-ties lashings to logs you've moved (each
-   keeps its own settings). **Bake** keeps the mesh and forgets the
-   settings. **Select Lashings** finds the ones tied to the selected logs.
+   keeps its own settings). **Bake** turns lashings into plain meshes: the
+   selected ones, or with none selected every lashing in the scene plus the
+   preview, all in one Ctrl+Z. **Select Lashings** finds the ones tied to
+   the selected logs.
+
+**With Smart UDIM:** lashings carry a "UVs ready" tag, so when Smart UDIM
+scans an asset that contains them they're marked **Keep UVs**: Auto UV
+never re-unwraps or scores them, and layout still packs them with
+everything else. Marking one Auto yourself removes the tag, so it stays
+Auto.
 
 How it stays accurate:
 - The rope is pressed onto each log's real surface (ray casts), so bent,
