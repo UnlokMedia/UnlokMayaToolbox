@@ -5392,6 +5392,26 @@ def _uw_seams(m, pf, kind, opts):
     than organic_angle."""
     faces, dcos, hard = m["faces"], m["dcos"], m["hard"]
     limit = math.cos(math.radians(opts["hard_angle"] if kind == "hard" else opts["organic_angle"]))
+    if kind == "hard":
+        # A piece with both hard and soft edges has its smoothing set up by
+        # hand: soft edges mean "one surface" (the sides of a low-poly pipe,
+        # bent or not), so only hard edges are cut, plus anything sharper
+        # than organic_angle. All-hard or all-soft pieces go by angle.
+        n_hard = n_soft = 0
+        for f in pf:
+            fv = faces[f]
+            c = len(fv)
+            for i in range(c):
+                a, b = fv[i], fv[(i + 1) % c]
+                key = (a, b) if a < b else (b, a)
+                if dcos.get(key) is None:
+                    continue
+                if key in hard:
+                    n_hard += 1
+                else:
+                    n_soft += 1
+        if n_hard and n_soft:
+            limit = math.cos(math.radians(max(opts["hard_angle"], opts["organic_angle"])))
     cut, sewable = set(), set()
     for f in pf:
         fv = faces[f]
@@ -5459,7 +5479,7 @@ def _uw_build(m, fids, cut):
             gc = len(faces[g])
             uf.union(base[f] + i, base[g] + (j + 1) % gc)
             uf.union(base[f] + (i + 1) % c, base[g] + j)
-    local, P, cl = {}, [], {}
+    local, P, cl, mv = {}, [], {}, []
     for f in fids:
         fv = faces[f]
         for i in range(len(fv)):
@@ -5468,6 +5488,7 @@ def _uw_build(m, fids, cut):
             if idx is None:
                 idx = local[r] = len(P)
                 P.append(pts[fv[i]])
+                mv.append(fv[i])
             cl[base[f] + i] = idx
     T, medge = [], {}
     for f in fids:
@@ -5480,7 +5501,7 @@ def _uw_build(m, fids, cut):
             x, y = cl[b0 + i], cl[b0 + (i + 1) % c]
             a, b = fv[i], fv[(i + 1) % c]
             medge[(x, y) if x < y else (y, x)] = (a, b) if a < b else (b, a)
-    return {"P": P, "T": T, "cl": cl, "medge": medge, "faces": fids}
+    return {"P": P, "T": T, "cl": cl, "medge": medge, "faces": fids, "mv": mv}
 
 
 def _uw_topology(T, nv):
@@ -5999,20 +6020,25 @@ def _uw_arap(P, T, UV, iters, ctl, cg_iters=12):
     return list(zip(u, v))
 
 
-def _uw_tutte(P, T, loop):
-    """Tutte embedding: the boundary on a circle (by length), the inside
-    averaged; always fold-free. The start for relaxing curved charts."""
+def _uw_tutte(P, T, loop, bpos=None):
+    """Tutte embedding: the boundary on a circle (by length) or at bpos
+    ({vertex: (u, v)}, a convex shape), the inside averaged; always
+    fold-free. The start for relaxing curved charts."""
     nv = len(P)
-    lens = [_uw_len(P, loop[i], loop[(i + 1) % len(loop)]) for i in range(len(loop))]
-    per = sum(lens) or 1.0
-    rad = per / (2.0 * math.pi)
     u = [0.0] * nv
     v = [0.0] * nv
-    acc = 0.0
-    for i, a in enumerate(loop):
-        ang = 2.0 * math.pi * acc / per
-        u[a], v[a] = rad * math.cos(ang), rad * math.sin(ang)
-        acc += lens[i]
+    if bpos:
+        for a in loop:
+            u[a], v[a] = bpos[a]
+    else:
+        lens = [_uw_len(P, loop[i], loop[(i + 1) % len(loop)]) for i in range(len(loop))]
+        per = sum(lens) or 1.0
+        rad = per / (2.0 * math.pi)
+        acc = 0.0
+        for i, a in enumerate(loop):
+            ang = 2.0 * math.pi * acc / per
+            u[a], v[a] = rad * math.cos(ang), rad * math.sin(ang)
+            acc += lens[i]
     nbr = [set() for _ in range(nv)]
     for a, b, c in T:
         nbr[a].update((b, c))
@@ -6029,6 +6055,83 @@ def _uw_tutte(P, T, loop):
     _uw_cg(A, u, bu, n_it, fixed)
     _uw_cg(A, v, bv, n_it, fixed)
     return list(zip(u, v))
+
+
+def _uw_shape_start(ch):
+    """Boundary positions for a chart whose final shape is known roughly,
+    from the cut that opened it (ch["hint"]):
+    - ring (a tube, bent or not, cut between its rims): a rectangle, rim
+      length wide and tube length tall, each side spaced by 3D length;
+    - pelt (a closed shape cut end to end): an ellipse, the cut's two sides
+      down its left and right halves, as tall as the cut and as wide as the
+      area needs.
+    Relaxing from a start that is already the right shape converges where a
+    circle start (long thin charts) doesn't. None when there's no hint or
+    the boundary doesn't split up as expected."""
+    hint = ch.get("hint")
+    if not hint:
+        return None
+    P, loop, medge, mv = ch["P"], ch["loops"][0], ch["medge"], ch["mv"]
+    n = len(loop)
+    seg = [_uw_len(P, loop[i], loop[(i + 1) % n]) for i in range(n)]
+    out = {}
+    if hint[0] == "ring":
+        rim_a, rim_b = hint[1], hint[2]
+
+        def kind(i):
+            x, y = loop[i], loop[(i + 1) % n]
+            key = medge.get((x, y) if x < y else (y, x))
+            return "A" if key in rim_a else ("B" if key in rim_b else "C")
+
+        cls = [kind(i) for i in range(n)]
+        starts = [i for i in range(n) if cls[i] == "A" and cls[i - 1] != "A"]
+        if len(starts) != 1:
+            return None
+        s0 = starts[0]
+        runs = []
+        for k in range(n):
+            i = (s0 + k) % n
+            if runs and runs[-1][0] == cls[i]:
+                runs[-1][1].append(i)
+            else:
+                runs.append([cls[i], [i]])
+        if [r[0] for r in runs] != ["A", "C", "B", "C"]:
+            return None
+        lens = [sum(seg[i] for i in r[1]) for r in runs]
+        W = (lens[0] + lens[2]) / 2.0
+        H = (lens[1] + lens[3]) / 2.0
+        if W <= 0 or H <= 0:
+            return None
+        sides = (lambda s: (W * s, 0.0), lambda s: (W, H * s), lambda s: (W * (1 - s), H),
+                 lambda s: (0.0, H * (1 - s)))
+        for (_, idxs), ln, side in zip(runs, lens, sides):
+            acc = 0.0
+            for i in idxs:
+                out[loop[i]] = side(acc / ln if ln > 0 else 0.0)
+                acc += seg[i]
+        return out
+    if hint[0] == "pelt":
+        tips = [i for i in range(n) if mv[loop[i]] in (hint[1], hint[2])]
+        if len(tips) != 2:
+            return None
+        i0, i1 = tips
+        half1 = list(range(i0, i1))
+        half2 = list(range(i1, n)) + list(range(0, i0))
+        l1 = sum(seg[i] for i in half1)
+        l2 = sum(seg[i] for i in half2)
+        L = (l1 + l2) / 2.0
+        area = sum(0.5 * math.sqrt(sum(c * c for c in _uw_tri_normal(P, t))) for t in ch["T"])
+        if L <= 0 or area <= 0:
+            return None
+        a_ax, b_ax = max(area / (2.0 * L), 1e-6 * L), L / 2.0
+        for idxs, ln, t0 in ((half1, l1, 0.5 * math.pi), (half2, l2, 1.5 * math.pi)):
+            acc = 0.0
+            for i in idxs:
+                th = t0 + math.pi * (acc / ln if ln > 0 else 0.0)
+                out[loop[i]] = (a_ax * math.cos(th), b_ax * math.sin(th))
+                acc += seg[i]
+        return out
+    return None
 
 
 def _uw_coarsen(P, T, target):
@@ -6126,7 +6229,7 @@ def _uw_coarsen(P, T, target):
     return keep, [tuple(tris[t]) for t in range(len(T)) if alive[t]], parent
 
 
-def _uw_multilevel(P, T, loops, opts, ctl):
+def _uw_multilevel(P, T, loops, opts, ctl, bpos=None):
     """Relax a big curved chart coarse-to-fine: ARAP to convergence on a
     coarse version (cheap), then the removed vertices are filled in
     between the coarse ones (a well-conditioned solve: every vertex is
@@ -6142,9 +6245,12 @@ def _uw_multilevel(P, T, loops, opts, ctl):
     c_loops, chi, ok = _uw_topology(cT, len(cP))
     if not ok or chi != 1 or len(c_loops) != 1:
         return None
-    init = _uw_hinge(cP, cT)
-    if _uw_stretch(cP, cT, init)[0] or _uw_overlap(init, c_loops):
-        init = _uw_tutte(cP, cT, c_loops[0])  # the hinge start folds: start fold-free
+    if bpos and all(keep[i] in bpos for i in c_loops[0]):
+        init = _uw_tutte(cP, cT, c_loops[0], dict((i, bpos[keep[i]]) for i in c_loops[0]))
+    else:
+        init = _uw_hinge(cP, cT)
+        if _uw_stretch(cP, cT, init)[0] or _uw_overlap(init, c_loops):
+            init = _uw_tutte(cP, cT, c_loops[0])  # the hinge start folds: start fold-free
     best = _uw_arap(cP, cT, init, 25, ctl, cg_iters=40)
     flips, good, _ = _uw_stretch(cP, cT, best)
     if flips or good < 0.7 or _uw_overlap(best, c_loops):
@@ -6220,8 +6326,9 @@ def _uw_flatten(ch, opts, ctl):
     flips, good, worst = _uw_stretch(P, T, uv)
     if flips == 0 and worst < 1.02 and not _uw_overlap(uv, loops):
         return uv, "unfolded"  # developable: exact
+    bpos = _uw_shape_start(ch)
     if len(T) > opts["multilevel_from"]:  # big and curved: relax a coarse version, then refine
-        res = _uw_multilevel(P, T, loops, opts, ctl)
+        res = _uw_multilevel(P, T, loops, opts, ctl, bpos)
         if res is not None:
             flips, good, worst = _uw_stretch(P, T, res)
             if flips == 0 and good >= 0.75 and not _uw_overlap(res, loops):
@@ -6229,9 +6336,12 @@ def _uw_flatten(ch, opts, ctl):
         return None  # split it and try the halves
     iters = opts["relax_iterations"]
     best = None
-    for start in ("hinge", "tutte"):
-        init = uv if start == "hinge" else _uw_tutte(P, T, loops[0])
-        res = _uw_arap(P, T, init, iters, ctl)
+    for start in (("shape", "hinge", "tutte") if bpos else ("hinge", "tutte")):
+        if start == "shape":
+            init = _uw_tutte(P, T, loops[0], bpos)
+        else:
+            init = uv if start == "hinge" else _uw_tutte(P, T, loops[0])
+        res = _uw_arap(P, T, init, iters * (2 if start == "shape" else 1), ctl)
         flips, good, worst = _uw_stretch(P, T, res)
         if flips == 0 and not _uw_overlap(res, loops):
             if good >= 0.9:
@@ -6247,14 +6357,15 @@ def _uw_piece(m, pf, kind, opts, ctl):
     """Charts for one piece. Returns (corner -> (chart, local UV), chart
     list, cut edges, sewable edges, faces for Unfold3D)."""
     cut, sewable = _uw_seams(m, pf, kind, opts)
-    work = [(r, 0) for r in _uw_regions(m, pf, cut)]
+    work = [(r, 0, None) for r in _uw_regions(m, pf, cut)]
     charts = []
     heavy = []
     while work:
         if ctl.get("cancel"):
             raise Cancelled("unwrap")
-        fids, depth = work.pop()
+        fids, depth, hint = work.pop()
         ch = _uw_build(m, fids, cut)
+        ch["hint"] = hint
         loops, chi, ok = _uw_topology(ch["T"], len(ch["P"]))
         if ok and chi == 2 and not loops:  # closed: pelt cut between the far ends
             a, b = _uw_far_pair(ch)
@@ -6262,14 +6373,21 @@ def _uw_piece(m, pf, kind, opts, ctl):
             if path:
                 cut.update(path)
                 sewable.update(path)
-                work.append((fids, depth))
+                work.append((fids, depth, ("pelt", ch["mv"][a], ch["mv"][b])))
                 continue
         if ok and chi == 0 and len(loops) == 2:  # a ring: one cut between its rims
             path = _uw_path_cut(ch, loops[0], loops[1])
             if path:
+                rims = []
+                for loop in loops:
+                    keys = set()
+                    for i in range(len(loop)):
+                        x, y = loop[i], loop[(i + 1) % len(loop)]
+                        keys.add(ch["medge"][(x, y) if x < y else (y, x)])
+                    rims.append(keys)
                 cut.update(path)
                 sewable.update(path)
-                work.append((fids, depth))
+                work.append((fids, depth, ("ring", rims[0], rims[1])))
                 continue
         res = None
         if ok and chi == 1 and len(loops) == 1:
@@ -6280,7 +6398,7 @@ def _uw_piece(m, pf, kind, opts, ctl):
                 new = _uw_split(m, fids, cut)
                 cut.update(new)
                 sewable.update(new)
-                work.extend((r, depth + 1) for r in _uw_regions(m, fids, cut))
+                work.extend((r, depth + 1, None) for r in _uw_regions(m, fids, cut))
                 continue
             # one face, or split as far as allowed: its best projection (Unfold3D
             # finishes it only when unfold3d_fallback is on)
@@ -6818,6 +6936,79 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
     return placed
 
 
+def _uv_tile(xform, uv_set="map1"):
+    """The UDIM most of a mesh's UVs are in, or None without UVs."""
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return None
+    us, vs = fn.getUVs(uv_set)
+    count = {}
+    for u, v in zip(us, vs):
+        if 0.0 <= u < 10.0 and v >= 0.0:
+            t = 1001 + int(u) + 10 * int(v)
+            count[t] = count.get(t, 0) + 1
+    return max(count.items(), key=lambda kv: (kv[1], -kv[0]))[0] if count else None
+
+
+def auto_uv_targets(asset, meshes, uv_set="map1", planned=None):
+    """The tile each mesh is fitted into after Auto UV (read before it
+    unwraps): where the current plan puts it (planned: {mesh: udim}), else
+    one of the tiles the applied layout gave its group (the one it's in
+    now, if it's one of them), else the tile its UVs are in now, else
+    1001 (meshes without UVs)."""
+    planned = planned or {}
+    want = set(meshes)
+    stored = {}
+    for mat in asset.all_material_sets():
+        tiles = [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip().isdigit()]
+        if not tiles:
+            continue
+        for m in expand_members(mat)[0]:
+            if m in want:
+                stored.setdefault(m, set()).update(tiles)
+    out = {}
+    for m in meshes:
+        if m in planned:
+            out[m] = planned[m]
+            continue
+        cur = _uv_tile(m, uv_set)
+        if m in stored:
+            out[m] = cur if cur in stored[m] else min(stored[m])
+        else:
+            out[m] = cur or 1001
+    return out
+
+
+def fit_meshes_to_tiles(meshes, tiles, uv_set="map1", padding=8.0 / 2048, progress=None):
+    """Fit each mesh's UV shells into one UDIM (tiles: {mesh: udim}, default
+    1001), as big as fits at one texel density for the mesh, shells on
+    their main axis. No layout across meshes (that's Smart Layout's job),
+    so meshes sharing a tile overlap until then. Returns [(mesh, udim)]."""
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    caches, claimed = {}, set()
+    out = []
+    for m in meshes:
+        if progress:
+            progress.item(short_name(m))
+        shells, _ = _read_shells(m, None, uv_set, unit_scale, caches, claimed)
+        if not shells:
+            continue
+        spots, _ = _pack_one_tile(shells, padding)
+        if spots is None:
+            continue
+        udim = tiles.get(m) or 1001
+        tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
+        fn = _mesh_fn(m)
+        us, vs = fn.getUVs(uv_set)
+        us, vs = list(us), list(vs)
+        for sh in shells:
+            x, y, k, angle = spots[id(sh)]
+            _place_shell(us, vs, sh, tu, tv, x, y, k, angle)
+        write_uvs(m, uv_set, us, vs)
+        out.append((m, udim))
+    return out
+
+
 AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("seams", 8), ("find", 3), ("unfold", 40),
                   ("fix", 10), ("pack", 12), ("check", 4)]
 
@@ -6825,7 +7016,7 @@ AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
                 hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing=None,
                 progress_callback=None, only=None, colours=False, score=True, score_cache=None, unwrapper=None,
-                unwrap_opts=None):
+                unwrap_opts=None, target_tiles=None):
     """The whole Auto UV pass on an asset, as one Ctrl+Z. (packing: unused
     since packing went pure-maths; kept for old callers.)
 
@@ -6840,6 +7031,10 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     how many were reused ("cached").
     unwrapper: one of UNWRAP_METHODS (default Unfold3D, the panel uses
     Unlok); unwrap_opts: overrides for UNWRAP_DEFAULTS.
+    pack: True packs each material group into its own tile (the old way);
+    "fit" (the panel) only fits each unwrapped mesh into one tile, chosen
+    by auto_uv_targets (target_tiles: {mesh: udim} from a layout plan wins),
+    and leaves the layout to Smart Layout.
     score: True scores every unmarked mesh first and keeps the good ones.
     "known" (what the panel uses) scores nothing: it keeps meshes that the
     last Check UVs (in score_cache) found good and that haven't changed
@@ -6858,7 +7053,7 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
             pr.refresh_view = bool(colours)
             return _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack,
                                 analyse_only, packing, pr, only, colours, score, score_cache, unwrapper,
-                                unwrap_opts)
+                                unwrap_opts, target_tiles)
     except Cancelled:
         return {"rows": [], "timing": {"total": time.time() - pr.t0}, "tiles": [], "backups": 0,
                 "cancelled": pr.where()}
@@ -6866,7 +7061,7 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
 
 def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack, analyse_only,
                  packing, pr, only=None, colours=False, score=True, score_cache=None, unwrapper=None,
-                 unwrap_opts=None):
+                 unwrap_opts=None, target_tiles=None):
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
@@ -6955,11 +7150,19 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 cmds.polyUVSet(m, create=True, uvSet=uv_set)
                 cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
         t = time.time()
+        targets = auto_uv_targets(asset, todo, uv_set, target_tiles) if pack == "fit" else {}
         live = (lambda done: show_uv_colours(asset, {m: "auto" for m in done})) if colours else None
         failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr, on_unfolded=live, method=unwrapper,
                              opts=unwrap_opts, uv_set=uv_set)
         timing["unwrap"] = time.time() - t
-        if pack:
+        if pack == "fit":
+            t = time.time()
+            done = [m for m in todo if m not in failed]
+            pr.stage("pack", len(done), "Fitting each mesh into its UDIM")
+            tiles = fit_meshes_to_tiles(done, targets, uv_set, progress=pr)
+            asset.update_tool_sets(remove={"laidout": [m for m, _ in tiles]})
+            timing["pack"] = time.time() - t
+        elif pack:
             t = time.time()
             avoid = set()
             all_handsoff = [m for m, st in status.items() if st == "handsoff"]  # not just the selection's
@@ -7014,7 +7217,8 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                                remove={"problem": unwrapped, "auto": [m for m in trouble if m in failed]})
     rows += tail
     timing["total"] = time.time() - t0
-    return {"rows": rows, "timing": timing, "tiles": tiles, "backups": backups, "cached": cached}
+    return {"rows": rows, "timing": timing, "tiles": tiles, "backups": backups, "cached": cached,
+            "fit": pack == "fit"}
 
 
 # =============================================================================
@@ -9304,10 +9508,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_clean.setValue(True)
         self.auto_clean.setToolTip("Fix lamina, non-manifold and zero-area faces on the meshes being unwrapped.")
         grid.add_full(self.auto_clean)
-        self.auto_pack = CheckField("Pack into UDIM tiles by section and material")
+        self.auto_pack = CheckField("Fit each mesh into its UDIM tile (Smart Layout lays them out later)")
         self.auto_pack.setValue(True)
-        self.auto_pack.setToolTip("Each material group gets its own tile; sections take their own rows and a "
-                                  "material keeps the same column in every section.")
+        self.auto_pack.setToolTip("After unwrapping, each mesh's shells are scaled to fill one tile: the tile "
+                                  "the current layout plan puts it in, else the one its group was laid out in, "
+                                  "else the tile its old UVs were in, else 1001 (no UVs yet). Meshes sharing a "
+                                  "tile overlap until Smart Layout lays them out.")
         grid.add_full(self.auto_pack)
         card.add(grid)
         analyse = secondary_button("Check UVs", "Optional: score every mesh's existing UVs (are there any, are "
@@ -10545,12 +10751,27 @@ class SmartUdimPanel(QtWidgets.QWidget):
         except Exception:
             traceback.print_exc()
 
+    def _planned_tiles(self):
+        """{mesh: udim} where the current layout plan puts most of each mesh."""
+        if self._plan is None or self._collected is None:
+            return {}
+        area = {}
+        for g in self._collected["groups"]:
+            for sh in g["shells"]:
+                pl = self._plan["placements"].get(id(sh))
+                if pl:
+                    t = 1001 + pl[0] + 10 * pl[1]
+                    d = area.setdefault(sh.mesh, {})
+                    d[t] = d.get(t, 0.0) + pl[6] * pl[7]
+        return dict((m, max(d.items(), key=lambda kv: kv[1])[0]) for m, d in area.items())
+
     def _auto_options(self):
         return dict(uv_set=self.uv_set.text().strip() or "map1",
                     backup=self.auto_backup.value(),
                     backup_set=self.auto_backup_name.text().strip() or "map1_backup",
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
-                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(), score="known",
+                    clean_first=self.auto_clean.value(), pack="fit" if self.auto_pack.value() else False,
+                    score="known",
                     unwrapper=self.auto_method.value(),
                     unwrap_opts={"sew": {"Compact shells": "compact", "Keep every cut": "off"}.get(
                         self.auto_join.value(), "max")})
@@ -10699,7 +10920,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         try:
             result = run_auto_uv(asset, progress_callback=self._progress, only=only,
                                  colours=self.colour_box.value(), score_cache=self._score_cache,
-                                 **self._auto_options())
+                                 target_tiles=self._planned_tiles(), **self._auto_options())
         finally:
             self._progress_end()
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -10717,9 +10938,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
         rows = result["rows"]
         count = lambda *acts: sum(1 for r in rows if r["action"] in acts)  # noqa: E731
         level = "warn" if count("failed", "check") else "info"
-        self.set_status("Auto UV in %.1fs: %d unwrapped, %d kept, %d to check, %d failed. %d tile(s) packed%s." % (
+        if result.get("fit"):
+            used = sorted(set(t for _, t in result["tiles"]))
+            packed = ("%d fitted into tile%s %s" % (len(result["tiles"]), "" if len(used) == 1 else "s",
+                                                    ", ".join(str(t) for t in used[:6]) + (
+                                                        "..." if len(used) > 6 else ""))
+                      if used else "Nothing new to fit into a tile")
+        else:
+            packed = "%d tile(s) packed" % len(result["tiles"])
+        self.set_status("Auto UV in %.1fs: %d unwrapped, %d kept, %d to check, %d failed. %s%s." % (
             result["timing"].get("total", 0.0), count("unwrapped", "check"), count("kept", "kept (check)"),
-            count("check", "kept (check)"), count("failed"), len(result["tiles"]),
+            count("check", "kept (check)"), count("failed"), packed,
             ("; %d backed up to %s" % (result["backups"], self.auto_backup_name.text())) if result["backups"]
             else ""), level=level)
         return result

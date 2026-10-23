@@ -183,6 +183,14 @@
         report.
       - Unwrapping (Unfold3D) is now the slow part; packing is pure maths
         (below).
+  - **Auto UV fit** (`pack="fit"`, what the panel uses): no group layout.
+    - `auto_uv_targets` picks each mesh's tile before unwrapping. Order:
+      the panel's plan (`_planned_tiles`, passed as `target_tiles`), then
+      the group's `unlokUdimTiles`, then the mesh's current tile
+      (`_uv_tile`, majority of its UVs), then 1001.
+    - `fit_meshes_to_tiles` packs each mesh's shells into its tile with
+      `_pack_one_tile`.
+    - `pack=True` is still the old `pack_udims` (one tile per group).
   - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
     `auto_uv()` -> `apply_layout()` (re-plans itself) -> `validate()`.
     - Each step method returns its result (None when cancelled or failed),
@@ -434,6 +442,17 @@
       split in two.
     - `unfold3d_fallback` (off) would hand unflattenable charts to
       Unfold3D; otherwise they get their best projection ("rough").
+  - **Tubes and pelts:**
+    - `_uw_piece` remembers how a chart was opened (`hint`): a ring with
+      its two rims' edge keys, or a pelt with its cut's end vertices.
+    - `_uw_shape_start` turns the hint into a convex boundary: a rectangle
+      split into rim A / cut / rim B / cut runs by length, or an ellipse.
+      `_uw_tutte(bpos=)` fills it, then ARAP relaxes it. A circle start
+      never converged for long bent tubes.
+    - `_uw_multilevel(bpos=)` uses the same start on its coarse level.
+  - **Soft edges:** `_uw_seams` trusts mixed hard/soft smoothing. Hard
+    pieces with both cut only hard edges plus anything over
+    `organic_angle`.
   - **Defaults:** the engine still defaults to Unfold3D
     (`run_auto_uv(unwrapper=None)`), so old tests keep their behaviour.
 - **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose

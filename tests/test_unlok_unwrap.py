@@ -114,6 +114,39 @@ def run():
     check("torus: flattened, nothing flipped", not failed and flips == 0,
           "%d shells, good %.2f, %.2fs, %s" % (shells(tor), good, secs, st))
 
+    # --- bent and irregular tubes
+    import random as _r
+    _r.seed(7)
+
+    def bent(name, curvature, sx=16, sy=40, tri=False, caps=True, jitter=0.0, round_caps=False):
+        c = cmds.polyCylinder(r=0.3, h=6, sx=sx, sy=sy, rcp=round_caps, name=name)[0]
+        if not caps:
+            n = cmds.polyEvaluate(c, face=True)
+            cmds.delete("%s.f[%d:%d]" % (c, sx * sy, n - 1))
+        if jitter:
+            for i in range(cmds.polyEvaluate(c, vertex=True)):
+                cmds.move(_r.uniform(-jitter, jitter), 0, _r.uniform(-jitter, jitter), "%s.vtx[%d]" % (c, i),
+                          relative=True)
+        if curvature:
+            cmds.nonLinear(c, type="bend", curvature=curvature)
+        if tri:
+            cmds.polyTriangulate(c)
+        cmds.delete(c, constructionHistory=True)
+        return c
+
+    for name, kw, max_shells in (("bend90", dict(curvature=90), 3), ("uBend", dict(curvature=180), 3),
+                                 ("lowPolyBend", dict(curvature=120, sx=8, sy=12), 3),
+                                 ("triBend", dict(curvature=90, tri=True), 3),
+                                 ("wobblyTube", dict(curvature=60, caps=False, jitter=0.03), 1),
+                                 ("capsuleBend", dict(curvature=90, round_caps=True), 3)):
+        c = bent(name, **kw)
+        failed, secs, st = unwrap([c])
+        flips, good, worst = stretch(c)
+        check("%s: few shells, nothing flipped, low stretch" % name,
+              not failed and flips == 0 and shells(c) <= max_shells and good >= 0.9,
+              "%d shells, good %.2f, worst %.2f, %.2fs, %s" % (shells(c), good, worst, secs,
+                                                              dict((k, v) for k, v in st.items() if v)))
+
     # --- combined grid of copies: one unwrap, the rest copied
     parts = []
     for i in range(36):
@@ -142,6 +175,31 @@ def run():
     except tb["Cancelled"]:
         stopped = True
     check("cancel stops the worker", stopped)
+
+    # --- Auto UV fits each mesh into its own UDIM (no group layout)
+    cmds.file(new=True, force=True)
+    root, kinds = ns["build_building"]()
+    asset = tb["SmartUdimAsset"].for_group(root)
+    asset.scan(sections_from_groups=True)
+    ms = list(kinds)
+    moved, planned = ms[0], ms[1]
+    cmds.polyEditUV(moved + ".map[*]", u=4.0, v=0.0)  # it sits in 1005 now
+    res = tb["run_auto_uv"](asset, score=False, unwrapper=UNLOK, pack="fit", target_tiles={planned: 1023})
+
+    def tiles_of(m):
+        us, vs = tb["_mesh_fn"](m).getUVs("map1")
+        return set(1001 + int(u) + 10 * int(v) for u, v in zip(us, vs) if u < 10)
+
+    fitted = dict(res["tiles"])
+    check("fit: every unwrapped mesh sits inside one tile",
+          res.get("fit") and fitted and all(len(tiles_of(m)) == 1 for m in fitted), "%d fitted" % len(fitted))
+    check("fit: a mesh already in 1005 stays in 1005", tiles_of(moved) == {1005}, str(tiles_of(moved)))
+    check("fit: a planned tile wins", tiles_of(planned) == {1023}, str(tiles_of(planned)))
+    others = [m for m in fitted if m not in (moved, planned)]
+    check("fit: the rest go to 1001 (their UVs started there)", all(tiles_of(m) == {1001} for m in others))
+    us, vs = tb["_mesh_fn"](others[0]).getUVs("map1")
+    check("fit: fills its tile (as big as fits)", max(max(us) - min(us), max(vs) - min(vs)) > 0.9,
+          "%.3f" % max(max(us) - min(us), max(vs) - min(vs)))
 
     # --- the building: Unlok vs Unfold3D through run_auto_uv (one Ctrl+Z)
     timings = {}

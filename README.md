@@ -257,9 +257,9 @@ density. The actual layout is still being built; see
      stay separate from your own Keep UVs / Hands off sets, so you can
      always tell your hand-laid work from Auto UV's.
    - **Auto UV Selected:** only the selected meshes or groups, so you can
-     work through an asset bit by bit. Packing covers just the material
-     groups they're in, around their finished members; Hands off meshes are
-     never moved.
+     work through an asset bit by bit. Each one is fitted into its own tile
+     (see step 4 below); nothing else moves, and Hands off meshes are never
+     touched.
    - **Speed on big assets:**
      - Meshes whose projection is already clean (every edge's UV length
        the same multiple of its 3D length: walls, planks, boxes) skip
@@ -289,11 +289,19 @@ density. The actual layout is still being built; see
      2. cleans bad geometry
      3. re-unwraps every mesh scoring below *Keep above* (0.85) with the
         chosen *Unwrapper* (below)
-     4. packs each material group into its own UDIM tile, at even density
-        and as big as fits, with sections on their own rows and each
-        material in the same column for every section. This uses the
-        toolbox's own packer: 1.7 s instead of 46 s with Unfold3D's
-        layout on a 141-mesh building, and fuller tiles (77% vs 72%).
+     4. fits each unwrapped mesh into one UDIM tile, as big as it fits
+        and at one density for the mesh, without laying meshes out against
+        each other. That's Smart Layout's job, later. Meshes sharing a tile
+        overlap until then. The tile is:
+        - the one the current layout plan puts the mesh in, if there's a
+          plan;
+        - else one its group was laid out in by Apply Layout (the one it's
+          in now, if it's one of them);
+        - else the tile its old UVs were in;
+        - else 1001, for a mesh with no UVs yet.
+
+        (Engine scripts can still pack each material group into its own
+        tile with `run_auto_uv(pack=True)`.)
    - **Progress:** Maya's progress bar at the bottom of the window, and the
      Auto UV step itself, show each stage, the mesh or batch it's on, a
      percentage and the time left. Press **Esc** to stop at the next mesh;
@@ -309,7 +317,11 @@ density. The actual layout is still being built; see
        36 pegs costs about the same as one peg.
      - **Hard surface or organic:** each piece is sorted by its edges.
        - **Hard surface** (flat areas, hard or sharp edges) is cut along
-         hard edges and edges sharper than *Seam angle*. Each part is then
+         hard edges and edges sharper than *Seam angle*. When a mesh mixes
+         hard and soft edges, its soft edges are trusted as "one surface":
+         only hard edges (and anything sharper than 80 degrees) are cut, so
+         a low-poly pipe's soft sides stay one tube even when it bends.
+         Each part is then
          unfolded at its true size, and the parts are sewn back together
          wherever they lie flat without overlapping, like unfolding a box.
          A box or a plank comes out as one shell with no stretch.
@@ -322,7 +334,11 @@ density. The actual layout is still being built; see
          unfolded triangle by triangle, which is exact. A ring (a
          cylinder's side) gets one cut between its rims and unrolls with
          no stretch.
-       - Curved parts are relaxed (as-rigid-as-possible).
+       - Curved parts are relaxed (as-rigid-as-possible). Bent, tapered,
+         wobbly or triangulated tubes start from a rectangle (rim length by
+         tube length), and closed shapes cut by a pelt start from an
+         ellipse. The relax then only has to take out the bend, so such a
+         tube comes out as one shell.
        - A part that would fold over or stretch badly is split and tried
          again.
      - **Join shells:**
