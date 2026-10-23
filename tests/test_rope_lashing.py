@@ -48,6 +48,22 @@ def log(name, r=0.15, h=3.0, move=(0, 0, 0), rot=(0, 0, 0)):
     return node
 
 
+def log_between(name, p0, p1, r):
+    """A cylinder running from p0 to p1."""
+    v = [p1[i] - p0[i] for i in range(3)]
+    length = math.sqrt(sum(c * c for c in v))
+    node = cmds.polyCylinder(r=r, h=length, sx=24, sy=12, name=name, constructionHistory=False)[0]
+    y = [c / length for c in v]
+    x = [0, 0, 1] if abs(y[2]) < 0.9 else [1, 0, 0]
+    z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]]
+    zl = math.sqrt(sum(c * c for c in z))
+    z = [c / zl for c in z]
+    x = [y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]]
+    mid = [(p0[i] + p1[i]) * 0.5 for i in range(3)]
+    cmds.xform(node, matrix=x + [0] + y + [0] + z + [0] + mid + [1], worldSpace=True)
+    return cmds.ls(node, long=True)[0]
+
+
 def mesh_fn(tb, node):
     return om.MFnMesh(tb["get_dag_path"](tb["_log_shape"](node)))
 
@@ -289,6 +305,27 @@ def run():
     asset.scan()
     check("marking a lashing Auto sticks through the next Scan", ropes[0] not in asset.uv_status() and
           asset.uv_status().get(ropes[1]) == "keep")
+
+    # --- logs that end at another: a saddle lashing; several logs at one joint: each tied in once
+    cmds.file(new=True, force=True)
+    post = log("post", r=0.12, move=(0, 1.5, 0))
+    beam = log("beam", r=0.1, rot=(0, 0, 90), move=(0, 3.1, 0))
+    poles = [P(post), P(beam)]
+    path = tb["rope_path"](poles, {"seed": 2})
+    self_c, pole_c = clearance(path, poles)
+    check("post under a beam: a Saddle lashing that clears itself and the logs",
+          path["kind"] == "Saddle" and self_c > 0.75 and pole_c > 0.2,
+          "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
+    rafter = log_between("rafter", (0.05, 3.29, 0.0), (0.1, 4.6, -1.6), 0.09)  # ends resting on the beam
+    rafter2 = log_between("rafter2", (-0.05, 3.29, 0.02), (-0.1, 4.6, 1.6), 0.09)
+    rep = tb["lash"]([post, beam, rafter, rafter2], {"style": "Smooth tube"})
+    tied = set()
+    for r in rep["made"]:
+        tied |= set(tb["rope_data"](r)["poles"])
+    every = all(cmds.ls(x, uuid=True)[0] in tied for x in (post, beam, rafter, rafter2))
+    check("a post, beam and two rafters meeting at one joint: every log tied in, once",
+          every and len(rep["made"]) == 3, "%d lashings %s, skipped %s" % (len(rep["made"]), rep["kinds"],
+                                                                        rep["skipped"]))
 
     # --- presets live in an optionVar
     var = tb["ROPE_PRESET_VAR"]

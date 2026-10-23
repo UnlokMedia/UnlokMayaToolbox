@@ -199,6 +199,23 @@
   - **UV hand-off:** rope shapes get `unlokUvReady` (UV_READY_ATTR). Smart
     UDIM's scan (`_mark_tool_uvs`) marks tagged meshes with no status Keep
     UVs; `set_uv_status(..., "auto")` deletes the tag so the choice sticks.
+  - **Hitches and ends:** `clove_z` is 1.6 turns (turn two stops before the
+    diagonal; a full second turn lay on top of itself). Hitches meet the
+    rope coming in / going out tangentially (`loop(tangent=)`), not head-on
+    through the air (that lifted turns 12+ radii off the log). Cut ends are
+    `_rl_tuck`ed: bent onto the log under the turns, placed first in
+    `_rl_ride_over` (`first=`) and never lifted or ramped (a ramped end made
+    the turns climb every pass), and left out of the final smoothing.
+  - **End joints:** `rope_joint` flags `endA` / `endB`; `rope_path` turns a
+    crossing where a log ends into a **Saddle** (`_rl_saddle`). `rope_pairs`
+    groups joints that share a spot and keeps a spanning set (each log tied
+    in once). `_rope_plan` passes the joint's other logs (`others`, kept out
+    of) and earlier rope (`obstacles`, ridden over; lifts capped at 5
+    diameters when crowded, since overlapping logs leave no room).
+  - **Kinks:** `_rl_unkink` eases bends tighter than 1.5 rope radii;
+    `_rl_frames` keeps the last direction where points bunch up (a flipped
+    frame threw strands out as spikes). Later lift passes only re-check
+    rope near what moved (`dirty`).
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
 - **Smart UDIM** (UV tab):

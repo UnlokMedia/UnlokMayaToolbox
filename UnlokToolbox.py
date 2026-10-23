@@ -13708,11 +13708,11 @@ ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user prese
 ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands")
 ROPE_STYLES = ("3 strands", "Twisted", "Smooth tube")
 ROPE_DEFAULTS = {"lashing": "Auto", "style": "Twisted", "thickness": 0.1, "wraps": 0, "fraps": -1,
-                 "hitches": True, "tail": 0.3, "bite": 0.15, "wobble": 0.25, "seed": 0, "sides": 0,
+                 "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.25, "seed": 0, "sides": 0,
                  "spacing": 0.0, "lay": 3.5}
 ROPE_KEYS = tuple(sorted(ROPE_DEFAULTS))
-ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4}
-ROPE_AUTO_FRAPS = {"Square": 2, "Diagonal": 2, "Round": 0, "Sheer": 2, "Bands": 0}
+ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4, "Saddle": 3}
+ROPE_AUTO_FRAPS = {"Square": 2, "Diagonal": 2, "Round": 0, "Sheer": 2, "Bands": 0, "Saddle": 0}
 ROPE_AUTO_SIDES = {"3 strands": 8, "Twisted": 18, "Smooth tube": 10}
 ROPE_AUTO_SPACING = {"3 strands": 0.2, "Twisted": 0.25, "Smooth tube": 0.5}  # sample step / rope diameter
 ROPE_PRESETS = {  # built in; user presets are kept in the ROPE_PRESET_VAR optionVar
@@ -13964,9 +13964,11 @@ def rope_joint(pa, pb, target=None):
     if dist < 1e-6 * max(pa.r, pb.r) and _rl_len(side) > 1e-6:
         n = _rl_norm(side)
     ra, rb = pa.radius(ta), pb.radius(tb)
+    # a log "ends here" when the joint is within the other log's width of its end
+    end_a = 1 if ta >= pa.t1 - 1.5 * rb else (-1 if ta <= pa.t0 + 1.5 * rb else 0)
+    end_b = 1 if tb >= pb.t1 - 1.5 * ra else (-1 if tb <= pb.t0 + 1.5 * ra else 0)
     return {"tA": ta, "tB": tb, "cA": ca, "cB": cb, "n": n, "D": dist, "gap": dist - ra - rb, "rA": ra,
-            "rB": rb, "angle": angle,
-            "inside": (pa.t0 + 0.5 * rb <= ta <= pa.t1 - 0.5 * rb and pb.t0 + 0.5 * ra <= tb <= pb.t1 - 0.5 * ra)}
+            "rB": rb, "angle": angle, "endA": end_a, "endB": end_b, "inside": not end_a and not end_b}
 
 
 def rope_lashing_kind(settings, angle):
@@ -14016,17 +14018,30 @@ class _RopeTie(object):
         e1 = _rl_any_perp(p)
         return (centre, p, _rl_mul(e1, radius), _rl_mul(_rl_cross(p, e1), radius), -1)
 
-    def loop(self, items, origin, p, turns, zfun, toward=None, swell=None):
+    def loop(self, items, origin, p, turns, zfun, toward=None, swell=None, tangent=0):
         """Rope around the convex hull of items (sections in the plane
         through origin, normal p), turning right-handed about p. zfun(angle
         so far) moves the plane along p; swell(angle) pushes the rope out
-        (a spiral). Starts (and so ends) on the side facing toward."""
+        (a spiral). Starts (and so ends) on the side facing toward; with
+        tangent +1 where rope coming from toward touches down tangentially
+        (it then lies on the surface instead of landing head-on through the
+        air), with -1 where rope leaving for toward lifts off tangentially."""
         e1 = None
         if toward is not None:
             e1 = _rl_norm(_rl_perp(p, _rl_sub(toward, origin)), None)
         if e1 is None:
             e1 = _rl_any_perp(p)
         e2 = _rl_cross(p, e1)
+        if tangent and toward is not None:
+            dist = _rl_len(_rl_perp(p, _rl_sub(toward, origin)))
+            reach_f = max(_rl_dot(_rl_sub(it[0], origin), e1) +
+                          math.sqrt(_rl_dot(it[2], e1) ** 2 + _rl_dot(it[3], e1) ** 2) for it in items) + self.rr
+            if dist > reach_f:
+                beta = tangent * math.acos(reach_f / dist)
+                if tangent < 0:  # it's the end of the loop that has to point there
+                    beta -= 2.0 * math.pi * turns
+                e1 = _rl_norm(_rl_add(_rl_mul(e1, math.cos(beta)), _rl_mul(e2, math.sin(beta))))
+                e2 = _rl_cross(p, e1)
         reach = max(_rl_len(_rl_sub(it[0], origin)) + max(_rl_len(it[2]), _rl_len(it[3])) for it in items)
         total = 2.0 * math.pi * turns
         steps = max(int(24 * turns), int(total * (reach + self.rr) / (0.5 * self.h)))
@@ -14065,30 +14080,34 @@ class _RopeTie(object):
         return lambda ang: pitch * ang / (2.0 * math.pi)
 
     def clove_z(self):
-        """Clove hitch over two turns: the end starts tucked between the
-        turns, turn one, a diagonal riding over the end (the X), turn two."""
+        """Clove hitch over two snug turns side by side: turn one, the
+        diagonal across to turn two (on the far side from where the rope
+        comes in, so it never lies on top of it), turn two. The cut end is
+        tucked under the turns separately (_rl_tuck)."""
         d = self.d
         q = 0.5 * math.pi
 
         def z(ang):
-            if ang < q:
-                return 0.5 * d * (1.0 - _rl_smooth01(ang / q))
-            if ang < 3.5 * q:
+            if ang < 2.5 * q:
                 return 0.0
-            if ang < 4.5 * q:
-                return 1.05 * d * _rl_smooth01((ang - 3.5 * q) / q)
+            if ang < 3.5 * q:
+                return 1.05 * d * _rl_smooth01((ang - 2.5 * q) / q)
             return 1.05 * d
         return z
 
-    def clove(self, items_of, origin, p, toward):
-        """Clove hitch: two turns around items_of(origin, p) starting at origin."""
-        return self.loop(items_of(origin, p), origin, p, 2, self.clove_z(), toward)
+    def clove(self, items_of, origin, p, toward, tangent):
+        """Clove hitch: two turns around items_of(origin, p) starting at
+        origin. tangent -1: the lashing's first hitch (the rope leaves it
+        for toward); +1: its last (the rope comes in from toward)."""
+        # 1.6 turns: turn two stops just before the diagonal (no lying on top of it); the gap
+        # lets the tucked end slip under the diagonal, like a real clove hitch
+        return self.loop(items_of(origin, p), origin, p, 1.6, self.clove_z(), toward, tangent=tangent)
 
-    def clove_on(self, i, t, sign, toward):
+    def clove_on(self, i, t, sign, toward, tangent):
         pole = self.poles[i]
         p = _rl_mul(pole.a, sign)
         origin = pole.center(t)
-        return self.clove(lambda o, pp: [self.section(i, o, pp, t)], origin, p, toward)
+        return self.clove(lambda o, pp: [self.section(i, o, pp, t)], origin, p, toward, tangent)
 
     def extent(self, samples, i, tc, sign):
         """How far samples bound to log i reach from tc, towards sign."""
@@ -14183,10 +14202,55 @@ def _rl_square(tie, J, wraps, fraps, hitches):
     if hitches:
         low = tie.extent(out, 0, ta, -1.0)
         s1, t1 = corner(-1, -1, 0)  # the standing part runs up the upright's side to the first wrap
-        start = tie.clove_on(0, ta - low - 2.6 * d, 1.0, _rl_add(A.center(t1), _rl_mul(ma, -1.0)))
+        start = tie.clove_on(0, ta - low - 2.6 * d, 1.0, _rl_add(A.center(t1), _rl_mul(ma, -1.0)), -1)
         far = tie.extent(out, 1, tb, 1.0)
-        end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0])
+        end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0], 1)
     return start + out + frap + end
+
+
+def _rl_saddle(tie, J, wraps, hitches):
+    """Saddle lashing where log 0 ends at log 1 (a post under a beam, a
+    rafter on a beam): each wrap goes over log 1 beside log 0, down and half
+    round log 0 just below its end, over log 1 on the other side and half
+    round log 0 the other way, so the rope crosses in an X on log 0's sides.
+    When log 1 ends there too, both passes go over the side it carries on."""
+    E, B = tie.poles
+    d, rr = tie.d, tie.rr
+    te, tb = J["tA"], J["tB"]
+    inward = -float(J["endA"] or 1)  # along log 0's axis, away from the joint
+    up = _rl_mul(E.a, -inward)
+    x = _rl_norm(_rl_perp(up, B.a), _rl_any_perp(up))  # along log 1, square to log 0
+    y = _rl_cross(up, x)
+    bx = _rl_dot(B.a, x)
+    bx = math.copysign(max(0.3, abs(bx)), bx)
+    over = _rl_norm(_rl_perp(B.a, up), _rl_cross(B.a, y))  # log 1's side away from log 0
+    yb = _rl_norm(_rl_perp(B.a, y), y)
+    ye = _rl_norm(_rl_perp(E.a, y), y)
+    xe = _rl_norm(_rl_perp(E.a, x), x)
+    re = J["rA"] + rr
+    t_end = E.t1 if J["endA"] > 0 else E.t0
+    t_end = te if (te - t_end) * inward > 0 else t_end  # never above the joint itself
+    room = {1: B.t1 - tb - 2.0 * d, -1: tb - B.t0 - 2.0 * d}
+    widest = (re + d * (wraps + 1)) / abs(bx)
+    sides = [sg for sg in (1, -1) if room[sg] > widest] or [max(room, key=room.get)]
+    out = []
+    for k in range(wraps):
+        for half in (0, 1):
+            sg = sides[half % len(sides)]
+            reach = (re + d * (k + 0.5 + (half if len(sides) == 1 else 0) * (wraps + 0.5))) / abs(bx)
+            tbk = tb + sg * reach
+            out += tie.arc(1, tbk, tbk, _rl_mul(yb, -1.0), over)  # over log 1, -y side to +y side
+            depth = 0.45 * re + d * (2 * k + half + 0.5)
+            tek = t_end + inward * depth
+            out += tie.arc(0, tek, tek, ye, _rl_mul(xe, -1.0 if half == 0 else 1.0))  # half round log 0
+    start, end = [], []
+    if hitches:
+        low = max(abs(E.closest_t(S) - t_end) for S, _, pi in out if pi == 0)
+        start = tie.clove_on(0, t_end + inward * (low + 2.6 * d), -inward, out[0][0], -1)
+        sg = sides[0]
+        far = tie.extent(out, 1, tb, sg)
+        end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1)
+    return start + out + end
 
 
 def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
@@ -14222,9 +14286,20 @@ def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
     if hitches:  # the start hitch sits around both logs, on the first diagonal (timber hitch's place)
         p, z0 = first
         origin = _rl_add(mid, _rl_mul(p, z0 - 1.6 * d))
-        start = tie.clove(items, origin, p, out[0][0])
-        far = tie.extent(out, 0, ta, 1.0)
-        end = tie.clove_on(0, ta + far + 1.6 * d, 1.0, (frap or out)[-1][0])
+        start = tie.clove(items, origin, p, out[0][0], -1)
+        # finish on whichever log and side the rope gets to without crossing the start hitch
+        done = start + out + frap
+        last = done[-1][0]
+        hitched = [S for S, _, _ in start]
+        best = None
+        for i, tc in ((0, ta), (1, tb)):
+            for sg in (1.0, -1.0):
+                t = tc + sg * (tie.extent(done, i, tc, sg) + 1.6 * d)
+                spot = tie.poles[i].center(t)
+                clear_by = min(_rl_len(_rl_sub(_rl_lerp(last, spot, f / 8.0), q)) for f in range(9) for q in hitched)
+                if best is None or clear_by > best[0]:
+                    best = (clear_by, i, t, sg)
+        end = tie.clove_on(best[1], best[2], best[3], last, 1)
     return start + out + frap + end
 
 
@@ -14241,7 +14316,8 @@ def _rl_round(tie, J, wraps, fraps, hitches, sheer):
 
     z0 = -0.5 * wraps * d
     origin = _rl_add(mid, _rl_mul(w, z0))
-    out = tie.loop(both(origin, w), origin, w, wraps, tie.linear(d))
+    out = tie.loop(both(origin, w), origin, w, wraps, tie.linear(d),
+                   _rl_add(J["cA"], _rl_mul(J["n"], -10.0 * A.r)))  # start on log 0's outer side
     room = J["gap"] >= d  # rope fits between the legs (touching legs would get pushed apart)
     frap = tie.fraps(out, J["cA"], J["n"], J["rA"], J["D"] - J["rB"], fraps, out[-1][0]) if sheer and room else []
     start, end = [], []
@@ -14252,17 +14328,19 @@ def _rl_round(tie, J, wraps, fraps, hitches, sheer):
         if sheer and room:  # on one leg, then on the other
             sa = 1.0 if _rl_dot(A.a, w) >= 0.0 else -1.0
             sb = 1.0 if _rl_dot(B.a, w) >= 0.0 else -1.0
-            start = tie.clove_on(0, A.closest_t(o0), sa, out[0][0])
-            end = tie.clove_on(1, B.closest_t(o1), sb, last)
+            start = tie.clove_on(0, A.closest_t(o0), sa, out[0][0], -1)
+            end = tie.clove_on(1, B.closest_t(o1), sb, last, 1)
         else:
-            start = tie.clove(both, o0, w, out[0][0])
-            end = tie.clove(both, o1, w, last)
+            start = tie.clove(both, o0, w, out[0][0], -1)
+            end = tie.clove(both, o1, w, last, 1)
     return start + out + frap + end
 
 
-def rope_path(poles, settings, target=None):
+def rope_path(poles, settings, target=None, others=(), obstacles=()):
     """The rope centre line for a lashing of two logs (pure maths plus ray
-    casts on the logs; nothing in the scene changes).
+    casts on the logs; nothing in the scene changes). others: more logs at
+    the joint to keep out of; obstacles: rope already there (points) to
+    ride over.
 
     Returns {"points", "up", "scale", "radius", "kind", "joint"}: rope centres,
     lift directions, per-point radius scale (tapered ends) and the rope
@@ -14272,7 +14350,12 @@ def rope_path(poles, settings, target=None):
     pa, pb = poles
     J = rope_joint(pa, pb, target)
     kind = rope_lashing_kind(s, J["angle"])
-    if kind in ("Square", "Diagonal") and abs(_rl_dot(pb.a, (0.0, 1.0, 0.0))) > abs(_rl_dot(pa.a, (0.0, 1.0, 0.0))):
+    if not J["inside"] and J["angle"] >= ROPE_PARALLEL_DEG and kind != "Bands":
+        kind = "Saddle"  # a log ends at the other: wraps over the other and round it below its end
+        if not J["endA"] or (J["endB"] and abs(pb.a[1]) > abs(pa.a[1])):
+            pa, pb = pb, pa  # log 0 is the one that ends (the more upright when both do)
+            J = rope_joint(pa, pb, target)
+    elif kind in ("Square", "Diagonal") and abs(_rl_dot(pb.a, (0.0, 1.0, 0.0))) > abs(_rl_dot(pa.a, (0.0, 1.0, 0.0))):
         pa, pb = pb, pa  # the upright is log 0 (the clove hitch starts on it)
         J = rope_joint(pa, pb, target)
     rmin = min(J["rA"], J["rB"])
@@ -14283,7 +14366,9 @@ def rope_path(poles, settings, target=None):
     fraps = ROPE_AUTO_FRAPS[kind] if int(s["fraps"]) < 0 else int(s["fraps"])
     hitches = bool(s["hitches"]) and kind != "Bands"
     tie = _RopeTie([pa, pb], rr, step)
-    if kind == "Square":
+    if kind == "Saddle":
+        raw = _rl_saddle(tie, J, wraps, hitches)
+    elif kind == "Square":
         raw = _rl_square(tie, J, wraps, fraps, hitches)
     elif kind == "Diagonal":
         raw = _rl_diagonal(tie, J, wraps, fraps, hitches)
@@ -14291,15 +14376,18 @@ def rope_path(poles, settings, target=None):
         raw = _rl_diagonal(tie, J, wraps, 0, False, both=False)
     else:
         raw = _rl_round(tie, J, wraps, fraps if kind == "Sheer" else 0, hitches, kind == "Sheer")
-    pts, ups, scale = _rl_finish(tie, raw, s)
+    pts, ups, scale = _rl_finish(tie, raw, s, others, obstacles)
     return {"points": pts, "up": ups, "scale": scale, "radius": rr, "kind": kind, "joint": J,
             "poles": [pa.node, pb.node]}
 
 
-def _rl_finish(tie, raw, s):
+def _rl_finish(tie, raw, s, others=(), obstacles=()):
     """Raw samples -> even rope centres pressed onto the logs, with tails,
-    a little wobble and every crossing riding over the earlier rope."""
+    a little wobble and every crossing riding over the earlier rope (and
+    over obstacles: rope already at this joint). others: more logs at the
+    joint the rope must keep out of."""
     poles, rr, h = tie.poles, tie.rr, tie.h
+    clear = list(poles) + list(others)  # everything the rope keeps out of
     sink = rr * (1.0 - clamp(float(s["bite"]), 0.0, 0.9))
     # 1. dense: same-log stretches follow the log (angle + axis), others are straight
     dense = [raw[0]]
@@ -14377,20 +14465,20 @@ def _rl_finish(tie, raw, s):
         i = j
     # 4. rope never cuts through a log it isn't lying on
     own = [smp[2] for smp in samples]
-    _rl_avoid(poles, X, U, own, sink)
-    # 5. tails: the cut ends stick out a little past the hitches
-    tail = max(0.0, float(s["tail"])) * 2.0 * min(p.r for p in poles)
-    if tail > 0.0 and n >= 4:
-        m = max(1, int(tail / h))
-        k = min(3, n - 1)
-        head_dir = _rl_norm(_rl_sub(X[0], X[k]), U[0])
-        end_dir = _rl_norm(_rl_sub(X[-1], X[-1 - k]), U[-1])
-        X = [_rl_add(X[0], _rl_mul(head_dir, h * j)) for j in range(m, 0, -1)] + X + \
-            [_rl_add(X[-1], _rl_mul(end_dir, h * j)) for j in range(1, m + 1)]
-        U = [U[0]] * m + U + [U[-1]] * m
-        own = [-1] * m + own + [-1] * m
+    _rl_avoid(clear, X, U, own, sink)
+    # 5. tails: each cut end bends onto its log and runs under the hitch's
+    #    turns, so it's tucked away (the turns ride over it in step 7)
+    extra = max(0.0, float(s["tail"])) * 2.0 * min(p.r for p in poles)
+    tucked = []
+    if n >= 4:
+        head = _rl_tuck(poles, X, U, own, 0, 1, tie.d, extra, h, sink)
+        end = _rl_tuck(poles, X, U, own, n - 1, -1, tie.d, extra, h, sink)
+        X = head[0][::-1] + X + end[0]
+        U = head[1][::-1] + U + end[1]
+        own = head[2][::-1] + own + end[2]
         n = len(X)
-        _rl_avoid(poles, X, U, own, sink)
+        tucked = list(range(len(head[0]))) + list(range(n - len(end[0]), n))
+        _rl_avoid(clear, X, U, own, sink)
     # 6. wobble: real rope never lies perfectly
     wob = clamp(float(s["wobble"]), 0.0, 2.0) * rr
     o = _ln_offsets(int(s["seed"]), 7, 6)
@@ -14409,20 +14497,49 @@ def _rl_finish(tie, raw, s):
         scale.append(1.0 + 0.12 * clamp(float(s["wobble"]), 0.0, 2.0) * ln_noise3(x * 0.7 + o[4], o[5], 0.6))
     # 7. later rope rides over earlier rope (that's how knots and fraps look)
     for _ in range(4):  # a lift can push rope into the other log: settle the two
-        X = _rl_ride_over(X, U, rr, h)
-        if not _rl_avoid(poles, X, U, own, sink):
+        X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
+        if not _rl_avoid(clear, X, U, own, sink):
             break
-    # 8. relax kinks, keep out of the other log, then taper the cut ends
+    # 8. relax kinks, keep out of the other log, then taper the cut ends. Tucked ends
+    #    and the rope just beside them stay put: averaging across the step where the
+    #    turn rides over the end would pull the two back into each other.
+    still = set(tucked)
+    for i in tucked:
+        still.update(range(max(0, i - 3), min(n, i + 4)))
     for _ in range(2):
-        X = [X[0]] + [_rl_add(_rl_mul(X[i], 0.6), _rl_mul(_rl_add(X[i - 1], X[i + 1]), 0.2))
-                      for i in range(1, n - 1)] + [X[-1]]
-    _rl_avoid(poles, X, U, own, sink)
+        X = [X[i] if i in still or i == 0 or i == n - 1 else
+             _rl_add(_rl_mul(X[i], 0.6), _rl_mul(_rl_add(X[i - 1], X[i + 1]), 0.2)) for i in range(n)]
+    _rl_avoid(clear, X, U, own, sink)
+    _rl_unkink(X, rr, h)
+    _rl_avoid(clear, X, U, own, sink)
     taper = max(1, int(1.5 * rr / h))
     for i in range(min(taper, n)):
         k = 0.78 + 0.22 * _rl_smooth01(float(i) / taper)
         scale[i] *= k
         scale[n - 1 - i] *= k
     return X, U, scale
+
+
+def _rl_unkink(X, rr, h, passes=8):
+    """Ease bends tighter than 1.5 rope radii (real rope can't kink like
+    that): only those points move, so the rest stays tight."""
+    n = len(X)
+    k = max(1, int(math.ceil(rr / h)))
+    for _ in range(passes):
+        moved = False
+        for i in range(k, n - k):
+            a, p, b = X[i - k], X[i], X[i + k]
+            u = _rl_sub(p, a)
+            v = _rl_sub(b, p)
+            lu, lv = _rl_len(u), _rl_len(v)
+            if lu < 1e-12 or lv < 1e-12:
+                continue
+            ang = math.acos(clamp(_rl_dot(u, v) / (lu * lv), -1.0, 1.0))
+            if ang > 1e-6 and 0.5 * (lu + lv) / ang < 1.5 * rr:
+                X[i] = _rl_lerp(p, _rl_lerp(a, b, 0.5), 0.5)
+                moved = True
+        if not moved:
+            break
 
 
 def _rl_avoid(poles, X, U, own, sink, near=1.4):
@@ -14451,9 +14568,53 @@ def _rl_avoid(poles, X, U, own, sink, near=1.4):
     return moved
 
 
-def _rl_ride_over(X, U, rr, h, passes=10):
-    """Lift each rope point along U until it clears every earlier point
-    (two radii apart), with ramps so the rope climbs instead of jumping."""
+def _rl_tuck(poles, X, U, own, i, inward, d, extra, h, sink):
+    """A tucked cut end at X[i] (i = 0 or the last point; inward is the step
+    into the rope): it bends from the rope's direction onto its log's axis,
+    towards the rest of the rope on that log (under the hitch's turns), runs
+    flat on the surface for two rope widths plus extra, and stops. Returns
+    (points, ups, owners) ordered away from X[i]."""
+    pi = own[i]
+    k = min(len(X) - 1, max(0, i + 3 * inward))
+    if pi < 0:  # no log under this end: a short straight end
+        m = int(extra / h)
+        away = _rl_norm(_rl_sub(X[i], X[k]), U[i])
+        return [_rl_add(X[i], _rl_mul(away, h * j)) for j in range(1, m + 1)], [U[i]] * m, [-1] * m
+    pole = poles[pi]
+    a = pole.a
+    t0 = pole.closest_t(X[i])
+    dd = _rl_norm(_rl_perp(a, _rl_sub(X[i], pole.center(t0))), U[i])
+    ts = [pole.closest_t(X[j]) for j in range(len(X)) if own[j] == pi]
+    sgn = 1.0 if sum(ts) / len(ts) >= t0 else -1.0
+    side = _rl_norm(_rl_cross(a, dd), dd)  # around the log
+    back = _rl_dot(_rl_sub(X[i], X[k]), side)  # the end carries on the way the rope came
+    side = _rl_mul(side, 1.0 if back >= 0.0 else -1.0)
+    bend = d  # radius of the bend from "around" to "along"
+    length = 2.2 * d + extra
+    radius = pole.radius(t0) + sink
+    pts, ups = [], []
+    for j in range(1, max(2, int(length / h)) + 1):
+        dist = h * j
+        if dist < 0.5 * math.pi * bend:
+            arc, along = bend * math.sin(dist / bend), bend * (1.0 - math.cos(dist / bend))
+        else:
+            arc, along = bend, bend + dist - 0.5 * math.pi * bend
+        ang = arc / radius
+        dirv = _rl_add(_rl_mul(dd, math.cos(ang)), _rl_mul(side, math.sin(ang)))
+        t = t0 + sgn * along
+        pts.append(_rl_add(pole.center(t), _rl_mul(dirv, pole.surface(t, dirv) + 0.7 * sink)))
+        ups.append(dirv)
+    return pts, ups, [pi] * len(pts)
+
+
+def _rl_ride_over(X, U, rr, h, passes=10, first=(), fixed=(), crowded=False):
+    """Lift each rope point along U until it clears every point placed
+    before it (two radii apart), with ramps so the rope climbs instead of
+    jumping. Points are placed in path order, except first (tucked ends):
+    they go down before everything, so all other rope rides over them.
+    fixed: points of other rope that's already tied (never moved).
+    crowded (other logs or rope at the joint): lifts are capped, because
+    where logs overlap the rope can't fit and would otherwise pile up."""
     n = len(X)
     dia = 2.0 * rr
     dia2 = dia * dia
@@ -14463,20 +14624,38 @@ def _rl_ride_over(X, U, rr, h, passes=10):
     near = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
     lift = [0.0] * n
     slope = 0.35 * h
+    cap = 5.0 * dia if crowded else float("inf")
+    early = set(first)
+    order = [i for i in first] + [i for i in range(n) if i not in early]
+    dirty = None  # after the first pass only rope near what moved can need lifting
+    old = None
     for _ in range(passes):
-        P = [(x[0] + u[0] * k, x[1] + u[1] * k, x[2] + u[2] * k) for x, u, k in zip(X, U, lift)]
+        P = [(x[0] + u[0] * k, x[1] + u[1] * k, x[2] + u[2] * k) for x, u, k in zip(X, U, lift)] + list(fixed)
+        if old is not None:
+            dirty = set()
+            for i in range(n):
+                if P[i] != old[i]:
+                    for q in (P[i], old[i]):
+                        kx, ky, kz = int(floor(q[0] * inv)), int(floor(q[1] * inv)), int(floor(q[2] * inv))
+                        dirty.update((kx + dx, ky + dy, kz + dz) for dx, dy, dz in near)
+        old = P[:n]
         grid = {}
+        for j in range(n, len(P)):
+            q = P[j]
+            grid.setdefault((int(floor(q[0] * inv)), int(floor(q[1] * inv)), int(floor(q[2] * inv))), []).append(j)
         add = [0.0] * n
         moved = False
-        for i in range(n):
+        for i in order:
             px, py, pz = P[i]
             kx, ky, kz = int(floor(px * inv)), int(floor(py * inv)), int(floor(pz * inv))
+            if dirty is not None and (kx, ky, kz) not in dirty:
+                grid.setdefault((kx, ky, kz), []).append(i)
+                continue
             need = 0.0
             ux, uy, uz = U[i]
-            last = i - skip
             for dx, dy, dz in near:
                 for j in grid.get((kx + dx, ky + dy, kz + dz), ()):
-                    if j > last:
+                    if j < n and -skip < j - i < skip:  # its own neighbours along the rope
                         continue
                     q = P[j]
                     wx, wy, wz = px - q[0], py - q[1], pz - q[2]
@@ -14501,8 +14680,10 @@ def _rl_ride_over(X, U, rr, h, passes=10):
         for _ in range(2):  # round off the ramps' corners
             add = [add[0]] + [max(add[i], (add[i - 1] + 2.0 * add[i] + add[i + 1]) * 0.25)
                               for i in range(1, n - 1)] + [add[-1]]
+        for i in early:  # tucked ends stay down (a ramp lifting them would push the turns ever higher)
+            add[i] = 0.0
         for i in range(n):
-            lift[i] += add[i]
+            lift[i] = min(lift[i] + add[i], cap)
     return [_rl_add(X[i], _rl_mul(U[i], lift[i])) for i in range(n)]
 
 
@@ -14510,12 +14691,19 @@ def _rl_frames(X, up0=None):
     """Rotation-minimising frames along a polyline: tangents T, normals N
     and B = T x N (so N, B, T is right-handed)."""
     n = len(X)
-    T = [_rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)])) for i in range(n)]
+    T = []
+    prev = None
+    for i in range(n):  # where points bunch up, keep the last direction (a guess would flip the frame)
+        prev = _rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)]), prev)
+        T.append(prev)
+    if T[0] is None:
+        T = [_rl_norm(_rl_sub(X[-1], X[0]))] * n
+    T = [t or T[0] for t in T]
     N = _rl_norm(_rl_perp(T[0], up0), None) if up0 is not None else None
     N = N or _rl_any_perp(T[0])
     Ns, Bs = [], []
     for t in T:
-        N = _rl_norm(_rl_perp(t, N), _rl_any_perp(t))
+        N = _rl_norm(_rl_perp(t, N), N)
         Ns.append(N)
         Bs.append(_rl_cross(t, N))
     return T, Ns, Bs
@@ -14751,11 +14939,46 @@ def rope_pairs(poles, reach=ROPE_PAIR_REACH):
             J = rope_joint(a, b)
             if J["gap"] > reach * min(J["rA"], J["rB"]):
                 continue
-            if not J["inside"]:
-                skipped.append((i, j, "they meet at a log's end"))
+            if J["endA"] and J["endB"] and J["angle"] < ROPE_PARALLEL_DEG:
+                skipped.append((i, j, "they only touch tip to tip"))
                 continue
-            pairs.append((i, j))
-    return pairs, skipped
+            pairs.append((i, j, J))
+    # Several logs meeting at one spot: tie each in once (the fewest lashings that
+    # join them all, best contact first), like a builder would, not every pair.
+    groups = list(range(len(pairs)))
+
+    def top(k):
+        while groups[k] != k:
+            groups[k] = groups[groups[k]]
+            k = groups[k]
+        return k
+    mids = [_rl_lerp(J["cA"], J["cB"], 0.5) for _, _, J in pairs]
+    for x in range(len(pairs)):
+        for y in range(x + 1, len(pairs)):
+            Jx, Jy = pairs[x][2], pairs[y][2]
+            if _rl_len(_rl_sub(mids[x], mids[y])) < 1.5 * max(Jx["rA"] + Jx["rB"], Jy["rA"] + Jy["rB"]):
+                groups[top(x)] = top(y)
+    keep = []
+    for g in set(top(k) for k in range(len(pairs))):
+        members = sorted((k for k in range(len(pairs)) if top(k) == g),
+                         key=lambda k: (max(0.0, pairs[k][2]["gap"]) / min(pairs[k][2]["rA"], pairs[k][2]["rB"]),
+                                        -min(poles[pairs[k][0]].r, poles[pairs[k][1]].r)))
+        joined = {}
+
+        def root(v):
+            while joined.get(v, v) != v:
+                v = joined[v]
+            return v
+        for k in members:
+            i, j, _ = pairs[k]
+            if root(i) == root(j):
+                skipped.append((i, j, "already tied in at that joint"))
+                continue
+            joined[root(i)] = root(j)
+            keep.append((i, j))
+    # thick logs first: later lashings at a shared joint ride over the earlier rope
+    keep.sort(key=lambda ij: -min(poles[ij[0]].r, poles[ij[1]].r))
+    return keep, skipped
 
 
 def _rope_unique_name():
@@ -14871,8 +15094,14 @@ def _rope_plan(logs, settings, target, progress=None, limit=None):
         one = dict(s)
         if not s.get("seed"):
             one["seed"] = _rope_pair_seed(poles[i].node, poles[j].node)
+        J0 = rope_joint(poles[i], poles[j])
+        mid = _rl_lerp(J0["cA"], J0["cB"], 0.5)
+        near = 3.0 * (J0["rA"] + J0["rB"])
+        others = [q for k, q in enumerate(poles) if k not in (i, j) and q.t0 - q.r <= q.closest_t(mid) <= q.t1 + q.r
+                  and _rl_len(_rl_perp(q.a, _rl_sub(mid, q.center(q.closest_t(mid))))) < near + q.r]
+        obstacles = [x for path_k, _ in built for x in path_k["points"] if _rl_len(_rl_sub(x, mid)) < 2.0 * near]
         try:
-            path = rope_path([poles[i], poles[j]], one, target if len(poles) == 2 else None)
+            path = rope_path([poles[i], poles[j]], one, target if len(poles) == 2 else None, others, obstacles)
         except ValueError as exc:
             report["skipped"].append((label, str(exc)))
             continue
@@ -15214,8 +15443,9 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self.f["hitches"] = CheckField("Clove hitches at the start and end")
         grid.add_full(self.f["hitches"])
         self.f["tail"] = FloatField(0.0, 3.0, 0.0, 1.0, decimals=2, step=0.05)
-        grid.add_row("Tails", self.f["tail"], "How far the cut ends stick out, as a fraction of the log's "
-                                              "diameter.")
+        grid.add_row("Tails", self.f["tail"], "The cut ends are tucked under the hitch's turns; this is how "
+                                              "far they run on along the log past them (fraction of the log's "
+                                              "diameter).")
         self.f["wobble"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
         grid.add_row("Wobble", self.f["wobble"], "Hand-tied irregularity: the rope wanders and swells a little.")
         card.add(grid)

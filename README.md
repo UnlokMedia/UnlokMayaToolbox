@@ -170,8 +170,10 @@ Ties logs together with rope the way pioneering lashings are really tied,
 for stilt shacks, fences and frames.
 
 1. **Select** two logs that touch or cross. Select a whole frame instead and
-   every pair that touches or crosses gets its own lashing (pairs that only
-   meet at a log's end are skipped). For logs side by side, also select a
+   every pair that touches or crosses gets its own lashing. Where several
+   logs meet at one spot (a post, a beam on it and rafters resting there),
+   each log is tied in once, with the fewest lashings that join them all,
+   and later rope rides over the rope already there. For logs side by side, also select a
    vertex or edge to say where along them the lashing goes. Select an
    existing lashing to edit it.
 2. **Lashing and rope:** everything here shows straight away. With logs
@@ -197,6 +199,12 @@ for stilt shacks, fences and frames.
        hitch on each leg (when the legs touch there's no room between them,
        so the hitches go around both and there are no fraps).
      - **Bands:** plain wraps, no knots (background).
+     - **Saddle** (picked by itself when a log ends at the other: a post
+       under a beam, a rafter resting on a beam): wraps go over the top log
+       on each side and half round the end log just below its end, crossing
+       in an X.
+     - Clove hitches are snug two-turn hitches whose cut ends are tucked
+       under the turns, so no loose ends stick out.
    - **Rope:** *3 strands* is real laid rope for close-ups; *Twisted* is one
      tube shaped like laid rope (the all-rounder); *Smooth tube* is the
      light background version.
