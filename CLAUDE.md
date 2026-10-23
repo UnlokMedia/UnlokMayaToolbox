@@ -218,6 +218,14 @@
     finishes it as one path. Kind "Combined"; stored with all its logs. `_rope_plan` passes the joint's other logs (`others`, kept out
     of) and earlier rope (`obstacles`, ridden over; lifts capped at 5
     diameters when crowded, since overlapping logs leave no room).
+  - **Tension and order in `_rl_finish`:** smooth + unkink + avoid first,
+    then the ride-over / avoid loop, then unkink and one more ride-over.
+    Smoothing after the lifts flattened rope-over-rope bumps back into
+    overlaps. `_rl_bridge` (inside each lift pass, idempotent so passes
+    settle) fills dips shorter than 4 rope widths between lifted stretches.
+    Hitches take `flow` (the rope's travel at the joint): same turning
+    sense, and on-surface joins start a little ahead so the rope spirals in
+    (no Z-shaped jog). Default wobble 0.05.
   - **Kinks:** `_rl_unkink` eases bends tighter than 1.5 rope radii;
     `_rl_frames` keeps the last direction where points bunch up (a flipped
     frame threw strands out as spikes). Later lift passes only re-check

@@ -25,6 +25,7 @@ UV
 """
 
 import bisect
+import collections
 import functools
 import heapq
 import itertools
@@ -13708,7 +13709,7 @@ ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user prese
 ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands")
 ROPE_STYLES = ("3 strands", "Twisted", "Smooth tube")
 ROPE_DEFAULTS = {"lashing": "Auto", "style": "Twisted", "thickness": 0.1, "wraps": 0, "fraps": -1,
-                 "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.25, "seed": 0, "sides": 0,
+                 "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.05, "seed": 0, "sides": 0,
                  "spacing": 0.0, "lay": 3.5}
 ROPE_KEYS = tuple(sorted(ROPE_DEFAULTS))
 ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4, "Saddle": 3}
@@ -13722,6 +13723,7 @@ ROPE_PRESETS = {  # built in; user presets are kept in the ROPE_PRESET_VAR optio
                            "wobble": 0.1},
     "Thin twine": {"thickness": 0.05, "wraps": 6, "fraps": 3},
     "Heavy rope": {"style": "3 strands", "thickness": 0.18},
+    "Hand-tied (loose)": {"wobble": 0.6, "tail": 0.3},
 }
 ROPE_PARALLEL_DEG = 25.0   # logs closer to parallel than this get a Round / Sheer lashing
 ROPE_SQUARE_DEG = 55.0     # crossing steeper than this: Square, otherwise Diagonal
@@ -13985,6 +13987,14 @@ def rope_lashing_kind(settings, angle):
     return kind
 
 
+def _rl_flow(samples, at_end):
+    """The rope's direction of travel at the start or end of samples."""
+    if len(samples) < 2:
+        return None
+    a, b = (samples[-2][0], samples[-1][0]) if at_end else (samples[0][0], samples[1][0])
+    return _rl_norm(_rl_sub(b, a), None)
+
+
 class _RopeTie(object):
     """Builds one lashing's path as samples (S, u, pole): S a point on a log
     surface (pole >= 0) or the rope centre minus u * rr (pole -1), u the
@@ -14018,32 +14028,44 @@ class _RopeTie(object):
         e1 = _rl_any_perp(p)
         return (centre, p, _rl_mul(e1, radius), _rl_mul(_rl_cross(p, e1), radius), -1)
 
-    def loop(self, items, origin, p, turns, zfun, toward=None, swell=None, tangent=0):
+    def loop(self, items, origin, p, turns, zfun, toward=None, swell=None, tangent=0, flow=None):
         """Rope around the convex hull of items (sections in the plane
         through origin, normal p), turning right-handed about p. zfun(angle
         so far) moves the plane along p; swell(angle) pushes the rope out
         (a spiral). Starts (and so ends) on the side facing toward; with
         tangent +1 where rope coming from toward touches down tangentially
         (it then lies on the surface instead of landing head-on through the
-        air), with -1 where rope leaving for toward lifts off tangentially."""
+        air), with -1 where rope leaving for toward lifts off tangentially.
+        flow: the rope's direction of travel at toward (path order). The
+        loop then turns the same way round, and when toward is on the
+        surface it starts a little ahead of it (or ends a little behind), so
+        the rope spirals in or out instead of jogging sideways."""
         e1 = None
         if toward is not None:
             e1 = _rl_norm(_rl_perp(p, _rl_sub(toward, origin)), None)
         if e1 is None:
             e1 = _rl_any_perp(p)
-        e2 = _rl_cross(p, e1)
+        sense = 1.0
+        if flow is not None and _rl_dot(flow, _rl_cross(p, e1)) < 0.0:
+            sense = -1.0
+        e2 = _rl_mul(_rl_cross(p, e1), sense)
+        total = 2.0 * math.pi * turns
         if tangent and toward is not None:
             dist = _rl_len(_rl_perp(p, _rl_sub(toward, origin)))
             reach_f = max(_rl_dot(_rl_sub(it[0], origin), e1) +
                           math.sqrt(_rl_dot(it[2], e1) ** 2 + _rl_dot(it[3], e1) ** 2) for it in items) + self.rr
-            if dist > reach_f:
-                beta = tangent * math.acos(reach_f / dist)
+            beta = None
+            if dist > 1.3 * reach_f or (flow is None and dist > reach_f):
+                beta = tangent * math.acos(min(1.0, reach_f / dist))
+            elif flow is not None:  # on (or next to) the surface: spiral in / out along it
+                gap = abs(_rl_dot(_rl_sub(toward, origin), p))
+                beta = tangent * max(0.6, 1.5 * gap / reach_f)
+            if beta is not None:
                 if tangent < 0:  # it's the end of the loop that has to point there
-                    beta -= 2.0 * math.pi * turns
+                    beta -= total
                 e1 = _rl_norm(_rl_add(_rl_mul(e1, math.cos(beta)), _rl_mul(e2, math.sin(beta))))
-                e2 = _rl_cross(p, e1)
+                e2 = _rl_mul(_rl_cross(p, e1), sense)
         reach = max(_rl_len(_rl_sub(it[0], origin)) + max(_rl_len(it[2]), _rl_len(it[3])) for it in items)
-        total = 2.0 * math.pi * turns
         steps = max(int(24 * turns), int(total * (reach + self.rr) / (0.5 * self.h)))
         out = []
         for k in range(steps + 1):
@@ -14095,19 +14117,19 @@ class _RopeTie(object):
             return 1.05 * d
         return z
 
-    def clove(self, items_of, origin, p, toward, tangent):
+    def clove(self, items_of, origin, p, toward, tangent, flow=None):
         """Clove hitch: two turns around items_of(origin, p) starting at
         origin. tangent -1: the lashing's first hitch (the rope leaves it
         for toward); +1: its last (the rope comes in from toward)."""
         # 1.6 turns: turn two stops just before the diagonal (no lying on top of it); the gap
         # lets the tucked end slip under the diagonal, like a real clove hitch
-        return self.loop(items_of(origin, p), origin, p, 1.6, self.clove_z(), toward, tangent=tangent)
+        return self.loop(items_of(origin, p), origin, p, 1.6, self.clove_z(), toward, tangent=tangent, flow=flow)
 
-    def clove_on(self, i, t, sign, toward, tangent):
+    def clove_on(self, i, t, sign, toward, tangent, flow=None):
         pole = self.poles[i]
         p = _rl_mul(pole.a, sign)
         origin = pole.center(t)
-        return self.clove(lambda o, pp: [self.section(i, o, pp, t)], origin, p, toward, tangent)
+        return self.clove(lambda o, pp: [self.section(i, o, pp, t)], origin, p, toward, tangent, flow)
 
     def extent(self, samples, i, tc, sign):
         """How far samples bound to log i reach from tc, towards sign."""
@@ -14204,7 +14226,7 @@ def _rl_square(tie, J, wraps, fraps, hitches):
         s1, t1 = corner(-1, -1, 0)  # the standing part runs up the upright's side to the first wrap
         start = tie.clove_on(0, ta - low - 2.6 * d, 1.0, _rl_add(A.center(t1), _rl_mul(ma, -1.0)), -1)
         far = tie.extent(out, 1, tb, 1.0)
-        end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0], 1)
+        end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0], 1, _rl_flow(frap or out, True))
     return start, out + frap, end
 
 
@@ -14246,10 +14268,10 @@ def _rl_saddle(tie, J, wraps, hitches):
     start, end = [], []
     if hitches:
         low = max(abs(E.closest_t(S) - t_end) for S, _, pi in out if pi == 0)
-        start = tie.clove_on(0, t_end + inward * (low + 2.6 * d), -inward, out[0][0], -1)
+        start = tie.clove_on(0, t_end + inward * (low + 2.6 * d), -inward, out[0][0], -1, _rl_flow(out, False))
         sg = sides[0]
         far = tie.extent(out, 1, tb, sg)
-        end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1)
+        end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1, _rl_flow(out, True))
     return start, out, end
 
 
@@ -14286,7 +14308,7 @@ def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
     if hitches:  # the start hitch sits around both logs, on the first diagonal (timber hitch's place)
         p, z0 = first
         origin = _rl_add(mid, _rl_mul(p, z0 - 1.6 * d))
-        start = tie.clove(items, origin, p, out[0][0], -1)
+        start = tie.clove(items, origin, p, out[0][0], -1, _rl_flow(out, False))
         # finish on whichever log and side the rope gets to without crossing the start hitch
         done = start + out + frap
         last = done[-1][0]
@@ -14299,7 +14321,7 @@ def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
                 clear_by = min(_rl_len(_rl_sub(_rl_lerp(last, spot, f / 8.0), q)) for f in range(9) for q in hitched)
                 if best is None or clear_by > best[0]:
                     best = (clear_by, i, t, sg)
-        end = tie.clove_on(best[1], best[2], best[3], last, 1)
+        end = tie.clove_on(best[1], best[2], best[3], last, 1, _rl_flow(done, True))
     return start, out + frap, end
 
 
@@ -14328,11 +14350,11 @@ def _rl_round(tie, J, wraps, fraps, hitches, sheer):
         if sheer and room:  # on one leg, then on the other
             sa = 1.0 if _rl_dot(A.a, w) >= 0.0 else -1.0
             sb = 1.0 if _rl_dot(B.a, w) >= 0.0 else -1.0
-            start = tie.clove_on(0, A.closest_t(o0), sa, out[0][0], -1)
-            end = tie.clove_on(1, B.closest_t(o1), sb, last, 1)
+            start = tie.clove_on(0, A.closest_t(o0), sa, out[0][0], -1, _rl_flow(out, False))
+            end = tie.clove_on(1, B.closest_t(o1), sb, last, 1, _rl_flow(frap or out, True))
         else:
-            start = tie.clove(both, o0, w, out[0][0], -1)
-            end = tie.clove(both, o1, w, last, 1)
+            start = tie.clove(both, o0, w, out[0][0], -1, _rl_flow(out, False))
+            end = tie.clove(both, o1, w, last, 1, _rl_flow(frap or out, True))
     return start, out + frap, end
 
 
@@ -14551,23 +14573,26 @@ def _rl_finish(tie, raw, s, others=(), obstacles=()):
             X[i] = _rl_add(X[i], _rl_add(_rl_mul(U[i], 0.25 * wob * (1.0 + ln_noise3(x + o[0], o[1], 0.3))),
                                          _rl_mul(side, 0.35 * wob * ln_noise3(x + o[2], o[3], 0.3))))
         scale.append(1.0 + 0.12 * clamp(float(s["wobble"]), 0.0, 2.0) * ln_noise3(x * 0.7 + o[4], o[5], 0.6))
-    # 7. later rope rides over earlier rope (that's how knots and fraps look)
-    for _ in range(4):  # a lift can push rope into the other log: settle the two
-        X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
-        if not _rl_avoid(clear, X, U, own, sink):
-            break
-    # 8. relax kinks, keep out of the other log, then taper the cut ends. Tucked ends
-    #    and the rope just beside them stay put: averaging across the step where the
-    #    turn rides over the end would pull the two back into each other.
+    # 7. relax the path first (tucked ends stay put), then let later rope ride over
+    #    earlier rope: smoothing after the lifts would flatten the bumps where rope
+    #    crosses rope and pull the two back into each other
     still = set(tucked)
     for i in tucked:
         still.update(range(max(0, i - 3), min(n, i + 4)))
     for _ in range(2):
         X = [X[i] if i in still or i == 0 or i == n - 1 else
              _rl_add(_rl_mul(X[i], 0.6), _rl_mul(_rl_add(X[i - 1], X[i + 1]), 0.2)) for i in range(n)]
-    _rl_avoid(clear, X, U, own, sink)
     _rl_unkink(X, rr, h)
     _rl_avoid(clear, X, U, own, sink)
+    for _ in range(4):  # a lift can push rope into the other log: settle the two
+        X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
+        if not _rl_avoid(clear, X, U, own, sink):
+            break
+    # ease any sharp bends the lifts made, then settle rope over rope once more
+    _rl_unkink(X, rr, h)
+    X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
+    _rl_avoid(clear, X, U, own, sink)
+    # 8. taper the cut ends
     taper = max(1, int(1.5 * rr / h))
     for i in range(min(taper, n)):
         k = 0.78 + 0.22 * _rl_smooth01(float(i) / taper)
@@ -14663,7 +14688,7 @@ def _rl_tuck(poles, X, U, own, i, inward, d, extra, h, sink):
     return pts, ups, [pi] * len(pts)
 
 
-def _rl_ride_over(X, U, rr, h, passes=10, first=(), fixed=(), crowded=False):
+def _rl_ride_over(X, U, rr, h, passes=16, first=(), fixed=(), crowded=False):
     """Lift each rope point along U until it clears every point placed
     before it (two radii apart), with ramps so the rope climbs instead of
     jumping. Points are placed in path order, except first (tucked ends):
@@ -14740,7 +14765,36 @@ def _rl_ride_over(X, U, rr, h, passes=10, first=(), fixed=(), crowded=False):
             add[i] = 0.0
         for i in range(n):
             lift[i] = min(lift[i] + add[i], cap)
+        # tension inside the loop, so the next pass re-checks whatever the bridging raised
+        lift = [min(v, cap) for v in _rl_bridge(lift, int(4.0 * dia / h), early)]
     return [_rl_add(X[i], _rl_mul(U[i], lift[i])) for i in range(n)]
+
+
+def _rl_bridge(lift, span, keep_down=()):
+    """Rope under tension: a dip shorter than span samples between two
+    lifted stretches is filled up to the lower of the two, like a taut rope
+    lying across bumps (the lifts' own ramps already shape the edges). The
+    same input always gives the same output, so repeated passes settle.
+    keep_down (tucked ends) stay where they are."""
+    n = len(lift)
+    if n < 3 or not any(lift):
+        return lift
+    def running_max(vals):
+        out, dq = [], collections.deque()
+        for i, v in enumerate(vals):
+            while dq and vals[dq[-1]] <= v:
+                dq.pop()
+            dq.append(i)
+            if dq[0] < i - span:
+                dq.popleft()
+            out.append(vals[dq[0]])
+        return out
+    left = running_max(lift)
+    right = running_max(lift[::-1])[::-1]
+    filled = [max(lift[i], min(left[i], right[i])) for i in range(n)]
+    for i in keep_down:
+        filled[i] = lift[i]
+    return filled
 
 
 def _rl_frames(X, up0=None):
@@ -15515,7 +15569,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
                                               "far they run on along the log past them (fraction of the log's "
                                               "diameter).")
         self.f["wobble"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
-        grid.add_row("Wobble", self.f["wobble"], "Hand-tied irregularity: the rope wanders and swells a little.")
+        grid.add_row("Wobble", self.f["wobble"], "Hand-tied irregularity: the rope wanders and swells a little. "
+                                                 "Default 0.05 is a tight rope; try 0.5+ for a loose, hand-tied look.")
         card.add(grid)
         seed_row = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(seed_row)

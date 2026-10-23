@@ -211,7 +211,8 @@ for stilt shacks, fences and frames.
      light background version.
    - **Thickness** is relative to the thinner log, so a preset suits any log
      size. Wraps, Fraps (Auto follows the recipes above), clove hitches on /
-     off, Tails (the cut ends), Wobble and Seed (Auto: each pair of logs
+     off, Tails (the cut ends), Wobble (default 0.05: a tight rope; raise it
+     for a hand-tied look) and Seed (Auto: each pair of logs
      keeps its own, so the preview and the result match).
    - Advanced: Bite (how far it presses into the wood), Sides, Segment
      length and Lay (how tight the strands twist).
@@ -245,6 +246,11 @@ How it stays accurate:
   tapered and Log Noise logs work.
 - Every later pass of rope rides over the earlier rope it crosses, which is
   what makes the hitches and fraps read as knots.
+- The rope behaves as if under tension: it bridges short dips between the
+  ropes it crosses instead of sagging back onto the wood, and hitches pick
+  up the rope's direction of travel, so it spirals in and out of them
+  instead of jogging sideways. Bends tighter than the rope can take are
+  eased.
 - Rope never cuts through a log.
 
 UVs are straight strips (U around the rope, V along it) cut into columns
