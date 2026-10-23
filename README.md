@@ -330,12 +330,22 @@ density. The actual layout is still being built; see
        - *Compact shells*: sew only while the shell stays compact, which
          packs tighter.
        - *Keep every cut*: leave a seam on every hard and sharp edge.
-     - **Very big curved parts** (over 8,000 triangles, e.g. a dense dome)
-       are cut and laid out here, then Unfold3D relaxes just those faces.
-     - **Speed:** the 47-mesh test building's unwrap maths takes 1.5 s, and
-       all of it bar the 19,200-face dome takes about 0.01 s. The whole
-       Auto UV run takes 3.9 s with Unlok vs 4.8 s with Unfold3D, at the
-       same quality score.
+     - **Big curved parts** (over 6,000 triangles, e.g. a dense dome or
+       rock) are relaxed coarse-to-fine, still without Unfold3D:
+       1. a ~1,000-triangle version is relaxed fully
+       2. the rest is filled in between it
+       3. two full-detail passes finish it
+
+       Unfold3D is never called. Anything still too stretched is split and
+       relaxed again.
+     - **Speed** on the 47-mesh test building, all in the background:
+       - 46 meshes (walls, planks, posts, columns, rings, curved panels)
+         take 0.04 s together.
+       - The 19,200-face closed dome takes about 8 s: relaxing big smooth
+         shapes in plain Python costs time.
+       - The whole Auto UV run takes 9.6 s with Unlok vs 5.2 s with
+         Unfold3D, at the same quality score. Unfold3D blocks Maya for its
+         whole run, while Unlok keeps Maya usable and Cancel instant.
    - **Unwrapper: Unfold3D (Maya)** is the old route:
      - normal-based projection
      - soft edges sewn; hard edges and edges sharper than *Seam angle* cut

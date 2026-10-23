@@ -23,6 +23,7 @@ UV
 
 import functools
 import heapq
+import itertools
 import json
 import math
 import operator
@@ -5187,7 +5188,9 @@ UNWRAP_DEFAULTS = {
     "sew_fill": 0.35,  # "compact": joined shells must fill this much of their box
     "planar_angle": 6.0,  # a chart whose faces all stay within this of its normal is projected
     "relax_iterations": 16,
-    "relax_budget": 8000,  # triangles: bigger charts that need relaxing go to Unfold3D instead
+    "multilevel_from": 6000,  # triangles: bigger curved charts relax coarse-to-fine
+    "coarse_target": 1000,  # triangles in the coarse version of a big chart
+    "unfold3d_fallback": False,  # hand charts it can't flatten to Unfold3D (else: best effort)
     "max_depth": 10,  # times a failing chart is split before it goes to Unfold3D
 }
 
@@ -5892,13 +5895,33 @@ def _uw_solver(P, T):
     return tri, rows, diag
 
 
-def _uw_cg(rows, diag, x, b, iters, fixed=None):
-    """Conjugate gradients with a Jacobi preconditioner on L x = b, warm
-    started from x (changed in place). fixed: indices held where they are.
-    The loops run through map / zip so the arithmetic stays in C (several
-    times faster than plain Python loops)."""
+def _uw_matrix(rows, diag):
+    """A Laplacian-like matrix (diag, minus weights to neighbours) in flat
+    form for _uw_mv: every product in one map, row sums from one running
+    sum, so no Python loop runs per row."""
+    J, W, ends = [], [], []
+    for js, ws in rows:
+        J.extend(js)
+        W.extend(ws)
+        ends.append(len(J))
+    starts = [0] + ends[:-1]
+    return (J, W, starts, ends, list(diag))
+
+
+def _uw_mv(A, q):
+    J, W, starts, ends, diag = A
+    acc = list(itertools.accumulate(map(operator.mul, W, map(q.__getitem__, J)), initial=0.0))
+    get = acc.__getitem__
+    off = map(operator.sub, map(get, ends), map(get, starts))
+    return list(map(operator.sub, map(operator.mul, diag, q), off))
+
+
+def _uw_cg(A, x, b, iters, fixed=None, tol=1e-10):
+    """Conjugate gradients with a Jacobi preconditioner on A x = b (A from
+    _uw_matrix), warm started from x (changed in place). fixed: indices
+    held where they are."""
     mul, sub, add = operator.mul, operator.sub, operator.add
-    inv = [1.0 / d for d in diag]
+    inv = [1.0 / d for d in A[4]]
     keep = None
     if fixed:
         keep = [1.0] * len(x)
@@ -5906,8 +5929,7 @@ def _uw_cg(rows, diag, x, b, iters, fixed=None):
             keep[i] = 0.0
 
     def mv(q):
-        g = q.__getitem__
-        out = [d * qi - sum(map(mul, ws, map(g, js))) for d, qi, (js, ws) in zip(diag, q, rows)]
+        out = _uw_mv(A, q)
         return list(map(mul, out, keep)) if keep else out
 
     r = list(map(sub, b, mv(x)))
@@ -5918,6 +5940,7 @@ def _uw_cg(rows, diag, x, b, iters, fixed=None):
     rz = sum(map(mul, r, z))
     if rz <= 1e-30:
         return x
+    stop = rz * tol
     xs = list(x)
     for _ in range(iters):
         ad = mv(d)
@@ -5929,7 +5952,7 @@ def _uw_cg(rows, diag, x, b, iters, fixed=None):
         r = [ri - alpha * ai for ri, ai in zip(r, ad)]
         z = list(map(mul, r, inv))
         rz2 = sum(map(mul, r, z))
-        if rz2 <= 1e-20 * rz or rz2 <= 1e-30:
+        if rz2 <= stop or rz2 <= 1e-30:
             break
         beta = rz2 / rz
         rz = rz2
@@ -5938,15 +5961,18 @@ def _uw_cg(rows, diag, x, b, iters, fixed=None):
     return x
 
 
-def _uw_arap(P, T, UV, iters, ctl):
+def _uw_arap(P, T, UV, iters, ctl, cg_iters=12):
     """As-rigid-as-possible relax (Liu et al. 2008, local/global) from UV."""
     tri, rows, diag = _uw_solver(P, T)
+    A = _uw_matrix(rows, diag)
     u = [q[0] for q in UV]
     v = [q[1] for q in UV]
     nv = len(P)
+    size = max(max(u) - min(u), max(v) - min(v), 1e-12)
     for it in range(iters):
         if ctl.get("cancel"):
             raise Cancelled("relax")
+        u0, v0 = list(u), list(v)
         bu = [0.0] * nv
         bv = [0.0] * nv
         for ws in tri:
@@ -5965,8 +5991,11 @@ def _uw_arap(P, T, UV, iters, ctl):
                 bv[i] += ry
                 bu[j] -= rx
                 bv[j] -= ry
-        _uw_cg(rows, diag, u, bu, 12)
-        _uw_cg(rows, diag, v, bv, 12)
+        _uw_cg(A, u, bu, cg_iters)
+        _uw_cg(A, v, bv, cg_iters)
+        moved = max(max(map(abs, map(operator.sub, u, u0))), max(map(abs, map(operator.sub, v, v0))))
+        if moved < 1e-4 * size:
+            break
     return list(zip(u, v))
 
 
@@ -5996,9 +6025,187 @@ def _uw_tutte(P, T, loop):
     bu = list(zero)
     bv = list(zero)
     n_it = min(300, max(60, int(4 * math.sqrt(nv))))
-    _uw_cg(rows, diag, u, bu, n_it, fixed)
-    _uw_cg(rows, diag, v, bv, n_it, fixed)
+    A = _uw_matrix(rows, diag)
+    _uw_cg(A, u, bu, n_it, fixed)
+    _uw_cg(A, v, bv, n_it, fixed)
     return list(zip(u, v))
+
+
+def _uw_coarsen(P, T, target):
+    """A coarse version of a chart by half-edge collapses, shortest edge
+    first, down to about target triangles. Boundary vertices stay on the
+    boundary, the link condition keeps it a manifold disk, and collapses
+    that would turn a triangle over are skipped. Coarse vertices are a
+    subset of the fine ones. Returns (kept vertex ids, coarse triangles in
+    fine ids, parent: removed vertex -> the vertex it merged into)."""
+    nv = len(P)
+    tris = [list(t) for t in T]
+    alive = [True] * len(T)
+    vt = [set() for _ in range(nv)]
+    use = {}
+    for ti, t in enumerate(T):
+        for v in t:
+            vt[v].add(ti)
+        for x, y in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            key = (x, y) if x < y else (y, x)
+            use[key] = use.get(key, 0) + 1
+    bnd = set()
+    for (x, y), n in use.items():
+        if n == 1:
+            bnd.update((x, y))
+    removed = [False] * nv
+    parent = {}
+
+    def dist(a, b):
+        p, q = P[a], P[b]
+        return (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2
+
+    heap = [(dist(x, y), x, y) for x, y in use]
+    heapq.heapify(heap)
+    ntri = len(T)
+
+    def nbrs(v):
+        out = set()
+        for t in vt[v]:
+            out.update(tris[t])
+        out.discard(v)
+        return out
+
+    def normal(t):
+        a, b, c = P[t[0]], P[t[1]], P[t[2]]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        wx, wy, wz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        return (uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx)
+
+    def collapse(u, k):
+        shared = [t for t in vt[u] if k in tris[t]]
+        if not shared:
+            return False
+        if u in bnd and k in bnd and len(shared) != 1:
+            return False  # an inside edge between two boundary points would pinch the disk
+        opposite = set(v for t in shared for v in tris[t] if v != u and v != k)
+        if (nbrs(u) & nbrs(k)) != opposite:
+            return False  # link condition
+        for t in vt[u]:
+            if t in shared:
+                continue
+            old = tris[t]
+            new = [k if v == u else v for v in old]
+            n0, n1 = normal(old), normal(new)
+            d = n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]
+            l0 = math.sqrt(n0[0] ** 2 + n0[1] ** 2 + n0[2] ** 2)
+            l1 = math.sqrt(n1[0] ** 2 + n1[1] ** 2 + n1[2] ** 2)
+            if l1 <= 1e-12 * max(l0, 1e-30) or d <= 0.3 * l0 * l1:
+                return False  # would turn over or collapse a triangle
+        for t in shared:
+            alive[t] = False
+            for v in tris[t]:
+                vt[v].discard(t)
+        for t in list(vt[u]):
+            tris[t] = [k if v == u else v for v in tris[t]]
+            vt[k].add(t)
+        vt[u] = set()
+        removed[u] = True
+        parent[u] = k
+        for w in nbrs(k):
+            heapq.heappush(heap, (dist(k, w), k, w))
+        return len(shared)
+
+    while heap and ntri > target:
+        _, a, b = heapq.heappop(heap)
+        if removed[a] or removed[b]:
+            continue
+        for u, k in ((a, b), (b, a)):
+            if u in bnd and k not in bnd:
+                continue  # never pull the boundary inward
+            got = collapse(u, k)
+            if got:
+                ntri -= got
+                break
+    keep = [v for v in range(nv) if not removed[v]]
+    return keep, [tuple(tris[t]) for t in range(len(T)) if alive[t]], parent
+
+
+def _uw_multilevel(P, T, loops, opts, ctl):
+    """Relax a big curved chart coarse-to-fine: ARAP to convergence on a
+    coarse version (cheap), then the removed vertices are filled in
+    between the coarse ones (a well-conditioned solve: every vertex is
+    near a fixed one), then a few fine ARAP passes take out what's left.
+    About 10x less work than relaxing the full chart. None if the coarse
+    chart couldn't be flattened without folding."""
+    keep, CT, parent = _uw_coarsen(P, T, opts["coarse_target"])
+    if ctl.get("cancel"):
+        raise Cancelled("relax")
+    idx = dict((v, i) for i, v in enumerate(keep))
+    cP = [P[v] for v in keep]
+    cT = [(idx[a], idx[b], idx[c]) for a, b, c in CT]
+    c_loops, chi, ok = _uw_topology(cT, len(cP))
+    if not ok or chi != 1 or len(c_loops) != 1:
+        return None
+    init = _uw_hinge(cP, cT)
+    if _uw_stretch(cP, cT, init)[0] or _uw_overlap(init, c_loops):
+        init = _uw_tutte(cP, cT, c_loops[0])  # the hinge start folds: start fold-free
+    best = _uw_arap(cP, cT, init, 25, ctl, cg_iters=40)
+    flips, good, _ = _uw_stretch(cP, cT, best)
+    if flips or good < 0.7 or _uw_overlap(best, c_loops):
+        return None  # even the coarse version won't lie flat well: split instead
+    # fill in: coarse vertices fixed, the rest averaged between them, starting
+    # from the coarse vertex each one was merged into
+    nv = len(P)
+    u = [0.0] * nv
+    v = [0.0] * nv
+    for i, vid in enumerate(keep):
+        u[vid], v[vid] = best[i]
+    for vid in range(nv):
+        if vid in idx:
+            continue
+        r = vid
+        while r in parent:
+            r = parent[r]
+        u[vid], v[vid] = u[r], v[r]
+    # the boundary between kept boundary points follows the coarse boundary,
+    # spaced by 3D length (left free, the averaging would pull it inward and
+    # fold it)
+    fixed = set(keep)
+    for loop in loops:
+        kept = [i for i, vid in enumerate(loop) if vid in idx]
+        if not kept:
+            continue
+        n = len(loop)
+        for s, k0 in enumerate(kept):
+            k1 = kept[(s + 1) % len(kept)]
+            run = []
+            i = (k0 + 1) % n
+            while i != k1:
+                run.append(loop[i])
+                i = (i + 1) % n
+            if not run:
+                continue
+            a, b = loop[k0], loop[k1]
+            pts = [a] + run + [b]
+            seg = [_uw_len(P, pts[t], pts[t + 1]) for t in range(len(pts) - 1)]
+            total = sum(seg) or 1.0
+            acc = 0.0
+            for t, vid in enumerate(run):
+                acc += seg[t]
+                w = acc / total
+                u[vid] = u[a] + (u[b] - u[a]) * w
+                v[vid] = v[a] + (v[b] - v[a]) * w
+                fixed.add(vid)
+    nbr = [set() for _ in range(nv)]
+    for a, b, c in T:
+        nbr[a].update((b, c))
+        nbr[b].update((a, c))
+        nbr[c].update((a, b))
+    rows = [(list(s), [1.0] * len(s)) for s in nbr]
+    diag = [float(len(s)) or 1.0 for s in nbr]
+    zero = [0.0] * nv
+    A = _uw_matrix(rows, diag)
+    _uw_cg(A, u, zero, 80, fixed)
+    _uw_cg(A, v, zero, 80, fixed)
+    if ctl.get("cancel"):
+        raise Cancelled("relax")
+    return _uw_arap(P, T, list(zip(u, v)), 2, ctl, cg_iters=12)
 
 
 def _uw_flatten(ch, opts, ctl):
@@ -6013,10 +6220,13 @@ def _uw_flatten(ch, opts, ctl):
     flips, good, worst = _uw_stretch(P, T, uv)
     if flips == 0 and worst < 1.02 and not _uw_overlap(uv, loops):
         return uv, "unfolded"  # developable: exact
-    if len(T) > opts["relax_budget"]:  # too big to relax here quickly: Unfold3D finishes it
-        if flips == 0 and not _uw_overlap(uv, loops):
-            return uv, "heavy"
-        return _uw_planar(P, T, -2.0) or uv, "heavy"
+    if len(T) > opts["multilevel_from"]:  # big and curved: relax a coarse version, then refine
+        res = _uw_multilevel(P, T, loops, opts, ctl)
+        if res is not None:
+            flips, good, worst = _uw_stretch(P, T, res)
+            if flips == 0 and good >= 0.75 and not _uw_overlap(res, loops):
+                return res, "relaxed"
+        return None  # split it and try the halves
     iters = opts["relax_iterations"]
     best = None
     for start in ("hinge", "tutte"):
@@ -6072,10 +6282,11 @@ def _uw_piece(m, pf, kind, opts, ctl):
                 sewable.update(new)
                 work.extend((r, depth + 1) for r in _uw_regions(m, fids, cut))
                 continue
-            # one face, or split as far as allowed: project it and let Unfold3D fix it
+            # one face, or split as far as allowed: its best projection (Unfold3D
+            # finishes it only when unfold3d_fallback is on)
             ch["loops"] = loops
             uv = _uw_planar(ch["P"], ch["T"], -2.0) or _uw_hinge(ch["P"], ch["T"])
-            res = (uv, "heavy")
+            res = (uv, "heavy" if opts.get("unfold3d_fallback") else "rough")
         ch["uv"], ch["how"] = res
         if ch["how"] == "heavy":
             heavy.extend(fids)
@@ -6292,7 +6503,7 @@ def _uw_mesh(m, opts, ctl, shared):
     corner_uv = [None] * (m["base"][-1] + len(m["faces"][-1]))
     cut_all, heavy = set(), []
     stats = {"pieces": 0, "copies": 0, "charts": 0, "hard": 0, "organic": 0, "flat": 0, "unfolded": 0,
-             "relaxed": 0, "heavy": 0, "sewn": 0}
+             "relaxed": 0, "heavy": 0, "rough": 0, "sewn": 0}
     faces, base = m["faces"], m["base"]
     for pf in _uw_pieces(m):
         if ctl.get("cancel"):

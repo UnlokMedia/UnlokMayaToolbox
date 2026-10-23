@@ -415,10 +415,25 @@
       tolerance), rejecting joins that make boundaries cross.
     - `_uw_weld` merges sewn corners onto one position; `_uw_spread` lays
       the shells out side by side.
-  - **Speed:** pure Python is slow at sparse solves, so `_uw_cg` keeps the
-    loops in `map` / `zip`. Charts needing relaxing above `relax_budget`
-    (8,000 triangles) are returned as "heavy" and get `u3dUnfold` on just
-    their faces. Before that cap, one 19,200-face dome took 104 s.
+  - **Speed:**
+    - `_uw_cg` and `_uw_mv` keep every loop in C: one `map` for all the
+      products, row sums from `itertools.accumulate`.
+    - CG stops at a relative tolerance and ARAP stops once nothing moves.
+    - Big charts (over `multilevel_from`, 6,000 triangles) go through
+      `_uw_multilevel`:
+      - `_uw_coarsen` does half-edge collapses (shortest first, boundary
+        kept, link condition, no flips) down to ~1,000 triangles.
+      - ARAP runs on that coarse version; it gives up early if even the
+        coarse version won't lie flat (the chart is then split).
+      - Fill-in: coarse vertices are fixed, the boundary between them is
+        placed by length (left free, it folds inward), and the rest is a
+        uniform-Laplacian solve.
+      - Two fine ARAP passes finish it.
+    - The 19,200-face dome went 104 s -> 8 s this way. A closed smooth
+      chart first tries one pelt; that fails the coarse check, then it's
+      split in two.
+    - `unfold3d_fallback` (off) would hand unflattenable charts to
+      Unfold3D; otherwise they get their best projection ("rough").
   - **Defaults:** the engine still defaults to Unfold3D
     (`run_auto_uv(unwrapper=None)`), so old tests keep their behaviour.
 - **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose

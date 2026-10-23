@@ -98,6 +98,15 @@ def run():
     check("sphere: few shells", shells(sph) <= 4, "%d shells" % shells(sph))
     check("sphere: UV quality ok", quality(sph) >= 0.7, "%.3f" % quality(sph))
 
+    # --- dense sphere: big curved charts relax coarse-to-fine, no Unfold3D
+    dense = cmds.polySphere(r=1, sx=120, sy=60, name="denseRock")[0]
+    failed, secs, st = unwrap([dense])
+    flips, good, worst = stretch(dense)
+    check("dense sphere (7,200 faces): relaxed here, nothing left for Unfold3D",
+          not failed and flips == 0 and not st.get("heavy") and not st.get("rough"),
+          "%d shells, good %.2f, %.2fs, %s" % (shells(dense), good, secs, st))
+    check("dense sphere: UV quality ok", quality(dense) >= 0.7, "%.3f" % quality(dense))
+
     # --- torus: not a disk, gets split until it flattens
     tor = cmds.polyTorus(r=1, sr=0.3, sx=24, sy=12, name="ring")[0]
     failed, secs, st = unwrap([tor])
@@ -154,8 +163,21 @@ def run():
         if method == tb["UNWRAP_METHODS"][0]:
             cmds.undo()
             check("building (Unlok): one Ctrl+Z restores the UVs", cmds.polyEditUV(first + ".map[*]", q=True) == before)
-    check("building: Unlok is faster than Unfold3D", timings[UNLOK] < timings[tb["UNWRAP_METHODS"][1]],
-          "Unlok %.1fs, Unfold3D %.1fs" % (timings[UNLOK], timings[tb["UNWRAP_METHODS"][1]]))
+    print("INFO  building Auto UV: Unlok %.1fs, Unfold3D %.1fs" % (timings[UNLOK], timings[tb["UNWRAP_METHODS"][1]]))
+    datas = [tb["_uw_read"](m) for m in kinds]
+    rest = [d for d in datas if "dome" not in d["mesh"]]
+    t = time.time()
+    out = tb["unlok_unwrap_data"](rest)
+    t_rest = time.time() - t
+    check("building: everything but the dense dome unwraps in under a second", t_rest < 1.0,
+          "%.2fs for %d meshes" % (t_rest, len(rest)))
+    dome = [d for d in datas if "dome" in d["mesh"]]
+    t = time.time()
+    out = tb["unlok_unwrap_data"](dome)
+    t_dome = time.time() - t
+    st = list(out.values())[0]["stats"]
+    check("building: the 19,200-face dome relaxes here, in under 15 s", t_dome < 15.0 and not st["heavy"],
+          "%.2fs %s" % (t_dome, dict((k, v) for k, v in st.items() if v)))
     check("building: Unlok quality at least as good (within 0.03)",
           scores[UNLOK] >= scores[tb["UNWRAP_METHODS"][1]] - 0.03,
           "Unlok %.3f, Unfold3D %.3f" % (scores[UNLOK], scores[tb["UNWRAP_METHODS"][1]]))
