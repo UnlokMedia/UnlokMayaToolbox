@@ -474,10 +474,10 @@
   (`maya.standalone.uninitialize()` before `os._exit`), and keep runs few:
   full suites plus the GUI smoke once before a push.
 - **GUI Maya: also set `MAYA_SKIP_USERSETUP_PY=1`** and pass `-script` an
-  absolute path. The user's Prism module (`Documents/maya/2024/modules/
-  Prism.mod`) can open a modal "Prism Autosave" dialog at startup, which
-  blocks the test forever (2026-10-23). Add `-log <file>` to see Maya's
-  output.
+  absolute path. The user's Prism module (production tracking,
+  `Documents/maya/2024/modules/Prism.mod`) opens a window at startup, and
+  its modal "Prism Autosave" dialog blocks a scripted test. It's harmless:
+  closing or skipping it is fine. Add `-log <file>` to see Maya's output.
 Maya 2024 and 2025 are installed locally (no 2023). Run
 `mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
 `tests/test_bevel_resolver.py` for the engines, and
