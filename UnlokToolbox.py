@@ -26,6 +26,7 @@ import json
 import math
 import random
 import re
+import threading
 import time
 import traceback
 
@@ -90,9 +91,81 @@ class Cancelled(Exception):
     """The user pressed Esc during a long run."""
 
 
+_ACTIVE = []  # Progress objects running right now (innermost last)
+_TICKS = [0]
+
+
+def toolbox_busy():
+    """True while a long toolbox step runs. Timers use it to hold off: the
+    Working window processes events mid-step, and nothing else may touch the
+    scene then."""
+    return bool(_ACTIVE)
+
+
+def _poll():
+    """Inside long loops: let the running step update its window, process
+    events (so Maya never shows 'Not responding') and raise Cancelled when
+    Cancel / Esc was pressed. Does nothing outside a step or off the main
+    thread (background planning)."""
+    if _ACTIVE and threading.current_thread() is threading.main_thread():
+        _ACTIVE[-1].update()
+
+
+def _tick():
+    _TICKS[0] += 1
+    if not _TICKS[0] & 2047:
+        _poll()
+
+
+def _guarded(timer, fn):
+    """A timer slot that waits while a toolbox step is running."""
+    def slot():
+        if toolbox_busy():
+            timer.start()
+            return
+        fn()
+    return slot
+
+
+class WorkingDialog(QtWidgets.QDialog):
+    """'Working...' window for long steps: what's happening, a bar, time
+    left and Cancel. Modal, so nothing else in Maya can change the scene
+    while it's up."""
+
+    def __init__(self, title, parent=None):
+        super(WorkingDialog, self).__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(QtCore.Qt.ApplicationModal)
+        self.setMinimumWidth(460)
+        self.cancelled = False
+        lay = QtWidgets.QVBoxLayout(self)
+        self.label = QtWidgets.QLabel("Starting...")
+        self.label.setWordWrap(True)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.button = QtWidgets.QPushButton("Cancel")
+        self.button.clicked.connect(self.reject)
+        lay.addWidget(self.label)
+        lay.addWidget(self.bar)
+        row = QtWidgets.QHBoxLayout()
+        hint = QtWidgets.QLabel("Cancel (or Esc) stops at the next safe point.")
+        hint.setProperty("unlokHint", True)
+        row.addWidget(hint, 1)
+        row.addWidget(self.button)
+        lay.addLayout(row)
+
+    def reject(self):  # Cancel button, Esc and the close box
+        self.cancelled = True
+        self.button.setEnabled(False)
+        self.button.setText("Stopping...")
+
+
 class Progress(object):
     """Progress for long runs: Maya's main progress bar (Esc cancels) plus an
-    optional callback(fraction, text) for a panel to show the same thing.
+    optional callback(fraction, text) for a panel to show the same thing,
+    and (in the UI) a Working window with Cancel once the step has run for
+    half a second.
 
     stages = [(key, weight)]: each stage's share of the bar. Inside a stage,
     call item(detail, weight) before each piece of work. Updates are
@@ -100,9 +173,11 @@ class Progress(object):
     Raises Cancelled from item() / update() once Esc was pressed.
     """
 
-    def __init__(self, title, stages, callback=None):
+    def __init__(self, title, stages, callback=None, window=True):
         self.title = title
         self.callback = callback
+        self.window = window
+        self.dialog = None
         total = float(sum(w for _, w in stages)) or 1.0
         self.span = {}
         acc = 0.0
@@ -125,9 +200,19 @@ class Progress(object):
                                  status=self.title, maxValue=1000)
             except Exception:
                 self.bar = None
+        _ACTIVE.append(self)
         return self
 
     def __exit__(self, *exc):
+        if self in _ACTIVE:
+            _ACTIVE.remove(self)
+        if self.dialog is not None:
+            try:
+                self.dialog.hide()
+                self.dialog.deleteLater()
+            except Exception:
+                pass
+            self.dialog = None
         if self.bar:
             try:
                 cmds.progressBar(self.bar, edit=True, endProgress=True)
@@ -190,6 +275,15 @@ class Progress(object):
                 cmds.refresh(currentView=True)
         if self.callback:
             self.callback(self.fraction(), self.text())
+        if self.bar and self.window and (self.dialog is not None or now - self.t0 > 0.5):
+            if self.dialog is None:
+                self.dialog = WorkingDialog(self.title, maya_main_window())
+                self.dialog.show()
+            self.dialog.label.setText(self.text())
+            self.dialog.bar.setValue(int(self.fraction() * 1000))
+            QtWidgets.QApplication.processEvents()  # keeps Maya responsive; the modal window takes the input
+            if self.dialog is not None and self.dialog.cancelled:
+                raise Cancelled(self.where())
 
 
 def status_progress(label):
@@ -2385,7 +2479,7 @@ class PathScatterPanel(QtWidgets.QWidget):
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(15)
-        self._timer.timeout.connect(self.rebuild)
+        self._timer.timeout.connect(_guarded(self._timer, self.rebuild))
 
         self.drawer = SurfacePathDrawer(self._on_stroke, lambda: self.fields["smoothing"].value(),
                                         PathScatterSystem.all_roots)
@@ -4403,6 +4497,7 @@ def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP
     face_shell, signs = [], []
     k = 0
     for c in counts:
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         face_shell.append(uv_shell[ids[k]])
         area = 0.0
         for i in range(c):
@@ -4441,6 +4536,7 @@ def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP
         boxes = {}
         k = 0
         for f, c in enumerate(counts):
+            _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
             s = face_shell[f]
             b = boxes.setdefault(s, [1e30, 1e30, -1e30, -1e30, []])
             for i in range(c):
@@ -4499,6 +4595,7 @@ def _stretched_shell_faces(xform, uv_set="map1"):
     shell_faces = {}
     k = 0
     for f, c in enumerate(counts):
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         if c:
             shell_faces.setdefault(uv_shell[ids[k]], []).append(f)
         k += c
@@ -4543,6 +4640,7 @@ def uv_footprints(xform, uv_set="map1", faces=None):
         us, vs = fn.getUVs(uv_set)
         boxes = {}
         for sid, u, v in zip(shell_of, us, vs):
+            _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
             b = boxes.get(sid)
             if b is None:
                 boxes[sid] = [u, v, u, v, 0.0]
@@ -4566,6 +4664,7 @@ def uv_footprints(xform, uv_set="map1", faces=None):
     boxes = {}
     k = 0
     for face, c in enumerate(counts):
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         if c and (faces is None or face in faces):
             sid = shell_of[ids[k]]
             box = boxes.get(sid)
@@ -4756,6 +4855,54 @@ def uv_colours_on(asset):
     return bool(root and _get(root, UV_COLOURS_ATTR, False))
 
 
+_OUTLINES = {}  # (mesh, uv set) -> (fingerprint, outlines): the viewer reads each mesh once
+
+
+def scene_shell_outlines(xform, uv_set="map1", unit_scale=1e-4, density=True):
+    """[{"hull": [(u, v)], "box": (u0, v0, u1, v1), "density": UV/3D ratio
+    or None}] per UV shell, for the UV viewer. Remembered until the mesh
+    changes (fingerprint), so a big asset is read once. density needs the
+    per-face areas (the current UV set must be uv_set)."""
+    fp = mesh_fingerprint(xform, uv_set)
+    hit = _OUTLINES.get((xform, uv_set))
+    if hit and hit[0] == fp:
+        return hit[1]
+    fn = _mesh_fn(xform)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return []
+    _, shell_of = fn.getUvShellsIds(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    pts = {}
+    for sid, u, v in zip(shell_of, us, vs):
+        _tick()
+        pts.setdefault(sid, []).append((u, v))
+    dens = {}
+    if density and fn.currentUVSetName() == uv_set:
+        counts, ids = fn.getAssignedUVs(uv_set)
+        nf = len(counts)
+        if nf:
+            a3, auv = _face_areas(xform, nf)
+            k = 0
+            for face, c in enumerate(counts):
+                _tick()
+                if c:
+                    d = dens.setdefault(shell_of[ids[k]], [0.0, 0.0])
+                    d[0] += a3[face] * unit_scale
+                    d[1] += auv[face]
+                k += c
+    out = []
+    for sid, q in pts.items():
+        hull = convex_hull(q)
+        if not hull:
+            continue
+        us_, vs_ = [h[0] for h in hull], [h[1] for h in hull]
+        d = dens.get(sid)
+        out.append({"hull": hull, "box": (min(us_), min(vs_), max(us_), max(vs_)),
+                    "density": math.sqrt(d[1] / d[0]) if d and d[0] > 1e-12 and d[1] > 0 else None})
+    _OUTLINES[(xform, uv_set)] = (fp, out)
+    return out
+
+
 def backup_uvs(meshes, uv_set="map1", backup_set="map1_backup", progress=None):
     """Copy uv_set to backup_set on meshes that have UVs and no backup yet
     (an existing backup is never overwritten, so re-runs keep the original)."""
@@ -4787,13 +4934,14 @@ def restore_uvs(meshes, uv_set="map1", backup_set="map1_backup"):
     return restored
 
 
-def _unwrap_batches(meshes, budget=8000):
+def _unwrap_batches(meshes, budget=8000, sizes=None):
     """Split meshes into batches of about `budget` faces, so the Unfold3D
     calls report progress (and can be cancelled) between batches. A mesh
-    bigger than the budget is a batch of its own. [(meshes, faces)]."""
+    bigger than the budget is a batch of its own. sizes: {mesh: faces to
+    unfold} when only some of a mesh's faces are unfolded. [(meshes, faces)]."""
     batches, cur, size = [], [], 0
     for m in meshes:
-        n = cmds.polyEvaluate(m, face=True) or 0
+        n = sizes[m] if sizes and m in sizes else (cmds.polyEvaluate(m, face=True) or 0)
         if cur and size + n > budget:
             batches.append((cur, size))
             cur, size = [], 0
@@ -4811,30 +4959,33 @@ def _batch_label(batch):
     return "%d meshes (%s faces)" % (len(names), "{:,}".format(faces))
 
 
-def projection_clean(xform, spread=1.15):
-    """True when projection already gave clean UVs: in every shell each
-    edge's UV length is the same multiple of its 3D length (within spread),
-    so nothing is stretched, squashed or sheared, and nothing is flipped or
-    collapsed. Flat-sided pieces (walls, planks, boxes) usually pass, so
-    Unfold3D can skip them."""
+def distorted_faces(xform, spread=1.15):
+    """Faces of the shells whose projection isn't clean, i.e. shells where
+    each edge's UV length is NOT the same multiple of its 3D length (within
+    spread), or that are flipped or collapsed. [] when every shell is clean;
+    None when some faces have no UVs (unfold the whole mesh)."""
     fn = _mesh_fn(xform)
     if fn is None:
-        return False
+        return None
     uv_set = fn.currentUVSetName()
     if not uv_set or fn.numUVs(uv_set) == 0:
-        return False
+        return None
     counts, ids = fn.getAssignedUVs(uv_set)
     vcounts, vids = fn.getVertices()
     if len(counts) == 0 or list(counts) != list(vcounts):
-        return False  # some faces have no UVs
+        return None  # some faces have no UVs
     _, shell_of = fn.getUvShellsIds(uv_set)
     us, vs = fn.getUVs(uv_set)
     pts = [(q.x, q.y, q.z) for q in fn.getPoints(om.MSpace.kWorld)]
     ids, vids = list(ids), list(vids)
     lo, hi, sign = {}, {}, {}
+    shell_faces = {}
+    bad = set()
     k = 0
-    for c in counts:
+    for face, c in enumerate(counts):
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         s = shell_of[ids[k]]
+        shell_faces.setdefault(s, []).append(face)
         area = 0.0
         for i in range(c):
             a, b = ids[k + i], ids[k + (i + 1) % c]
@@ -4845,7 +4996,8 @@ def projection_clean(xform, spread=1.15):
                 continue
             luv = math.sqrt((us[a] - us[b]) ** 2 + (vs[a] - vs[b]) ** 2)
             if luv <= 0.0:
-                return False  # collapsed
+                bad.add(s)  # collapsed
+                continue
             r = luv / l3
             if s not in lo:
                 lo[s] = hi[s] = r
@@ -4854,11 +5006,17 @@ def projection_clean(xform, spread=1.15):
             elif r > hi[s]:
                 hi[s] = r
         k += c
-        if area == 0.0:
-            return False
-        if sign.setdefault(s, area > 0) != (area > 0):
-            return False  # folded over inside its shell
-    return all(hi[s] <= lo[s] * spread for s in lo)
+        if area == 0.0 or sign.setdefault(s, area > 0) != (area > 0):
+            bad.add(s)  # collapsed, or folded over inside its shell
+    bad.update(s for s in lo if hi[s] > lo[s] * spread)
+    return sorted(f for s in bad for f in shell_faces[s])
+
+
+def projection_clean(xform, spread=1.15):
+    """True when projection already gave clean UVs on every shell (see
+    distorted_faces): flat-sided pieces (walls, planks, boxes) usually
+    pass, so Unfold3D can skip them."""
+    return distorted_faces(xform, spread) == []
 
 
 def _auto_seam(targets):
@@ -4912,29 +5070,44 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=No
         except Exception as exc:
             failed[xform] = "seams failed: %s" % exc
     ok = [m for m in ok if m not in failed]
-    # projection + seams already clean (walls, planks, boxes): no Unfold3D needed
-    clean = set(m for m in ok if projection_clean(m))
+    # Only shells whose projection isn't already clean get unfolded: a wall
+    # skips Unfold3D entirely, a mesh with one curved shell unfolds just that
+    # shell (shorter blocking calls, so Cancel and the window respond sooner).
+    pr.stage("find", max(1, len(ok)), "Finding shells that need unfolding")
+    targets, clean = {}, []
+    for m in ok:
+        pr.item(short_name(m))
+        faces = distorted_faces(m)
+        if faces == []:
+            clean.append(m)
+        else:
+            targets[m] = faces  # None: the whole mesh
     if clean and on_unfolded:
         on_unfolded(sorted(clean))
-    ok = [m for m in ok if m not in clean]
+    ok = [m for m in ok if m in targets]
 
-    def unfold(targets):
+    def comps(m):
+        faces = targets.get(m)
+        return [m] if faces is None else ["%s.%s" % (m, r) for r in face_ranges(faces)]
+
+    def unfold(meshes):
         try:
-            cmds.u3dUnfold(targets, iterations=1, pack=0, borderintersection=1, triangleflip=1,
-                           mapsize=1024, roomspace=0)
+            cmds.u3dUnfold([c for m in meshes for c in comps(m)], iterations=1, pack=0, borderintersection=1,
+                           triangleflip=1, mapsize=1024, roomspace=0)
         except Exception:
-            for m in targets:  # isolate the culprit
+            for m in meshes:  # isolate the culprit
                 try:
-                    cmds.u3dUnfold(m, iterations=1, pack=0, borderintersection=1, triangleflip=1,
+                    cmds.u3dUnfold(comps(m), iterations=1, pack=0, borderintersection=1, triangleflip=1,
                                    mapsize=1024, roomspace=0)
                 except Exception as exc:
                     failed[m] = "unfold failed: %s" % exc
 
-    batches = _unwrap_batches(ok)
+    sizes = dict((m, len(f)) for m, f in targets.items() if f is not None)
+    batches = _unwrap_batches(ok, sizes=sizes)
     pr.stage("unfold", sum(n for _, n in batches), "Unfolding", items=len(batches))
     for batch in batches:  # batches, so progress moves (and Esc works) on big assets
         pr.item(_batch_label(batch), weight=batch[1], force=True)
-        _auto_seam({m: [m] for m in batch[0]})  # closed shells need at least one seam
+        _auto_seam(dict((m, comps(m)) for m in batch[0]))  # closed shells need at least one seam
         unfold(batch[0])
         if on_unfolded:
             on_unfolded([m for m in batch[0] if m not in failed])
@@ -5070,7 +5243,7 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
     return placed
 
 
-AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("seams", 8), ("unfold", 40),
+AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("seams", 8), ("find", 3), ("unfold", 40),
                   ("fix", 10), ("pack", 12), ("check", 4)]
 
 
@@ -5306,13 +5479,34 @@ LAYOUT_DEFAULTS = {
 }
 
 
+def convex_hull(points):
+    """Convex hull (monotone chain), counter-clockwise, of [(u, v)]."""
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for q in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], q) <= 0:
+            lower.pop()
+        lower.append(q)
+    for q in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], q) <= 0:
+            upper.pop()
+        upper.append(q)
+    return lower[:-1] + upper[:-1]
+
+
 class LayoutShell(object):
     """One UV shell of one material group (sizes before density scaling).
 
     dims[mode] = (angle, w0, h0) for each orientation mode ('axis', 'up',
     'keep'), so switching orientation is just a re-plan.
     """
-    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "dims", "group")
+    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "dims", "group", "hull")
 
     def __init__(self, mesh, uv_ids, area3d, area_uv, pts, up_dir=None):
         self.mesh = mesh
@@ -5323,6 +5517,7 @@ class LayoutShell(object):
         cx = sum(p[0] for p in pts) / n
         cy = sum(p[1] for p in pts) / n
         self.cx, self.cy = cx, cy
+        self.hull = convex_hull([(q[0] - cx, q[1] - cy) for q in pts])  # outline for the UV viewer
 
         def box(angle):
             ca, sa = math.cos(angle), math.sin(angle)
@@ -5367,6 +5562,7 @@ def _mesh_cache(xform, uv_set, unit_scale):
     k = 0
     ids = list(ids)
     for c in counts:
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         face_uvs.append(ids[k:k + c])
         k += c
     vcounts, connects = fn.getVertices()
@@ -5432,6 +5628,7 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
             by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
     shells, conflicts = [], 0
     for shell, fs in by_shell.items():
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         if (xform, shell) in claimed:
             conflicts += 1
             continue
@@ -5849,14 +6046,17 @@ def plan_layout(collected, settings, density_scale=1.0):
             "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around}
 
 
-def plan_fit_to_tiles(collected, settings, progress=None):
+def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
     """Highest density whose layout fits in settings['max_tiles'] tiles."""
     limit = max(1, int(settings.get("max_tiles", 10)))
 
     def attempt(scale):  # plan_layout plus a progress tick (and Esc)
         if progress:
             progress.item("trying %d%% of the density" % round(scale * 100))
-        return plan_layout(collected, settings, scale)
+        plan = plan_layout(collected, settings, scale)
+        if on_attempt:
+            on_attempt(plan)
+        return plan
 
     lo, hi = 0.0, 1.0
     plan = attempt(hi)
@@ -5895,7 +6095,7 @@ def section_rows(collected, plan):
     return rows
 
 
-def plan_fit_rows(collected, settings, progress=None):
+def plan_fit_rows(collected, settings, progress=None, on_attempt=None):
     """The foolproof default: the highest texel density at which every
     section still fits on its own single row of UDIMs (the biggest section
     decides). Every shell gets that density, times its group's / section's
@@ -5906,7 +6106,10 @@ def plan_fit_rows(collected, settings, progress=None):
     def attempt(scale):
         if progress:
             progress.item("trying %d%% of the density" % round(scale * 100))
-        return plan_layout(collected, s, scale)
+        plan = plan_layout(collected, s, scale)
+        if on_attempt:
+            on_attempt(plan)
+        return plan
 
     def fits(plan):
         return all(len(r) <= 1 for r in section_rows(collected, plan).values())
@@ -5942,12 +6145,65 @@ def plan_fit_rows(collected, settings, progress=None):
     return best
 
 
-def make_plan(collected, settings, progress=None):
+def make_plan(collected, settings, progress=None, on_attempt=None):
+    """on_attempt(plan) sees every layout tried (live viewer); it may raise
+    Cancelled to stop the search (a newer plan superseded this one)."""
     if settings.get("mode") == FIT_ROWS:
-        return plan_fit_rows(collected, settings, progress)
+        return plan_fit_rows(collected, settings, progress, on_attempt)
     if settings.get("mode") == "Fit to tiles":
-        return plan_fit_to_tiles(collected, settings, progress)
-    return plan_layout(collected, settings)
+        return plan_fit_to_tiles(collected, settings, progress, on_attempt)
+    plan = plan_layout(collected, settings)
+    if on_attempt:
+        on_attempt(plan)
+    return plan
+
+
+class PlanWorker(QtCore.QObject):
+    """Runs make_plan on a background thread: pure maths on shells already
+    read from Maya (no Maya calls), so Maya stays usable while a big Fit
+    search runs. Emits attempts (throttled) for the live viewer and the
+    final plan. Set .cancel to stop it (it then finishes with "cancelled")."""
+
+    attempted = QtCore.Signal(object)
+    finished = QtCore.Signal(object, object, object)  # worker, plan or None, error text or None
+
+    def __init__(self, collected, settings):
+        super(PlanWorker, self).__init__()
+        self.collected = collected
+        self.settings = settings
+        self.cancel = False
+        self._last = 0.0
+        self.thread = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _hook(self, plan):
+        if self.cancel:
+            raise Cancelled("superseded")
+        now = time.time()
+        if now - self._last > 0.08:
+            self._last = now
+            self.attempted.emit(plan)
+
+    def _run(self):
+        try:
+            plan = make_plan(self.collected, self.settings, on_attempt=self._hook)
+            self.finished.emit(self, None if self.cancel else plan, "cancelled" if self.cancel else None)
+        except Cancelled:
+            self.finished.emit(self, None, "cancelled")
+        except Exception as exc:  # report it in the panel, never crash Maya
+            traceback.print_exc()
+            self.finished.emit(self, None, str(exc))
+
+    def stop(self, wait=5.0):
+        """Cancel, and wait for the attempt in flight (one layout, well under
+        a second) so nothing else reads the shared shells meanwhile."""
+        self.cancel = True
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(wait)
 
 
 def write_uvs(xform, uv_set, us, vs):
@@ -6005,6 +6261,122 @@ def _place_shell(us, vs, sh, tu, tv, x, y, k, angle):
     for u, (pu, pv) in zip(sh.uv_ids, pts):
         us[u] = tu + x + (pu - mx)
         vs[u] = tv + y + (pv - my)
+
+
+# 3x5 pixel font for labels drawn as UVs (rows top to bottom)
+_GLYPHS = dict(zip("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-", (
+    "111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001",
+    "111100111001111", "111100111101111", "111001001001001", "111101111101111", "111101111001111",
+    "010101111101101", "110101110101110", "011100100100011", "110101101101110", "111100110100111",
+    "111100110100100", "011100101101011", "101101111101101", "111010010010111", "001001001101010",
+    "101101110101101", "100100100100111", "101111111101101", "110101101101101", "010101101101010",
+    "110101110100100", "010101101110011", "110101110101101", "011100010001110", "111010010010010",
+    "101101101101111", "101101101101010", "101101111111101", "101101010101101", "101101010010010",
+    "111001010100111", "000000000000111", "000000111000000")))
+UV_LABEL_MESH = "unlokUdimLabels"
+UV_LABEL_TAG = "unlokUdimLabels"
+
+
+def _text_rects(text, u, v, px):
+    """Rects (u0, v0, u1, v1) spelling text with its bottom-left at (u, v)."""
+    out = []
+    for i, ch in enumerate(text.upper()):
+        g = _GLYPHS.get(ch)
+        if not g:
+            continue
+        x0 = u + i * 4 * px
+        for row in range(5):
+            bits = g[row * 3:row * 3 + 3]
+            y = v + (4 - row) * px
+            c = 0
+            while c < 3:  # one rect per run of lit pixels
+                if bits[c] == "1":
+                    e = c
+                    while e < 3 and bits[e] == "1":
+                        e += 1
+                    out.append((x0 + c * px, y, x0 + e * px, y + px))
+                    c = e
+                else:
+                    c += 1
+    return out
+
+
+def uv_label_rects(tiles, rows):
+    """Rects drawing UDIM borders, tile numbers and section names (left of
+    each row, in negative U) for the UV Editor helper mesh."""
+    out = []
+    w = 0.004
+    for t in sorted(tiles):
+        tu, tv = (t - 1001) % 10, (t - 1001) // 10
+        out += [(tu, tv, tu + 1, tv + w), (tu, tv + 1 - w, tu + 1, tv + 1),
+                (tu, tv, tu + w, tv + 1), (tu + 1 - w, tv, tu + 1, tv + 1)]
+        out += _text_rects(str(t), tu + 0.025, tv + 1 - 0.025 - 5 * 0.012, 0.012)
+    for row, name in sorted(rows.items()):
+        name = re.sub(r"[^A-Za-z0-9_-]", "", name or "")[:40]
+        if not name:
+            continue
+        px = min(0.04, 0.9 / (4 * len(name)))
+        out += _text_rects(name, -0.95, row + 0.5 - 2.5 * px, px)
+    return out
+
+
+def remove_uv_label_mesh():
+    with NoUndo():
+        for node in cmds.ls(UV_LABEL_MESH + "*", type="transform") or []:
+            if cmds.attributeQuery(UV_LABEL_TAG, node=node, exists=True):
+                cmds.delete(node)
+
+
+def build_uv_label_mesh(tiles, rows):
+    """A helper mesh whose UVs draw the labels: select it with the asset and
+    Maya's UV Editor shows tile borders, numbers and section names. Its 3D
+    shape is microscopic and it doesn't render. Not undoable (view aid);
+    rebuilt or removed by the panel. Returns its name or None."""
+    remove_uv_label_mesh()
+    rects = uv_label_rects(tiles, rows)
+    if not rects:
+        return None
+    pts, counts, conn, us, vs = om.MPointArray(), [], [], [], []
+    tiny = 1e-4  # invisible in the viewport, but not degenerate
+    for u0, v0, u1, v1 in rects:
+        base = len(us)
+        for u, v in ((u0, v0), (u1, v0), (u1, v1), (u0, v1)):
+            pts.append(om.MPoint(u * tiny, v * tiny, 0.0))
+            us.append(u)
+            vs.append(v)
+        counts.append(4)
+        conn += [base, base + 1, base + 2, base + 3]
+    with NoUndo():
+        fn = om.MFnMesh()
+        obj = fn.create(pts, counts, conn, us, vs)
+        fn.assignUVs(counts, conn)
+        xform = om.MFnDagNode(obj).fullPathName()
+        xform = cmds.rename(xform, UV_LABEL_MESH)
+        cmds.addAttr(xform, longName=UV_LABEL_TAG, attributeType="bool")
+        for shape in cmds.listRelatives(xform, shapes=True, fullPath=True) or []:
+            for attr in ("primaryVisibility", "castsShadows", "receiveShadows", "visibleInReflections",
+                         "visibleInRefractions"):
+                try:
+                    cmds.setAttr(shape + "." + attr, 0)
+                except Exception:
+                    pass
+        try:
+            cmds.sets(xform, edit=True, forceElement="initialShadingGroup")
+        except Exception:
+            pass
+    return xform
+
+
+def placed_outline(sh, pl):
+    """The shell's outline where a placement puts it (same maths as
+    _place_shell: the hull holds the extreme points, so the corners match)."""
+    tu, tv, x, y, k, angle = pl[:6]
+    ca, sa = math.cos(angle), math.sin(angle)
+    q = [((a * ca - b * sa) * k, (a * sa + b * ca) * k) for a, b in sh.hull]
+    if not q:
+        return []
+    mx, my = min(c[0] for c in q), min(c[1] for c in q)
+    return [(tu + x + c[0] - mx, tv + y + c[1] - my) for c in q]
 
 
 def apply_layout(asset, collected, plan, uv_set="map1", backup=True, backup_set="map1_backup", progress=None):
@@ -6208,6 +6580,7 @@ def _mesh_shells(xform, uv_set, unit_scale):
     shells = {}
     k = 0
     for f, c in enumerate(counts):
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         if c == 0:
             continue
         sid = shell_of[ids[k]]
@@ -6321,6 +6694,7 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
     candidates = set()
     tight = set()
     for a_pos, i in enumerate(order):
+        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
         bi = shells[i]["box"]
         for j in order[a_pos + 1:]:
             bj = shells[j]["box"]
@@ -6729,6 +7103,320 @@ class UdimMapWidget(QtWidgets.QWidget):
         self.setMinimumHeight(int(max(120, min(520, self.rows * self._tile_px() + 24))))
 
 
+VIEW_COLOURS = ("Material group", "UV status", "Texel density")
+
+
+class UVCanvas(QtWidgets.QWidget):
+    """The UV viewer's drawing area: UDIM grid, shell outlines, overlays.
+    Wheel zooms (around the cursor), middle-drag or Alt+drag pans, F frames,
+    hover explains a shell, click selects its mesh."""
+
+    def __init__(self, viewer):
+        super(UVCanvas, self).__init__(viewer)
+        self.viewer = viewer
+        self.setMouseTracking(True)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setMinimumSize(420, 320)
+        self.scale = 160.0  # pixels per UV unit
+        self.origin = QtCore.QPointF(40.0, 40.0)  # screen position of UV (0, top row)
+        self._drag = None
+
+    # coordinates: u right, v up
+    def to_px(self, u, v):
+        return QtCore.QPointF(self.origin.x() + u * self.scale, self.height() - self.origin.y() - v * self.scale)
+
+    def to_uv(self, pos):
+        return ((pos.x() - self.origin.x()) / self.scale, (self.height() - self.origin.y() - pos.y()) / self.scale)
+
+    def frame(self):
+        v = self.viewer
+        tiles = v.tiles or {1001}
+        us = [(t - 1001) % 10 for t in tiles]
+        vs = [(t - 1001) // 10 for t in tiles]
+        u0, u1, v0, v1 = min(us), max(us) + 1, min(vs), max(vs) + 1
+        margin = self.band_width() + 10.0 if v.show_rows else 24.0
+        sx = (self.width() - margin - 24.0) / float(max(1, u1 - u0))
+        sy = (self.height() - 48.0) / float(max(1, v1 - v0))
+        self.scale = max(8.0, min(sx, sy))
+        extra_x = self.width() - margin - 24.0 - (u1 - u0) * self.scale  # centre what's left over
+        extra_y = self.height() - 48.0 - (v1 - v0) * self.scale
+        self.origin = QtCore.QPointF(margin + max(0.0, extra_x) / 2.0 - u0 * self.scale,
+                                     24.0 + max(0.0, extra_y) / 2.0 - v0 * self.scale)
+        self.update()
+
+    def band_width(self):
+        """Width of the section-name band: fits the longest name."""
+        fm = QtGui.QFontMetrics(self.font())
+        names = list(self.viewer.rows.values()) or [""]
+        return float(max(60, min(240, max(fm.horizontalAdvance(n) for n in names) + 16)))
+
+    def paintEvent(self, event):
+        v = self.viewer
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.fillRect(self.rect(), QtGui.QColor("#262626"))
+        s = self.scale
+        font = p.font()
+        font.setPointSizeF(max(7.0, min(11.0, s / 14.0)))
+        p.setFont(font)
+        for t in sorted(v.tiles):
+            tu, tv = (t - 1001) % 10, (t - 1001) // 10
+            r = QtCore.QRectF(self.to_px(tu, tv + 1), self.to_px(tu + 1, tv))
+            p.fillRect(r, QtGui.QColor("#303030"))
+            if t in v.reserved and v.show_reserved:
+                p.fillRect(r, QtGui.QBrush(QtGui.QColor("#5a4a30"), QtCore.Qt.BDiagPattern))
+            p.setPen(QtGui.QPen(QtGui.QColor("#4a4a4a")))
+            p.drawRect(r)
+            if v.show_tiles:
+                p.setPen(QtGui.QColor("#8a8a8a"))
+                p.drawText(r.adjusted(4, 2, -2, -2), QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft, str(t))
+        for item in v.items:
+            poly = QtGui.QPolygonF([self.to_px(a, b) for a, b in item["hull"]])
+            col = v.colour_of(item)
+            p.setPen(QtGui.QPen(col.darker(140), 1))
+            fill = QtGui.QColor(col)
+            fill.setAlpha(150)
+            p.setBrush(fill)
+            if item.get("fixed"):
+                p.setBrush(QtGui.QBrush(col, QtCore.Qt.BDiagPattern))
+            p.drawPolygon(poly)
+        if v.show_rows:
+            p.setFont(self.font())  # names keep one size, so the band fits them
+            p.setPen(QtGui.QColor("#d8d8d8"))
+            width = self.band_width()
+            for row, name in sorted(v.rows.items()):
+                top, bottom = self.to_px(0, row + 1), self.to_px(0, row)
+                band = QtCore.QRectF(self.origin.x() - width - 4, top.y(), width, bottom.y() - top.y())  # left of U 0
+                p.fillRect(band, QtGui.QColor(60, 60, 60, 160))
+                p.drawText(band.adjusted(4, 0, -2, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft | QtCore.Qt.TextWordWrap,
+                           name)
+        if v.banner:
+            p.setPen(QtGui.QColor("#f0c870"))
+            p.drawText(QtCore.QRectF(8, 4, self.width() - 16, 18), QtCore.Qt.AlignLeft, v.banner)
+        if not v.items and not v.tiles:
+            p.setPen(QtGui.QColor("#8a8a8a"))
+            p.drawText(self.rect(), QtCore.Qt.AlignCenter, "Nothing to show yet: Plan a layout, or Read Scene UVs")
+        p.end()
+
+    def _item_at(self, pos):
+        u, w = self.to_uv(pos)
+        for item in reversed(self.viewer.items):
+            b = item["box"]
+            if b[0] <= u <= b[2] and b[1] <= w <= b[3]:
+                if QtGui.QPolygonF([QtCore.QPointF(a, c) for a, c in item["hull"]]).containsPoint(
+                        QtCore.QPointF(u, w), QtCore.Qt.OddEvenFill):
+                    return item
+        return None
+
+    def wheelEvent(self, event):
+        pos = event.pos() if hasattr(event, "pos") else event.position().toPoint()
+        before = self.to_uv(pos)
+        self.scale = max(4.0, min(20000.0, self.scale * (1.2 if event.angleDelta().y() > 0 else 1 / 1.2)))
+        after = self.to_px(*before)
+        self.origin += QtCore.QPointF(pos.x() - after.x(), -(pos.y() - after.y()))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MiddleButton or (event.modifiers() & QtCore.Qt.AltModifier):
+            self._drag = (event.pos(), QtCore.QPointF(self.origin))
+            return
+        if event.button() == QtCore.Qt.LeftButton:
+            item = self._item_at(event.pos())
+            if item and cmds.objExists(item["mesh"]):
+                cmds.select(item["mesh"], replace=True)
+
+    def mouseMoveEvent(self, event):
+        if self._drag:
+            start, origin = self._drag
+            d = event.pos() - start
+            self.origin = QtCore.QPointF(origin.x() + d.x(), origin.y() - d.y())
+            self.update()
+            return
+        item = self._item_at(event.pos())
+        self.viewer.hover(item)
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_F:
+            self.frame()
+        else:
+            super(UVCanvas, self).keyPressEvent(event)
+
+
+class UVViewer(QtWidgets.QWidget):
+    """Live UV window: the planned layout (animated while Plan searches) or
+    the scene's actual UVs, on the UDIM grid, with section rows, tile
+    numbers and reserved tiles as toggleable overlays."""
+
+    def __init__(self, panel):
+        super(UVViewer, self).__init__(panel, QtCore.Qt.Window | QtCore.Qt.Tool)
+        self.panel = panel
+        self.setWindowTitle("Smart UDIM - UV Viewer")
+        self.resize(940, 680)
+        self.items, self.tiles, self.reserved, self.rows = [], set(), set(), {}
+        self.source = "plan"
+        self.banner = ""
+        self.show_rows = self.show_tiles = self.show_reserved = True
+        self.target = None
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        bar = QtWidgets.QHBoxLayout()
+        self.mode = ComboField(VIEW_COLOURS)
+        self.mode.setToolTip("Colour shells by material group, UV status (the panel's colours) or texel density "
+                             "(blue = under target, green = on target, red = over).")
+        self.mode.changed.connect(self.canvas_update)
+        bar.addWidget(QtWidgets.QLabel("Colour by"))
+        bar.addWidget(self.mode)
+        for name, label, tip in (("show_rows", "Section rows", "Section names down the side of their rows."),
+                                 ("show_tiles", "Tile numbers", "UDIM numbers in each tile."),
+                                 ("show_reserved", "Reserved tiles", "Hatch tiles kept for locked / Hands off work.")):
+            box = CheckField(label)
+            box.setValue(True)
+            box.setToolTip(tip)
+            box.changed.connect(lambda n=name, b=box: self._toggle(n, b.value()))
+            bar.addWidget(box)
+        bar.addStretch(1)
+        self.scene_btn = secondary_button("Read Scene UVs", "Show the UVs as they are in the scene now (each mesh is "
+                                                            "read once, then remembered until it changes).")
+        self.scene_btn.clicked.connect(lambda *_: self.show_scene())
+        self.plan_btn = secondary_button("Show Plan", "Show the planned layout (updates live while Plan searches).")
+        self.plan_btn.clicked.connect(lambda *_: self.show_plan(self.panel._collected, self.panel._plan))
+        frame = secondary_button("Frame (F)", "Fit the used tiles in the window.")
+        frame.clicked.connect(lambda *_: self.canvas.frame())
+        labels = secondary_button("Labels in UV Editor", "Put section and tile labels into Maya's own UV Editor "
+                                                         "(a hidden helper mesh; press again to remove it).")
+        labels.clicked.connect(lambda *_: self.panel.labels_btn.setChecked(not self.panel.labels_btn.value()))
+        for b in (self.scene_btn, self.plan_btn, frame, labels):
+            bar.addWidget(b)
+        lay.addLayout(bar)
+        self.canvas = UVCanvas(self)
+        lay.addWidget(self.canvas, 1)
+        self.info = hint_label("Wheel zooms, middle-drag (or Alt+drag) pans, F frames. Click a shell to select its "
+                               "mesh.")
+        lay.addWidget(self.info)
+
+    def _toggle(self, name, value):
+        setattr(self, name, value)
+        self.canvas.update()
+
+    def canvas_update(self):
+        self.canvas.update()
+
+    # ---------------------------------------------------------------- data
+    def colour_of(self, item):
+        mode = self.mode.value()
+        if mode == "UV status":
+            state = (self.panel.states or {}).get(item["mesh"], "unknown")
+            return QtGui.QColor(UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])[1])
+        if mode == "Texel density":
+            d, t = item.get("density"), self.target
+            if not d or not t:
+                return QtGui.QColor("#6a6a6a")
+            r = max(0.5, min(2.0, d / t))
+            if r < 1.0:  # blue -> green
+                k = (r - 0.5) / 0.5
+                return QtGui.QColor(int(70 * k), int(120 + 80 * k), int(230 - 160 * k))
+            k = (r - 1.0)  # green -> red
+            return QtGui.QColor(int(70 + 160 * k), int(200 - 140 * k), 70)
+        return _key_color(item.get("key") or "default", 255)
+
+    def show_plan(self, collected, plan, searching=False):
+        if not collected or not plan:
+            return
+        self.source = "plan"
+        items = []
+        res = float(plan["settings"].get("map_size", 2048) or 2048)
+        for g in collected["groups"]:
+            for sh in g["shells"]:
+                pl = plan["placements"].get(id(sh))
+                if not pl:
+                    continue
+                tu, tv, x, y, k = pl[:5]
+                hull = placed_outline(sh, pl)
+                if not hull:
+                    continue
+                items.append({"hull": hull, "box": (tu + x, tv + y, tu + x + pl[6], tv + y + pl[7]), "mesh": sh.mesh,
+                              "key": g["key"], "group": g["set"], "section": g["section"],
+                              "density": math.sqrt(sh.area_uv * k * k / sh.area3d) * res if sh.area3d > 0 else None})
+        for fx in collected.get("fixed", []):
+            tu, tv = (fx["udim"] - 1001) % 10, (fx["udim"] - 1001) // 10
+            b = fx["box"]
+            hull = [(tu + b[0], tv + b[1]), (tu + b[2], tv + b[1]), (tu + b[2], tv + b[3]), (tu + b[0], tv + b[3])]
+            items.append({"hull": hull, "box": (tu + b[0], tv + b[1], tu + b[2], tv + b[3]), "mesh": fx["mesh"],
+                          "key": fx["key"], "group": fx["set"], "section": "", "density": None, "fixed": True})
+        self.items = items
+        self.tiles = set(plan.get("tiles", []))
+        self.reserved = set(plan.get("tiles", [])) - set(plan.get("new_tiles", []))
+        names = dict((g["section_index"], parse_group_name(g["section"])["key"] or g["section"])
+                     for g in collected["groups"])
+        self.rows = {}
+        for si, rows in section_rows(collected, plan).items():
+            for r in rows:
+                self.rows[r] = names.get(si, "")
+        self.target = plan.get("density")
+        self.banner = ("Planning... %d px/m" % round(plan.get("density", 0))) if searching else \
+            ("Planned layout: %d px/m, %d tile(s) (not applied yet)" % (round(plan.get("density", 0)),
+                                                                        len(plan.get("new_tiles", []))))
+        self.canvas.update()
+
+    def show_scene(self):
+        asset = self.panel._asset()
+        if asset is None:
+            return
+        uv_set = self.panel.uv_set.text().strip() or "map1"
+        unit = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+        res = float(self.panel.lay_map.value() or 2048)
+        owner = {}
+        for sec in asset.sections():
+            key_sec = parse_group_name(sec)["key"] or sec
+            for mat in asset.materials(sec):
+                key = _get(mat, UDIM_KEY) or parse_group_name(mat)["key"]
+                for m in expand_members(mat)[0]:
+                    owner.setdefault(m, (key, mat, key_sec))
+        meshes = asset.meshes()[0]
+        status = asset.uv_status()
+        items, tiles, row_names = [], set(), {}
+        try:
+            with Progress("Reading scene UVs", [("read", 1)], status_progress(self.panel.status)) as pr:
+                pr.stage("read", len(meshes), "Reading shells")
+                for m in meshes:
+                    pr.item(short_name(m))
+                    key, mat, sec = owner.get(m, ("default", "", ""))
+                    for o in scene_shell_outlines(m, uv_set, unit):
+                        b = o["box"]
+                        if b[0] < 0 or b[1] < 0 or b[0] >= 10:
+                            continue
+                        t = 1001 + int(b[0]) + 10 * int(b[1])
+                        tiles.add(t)
+                        row_names.setdefault(int(b[1]), {}).setdefault(sec, 0)
+                        row_names[int(b[1])][sec] += 1
+                        items.append({"hull": o["hull"], "box": b, "mesh": m, "key": key, "group": mat,
+                                      "section": sec, "density": o["density"] * res if o["density"] else None,
+                                      "fixed": status.get(m) == "handsoff"})
+        except Cancelled:
+            self.panel.set_status("Reading scene UVs cancelled.", level="warn")
+            return
+        self.source = "scene"
+        self.items, self.tiles, self.reserved = items, tiles, set()
+        self.rows = dict((r, max(c.items(), key=lambda kv: kv[1])[0]) for r, c in row_names.items())
+        stored = layout_settings_of(asset)
+        self.target = stored.get("density") or self.panel.lay_density.value()
+        self.banner = "Scene UVs (%d shells on %d mesh(es))" % (len(items), len(meshes))
+        self.canvas.frame()
+
+    def hover(self, item):
+        if not item:
+            self.info.setText("Wheel zooms, middle-drag (or Alt+drag) pans, F frames. Click a shell to select its "
+                              "mesh.")
+            return
+        d = ("%d px/m" % round(item["density"])) if item.get("density") else "density n/a"
+        self.info.setText("%s  |  %s%s  |  %s%s" % (
+            short_name(item["mesh"]), item.get("key"), (" (%s)" % item["section"]) if item.get("section") else "",
+            d, "  |  Hands off" if item.get("fixed") else ""))
+
+
 class SmartUdimPanel(QtWidgets.QWidget):
     TOOL_NAME = "Smart UDIM"
     TOOL_TIP = "Organise geometry into UDIM sections and material groups, clean it and check its UVs."
@@ -6749,22 +7437,25 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._replan_timer = QtCore.QTimer(self)
         self._replan_timer.setSingleShot(True)
         self._replan_timer.setInterval(60)
-        self._replan_timer.timeout.connect(self._replan)
+        self._replan_timer.timeout.connect(_guarded(self._replan_timer, self._replan))
         self._populating = False
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
-        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self.refresh))
         self.states = {}
         self._applied = {}  # mesh -> state last coloured
         self._dirty = True  # the asset's sets / meshes changed since the last refresh
         self._set_callbacks = []
         self._auto_items = {}  # mesh -> its row in the Auto UV list
         self._score_cache = {}  # mesh -> [fingerprint, options..., score, reason]: saved with the scene
+        self._worker = None  # background PlanWorker
+        self.viewer = None  # UVViewer window
+        self._uv_labels = None  # helper mesh showing labels in Maya's UV Editor
         self._scene_timer = QtCore.QTimer(self)
         self._scene_timer.setSingleShot(True)
         self._scene_timer.setInterval(0)
-        self._scene_timer.timeout.connect(self._on_scene_changed)
+        self._scene_timer.timeout.connect(_guarded(self._scene_timer, self._on_scene_changed))
         self._callbacks = []
         self._build()
         self._install_jobs()
@@ -7130,14 +7821,26 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_comp.setValue(True)
         grid.add_full(self.lay_comp)
         card.add(grid)
-        plan_btn = secondary_button("Plan", "Preview the layout in the map below without changing anything.")
-        plan_btn.clicked.connect(lambda *_: self.plan_layout())
+        plan_btn = secondary_button("Plan", "Preview the layout in the map below without changing anything. The "
+                                            "search runs in the background (Maya stays usable) and shows live in "
+                                            "the UV Viewer.")
+        plan_btn.clicked.connect(lambda *_: self.plan_live())
+        viewer_btn = secondary_button("UV Viewer", "A big live view of the layout: the plan (animated while it "
+                                                   "searches) or the scene's UVs, with section rows, tile numbers, "
+                                                   "colour modes and click-to-select.")
+        viewer_btn.clicked.connect(lambda *_: self.open_viewer())
+        self.labels_btn = CheckField("Labels in UV Editor")
+        self.labels_btn.setToolTip("Show tile borders, UDIM numbers and section names in Maya's own UV Editor: a "
+                                   "helper mesh (unlokUdimLabels, doesn't render) is added to the selection. "
+                                   "Untick to remove it.")
+        self.labels_btn.changed.connect(lambda: self.toggle_uv_editor_labels(self.labels_btn.value()))
         self.apply_btn = primary_button("Apply Layout")
         self.apply_btn.setMinimumHeight(28)
         self.apply_btn.setToolTip("Write the planned layout into the UV set (old UVs backed up if step 6's "
                                   "backup is ticked). One Ctrl+Z undoes it.")
         self.apply_btn.clicked.connect(lambda *_: self.apply_layout())
-        card.add(button_row(plan_btn, self.apply_btn))
+        card.add(button_row(plan_btn, viewer_btn, self.apply_btn))
+        card.add(self.labels_btn)
         self.udim_map = UdimMapWidget()
         self.udim_map.groupClicked.connect(self._map_clicked)
         card.add(self.udim_map)
@@ -7893,20 +8596,136 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _layout_settings_changed(self):
         self._update_layout_enabled()
-        if self._plan is None:
+        if self._plan is None and self._worker is None:
             return
-        if self._plan_work() > self.LIVE_REPLAN_WORK:  # too big to re-plan on every tick
-            self.layout_summary.setText("Settings changed. This layout is big, so it doesn't re-plan live: press "
-                                        "<b>Plan</b> to update the map.")
-            return
-        self._replan_timer.start()  # live re-plan: pure math on cached shells
+        self._replan_timer.start()  # live re-plan in the background: pure maths on cached shells
 
     def _replan(self):
         try:
-            if self._plan is not None:
-                self.plan_layout(quiet=True)
+            if self._plan is not None or self._worker is not None:
+                self.plan_live()
         except Exception:
             traceback.print_exc()
+
+    # ------------------------------------------------------------ live planning
+    @ui_safe
+    def plan_live(self):
+        """Plan in the background: read the shells once (Working window),
+        then search on a worker thread while Maya stays usable. A newer
+        request cancels the older search."""
+        asset = self._asset()
+        if asset is None or not asset.sections():
+            self.set_status("Pick a root and Scan first.", level="warn")
+            return
+        if self._collected is None:
+            uv_set = self.uv_set.text().strip() or "map1"
+            try:
+                with Progress("Plan", [("read", 1)], status_progress(self.status)) as pr:
+                    pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
+                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value())
+            except Cancelled:
+                self._collected = None
+                self.set_status("Plan cancelled. Nothing changed.", level="warn")
+                return
+        self._stop_worker()
+        worker = PlanWorker(self._collected, self._layout_settings())
+        worker.attempted.connect(self._plan_attempted)  # bound methods: queued onto the main thread
+        worker.finished.connect(self._plan_finished)
+        self._worker = worker
+        self._plan_t0 = time.time()
+        self.layout_summary.setText("Planning in the background... (Maya stays usable; watch it in the UV "
+                                    "Viewer)")
+        worker.start()
+
+    def _plan_attempted(self, plan):
+        try:
+            if self._worker is not None and self.viewer is not None and self.viewer.isVisible():
+                self.viewer.show_plan(self._worker.collected, plan, searching=True)
+        except Exception:
+            traceback.print_exc()
+
+    def _plan_finished(self, worker, plan, err):
+        if worker is not self._worker:
+            return  # superseded by a newer search
+        self._worker = None
+        if err == "cancelled" or worker.collected is not self._collected:
+            return  # cancelled, or the scene changed meanwhile (shells will be re-read)
+        if err:
+            self.set_status("Plan failed: %s" % err, level="error")
+            return
+        self._plan = plan
+        self.udim_map.set_plan(self._collected, plan)
+        if self.viewer is not None and self.viewer.isVisible():
+            self.viewer.show_plan(self._collected, plan)
+        self._summarise_plan(time.time() - self._plan_t0)
+        self._refresh_uv_labels()
+        self._update_guidance()
+
+    def _stop_worker(self):
+        if self._worker is not None:
+            worker, self._worker = self._worker, None
+            worker.stop()
+
+    def _label_data(self):
+        """(tiles, {row: section name}) from the plan, else from what was applied."""
+        if self._plan is not None and self._collected is not None:
+            names = dict((g["section_index"], parse_group_name(g["section"])["key"] or g["section"])
+                         for g in self._collected["groups"])
+            rows = {}
+            for si, rs in section_rows(self._collected, self._plan).items():
+                for r in rs:
+                    rows.setdefault(r, names.get(si, ""))
+            return set(self._plan.get("tiles", [])), rows
+        asset = self._asset()
+        tiles, rows = set(), {}
+        for sec in (asset.sections() if asset else []):
+            name = parse_group_name(sec)["key"] or sec
+            for mat in asset.materials(sec):
+                for t in (_get(mat, LAYOUT_TILES, "") or "").split(","):
+                    if t.strip().isdigit():
+                        tiles.add(int(t))
+                        rows.setdefault((int(t) - 1001) // 10, name)
+        return tiles, rows
+
+    @ui_safe
+    def toggle_uv_editor_labels(self, on=True):
+        if not on:
+            remove_uv_label_mesh()
+            self._uv_labels = None
+            return
+        tiles, rows = self._label_data()
+        if not tiles:
+            self.set_status("Nothing to label yet: Plan or Apply a layout first.", level="warn")
+            self.labels_btn.setValue(False)
+            return
+        self._uv_labels = build_uv_label_mesh(tiles, rows)
+        if self._uv_labels:
+            with NoUndo():
+                cmds.select(self._uv_labels, add=True)
+            try:
+                mel.eval("TextureViewWindow")
+            except Exception:
+                pass
+            self.set_status("Labels are in the UV Editor (keep %s selected with the meshes)." % self._uv_labels)
+
+    def _refresh_uv_labels(self):
+        if toolbox_busy():  # a step is running (its Working window processes events): no scene edits now
+            return
+        if self._uv_labels and cmds.objExists(self._uv_labels):
+            tiles, rows = self._label_data()
+            self._uv_labels = build_uv_label_mesh(tiles, rows)
+
+    @ui_safe
+    def open_viewer(self):
+        if self.viewer is None:
+            self.viewer = UVViewer(self)
+        self.viewer.show()
+        self.viewer.raise_()
+        if self._plan is not None and self._collected is not None:
+            self.viewer.show_plan(self._collected, self._plan)
+            self.viewer.canvas.frame()
+        else:
+            self.viewer.show_scene()
 
     @ui_safe
     def plan_layout(self, quiet=False):
@@ -7915,6 +8734,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("Pick a root and Scan first.", level="warn")
             return None
         t0 = time.time()
+        self._stop_worker()
         settings = self._layout_settings()
         if self._collected is None:  # orientation etc. are re-plans only: no scene read
             uv_set = self.uv_set.text().strip() or "map1"
@@ -7940,7 +8760,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         else:
             self._plan = make_plan(self._collected, settings)
         self.udim_map.set_plan(self._collected, self._plan)
+        if self.viewer is not None and self.viewer.isVisible():
+            self.viewer.show_plan(self._collected, self._plan)
         self._summarise_plan(time.time() - t0)
+        self._refresh_uv_labels()
         self._update_guidance()
         return self._plan
 
@@ -8622,6 +9445,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def shutdown(self):
         self._refresh_timer.stop()
         self._scene_timer.stop()
+        self._stop_worker()
+        if self.viewer is not None:
+            self.viewer.close()
+        if self._uv_labels:
+            try:
+                remove_uv_label_mesh()
+            except Exception:
+                pass
         cbs = _registry()["callbacks"]
         for cid in self._callbacks + self._set_callbacks:
             try:
@@ -9569,7 +10400,7 @@ class BevelResolverPanel(QtWidgets.QWidget):
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
-        self._sel_timer.timeout.connect(self._update_guidance)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._update_guidance))
         self._build()
         self._install_jobs()
         self._update_guidance()
@@ -10267,11 +11098,11 @@ class LogNoisePanel(QtWidgets.QWidget):
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
-        self._sel_timer.timeout.connect(self._sync_from_selection)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._sync_from_selection))
         self._edit_timer = QtCore.QTimer(self)
         self._edit_timer.setSingleShot(True)
         self._edit_timer.setInterval(40)
-        self._edit_timer.timeout.connect(self._apply_pending)
+        self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
         self._build()
         self._install_jobs()
         self._sync_from_selection()

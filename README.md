@@ -301,6 +301,9 @@ density. The actual layout is still being built; see
      percentage and the time left. Press **Esc** to stop at the next mesh;
      one Ctrl+Z then undoes what was done. A long pause only happens inside
      one Unfold3D call on a big mesh, and the bar names it first.
+   - **Only the shells that need it are unfolded.** A shell whose projection
+     is already clean (walls, planks, boxes) skips Unfold3D. A mesh with one
+     curved shell unfolds just that shell, so each Unfold3D call is shorter.
    - **Restore Backup** copies the backup set back into `map1` for the
      selected meshes, or for all of them if nothing is selected.
    - **Meshes you've already UV'd:** select them and press one of these
@@ -324,14 +327,38 @@ density. The actual layout is still being built; see
      previews every shell coloured by material: hover for density, coverage
      and tiles, click to select a group, and locked tiles show hatched.
      Changing a setting re-plans instantly. **Apply Layout** writes it.
+   - **Plan runs in the background.** Once the shells are read, the search
+     runs on its own thread: Maya stays usable, and changing a setting
+     starts a fresh search (the old one stops). Apply and Do It All still
+     plan on the spot.
+   - **UV Viewer** (button next to Plan): a big window with the layout on
+     the UDIM grid. While Plan searches it animates through the densities
+     it tries. *Read Scene UVs* shows the UVs as they are in the scene now
+     (each mesh is read once, then remembered until it changes).
+     - Colour by material group, UV status (the panel's colours) or texel
+       density (blue under target, green on it, red over).
+     - Overlays you can toggle: section names down the side of their rows,
+       UDIM numbers, and hatched reserved tiles.
+     - Wheel zooms, middle-drag or Alt+drag pans, F frames. Hover a shell
+       to see its mesh, group, section and density; click it to select the
+       mesh.
+   - **Labels in UV Editor** (checkbox): tile borders, UDIM numbers and
+     section names inside Maya's own UV Editor. They're drawn by a helper
+     mesh, `unlokUdimLabels`, which doesn't render and is added to the
+     selection (the UV Editor only shows selected meshes). It updates with
+     each plan. Untick it to delete the mesh; closing the toolbox deletes it
+     too.
    - **Plan only lays out meshes that are ready:** Keep UVs, Auto UV'd,
      already laid out, or scoring well. Meshes that still need UVs, and
      meshes with junk UVs (thousands of shells, or most faces their own
      shell), are left out and listed. The banner then says to run Auto UV
-     first. On a big layout, settings no longer re-plan live on every
-     change: press Plan.
+     first.
    - **Every heavy step shows progress and stops on Esc:** Check UVs, Auto
      UV, Plan, Apply, Validate, Pre-process, Bevel Resolver and Log Noise.
+     After half a second a **Working** window appears with what's
+     happening and a **Cancel** button. Maya keeps redrawing, so Windows
+     never marks it "Not responding", and Cancel or Esc stops within a
+     moment (long loops check it as they go, not just between meshes).
      A cancelled Apply, Bevel Resolve or Log Noise apply rolls back
      completely, and never undoes your previous action. Validate and the
      hand-off sheet report junk-UV meshes instead of grinding through
@@ -464,6 +491,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   both hands-off tile modes and validation.
 - `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and
   2D packing (fill, padding, stable re-plans, speed).
+- `tests/test_live_view.py`: shell outlines match their placements, the
+  live-view hook, the background planner (same result, stops promptly),
+  scene outlines and their density, the UV Editor label mesh.
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash

@@ -463,11 +463,54 @@ def main():
     udim.plan_layout()
     pump()
     udim.lay_density.spin.setValue(1024.0)  # like a user edit: emits, so it live re-plans from cached shells
-    deadline = time.time() + 1.0
-    while time.time() < deadline:
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not (udim._worker is None and "1024 px/m" in udim.layout_summary.text()):
         pump(1)
-    check("changing a setting re-plans live", "1024 px/m" in udim.layout_summary.text(),
+    check("changing a setting re-plans live (in the background)", "1024 px/m" in udim.layout_summary.text(),
           udim.layout_summary.text()[:120])
+
+    # --- background Plan, the UV Viewer and labels in Maya's UV Editor
+    udim.lay_mode.setValue("Fit sections to rows")
+    udim.plan_live()
+    started = udim._worker is not None
+    deadline = time.time() + 30.0
+    while udim._worker is not None and time.time() < deadline:
+        pump(1)
+    check("Plan runs in the background and lands in the panel",
+          started and udim._worker is None and "Every section fits on its own row" in udim.layout_summary.text(),
+          udim.layout_summary.text()[:160])
+    udim.open_viewer()
+    pump()
+    viewer = udim.viewer
+    check("UV Viewer shows the plan", viewer.isVisible() and len(viewer.items) > 0 and viewer.tiles and viewer.rows,
+          "%d items, tiles %s, rows %s" % (len(viewer.items), sorted(viewer.tiles), viewer.rows))
+    viewer.grab().save(os.path.join(OUT, "11b_uv_viewer_plan.png"))
+    viewer.mode.setValue("Texel density")
+    viewer.canvas.update()
+    pump()
+    check("UV Viewer colours by texel density", viewer.colour_of(viewer.items[0]).name() != "#6a6a6a")
+    viewer.grab().save(os.path.join(OUT, "11c_uv_viewer_density.png"))
+    viewer.show_scene()
+    pump()
+    check("UV Viewer reads the scene's UVs", viewer.source == "scene" and len(viewer.items) > 0,
+          "%d items" % len(viewer.items))
+    viewer.mode.setValue("UV status")
+    pump()
+    viewer.grab().save(os.path.join(OUT, "11d_uv_viewer_scene.png"))
+    viewer.close()
+    udim.labels_btn.setChecked(True)
+    pump()
+    label_mesh = ns["UV_LABEL_MESH"]
+    check("Labels in UV Editor adds the helper mesh", cmds.objExists(label_mesh) and
+          label_mesh in (cmds.ls(selection=True) or []), udim.status.text())
+    udim.labels_btn.setChecked(False)
+    pump()
+    check("...and unticking removes it", not cmds.objExists(label_mesh))
+    for w in QtWidgets.QApplication.topLevelWidgets():  # the UV Editor it opened
+        if w.isVisible() and "UV Editor" in (w.windowTitle() or ""):
+            w.close()
+    udim.lay_mode.setValue("Fixed density")
+    udim.plan_layout()
     first = udim.tree.topLevelItem(0).child(0)
     first.setCheckState(udim.COL_LOCK, ns["QtCore"].Qt.Checked)
     pump()

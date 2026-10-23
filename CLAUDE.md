@@ -353,8 +353,45 @@
   `undo_if_last(chunk_name)`, never a bare `cmds.undo()`. A run cancelled
   before it changed anything leaves no step, and `cmds.undo()` would then
   undo the user's previous action.
-- **Live re-plans** stop above LIVE_REPLAN_WORK (shells x packs); the user
-  presses Plan, which shows progress.
+- **Working window** (`WorkingDialog`, made by `Progress.update()` after
+  0.5 s in the UI):
+  - It's application-modal and calls `processEvents()`, so Maya never goes
+    "Not responding" and Cancel works. Its Cancel raises `Cancelled`, the
+    same as Esc.
+  - `_tick()` sits in hot per-face / per-shell loops and polls the running
+    Progress every 2,048 calls (main thread only).
+  - Because events now run mid-step, every panel timer goes through
+    `_guarded(timer, fn)`, which re-arms while `toolbox_busy()`. Nothing may
+    edit the scene from an event during a step (`_refresh_uv_labels`
+    checks too).
+- **Background planning** (`PlanWorker`, `SmartUdimPanel.plan_live`):
+  - Shells are read on the main thread (Working window). `make_plan` then
+    runs on a `threading.Thread`; it's pure maths and makes no Maya calls.
+  - `make_plan(on_attempt=...)` shows every density tried, throttled to
+    about 12 a second, which is how the UV Viewer animates. Raising
+    `Cancelled` from the hook stops a superseded search.
+  - Signals connect to bound panel methods, so they're queued onto the
+    main thread (a lambda might not be).
+  - `_stop_worker()` joins the thread (one attempt, well under a second)
+    before anything else plans from the same `collected`, since
+    `free_around` caches on it.
+  - Results whose `collected` is no longer the panel's are dropped.
+  - Apply and Do It All stop the worker and plan synchronously.
+- **UV Viewer** (`UVViewer`, `UVCanvas`):
+  - `LayoutShell.hull` (convex hull about the centre) plus `placed_outline`
+    gives the plan outlines, using the same maths as `_place_shell`.
+  - `scene_shell_outlines` reads the scene; it's cached in `_OUTLINES` by
+    fingerprint.
+- **UV Editor labels** (`build_uv_label_mesh`):
+  - A helper mesh whose UVs spell out tile borders, numbers (3x5 pixel
+    font, `_GLYPHS`) and section names in negative U. Its 3D size is 1e-4
+    and it doesn't render.
+  - It's built in NoUndo (the API create isn't undoable) and found again by
+    its `unlokUdimLabels` tag attribute.
+- **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose
+  projection isn't clean. Auto UV's "find" stage unfolds just those
+  (component lists to `u3dUnfold` / `_auto_seam`), or the whole mesh when
+  some faces have no UVs.
 
 ## Maya API gotchas found so far
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
@@ -436,6 +473,11 @@
   on the user's screen (they share the machine). Always shut down cleanly
   (`maya.standalone.uninitialize()` before `os._exit`), and keep runs few:
   full suites plus the GUI smoke once before a push.
+- **GUI Maya: also set `MAYA_SKIP_USERSETUP_PY=1`** and pass `-script` an
+  absolute path. The user's Prism module (`Documents/maya/2024/modules/
+  Prism.mod`) can open a modal "Prism Autosave" dialog at startup, which
+  blocks the test forever (2026-10-23). Add `-log <file>` to see Maya's
+  output.
 Maya 2024 and 2025 are installed locally (no 2023). Run
 `mayapy tests/test_toolbox.py`, `tests/test_smart_udim.py` and
 `tests/test_bevel_resolver.py` for the engines, and
