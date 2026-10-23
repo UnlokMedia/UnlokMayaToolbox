@@ -187,7 +187,10 @@
     from `_rope_pair_seed`, so preview and result match). Meshes are made
     through the API in NoUndo, `setDoNotWrite`, reference display (not
     selectable) and tagged `unlokRopePreview`; the selection never changes,
-    so no SelectionChanged loop. `lash` and leaving preview mode clear them.
+    so no SelectionChanged loop. The panel pins the preview to its logs
+    (`_pin`: uuids + target), so it survives deselecting; selecting other
+    logs (live on) re-pins, selecting lashings (edit mode), Clear Preview
+    and Lash drop it. Lash with no logs selected ties the pinned logs.
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
 - **Smart UDIM** (UV tab):

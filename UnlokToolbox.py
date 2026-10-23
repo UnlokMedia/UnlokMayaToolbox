@@ -15041,6 +15041,7 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self._pending = set()
         self._mode = "idle"  # idle / preview (logs selected, live) / edit (lashings selected)
         self._preview = {}  # the last preview's report (its kinds go in the banner)
+        self._pin = None  # the previewed logs {"uuids", "target"}: the preview stays when they're deselected
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
@@ -15183,17 +15184,26 @@ class RopeLashingPanel(QtWidgets.QWidget):
         col.addWidget(card)
 
         # ---- 3. lash
-        card = self.step_lash = StepCard(3, "Lash", "Keeps what the preview shows as real lashings. One Ctrl+Z "
-                                                    "undoes it.")
-        self.live = CheckField("Live preview on the selected logs")
+        card = self.step_lash = StepCard(3, "Preview and lash", "The preview stays on its logs when you deselect "
+                                                                "them, so you can look at it shaded and keep "
+                                                                "tweaking. Lash keeps it (one Ctrl+Z).")
+        self.live = CheckField("Selecting logs previews them straight away")
         self.live.setValue(True)
-        self.live.setToolTip("Show the lashing on the selected logs while you pick the settings (nothing is kept "
-                             "until Lash Selected). Turn off for big frames if it gets slow.")
+        self.live.setToolTip("On: selecting two or more logs moves the preview onto them.\nOff: only Preview "
+                             "Selected does (handy for big frames, or to pick other things without losing the "
+                             "preview).")
         self.live.changed.connect(lambda: self._sync_from_selection())
         card.add(self.live)
+        prev = secondary_button("Preview Selected", "Show the lashing on the selected logs. It stays when you "
+                                                    "deselect them.")
+        prev.clicked.connect(lambda *_: self.preview_selected())
+        clear = secondary_button("Clear Preview", "Remove the preview (nothing in the scene changes).")
+        clear.clicked.connect(lambda *_: self.clear_preview())
+        card.add(button_row(prev, clear))
         self.lash_btn = primary_button("Lash Selected")
         self.lash_btn.setMinimumHeight(28)
-        self.lash_btn.setToolTip("Tie the selected logs with the settings above. One Ctrl+Z undoes it.")
+        self.lash_btn.setToolTip("Tie the selected logs (or the previewed ones when no logs are selected) with the "
+                                 "settings above: exactly what the preview shows. One Ctrl+Z undoes it.")
         self.lash_btn.clicked.connect(lambda *_: self.lash())
         card.add(self.lash_btn)
         col.addWidget(card)
@@ -15244,6 +15254,23 @@ class RopeLashingPanel(QtWidgets.QWidget):
         for key, widget in self.f.items():
             widget.setValue(settings.get(key, ROPE_DEFAULTS[key]))
 
+    def _pin_logs(self):
+        """(logs, target) the preview is pinned to, or (None, None) once one
+        of them is gone (deleted, new scene)."""
+        if not self._pin:
+            return None, None
+        logs = []
+        for uid in self._pin["uuids"]:
+            found = cmds.ls(uid, long=True) or []
+            if not found:
+                self._pin = None
+                return None, None
+            logs.append(found[0])
+        return logs, self._pin["target"]
+
+    def _set_pin(self, logs, target):
+        self._pin = {"uuids": [cmds.ls(x, uuid=True)[0] for x in logs], "target": target}
+
     def _sync_from_selection(self):
         try:
             ropes, logs, target = rope_selection()
@@ -15268,24 +15295,30 @@ class RopeLashingPanel(QtWidgets.QWidget):
                 text = (text + " %d lashing(s) selected." % len(ropes)).strip()
             self.sel_label.setText(text)
             ready = len(logs) >= 2
-            if ropes:
-                mode = "edit"
+            if ropes:  # editing lashings: a preview would only blur what the sliders change
+                self._pin = None
             elif ready and self.live.value():
-                mode = "preview"
-            else:
-                mode = "idle"
-            self._mode = mode
-            if mode == "preview":
+                self._set_pin(logs, target)
+            pinned = self._pin_logs()[0] is not None
+            self._mode = "edit" if ropes else ("preview" if pinned else "idle")
+            if self._mode == "preview" and (ready and self.live.value() or not rope_previews()):
                 self._refresh_preview()
-            elif clear_rope_previews():
+            elif self._mode != "preview" and clear_rope_previews():
                 self.set_status("Preview cleared.")
-            self.step_select.set_state("done" if ready or ropes else "current")
-            self.step_rope.set_state("current" if mode != "idle" else ("done" if ready else "todo"))
-            self.step_lash.set_state("current" if ready else "todo")
-            self.step_finish.set_state("todo")
-            self._update_banner()
+            self._update_states()
         except Exception:
             traceback.print_exc()
+
+    def _update_states(self):
+        ropes, logs, _ = rope_selection()
+        ready = len(logs) >= 2
+        pinned = self._mode == "preview"
+        self.step_select.set_state("done" if ready or ropes or pinned else "current")
+        self.step_rope.set_state("current" if self._mode != "idle" else ("done" if ready else "todo"))
+        self.step_lash.set_state("current" if ready or pinned else "todo")
+        self.step_finish.set_state("todo")
+        self.lash_btn.setText("Lash Selected" if ready or not pinned else "Lash Preview")
+        self._update_banner()
 
     def _update_banner(self):
         ropes, logs, _ = rope_selection()
@@ -15295,18 +15328,26 @@ class RopeLashingPanel(QtWidgets.QWidget):
                                       tag="EDITING", tone="active")
         elif self._mode == "preview":
             kinds = ", ".join(sorted(self._preview.get("kinds", {}))) or "No"
-            self.next_banner.set_text("<b>%s</b> lashing shown on the selected logs. Click the lashing types and "
-                                      "rope styles to compare, then <b>Lash Selected</b> to keep it." % kinds,
-                                      tag="PREVIEW", tone="active")
+            names = [short_name(x) for x in self._pin_logs()[0] or []]
+            on = " + ".join(names) if len(names) <= 3 else "%d logs" % len(names)
+            self.next_banner.set_text("<b>%s</b> lashing on %s. Deselect to see it shaded; every change in step 2 "
+                                      "shows on it. <b>Lash</b> keeps it." % (kinds, on), tag="PREVIEW",
+                                      tone="active")
         elif len(logs) >= 2:
-            self.next_banner.set_text("Set up the lashing in step 2, then press <b>Lash Selected</b>.")
+            self.next_banner.set_text("Press <b>Preview Selected</b> to see it, or set up step 2 and press "
+                                      "<b>Lash Selected</b>.")
         else:
             self.next_banner.set_text("Select two logs that touch or cross (or a whole frame of them), or a "
                                       "lashing to edit.")
 
     def _refresh_preview(self):
-        """Re-draw the preview for the selected logs with the current fields."""
-        logs, target = rope_selection()[1:]
+        """Re-draw the preview on its logs with the current fields."""
+        logs, target = self._pin_logs()
+        if logs is None:
+            clear_rope_previews()
+            self._mode = "idle"
+            self._update_states()
+            return
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
@@ -15322,10 +15363,29 @@ class RopeLashingPanel(QtWidgets.QWidget):
             msg = "Preview: %d lashing(s) in %.2fs." % (shown, time.time() - t0)
             level = "info"
             if report.get("pairs", shown) > shown:
-                msg += " Showing the first %d of %d: Lash Selected ties them all." % (shown, report["pairs"])
+                msg += " Showing the first %d of %d: Lash ties them all." % (shown, report["pairs"])
                 level = "warn"
             self.set_status(msg, level)
         self._update_banner()
+
+    @ui_safe
+    def preview_selected(self):
+        logs, target = rope_selection()[1:]
+        if len(logs) < 2:
+            self.set_status("Select two or more logs to preview.", level="warn")
+            return
+        self._set_pin(logs, target)
+        self._mode = "preview"
+        self._refresh_preview()
+        self._update_states()
+
+    @ui_safe
+    def clear_preview(self):
+        self._pin = None
+        n = clear_rope_previews()
+        self._mode = "edit" if rope_selection()[0] else "idle"
+        self._update_states()
+        self.set_status("Preview cleared." if n else "No preview to clear.")
 
     # ============================================================= actions
     def _queue(self, key):
@@ -15367,9 +15427,12 @@ class RopeLashingPanel(QtWidgets.QWidget):
     @ui_safe
     def lash(self):
         logs, target = rope_selection()[1:]
-        if len(logs) < 2:
-            self.set_status("Select at least two logs (mesh objects) first.", level="warn")
+        if len(logs) < 2:  # no logs selected: keep the preview
+            logs, target = self._pin_logs()
+        if not logs or len(logs) < 2:
+            self.set_status("Select at least two logs (mesh objects) first, or preview some.", level="warn")
             return
+        self._pin = None
         clear_rope_previews()
         t0 = time.time()
         try:

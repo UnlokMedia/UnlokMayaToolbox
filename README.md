@@ -175,10 +175,11 @@ for stilt shacks, fences and frames.
    vertex or edge to say where along them the lashing goes. Select an
    existing lashing to edit it.
 2. **Lashing and rope:** everything here shows straight away. With logs
-   selected and *Live preview* on, a preview lashing appears on them (the
-   banner says **PREVIEW**) and follows every click, so you can flip
-   between lashing types and rope styles to compare. With lashings
-   selected, the same controls edit them live (the banner says
+   selected, a preview lashing appears on them (the banner says
+   **PREVIEW**) and follows every click, so you can flip between lashing
+   types and rope styles to compare. The preview stays on its logs when you
+   deselect them, so you can look at it shaded and keep tweaking. With
+   lashings selected, the same controls edit them live (the banner says
    **EDITING**).
    - **Preset:** picking one loads it. Built in: Standard, Hero
      (close-ups), Background (light), Thin twine and Heavy rope.
@@ -205,10 +206,17 @@ for stilt shacks, fences and frames.
      keeps its own, so the preview and the result match).
    - Advanced: Bite (how far it presses into the wood), Sides, Segment
      length and Lay (how tight the strands twist).
-3. **Lash Selected** keeps exactly what the preview showed (one Ctrl+Z). The
-   preview itself isn't undoable, can't be selected and is never saved with
-   the scene. For big frames it shows the first 12 lashings; turn *Live
-   preview* off if it gets slow.
+3. **Preview and lash:**
+   - **Lash** keeps exactly what the preview shows (one Ctrl+Z). With logs
+     selected it ties those (**Lash Selected**); with nothing selected it
+     ties the previewed ones (**Lash Preview**). So either select logs, set
+     things up and Lash, or preview, deselect, tweak, then Lash.
+   - *Selecting logs previews them straight away* is on by default. Turn it
+     off for big frames, or to click around without moving the preview;
+     **Preview Selected** then puts it on the selected logs.
+   - **Clear Preview** removes it. The preview isn't undoable, can't be
+     selected and is never saved with the scene. For big frames it shows
+     the first 12 lashings (Lash still ties them all).
 4. **Finish:** **Refit to Logs** re-ties lashings to logs you've moved (each
    keeps its own settings). **Bake** keeps the mesh and forgets the
    settings. **Select Lashings** finds the ones tied to the selected logs.

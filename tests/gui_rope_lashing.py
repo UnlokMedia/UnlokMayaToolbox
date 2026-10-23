@@ -124,10 +124,29 @@ def main():
     panel.f["lashing"].buttons["Auto"].click()
     panel._apply_pending()
     pump()
-    n_preview = verts(ns["rope_previews"]()[0])
     window.grab().save(os.path.join(OUT, "00_panel_preview.png"))
 
-    panel.lash()
+    # --- the preview stays on its logs when they're deselected
+    cmds.select(clear=True)
+    panel._sync_from_selection()
+    pump()
+    check("deselecting keeps the preview", len(ns["rope_previews"]()) == 1 and
+          panel.next_banner.tag.text() == "PREVIEW" and panel.lash_btn.text() == "Lash Preview",
+          "%s | %s" % (panel.lash_btn.text(), panel.next_banner.text.text()))
+    n_twisted = verts(ns["rope_previews"]()[0])
+    panel.f["style"].buttons["3 strands"].click()
+    panel._apply_pending()
+    pump()
+    check("with nothing selected, changes still update the preview",
+          verts(ns["rope_previews"]()[0]) != n_twisted)
+    frame_on(ns["rope_previews"]()[0], persp)
+    snap("00_preview_deselected_3strands.png")
+    panel.f["style"].buttons["Twisted"].click()
+    panel._apply_pending()
+    pump()
+    n_preview = verts(ns["rope_previews"]()[0])
+
+    panel.lash()  # nothing selected: keeps the preview
     pump()
     ropes = ns["ropes_in"]()
     check("Lash Selected ties one lashing", len(ropes) == 1, panel.status.text())
@@ -231,10 +250,14 @@ def main():
     panel.live.setValue(False)
     panel._sync_from_selection()
     check("Live preview off: no preview", not ns["rope_previews"]() and panel.next_banner.tag.text() == "NEXT")
+    panel.preview_selected()
+    check("Preview Selected works with live preview off", len(ns["rope_previews"]()) == 1)
     panel.live.setValue(True)
     cmds.select(clear=True)
     panel._sync_from_selection()
-    check("deselecting clears the preview", not ns["rope_previews"]())
+    check("the preview survives deselecting", len(ns["rope_previews"]()) == 1)
+    panel.clear_preview()
+    check("Clear Preview removes it", not ns["rope_previews"]() and panel.next_banner.tag.text() == "NEXT")
     panel.lash()
     check("no selection gives a warning", "Select" in panel.status.text(), panel.status.text())
 
