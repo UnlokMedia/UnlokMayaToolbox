@@ -14205,7 +14205,7 @@ def _rl_square(tie, J, wraps, fraps, hitches):
         start = tie.clove_on(0, ta - low - 2.6 * d, 1.0, _rl_add(A.center(t1), _rl_mul(ma, -1.0)), -1)
         far = tie.extent(out, 1, tb, 1.0)
         end = tie.clove_on(1, tb + far + 1.6 * d, 1.0, (frap or out)[-1][0], 1)
-    return start + out + frap + end
+    return start, out + frap, end
 
 
 def _rl_saddle(tie, J, wraps, hitches):
@@ -14250,7 +14250,7 @@ def _rl_saddle(tie, J, wraps, hitches):
         sg = sides[0]
         far = tie.extent(out, 1, tb, sg)
         end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1)
-    return start + out + end
+    return start, out, end
 
 
 def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
@@ -14280,7 +14280,7 @@ def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
             first = (p, z0)
         out += piece
     if not both:
-        return out
+        return [], out, []
     frap = tie.fraps(out, J["cA"], n, J["rA"], J["D"] - J["rB"], fraps, out[-1][0])
     start, end = [], []
     if hitches:  # the start hitch sits around both logs, on the first diagonal (timber hitch's place)
@@ -14300,7 +14300,7 @@ def _rl_diagonal(tie, J, wraps, fraps, hitches, both=True):
                 if best is None or clear_by > best[0]:
                     best = (clear_by, i, t, sg)
         end = tie.clove_on(best[1], best[2], best[3], last, 1)
-    return start + out + frap + end
+    return start, out + frap, end
 
 
 def _rl_round(tie, J, wraps, fraps, hitches, sheer):
@@ -14333,21 +14333,20 @@ def _rl_round(tie, J, wraps, fraps, hitches, sheer):
         else:
             start = tie.clove(both, o0, w, out[0][0], -1)
             end = tie.clove(both, o1, w, last, 1)
-    return start + out + frap + end
+    return start, out + frap, end
 
 
-def rope_path(poles, settings, target=None, others=(), obstacles=()):
-    """The rope centre line for a lashing of two logs (pure maths plus ray
-    casts on the logs; nothing in the scene changes). others: more logs at
-    the joint to keep out of; obstacles: rope already there (points) to
-    ride over.
+def _rl_rope_size(s, rmin):
+    """(rope radius, sample step) for settings s on logs whose thinnest radius is rmin."""
+    rr = max(1e-5, float(s["thickness"]) * rmin)
+    spacing = float(s["spacing"]) or ROPE_AUTO_SPACING.get(s["style"], 0.25)
+    return rr, max(0.02, spacing) * 2.0 * rr
 
-    Returns {"points", "up", "scale", "radius", "kind", "joint"}: rope centres,
-    lift directions, per-point radius scale (tapered ends) and the rope
-    radius. Raises ValueError when the logs can't be lashed."""
-    s = dict(ROPE_DEFAULTS)
-    s.update(settings or {})
-    pa, pb = poles
+
+def _rl_pair_parts(pa, pb, s, target=None, rr=None):
+    """One lashing between two logs, unfinished: its kind, joint, the two
+    logs in the order the builder used, its tie and (start hitch, body, end
+    hitch) as raw samples."""
     J = rope_joint(pa, pb, target)
     kind = rope_lashing_kind(s, J["angle"])
     if not J["inside"] and J["angle"] >= ROPE_PARALLEL_DEG and kind != "Bands":
@@ -14358,27 +14357,84 @@ def rope_path(poles, settings, target=None, others=(), obstacles=()):
     elif kind in ("Square", "Diagonal") and abs(_rl_dot(pb.a, (0.0, 1.0, 0.0))) > abs(_rl_dot(pa.a, (0.0, 1.0, 0.0))):
         pa, pb = pb, pa  # the upright is log 0 (the clove hitch starts on it)
         J = rope_joint(pa, pb, target)
-    rmin = min(J["rA"], J["rB"])
-    rr = max(1e-5, float(s["thickness"]) * rmin)
-    spacing = float(s["spacing"]) or ROPE_AUTO_SPACING.get(s["style"], 0.25)
-    step = max(0.02, spacing) * 2.0 * rr
+    if rr is None:
+        rr, step = _rl_rope_size(s, min(J["rA"], J["rB"]))
+    else:
+        step = _rl_rope_size(s, rr / max(1e-9, float(s["thickness"])))[1]
     wraps = int(s["wraps"]) or ROPE_AUTO_WRAPS[kind]
     fraps = ROPE_AUTO_FRAPS[kind] if int(s["fraps"]) < 0 else int(s["fraps"])
     hitches = bool(s["hitches"]) and kind != "Bands"
     tie = _RopeTie([pa, pb], rr, step)
     if kind == "Saddle":
-        raw = _rl_saddle(tie, J, wraps, hitches)
+        parts = _rl_saddle(tie, J, wraps, hitches)
     elif kind == "Square":
-        raw = _rl_square(tie, J, wraps, fraps, hitches)
+        parts = _rl_square(tie, J, wraps, fraps, hitches)
     elif kind == "Diagonal":
-        raw = _rl_diagonal(tie, J, wraps, fraps, hitches)
+        parts = _rl_diagonal(tie, J, wraps, fraps, hitches)
     elif kind == "Bands" and J["angle"] >= ROPE_PARALLEL_DEG:
-        raw = _rl_diagonal(tie, J, wraps, 0, False, both=False)
+        parts = _rl_diagonal(tie, J, wraps, 0, False, both=False)
     else:
-        raw = _rl_round(tie, J, wraps, fraps if kind == "Sheer" else 0, hitches, kind == "Sheer")
+        parts = _rl_round(tie, J, wraps, fraps if kind == "Sheer" else 0, hitches, kind == "Sheer")
+    return {"kind": kind, "joint": J, "pa": pa, "pb": pb, "tie": tie, "parts": parts}
+
+
+def rope_path(poles, settings, target=None, others=(), obstacles=(), edges=None):
+    """The rope centre line for a lashing (pure maths plus ray casts on the
+    logs; nothing in the scene changes). Two logs: one lashing. More: one
+    continuous rope binding them all where they meet, joint after joint
+    along edges ([(i, j)] index pairs; found from the logs when None), with
+    one start hitch and one end hitch. others: more logs at the joint to
+    keep out of; obstacles: rope already there (points) to ride over.
+
+    Returns {"points", "up", "scale", "radius", "kind", "joint", "poles"}:
+    rope centres, lift directions, per-point radius scale (tapered ends),
+    the rope radius and the logs (nodes). Raises ValueError when the logs
+    can't be lashed."""
+    s = dict(ROPE_DEFAULTS)
+    s.update(settings or {})
+    if len(poles) == 2:
+        seg = _rl_pair_parts(poles[0], poles[1], s, target)
+        start, body, end = seg["parts"]
+        tie = seg["tie"]
+        pts, ups, scale = _rl_finish(tie, start + body + end, s, others, obstacles)
+        return {"points": pts, "up": ups, "scale": scale, "radius": tie.rr, "kind": seg["kind"],
+                "joint": seg["joint"], "poles": [seg["pa"].node, seg["pb"].node]}
+    if edges is None:
+        groups, _ = rope_pairs(poles, reach=3.0 * ROPE_PAIR_REACH)  # you picked these logs: be generous
+        edges = [e for g in groups for e in g]
+    if not edges:
+        raise ValueError("these logs don't touch or cross")
+    # walk the joints as one rope: depth first from the log most others are tied to
+    links = {}
+    for i, j in edges:
+        links.setdefault(i, []).append(j)
+        links.setdefault(j, []).append(i)
+    hub = max(links, key=lambda k: (len(links[k]), poles[k].r))
+    order, seen, stack = [], {hub}, [hub]
+    while stack:
+        k = stack[-1]
+        nxt = [m for m in links[k] if m not in seen]
+        if not nxt:
+            stack.pop()
+            continue
+        m = max(nxt, key=lambda q: poles[q].r)
+        seen.add(m)
+        order.append((k, m))
+        stack.append(m)
+    rr, step = _rl_rope_size(s, min(poles[k].r for k in seen))
+    raw, first_joint, kinds = [], None, []
+    for n_seg, (i, j) in enumerate(order):
+        seg = _rl_pair_parts(poles[i], poles[j], s, None, rr)
+        first_joint = first_joint or seg["joint"]
+        kinds.append(seg["kind"])
+        gi, gj = poles.index(seg["pa"]), poles.index(seg["pb"])
+        start, body, end = [[(S, u, gi if pi == 0 else (gj if pi == 1 else -1)) for S, u, pi in part]
+                            for part in seg["parts"]]
+        raw += (start if n_seg == 0 else []) + body + (end if n_seg == len(order) - 1 else [])
+    tie = _RopeTie(list(poles), rr, step)
     pts, ups, scale = _rl_finish(tie, raw, s, others, obstacles)
-    return {"points": pts, "up": ups, "scale": scale, "radius": rr, "kind": kind, "joint": J,
-            "poles": [pa.node, pb.node]}
+    return {"points": pts, "up": ups, "scale": scale, "radius": rr, "kind": "Combined", "parts": kinds,
+            "joint": first_joint, "poles": [p.node for p in poles]}
 
 
 def _rl_finish(tie, raw, s, others=(), obstacles=()):
@@ -14925,8 +14981,10 @@ def rope_selection():
 
 
 def rope_pairs(poles, reach=ROPE_PAIR_REACH):
-    """Pairs of logs (index pairs) that touch or cross, for lashing a whole
-    frame in one go, plus [(i, j, why)] pairs left out."""
+    """The joints among logs: [[(i, j), ...] per joint], each the fewest
+    touching or crossing pairs that join every log meeting there (best
+    first: the log a member bears on, then contact, then thickness), plus
+    [(i, j, why)] pairs left out."""
     pairs, skipped = [], []
     for i in range(len(poles)):
         for j in range(i + 1, len(poles)):
@@ -14958,10 +15016,13 @@ def rope_pairs(poles, reach=ROPE_PAIR_REACH):
             Jx, Jy = pairs[x][2], pairs[y][2]
             if _rl_len(_rl_sub(mids[x], mids[y])) < 1.5 * max(Jx["rA"] + Jx["rB"], Jy["rA"] + Jy["rB"]):
                 groups[top(x)] = top(y)
-    keep = []
+    keep = []  # [[(i, j), ...] per joint]
     for g in set(top(k) for k in range(len(pairs))):
+        # like a builder: tie each log to the one it bears on (a log that carries on past
+        # the joint) before tip-to-tip corner ties, then best contact, then thickest
         members = sorted((k for k in range(len(pairs)) if top(k) == g),
-                         key=lambda k: (max(0.0, pairs[k][2]["gap"]) / min(pairs[k][2]["rA"], pairs[k][2]["rB"]),
+                         key=lambda k: (bool(pairs[k][2]["endA"] and pairs[k][2]["endB"]),
+                                        max(0.0, pairs[k][2]["gap"]) / min(pairs[k][2]["rA"], pairs[k][2]["rB"]),
                                         -min(poles[pairs[k][0]].r, poles[pairs[k][1]].r)))
         joined = {}
 
@@ -14969,15 +15030,16 @@ def rope_pairs(poles, reach=ROPE_PAIR_REACH):
             while joined.get(v, v) != v:
                 v = joined[v]
             return v
+        joint = []
         for k in members:
             i, j, _ = pairs[k]
             if root(i) == root(j):
-                skipped.append((i, j, "already tied in at that joint"))
-                continue
+                continue  # already bound in at this joint
             joined[root(i)] = root(j)
-            keep.append((i, j))
-    # thick logs first: later lashings at a shared joint ride over the earlier rope
-    keep.sort(key=lambda ij: -min(poles[ij[0]].r, poles[ij[1]].r))
+            joint.append((i, j))
+        keep.append(joint)
+    # thick logs first: later lashings nearby ride over the earlier rope
+    keep.sort(key=lambda g: -max(min(poles[i].r, poles[j].r) for i, j in g))
     return keep, skipped
 
 
@@ -15035,12 +15097,13 @@ def _rope_poles(data):
         if not found or not _log_shape(found[0]):
             return None
         nodes.append(found[0])
-    return nodes if len(nodes) == 2 else None
+    return nodes if len(nodes) >= 2 else None
 
 
 def lash(logs, settings=None, target=None, select=False, progress=None, bake=False):
     """Lash logs together (one Ctrl+Z). Two logs: lashed whatever the gap.
-    More: every pair that touches or crosses. Each lashing gets its own
+    More: logs meeting at one joint are bound by one continuous rope, and
+    each separate joint gets its own. Each lashing gets its own
     seed (the same for the same pair of logs, as in the preview) unless
     settings has one. select: select the new lashings
     (inside the same undo step). bake: make them baked lashings straight
@@ -15053,10 +15116,10 @@ def lash(logs, settings=None, target=None, select=False, progress=None, bake=Fal
         raise
 
 
-def _rope_pair_seed(a, b):
-    """A seed that stays put for a pair of logs, so a preview and the
+def _rope_pair_seed(*nodes):
+    """A seed that stays put for a set of logs, so a preview and the
     lashing it turns into wobble the same way."""
-    text = "|".join(sorted((short_name(a), short_name(b))))
+    text = "|".join(sorted(short_name(x) for x in nodes))
     return sum((i + 1) * ord(c) for i, c in enumerate(text)) % 9999 + 1
 
 
@@ -15076,32 +15139,36 @@ def _rope_plan(logs, settings, target, progress=None, limit=None):
     if len(poles) < 2:
         return [], report
     if len(poles) == 2:
-        pairs = [(0, 1)]
-    else:
-        pairs, far = rope_pairs(poles)
+        joints = [[(0, 1)]]
+    else:  # logs meeting at one joint are bound by one rope; separate joints get one each
+        joints, far = rope_pairs(poles)
         report["skipped"] += [("%s + %s" % (short_name(poles[i].node), short_name(poles[j].node)), why)
                               for i, j, why in far]
-    report["pairs"] = len(pairs)
+    report["pairs"] = len(joints)
     if limit is not None:
-        pairs = pairs[:limit]
+        joints = joints[:limit]
     if progress:
-        progress.stage("ties", len(pairs), "Tying")
+        progress.stage("ties", len(joints), "Tying")
     built = []
-    for i, j in pairs:
-        label = "%s + %s" % (short_name(poles[i].node), short_name(poles[j].node))
+    for edges in joints:
+        ids = sorted(set(k for e in edges for k in e))
+        members = [poles[k] for k in ids]
+        label = " + ".join(short_name(q.node) for q in members)
         if progress:
             progress.item(label)
         one = dict(s)
         if not s.get("seed"):
-            one["seed"] = _rope_pair_seed(poles[i].node, poles[j].node)
-        J0 = rope_joint(poles[i], poles[j])
+            one["seed"] = _rope_pair_seed(*[q.node for q in members])
+        J0 = rope_joint(poles[edges[0][0]], poles[edges[0][1]])
         mid = _rl_lerp(J0["cA"], J0["cB"], 0.5)
         near = 3.0 * (J0["rA"] + J0["rB"])
-        others = [q for k, q in enumerate(poles) if k not in (i, j) and q.t0 - q.r <= q.closest_t(mid) <= q.t1 + q.r
+        others = [q for k, q in enumerate(poles) if k not in ids and q.t0 - q.r <= q.closest_t(mid) <= q.t1 + q.r
                   and _rl_len(_rl_perp(q.a, _rl_sub(mid, q.center(q.closest_t(mid))))) < near + q.r]
         obstacles = [x for path_k, _ in built for x in path_k["points"] if _rl_len(_rl_sub(x, mid)) < 2.0 * near]
+        local = [(ids.index(i), ids.index(j)) for i, j in edges]
         try:
-            path = rope_path([poles[i], poles[j]], one, target if len(poles) == 2 else None, others, obstacles)
+            path = rope_path(members, one, target if len(poles) == 2 else None, others, obstacles,
+                             local if len(members) > 2 else None)
         except ValueError as exc:
             report["skipped"].append((label, str(exc)))
             continue
@@ -15380,10 +15447,11 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self.f = {}
 
         # ---- 1. select
-        card = self.step_select = StepCard(1, "Select logs", "Two logs that touch or cross, or a whole frame "
-                                                             "(every touching pair gets its own lashing). Logs side "
-                                                             "by side: also pick a vertex to say where. Select a "
-                                                             "lashing instead to edit it.")
+        card = self.step_select = StepCard(1, "Select logs", "Logs selected together are bound together: all "
+                                                             "the logs meeting at a joint get one rope (select two "
+                                                             "at a time for separate lashings). A whole frame gets "
+                                                             "one per joint. Logs side by side: also pick a vertex "
+                                                             "to say where. Select a lashing instead to edit it.")
         self.sel_label = hint_label("")
         card.add(self.sel_label)
         col.addWidget(card)
@@ -15591,7 +15659,8 @@ class RopeLashingPanel(QtWidgets.QWidget):
                 except ValueError as exc:
                     text = "Can't use these: %s." % exc
             elif len(logs) > 2:
-                text = "%d logs: every pair that touches or crosses gets a lashing." % len(logs)
+                text = ("%d logs: the logs meeting at each joint are bound with one rope (select two at a time "
+                        "for separate lashings)." % len(logs))
             elif logs:
                 text = "1 log selected: add the one it should be tied to."
             else:

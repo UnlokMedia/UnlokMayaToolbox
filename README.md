@@ -170,10 +170,11 @@ Ties logs together with rope the way pioneering lashings are really tied,
 for stilt shacks, fences and frames.
 
 1. **Select** two logs that touch or cross. Select a whole frame instead and
-   every pair that touches or crosses gets its own lashing. Where several
-   logs meet at one spot (a post, a beam on it and rafters resting there),
-   each log is tied in once, with the fewest lashings that join them all,
-   and later rope rides over the rope already there. For logs side by side, also select a
+   each joint gets its own lashing. Logs selected together are bound
+   together: where several logs meet at one spot (a post, a beam on it and
+   rafters resting there) one continuous rope binds them all, joint after
+   joint, with one starting and one finishing hitch. For separate
+   lashings, select two logs at a time. For logs side by side, also select a
    vertex or edge to say where along them the lashing goes. Select an
    existing lashing to edit it.
 2. **Lashing and rope:** everything here shows straight away. With logs

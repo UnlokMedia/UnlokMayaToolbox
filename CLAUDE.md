@@ -208,8 +208,14 @@
     the turns climb every pass), and left out of the final smoothing.
   - **End joints:** `rope_joint` flags `endA` / `endB`; `rope_path` turns a
     crossing where a log ends into a **Saddle** (`_rl_saddle`). `rope_pairs`
-    groups joints that share a spot and keeps a spanning set (each log tied
-    in once). `_rope_plan` passes the joint's other logs (`others`, kept out
+    groups touching pairs into joints (pairs sharing a spot) and keeps a
+    spanning set per joint, preferring the log a member bears on.
+  - **Combined lashings** (the user's rule: what's selected together is bound
+    together): a joint with 3+ logs is one rope. Builders return (start
+    hitch, body, end hitch); `rope_path` with 3+ poles walks the joint's
+    edges depth first from the hub log, takes the first segment's start
+    hitch, every body and the last end hitch, remaps pole indices and
+    finishes it as one path. Kind "Combined"; stored with all its logs. `_rope_plan` passes the joint's other logs (`others`, kept out
     of) and earlier rope (`obstacles`, ridden over; lifts capped at 5
     diameters when crowded, since overlapping logs leave no room).
   - **Kinks:** `_rl_unkink` eases bends tighter than 1.5 rope radii;
