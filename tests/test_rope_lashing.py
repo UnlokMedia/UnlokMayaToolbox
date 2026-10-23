@@ -206,7 +206,7 @@ def run():
     dt = time.time() - t0
     check("frame of 4 posts + 4 beams: 8 lashings", len(rep["made"]) == 8, "%d made, kinds %s, skipped %s" % (
         len(rep["made"]), rep["kinds"], rep["skipped"]))
-    check("frame: under 8 s", dt < 8.0, "%.2fs" % dt)  # 8 joints: 4.7-6.1 s on the dev machine, load varies
+    check("frame: under 14 s", dt < 14.0, "%.2fs" % dt)  # 8 joints with the settle: ~10-11 s on the dev machine
     cmds.undo()
     check("one Ctrl+Z removes the whole frame's lashings", not tb["ropes_in"]())
 
@@ -305,6 +305,30 @@ def run():
     asset.scan()
     check("marking a lashing Auto sticks through the next Scan", ropes[0] not in asset.uv_status() and
           asset.uv_status().get(ropes[1]) == "keep")
+
+    # --- the settle: gravity sags free rope, Settle 0 switches the simulation off (and is faster)
+    cmds.file(new=True, force=True)
+    e = log("legA", move=(9, 1.5, 0))
+    f = log("legB", move=(9.4, 1.5, 0))
+    def low_free(path):
+        X, rr = path["points"], path["radius"]
+        ys = [p[1] for p in X if min(tb["_rl_len"](tb["_rl_perp"](q.a, tb["_rl_sub"](p, q.center(q.closest_t(p)))))
+                                    - q.radius(q.closest_t(p)) for q in poles) > 2.0 * rr]
+        return min(ys) if ys else None
+    sheer_s = {"lashing": "Sheer", "seed": 4, "wobble": 0.0}
+    t0 = time.time()
+    flat = tb["rope_path"]([P(e), P(f)], dict(sheer_s, settle=0))
+    t_off = time.time() - t0
+    t0 = time.time()
+    tight = tb["rope_path"]([P(e), P(f)], dict(sheer_s, tension=0.5, gravity=0.0))
+    t_on = time.time() - t0
+    poles = [P(e), P(f)]
+    sag = tb["rope_path"](poles, dict(sheer_s, tension=0.0, gravity=1.5))
+    check("Gravity sags rope that isn't on a log", low_free(sag) is not None and low_free(tight) is not None and
+          low_free(sag) < low_free(tight) - 0.5 * tight["radius"],
+          "lowest free point %.4f vs %.4f" % (low_free(sag) or 0, low_free(tight) or 0))
+    check("Settle 0 skips the simulation (faster)", len(flat["points"]) > 100 and t_off < t_on,
+          "%.2fs off vs %.2fs on" % (t_off, t_on))
 
     # --- logs that end at another: a saddle lashing; several logs at one joint: each tied in once
     cmds.file(new=True, force=True)

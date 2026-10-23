@@ -13709,7 +13709,7 @@ ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user prese
 ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands")
 ROPE_STYLES = ("3 strands", "Twisted", "Smooth tube")
 ROPE_DEFAULTS = {"lashing": "Auto", "style": "Twisted", "thickness": 0.1, "wraps": 0, "fraps": -1,
-                 "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.05, "seed": 0, "sides": 0,
+                 "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.05, "tension": 0.5, "gravity": 0.0, "settle": 30, "seed": 0, "sides": 0,
                  "spacing": 0.0, "lay": 3.5}
 ROPE_KEYS = tuple(sorted(ROPE_DEFAULTS))
 ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4, "Saddle": 3}
@@ -14557,21 +14557,17 @@ def _rl_finish(tie, raw, s, others=(), obstacles=()):
         n = len(X)
         tucked = list(range(len(head[0]))) + list(range(n - len(end[0]), n))
         _rl_avoid(clear, X, U, own, sink)
-    # 6. wobble: real rope never lies perfectly
+    # 6. wobble: the rope swells a little now; its wandering goes on after the settle
     wob = clamp(float(s["wobble"]), 0.0, 2.0) * rr
     o = _ln_offsets(int(s["seed"]), 7, 6)
     freq = 1.0 / (6.0 * rr)
     acc = 0.0
-    scale = []
+    scale, wander = [], []
     for i in range(n):
         if i:
             acc += _rl_len(_rl_sub(X[i], X[i - 1]))
         x = acc * freq
-        tng = _rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)]), U[i])
-        side = _rl_norm(_rl_cross(tng, U[i]), U[i])
-        if wob > 0.0:
-            X[i] = _rl_add(X[i], _rl_add(_rl_mul(U[i], 0.25 * wob * (1.0 + ln_noise3(x + o[0], o[1], 0.3))),
-                                         _rl_mul(side, 0.35 * wob * ln_noise3(x + o[2], o[3], 0.3))))
+        wander.append((0.25 * wob * (1.0 + ln_noise3(x + o[0], o[1], 0.3)), 0.35 * wob * ln_noise3(x + o[2], o[3], 0.3)))
         scale.append(1.0 + 0.12 * clamp(float(s["wobble"]), 0.0, 2.0) * ln_noise3(x * 0.7 + o[4], o[5], 0.6))
     # 7. relax the path first (tucked ends stay put), then let later rope ride over
     #    earlier rope: smoothing after the lifts would flatten the bumps where rope
@@ -14584,21 +14580,268 @@ def _rl_finish(tie, raw, s, others=(), obstacles=()):
              _rl_add(_rl_mul(X[i], 0.6), _rl_mul(_rl_add(X[i - 1], X[i + 1]), 0.2)) for i in range(n)]
     _rl_unkink(X, rr, h)
     _rl_avoid(clear, X, U, own, sink)
-    for _ in range(4):  # a lift can push rope into the other log: settle the two
+    settle = int(s.get("settle", 30))
+    for _ in range(2 if settle else 4):  # a lift can push rope into the other log: settle the two
         X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
         if not _rl_avoid(clear, X, U, own, sink):
             break
-    # ease any sharp bends the lifts made, then settle rope over rope once more
-    _rl_unkink(X, rr, h)
-    X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
+    if not settle:  # no simulation: ease the sharp bends the lifts made, then settle rope over rope once more
+        _rl_unkink(X, rr, h)
+        X = _rl_ride_over(X, U, rr, h, first=tucked, fixed=obstacles, crowded=bool(others or obstacles))
+        _rl_avoid(clear, X, U, own, sink)
+    # 8. let it settle like real rope: tension, stiffness, gravity, friction, no passing through
+    X = _rl_settle(X, own, clear, rr, sink, settle, s.get("tension", 0.5),
+                   s.get("gravity", 0.0), tucked, obstacles)
+    if wob > 0.0:  # hand-tied wandering, on top of the settled rope
+        for i in range(n):
+            tng = _rl_norm(_rl_sub(X[min(n - 1, i + 1)], X[max(0, i - 1)]), U[i])
+            side = _rl_norm(_rl_cross(tng, U[i]), U[i])
+            X[i] = _rl_add(X[i], _rl_add(_rl_mul(U[i], wander[i][0]), _rl_mul(side, wander[i][1])))
     _rl_avoid(clear, X, U, own, sink)
-    # 8. taper the cut ends
+    # 9. taper the cut ends
     taper = max(1, int(1.5 * rr / h))
     for i in range(min(taper, n)):
         k = 0.78 + 0.22 * _rl_smooth01(float(i) / taper)
         scale[i] *= k
         scale[n - 1 - i] *= k
     return X, U, scale
+
+
+def _rl_settle(X, own, poles, rr, sink, iters, tension=0.5, gravity=0.0, pinned=(), fixed=()):
+    """Let the rope settle like real rope: a quick position-based simulation
+    on a coarser copy (one point per 1.25 rope radii), then resampled back
+    to len(X) points.
+
+    Each step: segments pull towards a shorter rest length (tension: 0 = no
+    pull, 1 = about 5% shorter), the rope resists bending (stiffness eases
+    kinks), gravity pulls rope that's not on a log down (sag), rope keeps
+    one diameter from itself (pairs refreshed every few steps, so the
+    over / under crossings stay as tied) and from every log (its real
+    surface: bumps measured once by ray cast), and rope lying on a log only
+    slides slowly along it (friction). pinned: indices that don't move
+    (tucked ends); fixed: other rope already tied (points)."""
+    n = len(X)
+    if iters <= 0 or n < 8:
+        return X
+    dia = 2.0 * rr
+    # coarse copy, evenly spaced
+    acc = [0.0]
+    for p, q in zip(X, X[1:]):
+        acc.append(acc[-1] + _rl_len(_rl_sub(q, p)))
+    total = acc[-1]
+    hs = 1.25 * rr
+    m = max(8, int(total / hs) + 1)
+    P, src = [], []
+    j = 0
+    for k in range(m):
+        want = total * k / (m - 1)
+        while j < n - 2 and acc[j + 1] < want:
+            j += 1
+        span = acc[j + 1] - acc[j]
+        f = (want - acc[j]) / span if span > 1e-12 else 0.0
+        P.append(list(_rl_lerp(X[j], X[j + 1], f)))
+        src.append(j if f < 0.5 else j + 1)
+    own_c = [own[i] for i in src]
+    pin_set = set(pinned)
+    pin_c = [1.0 if i in pin_set else 0.0 for i in src]
+    pin_c[0] = pin_c[0] or 0.0
+    rest0 = [math.sqrt(sum((P[k + 1][c] - P[k][c]) ** 2 for c in range(3))) for k in range(m - 1)]
+    shrink = 0.05 * clamp(float(tension), 0.0, 2.0)
+    # the logs each point can touch, and how far each log's real surface sits out (bumps)
+    cand = []
+    bump = []
+    for k in range(m):
+        p = P[k]
+        near_p = []
+        for qi, pole in enumerate(poles):
+            t = pole.closest_t(p)
+            if not pole.t0 - pole.r <= t <= pole.t1 + pole.r:
+                continue
+            v = _rl_perp(pole.a, _rl_sub(p, pole.center(t)))
+            if _rl_len(v) < pole.radius(t) + 6.0 * dia:
+                near_p.append(qi)
+        cand.append(near_p)
+        b = 0.0
+        if own_c[k] >= 0:
+            pole = poles[own_c[k]]
+            t = pole.closest_t(p)
+            dd = _rl_norm(_rl_perp(pole.a, _rl_sub(p, pole.center(t))), None)
+            if dd is not None:
+                b = pole.surface(t, dd) - pole.radius(t)
+        bump.append(b)
+    skip = int(3.0 * dia / hs) + 2
+    inv = 1.0 / (2.0 * dia)
+    floor, sqrt = math.floor, math.sqrt
+    down = (0.0, -1.0, 0.0)
+    g = clamp(float(gravity), 0.0, 2.0) * 0.08 * rr
+    pairs, near_fixed = [], []
+
+    def rebuild():
+        grid = {}
+        for k in range(m):
+            q = P[k]
+            grid.setdefault((int(floor(q[0] * inv)), int(floor(q[1] * inv)), int(floor(q[2] * inv))), []).append(k)
+        out = []
+        reach2 = (1.5 * dia) ** 2
+        for k in range(m):
+            q = P[k]
+            kx, ky, kz = int(floor(q[0] * inv)), int(floor(q[1] * inv)), int(floor(q[2] * inv))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for o in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                            if o > k + skip:
+                                r2 = (P[o][0] - q[0]) ** 2 + (P[o][1] - q[1]) ** 2 + (P[o][2] - q[2]) ** 2
+                                if r2 < reach2:
+                                    out.append((k, o))
+        fx = []
+        if fixed:
+            for q in fixed:
+                grid_key = (int(floor(q[0] * inv)), int(floor(q[1] * inv)), int(floor(q[2] * inv)))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for dz in (-1, 0, 1):
+                            for o in grid.get((grid_key[0] + dx, grid_key[1] + dy, grid_key[2] + dz), ()):
+                                fx.append((o, q))
+        return out, fx
+
+    local = [None] * m  # per point: [(log, axis, centre, radius + clearance)], measured every 4 steps
+
+    def measure():
+        for k in range(m):
+            p = P[k]
+            row = []
+            for qi in cand[k]:
+                pole = poles[qi]
+                t = pole.closest_t(p)
+                if not pole.t0 - pole.r <= t <= pole.t1 + pole.r:
+                    continue
+                need = pole.radius(t) + sink + (bump[k] if qi == own_c[k] else 0.0)
+                row.append((pole.a, pole.center(t), need))
+            local[k] = row
+
+    for it in range(iters):
+        if it % 6 == 0:
+            pairs, near_fixed = rebuild()
+            measure()
+        prev = [p[:] for p in P]
+        ramp = min(1.0, (it + 1) / (0.6 * iters))
+        # tension: segments want to be a little shorter
+        for k in range(m - 1):
+            a, b = P[k], P[k + 1]
+            dx, dy, dz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+            d = sqrt(dx * dx + dy * dy + dz * dz)
+            if d < 1e-12:
+                continue
+            wa, wb = 1.0 - pin_c[k], 1.0 - pin_c[k + 1]
+            if wa + wb == 0.0:
+                continue
+            corr = 0.8 * (d - rest0[k] * (1.0 - shrink * ramp)) / (d * (wa + wb))
+            a[0] += dx * corr * wa
+            a[1] += dy * corr * wa
+            a[2] += dz * corr * wa
+            b[0] -= dx * corr * wb
+            b[1] -= dy * corr * wb
+            b[2] -= dz * corr * wb
+        # stiffness: ease each point towards the line through its neighbours
+        mids = [None] + [((P[k - 1][0] + P[k + 1][0]) * 0.5, (P[k - 1][1] + P[k + 1][1]) * 0.5,
+                          (P[k - 1][2] + P[k + 1][2]) * 0.5) for k in range(1, m - 1)] + [None]
+        for k in range(1, m - 1):
+            if pin_c[k]:
+                continue
+            c = mids[k]
+            p = P[k]
+            p[0] += (c[0] - p[0]) * 0.25
+            p[1] += (c[1] - p[1]) * 0.25
+            p[2] += (c[2] - p[2]) * 0.25
+        # gravity (only rope that isn't lying on a log)
+        if g > 0.0:
+            for k in range(m):
+                if not pin_c[k] and own_c[k] < 0:
+                    P[k][1] += down[1] * g
+        # rope keeps clear of itself (and of rope already tied there)
+        for _ in range(2):
+            for k, o in pairs:
+                a, b = P[k], P[o]
+                dx, dy, dz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+                d2 = dx * dx + dy * dy + dz * dz
+                if d2 >= dia * dia or d2 < 1e-18:
+                    continue
+                d = sqrt(d2)
+                wa, wb = 1.0 - pin_c[k], 1.0 - pin_c[o]
+                if wa + wb == 0.0:
+                    continue
+                corr = (dia - d) / (d * (wa + wb))
+                a[0] -= dx * corr * wa
+                a[1] -= dy * corr * wa
+                a[2] -= dz * corr * wa
+                b[0] += dx * corr * wb
+                b[1] += dy * corr * wb
+                b[2] += dz * corr * wb
+            for k, q in near_fixed:
+                if pin_c[k]:
+                    continue
+                a = P[k]
+                dx, dy, dz = a[0] - q[0], a[1] - q[1], a[2] - q[2]
+                d2 = dx * dx + dy * dy + dz * dz
+                if d2 >= dia * dia or d2 < 1e-18:
+                    continue
+                d = sqrt(d2)
+                corr = (dia - d) / d
+                a[0] += dx * corr
+                a[1] += dy * corr
+                a[2] += dz * corr
+        # and out of every log, onto its real surface; rope on a log slides slowly (friction)
+        for k in range(m):
+            if pin_c[k]:
+                P[k] = prev[k]
+                continue
+            p = P[k]
+            touching = None
+            for ax, cen, need in local[k]:
+                wx, wy, wz = p[0] - cen[0], p[1] - cen[1], p[2] - cen[2]
+                along = wx * ax[0] + wy * ax[1] + wz * ax[2]
+                v = (wx - ax[0] * along, wy - ax[1] * along, wz - ax[2] * along)  # square to the (local) axis
+                dist = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+                if dist < need:
+                    nrm = _rl_norm(v, None)
+                    if nrm is None:
+                        continue
+                    p[0] += nrm[0] * (need - dist)
+                    p[1] += nrm[1] * (need - dist)
+                    p[2] += nrm[2] * (need - dist)
+                    touching = nrm
+                elif dist < need + 0.15 * rr:
+                    touching = _rl_norm(v, None)
+            if touching is not None:
+                q = prev[k]
+                d = (p[0] - q[0], p[1] - q[1], p[2] - q[2])
+                dn = _rl_dot(d, touching)
+                keep = 0.35  # of the sliding along the surface
+                p[0] = q[0] + touching[0] * dn + (d[0] - touching[0] * dn) * keep
+                p[1] = q[1] + touching[1] * dn + (d[1] - touching[1] * dn) * keep
+                p[2] = q[2] + touching[2] * dn + (d[2] - touching[2] * dn) * keep
+    # back to the caller's resolution: Catmull-Rom through the settled points
+    cacc = [0.0]
+    for k in range(m - 1):
+        cacc.append(cacc[-1] + sqrt(sum((P[k + 1][c] - P[k][c]) ** 2 for c in range(3))))
+    ctotal = cacc[-1] or 1.0
+    out = []
+    seg = 0
+    for i in range(n):
+        want = ctotal * acc[i] / (total or 1.0)
+        while seg < m - 2 and cacc[seg + 1] < want:
+            seg += 1
+        span = cacc[seg + 1] - cacc[seg]
+        f = (want - cacc[seg]) / span if span > 1e-12 else 0.0
+        p0, p1 = P[max(0, seg - 1)], P[seg]
+        p2, p3 = P[seg + 1], P[min(m - 1, seg + 2)]
+        f2, f3 = f * f, f * f * f
+        out.append(tuple(0.5 * (2.0 * p1[c] + (p2[c] - p0[c]) * f + (2.0 * p0[c] - 5.0 * p1[c] + 4.0 * p2[c] - p3[c]) * f2 +
+                                (3.0 * p1[c] - p0[c] - 3.0 * p2[c] + p3[c]) * f3) for c in range(3)))
+    for i in pinned:  # tucked ends stay exactly where they were
+        out[i] = X[i]
+    return out
 
 
 def _rl_unkink(X, rr, h, passes=8):
@@ -15571,6 +15814,12 @@ class RopeLashingPanel(QtWidgets.QWidget):
         self.f["wobble"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
         grid.add_row("Wobble", self.f["wobble"], "Hand-tied irregularity: the rope wanders and swells a little. "
                                                  "Default 0.05 is a tight rope; try 0.5+ for a loose, hand-tied look.")
+        self.f["tension"] = FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05)
+        grid.add_row("Tension", self.f["tension"], "How hard the rope is pulled tight as it settles: 0 slack, 0.5 "
+                                                   "snug, 1+ drum tight.")
+        self.f["gravity"] = FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05)
+        grid.add_row("Gravity", self.f["gravity"], "Lets rope that isn't lying on a log sag (works best with low "
+                                                   "Tension).")
         card.add(grid)
         seed_row = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(seed_row)
@@ -15599,6 +15848,9 @@ class RopeLashingPanel(QtWidgets.QWidget):
         adv.add_row("Segment", self.f["spacing"], "Length of each segment along the rope, as a fraction of its "
                                                   "diameter (smaller = smoother and heavier). Auto: 0.2 for 3 "
                                                   "strands, 0.25 twisted, 0.5 smooth.")
+        self.f["settle"] = IntField(0, 100, 0, 60)
+        adv.add_row("Settle", self.f["settle"], "Simulation steps as the rope settles (tension, stiffness, gravity, "
+                                                "friction). 0 = off (fastest). More = smoother, slower.")
         self.f["lay"] = FloatField(1.0, 12.0, 1.5, 8.0, decimals=2, step=0.1)
         adv.add_row("Lay", self.f["lay"], "How tightly the strands twist: rope diameters per full turn (real "
                                           "rope: about 3.5).")

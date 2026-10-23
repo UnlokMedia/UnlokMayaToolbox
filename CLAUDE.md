@@ -226,6 +226,16 @@
     Hitches take `flow` (the rope's travel at the joint): same turning
     sense, and on-surface joins start a little ahead so the rope spirals in
     (no Z-shaped jog). Default wobble 0.05.
+  - **Settle** (`_rl_settle`, after the ride-over has set the over / under
+    crossings): position-based simulation on a coarse copy (one point per
+    1.25 rope radii, Catmull-Rom back): segment rest lengths shrink by up
+    to 5% x Tension, stiffness (Jacobi pull to neighbours' midpoint),
+    Gravity on points not owned by a log, rope-rope pairs (refreshed every
+    6 steps; small steps keep the topology) and fixed obstacles, logs
+    (centre / radius measured every 6 steps, bumps by one ray cast per
+    point), friction (keeps 35% of sliding on a log), tucked ends pinned.
+    Wobble's wandering is added after it so the slider stays in control.
+    Settle 0 = the old path (extra unkink + ride-over).
   - **Kinks:** `_rl_unkink` eases bends tighter than 1.5 rope radii;
     `_rl_frames` keeps the last direction where points bunch up (a flipped
     frame threw strands out as spikes). Later lift passes only re-check
