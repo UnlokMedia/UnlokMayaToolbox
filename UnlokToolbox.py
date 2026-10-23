@@ -22,8 +22,10 @@ UV
 """
 
 import functools
+import heapq
 import json
 import math
+import operator
 import random
 import re
 import threading
@@ -5031,14 +5033,36 @@ def _auto_seam(targets):
             pass
 
 
-def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=None):
+def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=None, method=None, opts=None,
+                uv_set="map1"):
     """Unwrap meshes (see the section comment). Returns {mesh: error} for any
     that failed; one bad mesh never stops the rest. With a Progress, it
-    reports stages 'project', 'seams', 'unfold' and 'fix'."""
+    reports stages 'project', 'seams', 'unfold' and 'fix'. method: one of
+    UNWRAP_METHODS (default Unfold3D); the Unlok one hands Unfold3D only the
+    charts it couldn't flatten itself."""
     failed = {}
     if not meshes:
         return failed
     pr = progress or Progress("", [])
+    if method == UNWRAP_METHODS[0]:
+        o = dict(opts or {})
+        o.setdefault("hard_angle", hard_angle)
+        failed, heavy, stats = unlok_unwrap(meshes, uv_set, o, pr, on_unfolded)
+        auto_unwrap.last_stats = stats
+        if heavy:
+            cmds.loadPlugin("Unfold3D", quiet=True)
+            pr.stage("fix", sum(len(f) for f in heavy.values()), "Unfold3D on the charts it couldn't flatten",
+                     items=len(heavy))
+            for m, faces in sorted(heavy.items()):
+                pr.item(short_name(m), weight=len(faces), force=True)
+                try:
+                    cmds.u3dUnfold(["%s.%s" % (m, r) for r in face_ranges(faces)], iterations=1, pack=0,
+                                   borderintersection=1, triangleflip=1, mapsize=1024, roomspace=0)
+                except Exception as exc:
+                    failed[m] = "unfold failed: %s" % exc
+            if on_unfolded:
+                on_unfolded([m for m in heavy if m not in failed])
+        return failed
     cmds.loadPlugin("Unfold3D", quiet=True)
     ok = []
     pr.stage("project", len(meshes), "Projecting")
@@ -5130,6 +5154,1346 @@ def auto_unwrap(meshes, hard_angle=40.0, passes=2, progress=None, on_unfolded=No
             _auto_seam({m: by_mesh[m] for m in batch[0]})
             unfold(batch[0])
     return failed
+
+
+# =============================================================================
+# Unlok Unwrap: the toolbox's own unwrapper
+# =============================================================================
+# Mesh data is read once on the main thread; everything else is pure maths
+# on a worker thread, so Maya stays responsive and Cancel is instant. Then
+# the result is written back in a few undoable commands. Per connected piece:
+#   1. Copies: pieces with the same topology and edge lengths (duplicated and
+#      combined, or separate copies) are unwrapped once; the rest copy it.
+#   2. Kind: hard surface (flat areas and sharp or hard edges) or organic
+#      (smoothly curved everywhere).
+#   3. Charts: hard surface cuts hard and sharp edges; organic only very sharp
+#      ones. Each chart is made a disk: a closed one gets a pelt cut between
+#      its two farthest points, a ring (cylinder, tube) one cut between its
+#      rims, anything else is split by normals.
+#   4. Flatten: flat charts are projected; developable ones (planks, boxes,
+#      cylinders, cones) are unfolded triangle by triangle at their true
+#      size, which is exact; anything else is relaxed with ARAP (local /
+#      global, conjugate gradients). A chart that still flips or overlaps is
+#      split and tried again.
+#   5. Sew (hard surface): neighbouring charts are joined back across their
+#      cuts wherever the shared edges line up and nothing overlaps, biggest
+#      seams first, so a box or a plank comes out as one unfolded shell.
+
+UNWRAP_METHODS = ("Unlok (fast)", "Unfold3D (Maya)")
+UNWRAP_DEFAULTS = {
+    "hard_angle": 40.0,  # hard surface: cut edges sharper than this, and hard edges
+    "organic_angle": 80.0,  # organic: only cut edges sharper than this
+    "sew": "max",  # "max": join all it can; "compact": only while the shell stays compact; "off"
+    "sew_fill": 0.35,  # "compact": joined shells must fill this much of their box
+    "planar_angle": 6.0,  # a chart whose faces all stay within this of its normal is projected
+    "relax_iterations": 16,
+    "relax_budget": 8000,  # triangles: bigger charts that need relaxing go to Unfold3D instead
+    "max_depth": 10,  # times a failing chart is split before it goes to Unfold3D
+}
+
+
+def _uw_read(xform):
+    """Everything the unwrapper needs from a mesh, as plain lists (main
+    thread). None for a mesh without faces."""
+    fn = _mesh_fn(xform)
+    if fn is None or fn.numPolygons == 0:
+        return None
+    pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    counts, vids = fn.getVertices()
+    vids = list(vids)
+    tcounts, tvids = fn.getTriangles()
+    tvids = list(tvids)
+    faces, tris = [], []
+    k = t = 0
+    for f, c in enumerate(counts):
+        _tick()
+        fv = vids[k:k + c]
+        k += c
+        pos = {}
+        for i, v in enumerate(fv):
+            pos.setdefault(v, i)
+        tr = []
+        for _ in range(tcounts[f]):
+            tr.append((pos[tvids[t]], pos[tvids[t + 1]], pos[tvids[t + 2]]))
+            t += 3
+        faces.append(fv)
+        tris.append(tr)
+    edge_id, hard = {}, set()
+    for e in range(fn.numEdges):
+        _tick()
+        a, b = fn.getEdgeVertices(e)
+        key = (a, b) if a < b else (b, a)
+        edge_id[key] = e
+        if not fn.isEdgeSmooth(e):
+            hard.add(key)
+    return {"mesh": xform, "pts": pts, "faces": faces, "tris": tris, "edge_id": edge_id, "hard": hard}
+
+
+class _UF(object):
+    """Union-find over ints (dict based: only touched items cost memory)."""
+
+    def __init__(self):
+        self.p = {}
+
+    def find(self, x):
+        p = self.p
+        r = x
+        while p.get(r, r) != r:
+            r = p[r]
+        while p.get(x, x) != r:
+            p[x], x = r, p[x]
+        return r
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.p[ra] = rb
+
+
+def _uw_prepare(m):
+    """Corner bases, edge -> [(face, corner)], face normals and areas."""
+    faces, tris, pts = m["faces"], m["tris"], m["pts"]
+    base, n = [], 0
+    edges = {}
+    nrm, area = [], []
+    for f, fv in enumerate(faces):
+        base.append(n)
+        c = len(fv)
+        n += c
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            edges.setdefault((a, b) if a < b else (b, a), []).append((f, i))
+        nx = ny = nz = 0.0
+        for i, j, k in tris[f]:
+            a, b, cc = pts[fv[i]], pts[fv[j]], pts[fv[k]]
+            ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+            vx, vy, vz = cc[0] - a[0], cc[1] - a[1], cc[2] - a[2]
+            nx += uy * vz - uz * vy
+            ny += uz * vx - ux * vz
+            nz += ux * vy - uy * vx
+        ln = math.sqrt(nx * nx + ny * ny + nz * nz)
+        area.append(ln * 0.5)
+        nrm.append((nx / ln, ny / ln, nz / ln) if ln > 0 else (0.0, 0.0, 0.0))
+    m["base"], m["edges"], m["nrm"], m["area"] = base, edges, nrm, area
+    # edge -> cosine of its dihedral angle, or None where it must always be cut
+    # (open border, non-manifold, flipped neighbours)
+    dcos = {}
+    for key, ent in edges.items():
+        if len(ent) != 2 or ent[0][0] == ent[1][0]:
+            dcos[key] = None
+            continue
+        (f, i), (g, j) = ent
+        if faces[f][i] == faces[g][j]:  # both run the same way: normals disagree
+            dcos[key] = None
+            continue
+        a, b = nrm[f], nrm[g]
+        dcos[key] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    m["dcos"] = dcos
+
+
+def _uw_pieces(m):
+    """Connected pieces (faces sharing a vertex), each a sorted face list."""
+    owner = {}
+    uf = _UF()
+    for f, fv in enumerate(m["faces"]):
+        for v in fv:
+            o = owner.get(v)
+            if o is None:
+                owner[v] = f
+            else:
+                uf.union(f, o)
+    out = {}
+    for f in range(len(m["faces"])):
+        out.setdefault(uf.find(f), []).append(f)
+    return list(out.values())
+
+
+def _uw_signature(m, pf):
+    """Topology of a piece in its own vertex numbering (equal for copies made
+    by duplicating, combined or not)."""
+    local = {}
+    rows = []
+    faces, tris = m["faces"], m["tris"]
+    for f in pf:
+        row = []
+        for v in faces[f]:
+            if v not in local:
+                local[v] = len(local)
+            row.append(local[v])
+        rows.append(tuple(row))
+        rows.append(tuple(tris[f]))
+    return hash(tuple(rows))
+
+
+def _uw_lengths(m, pf):
+    pts, faces, tris = m["pts"], m["faces"], m["tris"]
+    out = []
+    for f in pf:
+        fv = faces[f]
+        for i, j, k in tris[f]:
+            for x, y in ((i, j), (j, k), (k, i)):
+                a, b = pts[fv[x]], pts[fv[y]]
+                out.append(math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2))
+    return out
+
+
+def _uw_same_shape(la, lb):
+    """Scale s when lb is la's surface scaled by s (same lengths everywhere,
+    so the same UVs fit, whatever the bending or mirroring), else None."""
+    if len(la) != len(lb):
+        return None
+    sa = sum(la)
+    if sa <= 0:
+        return None
+    s = sum(lb) / sa
+    for a, b in zip(la, lb):
+        if abs(b - s * a) > 1e-4 * s * a + 1e-7:
+            return None
+    return s
+
+
+def _uw_kind(m, pf, opts):
+    """'hard' or 'organic' for a piece, by its edges: organic pieces are
+    curved smoothly almost everywhere, with few flat areas, hard edges or
+    sharp angles."""
+    faces, dcos, hard, pts = m["faces"], m["dcos"], m["hard"], m["pts"]
+    flat_cos = math.cos(math.radians(2.0))
+    sharp_cos = math.cos(math.radians(opts["hard_angle"]))
+    smooth = total = 0.0
+    seen = set()
+    for f in pf:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            if key in seen:
+                continue
+            seen.add(key)
+            d = dcos.get(key)
+            if d is None:
+                continue
+            pa, pb = pts[a], pts[b]
+            ln = math.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2)
+            total += ln
+            if key in hard or d < sharp_cos:
+                smooth -= ln  # hard and sharp edges count against organic
+            elif d < flat_cos:
+                smooth += ln
+    return "organic" if total > 0 and smooth / total > 0.6 else "hard"
+
+
+def _uw_seams(m, pf, kind, opts):
+    """The edges cut first: always borders and bad edges; hard surface also
+    hard edges and edges sharper than hard_angle; organic only edges sharper
+    than organic_angle."""
+    faces, dcos, hard = m["faces"], m["dcos"], m["hard"]
+    limit = math.cos(math.radians(opts["hard_angle"] if kind == "hard" else opts["organic_angle"]))
+    cut, sewable = set(), set()
+    for f in pf:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            d = dcos.get(key)
+            if d is None:
+                cut.add(key)
+            elif (kind == "hard" and key in hard) or d < limit:
+                cut.add(key)
+                sewable.add(key)
+    return cut, sewable
+
+
+def _uw_regions(m, fids, cut):
+    """Faces split into regions joined across uncut edges."""
+    faces, edges = m["faces"], m["edges"]
+    fset = set(fids)
+    seen = set()
+    out = []
+    for s in fids:
+        if s in seen:
+            continue
+        seen.add(s)
+        stack, reg = [s], []
+        while stack:
+            f = stack.pop()
+            reg.append(f)
+            fv = faces[f]
+            c = len(fv)
+            for i in range(c):
+                a, b = fv[i], fv[(i + 1) % c]
+                key = (a, b) if a < b else (b, a)
+                if key in cut:
+                    continue
+                for g, _ in edges[key]:
+                    if g != f and g in fset and g not in seen:
+                        seen.add(g)
+                        stack.append(g)
+        out.append(reg)
+    return out
+
+
+def _uw_build(m, fids, cut):
+    """A chart's local mesh: vertices are corners joined across uncut edges
+    (a vertex on a slit becomes two). Returns dict(P, T, cl, medge):
+    3D points, triangles, corner -> local vertex, local edge -> mesh edge."""
+    faces, edges, base, pts, tris = m["faces"], m["edges"], m["base"], m["pts"], m["tris"]
+    fset = set(fids)
+    uf = _UF()
+    for f in fids:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            if key in cut:
+                continue
+            ent = edges[key]
+            g, j = ent[0] if ent[1][0] == f else ent[1]
+            if g <= f or g not in fset:
+                continue
+            gc = len(faces[g])
+            uf.union(base[f] + i, base[g] + (j + 1) % gc)
+            uf.union(base[f] + (i + 1) % c, base[g] + j)
+    local, P, cl = {}, [], {}
+    for f in fids:
+        fv = faces[f]
+        for i in range(len(fv)):
+            r = uf.find(base[f] + i)
+            idx = local.get(r)
+            if idx is None:
+                idx = local[r] = len(P)
+                P.append(pts[fv[i]])
+            cl[base[f] + i] = idx
+    T, medge = [], {}
+    for f in fids:
+        b0 = base[f]
+        for i, j, k in tris[f]:
+            T.append((cl[b0 + i], cl[b0 + j], cl[b0 + k]))
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            x, y = cl[b0 + i], cl[b0 + (i + 1) % c]
+            a, b = fv[i], fv[(i + 1) % c]
+            medge[(x, y) if x < y else (y, x)] = (a, b) if a < b else (b, a)
+    return {"P": P, "T": T, "cl": cl, "medge": medge, "faces": fids}
+
+
+def _uw_topology(T, nv):
+    """(boundary loops as vertex lists, euler characteristic, ok). Loops run
+    with the surface on their left (counter-clockwise for a disk)."""
+    use = {}
+    for a, b, c in T:
+        for x, y in ((a, b), (b, c), (c, a)):
+            key = (x, y) if x < y else (y, x)
+            use[key] = use.get(key, 0) + 1
+    nxt = {}
+    ok = True
+    for a, b, c in T:
+        for x, y in ((a, b), (b, c), (c, a)):
+            n = use[(x, y) if x < y else (y, x)]
+            if n == 1:
+                if x in nxt:
+                    ok = False  # two boundaries through one vertex (pinched)
+                nxt[x] = y
+            elif n > 2:
+                ok = False
+    loops = []
+    seen = set()
+    for s in list(nxt):
+        if s in seen:
+            continue
+        loop = []
+        v = s
+        while v not in seen and v in nxt:
+            seen.add(v)
+            loop.append(v)
+            v = nxt[v]
+        loops.append(loop)
+    used = set(v for t in T for v in t)
+    return loops, len(used) - len(use) + len(T), ok and len(used) == nv
+
+
+def _uw_path_cut(ch, sources, targets):
+    """Shortest path (3D length) over mesh edges from any source vertex to
+    any target vertex. Returns the mesh edge keys along it, or None."""
+    P, medge = ch["P"], ch["medge"]
+    adj = {}
+    for (x, y) in medge:
+        a, b = P[x], P[y]
+        ln = math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+        adj.setdefault(x, []).append((y, ln))
+        adj.setdefault(y, []).append((x, ln))
+    dist, prev = {}, {}
+    heap = []
+    for s in sources:
+        dist[s] = 0.0
+        heap.append((0.0, s))
+    heapq.heapify(heap)
+    targets = set(targets)
+    hit = None
+    while heap:
+        d, v = heapq.heappop(heap)
+        if d > dist.get(v, 1e300):
+            continue
+        if v in targets:
+            hit = v
+            break
+        for w, ln in adj.get(v, ()):
+            nd = d + ln
+            if nd < dist.get(w, 1e300):
+                dist[w] = nd
+                prev[w] = v
+                heapq.heappush(heap, (nd, w))
+    if hit is None:
+        return None
+    path = []
+    v = hit
+    while v in prev:
+        u = prev[v]
+        path.append(medge[(u, v) if u < v else (v, u)])
+        v = u
+    return path
+
+
+def _uw_far_pair(ch):
+    """Two vertices about as far apart as the chart allows (double sweep)."""
+    medge = ch["medge"]
+    adj = {}
+    for x, y in medge:
+        adj.setdefault(x, []).append(y)
+        adj.setdefault(y, []).append(x)
+
+    def farthest(s):
+        seen = {s}
+        order = [s]
+        for v in order:
+            for w in adj.get(v, ()):
+                if w not in seen:
+                    seen.add(w)
+                    order.append(w)
+        return order[-1]
+
+    a = farthest(0)
+    return a, farthest(a)
+
+
+def _uw_split(m, fids, cut):
+    """Split faces in two by normals (seeds: the most different normals),
+    or along their longest axis when they all face one way. Returns the new
+    cut edges between the halves."""
+    faces, edges, nrm, area, pts = m["faces"], m["edges"], m["nrm"], m["area"], m["pts"]
+    fset = set(fids)
+    mx = my = mz = 0.0
+    for f in fids:
+        n, a = nrm[f], area[f]
+        mx, my, mz = mx + n[0] * a, my + n[1] * a, mz + n[2] * a
+
+    def dot(a, b):
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    s1 = min(fids, key=lambda f: dot(nrm[f], (mx, my, mz)))
+    s2 = min(fids, key=lambda f: dot(nrm[f], nrm[s1]))
+    side = {}
+    if dot(nrm[s1], nrm[s2]) < 0.995:
+        heap = [(0.0, s1, 0), (0.0, s2, 1)]
+        seeds = (nrm[s1], nrm[s2])
+        while heap:
+            _, f, k = heapq.heappop(heap)
+            if f in side:
+                continue
+            side[f] = k
+            fv = faces[f]
+            c = len(fv)
+            for i in range(c):
+                a, b = fv[i], fv[(i + 1) % c]
+                key = (a, b) if a < b else (b, a)
+                if key in cut:
+                    continue
+                for g, _ in edges[key]:
+                    if g in fset and g not in side:
+                        heapq.heappush(heap, (1.0 - dot(nrm[g], seeds[k]), g, k))
+        for f in fids:
+            side.setdefault(f, 0)
+    if not side or len(set(side.values())) < 2:  # all one way: cut across the longest axis
+        cen = {}
+        for f in fids:
+            fv = faces[f]
+            cen[f] = tuple(sum(pts[v][a] for v in fv) / len(fv) for a in range(3))
+        ext = [max(cen[f][a] for f in fids) - min(cen[f][a] for f in fids) for a in range(3)]
+        ax = ext.index(max(ext))
+        order = sorted(fids, key=lambda f: cen[f][ax])
+        half = set(order[:max(1, len(order) // 2)])
+        side = dict((f, 0 if f in half else 1) for f in fids)
+    new = set()
+    for f in fids:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            for g, _ in edges[key]:
+                if g in fset and side[g] != side[f]:
+                    new.add(key)
+    return new
+
+
+# --- flattening -------------------------------------------------------------
+
+def _uw_tri_normal(P, t):
+    a, b, c = P[t[0]], P[t[1]], P[t[2]]
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    return (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+
+
+def _uw_planar(P, T, cos_limit):
+    nx = ny = nz = 0.0
+    tn = []
+    for t in T:
+        n = _uw_tri_normal(P, t)
+        tn.append(n)
+        nx, ny, nz = nx + n[0], ny + n[1], nz + n[2]
+    ln = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if ln <= 0:
+        return None
+    nx, ny, nz = nx / ln, ny / ln, nz / ln
+    for n in tn:
+        l2 = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+        if l2 > 0 and (n[0] * nx + n[1] * ny + n[2] * nz) < cos_limit * l2:
+            return None
+    # basis: e1 perpendicular to the normal, e2 = n x e1
+    if abs(nx) < 0.9:
+        ex, ey, ez = 0.0, nz, -ny  # n x X
+    else:
+        ex, ey, ez = -nz, 0.0, nx  # n x Y
+    le = math.sqrt(ex * ex + ey * ey + ez * ez)
+    ex, ey, ez = ex / le, ey / le, ez / le
+    fx, fy, fz = ny * ez - nz * ey, nz * ex - nx * ez, nx * ey - ny * ex
+    return [(p[0] * ex + p[1] * ey + p[2] * ez, p[0] * fx + p[1] * fy + p[2] * fz) for p in P]
+
+
+def _uw_len(P, a, b):
+    p, q = P[a], P[b]
+    return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2)
+
+
+def _uw_hinge(P, T):
+    """Unfold triangle by triangle from the middle outward, each one laid
+    against its already-placed neighbour at its true size. Exact (no
+    stretch) on developable surfaces: flat, cylinders, cones, planks."""
+    nv = len(P)
+    UV = [None] * nv
+    if not T:
+        return [(0.0, 0.0)] * nv
+    edge_tris = {}
+    for ti, (a, b, c) in enumerate(T):
+        for x, y in ((a, b), (b, c), (c, a)):
+            edge_tris.setdefault((x, y) if x < y else (y, x), []).append(ti)
+    cx = sum(p[0] for p in P) / nv
+    cy = sum(p[1] for p in P) / nv
+    cz = sum(p[2] for p in P) / nv
+
+    def tri_dist(t):
+        a, b, c = T[t]
+        x = (P[a][0] + P[b][0] + P[c][0]) / 3.0 - cx
+        y = (P[a][1] + P[b][1] + P[c][1]) / 3.0 - cy
+        z = (P[a][2] + P[b][2] + P[c][2]) / 3.0 - cz
+        return x * x + y * y + z * z
+
+    placed = [False] * len(T)
+    for start in sorted(range(len(T)), key=tri_dist):
+        if placed[start]:
+            continue
+        a, b, c = T[start]
+        if UV[a] is None or UV[b] is None:  # a fresh island (only if disconnected)
+            lab = _uw_len(P, a, b)
+            off = (max((u[0] for u in UV if u is not None), default=0.0) + lab * 2.0) if any(UV) else 0.0
+            UV[a] = (off, 0.0)
+            UV[b] = (off + lab, 0.0)
+        queue = [start]
+        placed[start] = True
+        qi = 0
+        while qi < len(queue):
+            t = queue[qi]
+            qi += 1
+            tv = T[t]
+            for r in range(3):  # third vertex of t, if not yet placed
+                p, q, s = tv[r], tv[(r + 1) % 3], tv[(r + 2) % 3]
+                if UV[s] is None and UV[p] is not None and UV[q] is not None:
+                    UV[s] = _uw_third(UV[p], UV[q], _uw_len(P, p, s), _uw_len(P, q, s))
+            for r in range(3):
+                x, y = tv[r], tv[(r + 1) % 3]
+                for n in edge_tris[(x, y) if x < y else (y, x)]:
+                    if not placed[n]:
+                        placed[n] = True
+                        queue.append(n)
+    return [u if u is not None else (0.0, 0.0) for u in UV]
+
+
+def _uw_third(pu, qu, lp, lq):
+    """Point r with |pr| = lp, |qr| = lq, left of p -> q (counter-clockwise)."""
+    ex, ey = qu[0] - pu[0], qu[1] - pu[1]
+    L = math.sqrt(ex * ex + ey * ey)
+    if L <= 1e-15:
+        return (pu[0] + lp, pu[1])
+    ex, ey = ex / L, ey / L
+    x = (lp * lp - lq * lq + L * L) / (2.0 * L)
+    h = math.sqrt(max(0.0, lp * lp - x * x))
+    return (pu[0] + x * ex - h * ey, pu[1] + x * ey + h * ex)
+
+
+def _uw_stretch(P, T, UV):
+    """(flipped triangles, share of 3D area that is well mapped, worst
+    singular value spread): well mapped = within 1.5x of the chart's own
+    average scale and under 1.5:1 anisotropy."""
+    tot3 = totuv = 0.0
+    rows = []
+    for a, b, c in T:
+        n = _uw_tri_normal(P, (a, b, c))
+        a3 = 0.5 * math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+        ua, ub, uc = UV[a], UV[b], UV[c]
+        auv = 0.5 * ((ub[0] - ua[0]) * (uc[1] - ua[1]) - (uc[0] - ua[0]) * (ub[1] - ua[1]))
+        tot3 += a3
+        totuv += auv
+        rows.append((a, b, c, a3, auv))
+    if tot3 <= 0 or totuv <= 0:
+        return len(T), 0.0, 1e9
+    scale = math.sqrt(totuv / tot3)
+    flips = 0
+    good = 0.0
+    worst = 1.0
+    for a, b, c, a3, auv in rows:
+        if a3 <= 1e-20:
+            continue
+        if auv <= 0:
+            flips += 1
+            continue
+        # singular values of the triangle's map (3D -> UV), via its local frame
+        l_ab = _uw_len(P, a, b)
+        if l_ab <= 0:
+            continue
+        x2 = ((P[b][0] - P[a][0]) * (P[c][0] - P[a][0]) + (P[b][1] - P[a][1]) * (P[c][1] - P[a][1]) +
+              (P[b][2] - P[a][2]) * (P[c][2] - P[a][2])) / l_ab
+        y2 = 2.0 * a3 / l_ab
+        if y2 <= 0:
+            continue
+        du1, dv1 = UV[b][0] - UV[a][0], UV[b][1] - UV[a][1]
+        du2, dv2 = UV[c][0] - UV[a][0], UV[c][1] - UV[a][1]
+        # J = [du1 du2; dv1 dv2] * inv([l_ab x2; 0 y2])
+        j00 = du1 / l_ab
+        j10 = dv1 / l_ab
+        j01 = (du2 - j00 * x2) / y2
+        j11 = (dv2 - j10 * x2) / y2
+        e = (j00 * j00 + j10 * j10 + j01 * j01 + j11 * j11) * 0.5
+        d = abs(j00 * j11 - j01 * j10)
+        root = math.sqrt(max(0.0, e * e - d * d))
+        s1, s2 = math.sqrt(e + root), math.sqrt(max(1e-30, e - root))
+        aniso = s1 / s2
+        area_r = math.sqrt(d) / scale
+        worst = max(worst, aniso, area_r, 1.0 / max(area_r, 1e-12))
+        if aniso <= 1.5 and 1 / 1.5 <= area_r <= 1.5:
+            good += a3
+    return flips, good / tot3, worst
+
+
+def _uw_overlap(UV, loops):
+    """True when the chart's boundary crosses itself (it folds over)."""
+    segs = []
+    for loop in loops:
+        n = len(loop)
+        for i in range(n):
+            segs.append((loop[i], loop[(i + 1) % n]))
+    return _uw_segments_cross([(UV[a], UV[b], a, b) for a, b in segs], [])
+
+
+def _uw_segments_cross(sa, sb):
+    """Do any two segments properly cross? sa against itself when sb is
+    empty, else sa against sb. Segments: (p, q, id_p, id_q); segments that
+    share an id or an end point, or only touch, don't count."""
+    both = sa + sb
+    if len(both) < 2:
+        return False
+    total = 0.0
+    for p, q, _, _ in both:
+        total += abs(q[0] - p[0]) + abs(q[1] - p[1])
+    cell = max(total / len(both), 1e-9) * 2.0
+    grid = {}
+    for k, (p, q, _, _) in enumerate(sa):
+        x0, x1 = int(math.floor(min(p[0], q[0]) / cell)), int(math.floor(max(p[0], q[0]) / cell))
+        y0, y1 = int(math.floor(min(p[1], q[1]) / cell)), int(math.floor(max(p[1], q[1]) / cell))
+        if (x1 - x0 + 1) * (y1 - y0 + 1) > 4096:
+            return True  # absurdly long segment: treat as broken
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
+                grid.setdefault((gx, gy), []).append(k)
+    others = sb if sb else sa
+    eps = cell * 1e-7
+
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(v) <= eps * cell else (1 if v > 0 else -1)
+
+    for k, (p, q, ip, iq) in enumerate(others):
+        x0, x1 = int(math.floor(min(p[0], q[0]) / cell)), int(math.floor(max(p[0], q[0]) / cell))
+        y0, y1 = int(math.floor(min(p[1], q[1]) / cell)), int(math.floor(max(p[1], q[1]) / cell))
+        if (x1 - x0 + 1) * (y1 - y0 + 1) > 4096:
+            return True
+        tried = set()
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
+                for o in grid.get((gx, gy), ()):
+                    if o in tried or (not sb and o <= k):
+                        continue
+                    tried.add(o)
+                    r, s, ir, is_ = sa[o]
+                    if ip in (ir, is_) or iq in (ir, is_):
+                        continue
+                    d1, d2 = orient(p, q, r), orient(p, q, s)
+                    d3, d4 = orient(r, s, p), orient(r, s, q)
+                    if d1 * d2 < 0 and d3 * d4 < 0:
+                        return True
+    return False
+
+
+def _uw_solver(P, T):
+    """ARAP pieces that don't change between iterations: per triangle its
+    flat isometric frame and cotangent weights; the cotangent Laplacian."""
+    nv = len(P)
+    tri = []
+    nbr = [dict() for _ in range(nv)]
+    for a, b, c in T:
+        l_ab = _uw_len(P, a, b)
+        if l_ab <= 1e-15:
+            continue
+        n = _uw_tri_normal(P, (a, b, c))
+        dbl = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+        if dbl <= 1e-20:
+            continue
+        x2 = ((P[b][0] - P[a][0]) * (P[c][0] - P[a][0]) + (P[b][1] - P[a][1]) * (P[c][1] - P[a][1]) +
+              (P[b][2] - P[a][2]) * (P[c][2] - P[a][2])) / l_ab
+        y2 = dbl / l_ab
+        X = {a: (0.0, 0.0), b: (l_ab, 0.0), c: (x2, y2)}
+        ws = []
+        for i, j, k in ((a, b, c), (b, c, a), (c, a, b)):  # edge i-j, opposite corner k
+            ki, kj = X[i], X[j]
+            kk = X[k]
+            ux, uy = ki[0] - kk[0], ki[1] - kk[1]
+            vx, vy = kj[0] - kk[0], kj[1] - kk[1]
+            cot = (ux * vx + uy * vy) / max(1e-20, abs(ux * vy - uy * vx))
+            w = 0.5 * min(1e3, max(1e-3, cot))
+            ws.append((i, j, w, ki[0] - kj[0], ki[1] - kj[1]))
+            nbr[i][j] = nbr[i].get(j, 0.0) + w
+            nbr[j][i] = nbr[j].get(i, 0.0) + w
+        tri.append(ws)
+    rows = [(list(d.keys()), list(d.values())) for d in nbr]
+    diag = [sum(w) or 1.0 for _, w in rows]
+    return tri, rows, diag
+
+
+def _uw_cg(rows, diag, x, b, iters, fixed=None):
+    """Conjugate gradients with a Jacobi preconditioner on L x = b, warm
+    started from x (changed in place). fixed: indices held where they are.
+    The loops run through map / zip so the arithmetic stays in C (several
+    times faster than plain Python loops)."""
+    mul, sub, add = operator.mul, operator.sub, operator.add
+    inv = [1.0 / d for d in diag]
+    keep = None
+    if fixed:
+        keep = [1.0] * len(x)
+        for i in fixed:
+            keep[i] = 0.0
+
+    def mv(q):
+        g = q.__getitem__
+        out = [d * qi - sum(map(mul, ws, map(g, js))) for d, qi, (js, ws) in zip(diag, q, rows)]
+        return list(map(mul, out, keep)) if keep else out
+
+    r = list(map(sub, b, mv(x)))
+    if keep:
+        r = list(map(mul, r, keep))
+    z = list(map(mul, r, inv))
+    d = list(z)
+    rz = sum(map(mul, r, z))
+    if rz <= 1e-30:
+        return x
+    xs = list(x)
+    for _ in range(iters):
+        ad = mv(d)
+        dad = sum(map(mul, d, ad))
+        if dad <= 1e-30:
+            break
+        alpha = rz / dad
+        xs = [xi + alpha * di for xi, di in zip(xs, d)]
+        r = [ri - alpha * ai for ri, ai in zip(r, ad)]
+        z = list(map(mul, r, inv))
+        rz2 = sum(map(mul, r, z))
+        if rz2 <= 1e-20 * rz or rz2 <= 1e-30:
+            break
+        beta = rz2 / rz
+        rz = rz2
+        d = list(map(add, z, [beta * di for di in d]))
+    x[:] = xs
+    return x
+
+
+def _uw_arap(P, T, UV, iters, ctl):
+    """As-rigid-as-possible relax (Liu et al. 2008, local/global) from UV."""
+    tri, rows, diag = _uw_solver(P, T)
+    u = [q[0] for q in UV]
+    v = [q[1] for q in UV]
+    nv = len(P)
+    for it in range(iters):
+        if ctl.get("cancel"):
+            raise Cancelled("relax")
+        bu = [0.0] * nv
+        bv = [0.0] * nv
+        for ws in tri:
+            s00 = s01 = s10 = s11 = 0.0
+            for i, j, w, dx, dy in ws:
+                du, dv = u[i] - u[j], v[i] - v[j]
+                s00 += w * du * dx
+                s01 += w * du * dy
+                s10 += w * dv * dx
+                s11 += w * dv * dy
+            th = math.atan2(s10 - s01, s00 + s11)
+            c, s = math.cos(th), math.sin(th)
+            for i, j, w, dx, dy in ws:
+                rx, ry = w * (c * dx - s * dy), w * (s * dx + c * dy)
+                bu[i] += rx
+                bv[i] += ry
+                bu[j] -= rx
+                bv[j] -= ry
+        _uw_cg(rows, diag, u, bu, 12)
+        _uw_cg(rows, diag, v, bv, 12)
+    return list(zip(u, v))
+
+
+def _uw_tutte(P, T, loop):
+    """Tutte embedding: the boundary on a circle (by length), the inside
+    averaged; always fold-free. The start for relaxing curved charts."""
+    nv = len(P)
+    lens = [_uw_len(P, loop[i], loop[(i + 1) % len(loop)]) for i in range(len(loop))]
+    per = sum(lens) or 1.0
+    rad = per / (2.0 * math.pi)
+    u = [0.0] * nv
+    v = [0.0] * nv
+    acc = 0.0
+    for i, a in enumerate(loop):
+        ang = 2.0 * math.pi * acc / per
+        u[a], v[a] = rad * math.cos(ang), rad * math.sin(ang)
+        acc += lens[i]
+    nbr = [set() for _ in range(nv)]
+    for a, b, c in T:
+        nbr[a].update((b, c))
+        nbr[b].update((a, c))
+        nbr[c].update((a, b))
+    rows = [(list(s), [1.0] * len(s)) for s in nbr]
+    diag = [float(len(s)) or 1.0 for s in nbr]
+    fixed = set(loop)
+    zero = [0.0] * nv
+    bu = list(zero)
+    bv = list(zero)
+    n_it = min(300, max(60, int(4 * math.sqrt(nv))))
+    _uw_cg(rows, diag, u, bu, n_it, fixed)
+    _uw_cg(rows, diag, v, bv, n_it, fixed)
+    return list(zip(u, v))
+
+
+def _uw_flatten(ch, opts, ctl):
+    """UVs for one disk chart, or None when it can't be flattened cleanly.
+    Returns (UV, how) with how in 'flat', 'unfolded', 'relaxed', 'heavy'."""
+    P, T = ch["P"], ch["T"]
+    uv = _uw_planar(P, T, math.cos(math.radians(opts["planar_angle"])))
+    if uv is not None:
+        return uv, "flat"
+    loops = ch["loops"]
+    uv = _uw_hinge(P, T)
+    flips, good, worst = _uw_stretch(P, T, uv)
+    if flips == 0 and worst < 1.02 and not _uw_overlap(uv, loops):
+        return uv, "unfolded"  # developable: exact
+    if len(T) > opts["relax_budget"]:  # too big to relax here quickly: Unfold3D finishes it
+        if flips == 0 and not _uw_overlap(uv, loops):
+            return uv, "heavy"
+        return _uw_planar(P, T, -2.0) or uv, "heavy"
+    iters = opts["relax_iterations"]
+    best = None
+    for start in ("hinge", "tutte"):
+        init = uv if start == "hinge" else _uw_tutte(P, T, loops[0])
+        res = _uw_arap(P, T, init, iters, ctl)
+        flips, good, worst = _uw_stretch(P, T, res)
+        if flips == 0 and not _uw_overlap(res, loops):
+            if good >= 0.9:
+                return res, "relaxed"
+            if best is None or good > best[1]:
+                best = (res, good)
+    if best is not None and best[1] >= 0.75:
+        return best[0], "relaxed"
+    return None
+
+
+def _uw_piece(m, pf, kind, opts, ctl):
+    """Charts for one piece. Returns (corner -> (chart, local UV), chart
+    list, cut edges, sewable edges, faces for Unfold3D)."""
+    cut, sewable = _uw_seams(m, pf, kind, opts)
+    work = [(r, 0) for r in _uw_regions(m, pf, cut)]
+    charts = []
+    heavy = []
+    while work:
+        if ctl.get("cancel"):
+            raise Cancelled("unwrap")
+        fids, depth = work.pop()
+        ch = _uw_build(m, fids, cut)
+        loops, chi, ok = _uw_topology(ch["T"], len(ch["P"]))
+        if ok and chi == 2 and not loops:  # closed: pelt cut between the far ends
+            a, b = _uw_far_pair(ch)
+            path = _uw_path_cut(ch, [a], [b])
+            if path:
+                cut.update(path)
+                sewable.update(path)
+                work.append((fids, depth))
+                continue
+        if ok and chi == 0 and len(loops) == 2:  # a ring: one cut between its rims
+            path = _uw_path_cut(ch, loops[0], loops[1])
+            if path:
+                cut.update(path)
+                sewable.update(path)
+                work.append((fids, depth))
+                continue
+        res = None
+        if ok and chi == 1 and len(loops) == 1:
+            ch["loops"] = loops
+            res = _uw_flatten(ch, opts, ctl)
+        if res is None:
+            if len(fids) > 1 and depth < opts["max_depth"]:
+                new = _uw_split(m, fids, cut)
+                cut.update(new)
+                sewable.update(new)
+                work.extend((r, depth + 1) for r in _uw_regions(m, fids, cut))
+                continue
+            # one face, or split as far as allowed: project it and let Unfold3D fix it
+            ch["loops"] = loops
+            uv = _uw_planar(ch["P"], ch["T"], -2.0) or _uw_hinge(ch["P"], ch["T"])
+            res = (uv, "heavy")
+        ch["uv"], ch["how"] = res
+        if ch["how"] == "heavy":
+            heavy.extend(fids)
+        charts.append(ch)
+        ctl["done"] = ctl.get("done", 0.0) + len(fids)
+    return charts, cut, sewable, heavy
+
+
+def _uw_area(UV, T):
+    s = 0.0
+    for a, b, c in T:
+        ua, ub, uc = UV[a], UV[b], UV[c]
+        s += 0.5 * ((ub[0] - ua[0]) * (uc[1] - ua[1]) - (uc[0] - ua[0]) * (ub[1] - ua[1]))
+    return s
+
+
+def _uw_sew(m, charts, cut, sewable, opts, ctl):
+    """Join charts back across sewable cuts (box unfolding): biggest shared
+    seams first, when the shared vertices line up after a rigid move and
+    the joined shell doesn't overlap itself. Returns (per chart transform
+    (c, s, tx, ty), set of sewn edges)."""
+    faces, edges, base = m["faces"], m["edges"], m["base"]
+    n = len(charts)
+    xf = [(1.0, 0.0, 0.0, 0.0)] * n
+    group = list(range(n))
+    members = dict((i, [i]) for i in range(n))
+    sewn = set()
+    if opts["sew"] == "off" or n < 2:
+        return xf, sewn
+    chart_of = {}
+    for ci, ch in enumerate(charts):
+        for f in ch["faces"]:
+            chart_of[f] = ci
+    pairs = {}
+    for key in sewable:
+        ent = edges.get(key)
+        if not ent or len(ent) != 2 or m["dcos"].get(key) is None:
+            continue
+        (f, i), (g, j) = ent
+        a, b = chart_of.get(f), chart_of.get(g)
+        if a is None or b is None or a == b:
+            continue
+        pairs.setdefault((min(a, b), max(a, b)), []).append(key)
+    pts = m["pts"]
+
+    def elen(key):
+        p, q = pts[key[0]], pts[key[1]]
+        return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2)
+
+    order = sorted(pairs.items(), key=lambda kv: -sum(elen(k) for k in kv[1]))
+
+    def world(ci, uv):
+        c, s, tx, ty = xf[ci]
+        return (c * uv[0] - s * uv[1] + tx, s * uv[0] + c * uv[1] + ty)
+
+    def corner_uv(ci, f, i):
+        ch = charts[ci]
+        return world(ci, ch["uv"][ch["cl"][base[f] + i]])
+
+    def boundary(gi):
+        segs = []
+        for ci in members[gi]:
+            ch = charts[ci]
+            for loop in ch["loops"]:
+                k = len(loop)
+                for t in range(k):
+                    a, b = loop[t], loop[(t + 1) % k]
+                    segs.append((world(ci, ch["uv"][a]), world(ci, ch["uv"][b]), (ci, a), (ci, b)))
+        return segs
+
+    for (a, b), keys in order:
+        if ctl.get("cancel"):
+            raise Cancelled("sew")
+        ga, gb = group[a], group[b]
+        if ga == gb:
+            continue
+        if len(members[gb]) > len(members[ga]):
+            a, b, ga, gb = b, a, gb, ga
+        # matching points: the shared edges' ends, seen from both sides
+        pa, pb = [], []
+        for key in keys:
+            (f, i), (g, j) = edges[key]
+            if chart_of[f] != a:
+                (f, i), (g, j) = (g, j), (f, i)
+            fc, gc = len(faces[f]), len(faces[g])
+            pa += [corner_uv(a, f, i), corner_uv(a, f, (i + 1) % fc)]
+            pb += [corner_uv(b, g, (j + 1) % gc), corner_uv(b, g, j)]
+        k = float(len(pa))
+        ax, ay = sum(p[0] for p in pa) / k, sum(p[1] for p in pa) / k
+        bx, by = sum(p[0] for p in pb) / k, sum(p[1] for p in pb) / k
+        sc = sx = 0.0
+        for p, q in zip(pa, pb):
+            qx, qy, px, py = q[0] - bx, q[1] - by, p[0] - ax, p[1] - ay
+            sc += qx * px + qy * py
+            sx += qx * py - qy * px
+        th = math.atan2(sx, sc)
+        c, s = math.cos(th), math.sin(th)
+        tx, ty = ax - (c * bx - s * by), ay - (s * bx + c * by)
+        length = sum(elen(key) for key in keys) or 1e-9
+        err = max(math.hypot(c * q[0] - s * q[1] + tx - p[0], s * q[0] + c * q[1] + ty - p[1])
+                  for p, q in zip(pa, pb))
+        if err > 0.01 * length:
+            continue  # doesn't lie flat (a corner can't open up without stretching)
+        old = dict((ci, xf[ci]) for ci in members[gb])
+        for ci in members[gb]:
+            c0, s0, x0, y0 = xf[ci]
+            xf[ci] = (c * c0 - s * s0, s * c0 + c * s0, c * x0 - s * y0 + tx, s * x0 + c * y0 + ty)
+        sa, sb = boundary(ga), boundary(gb)
+        bad = _uw_segments_cross(sa, sb)
+        if not bad and opts["sew"] == "compact":
+            allp = [p for seg in sa + sb for p in (seg[0],)]
+            area = sum(abs(_uw_area([world(ci, q) for q in charts[ci]["uv"]], charts[ci]["T"]))
+                       for ci in members[ga] + members[gb])
+            box = (max(p[0] for p in allp) - min(p[0] for p in allp)) * (max(p[1] for p in allp) -
+                                                                         min(p[1] for p in allp))
+            bad = box > 0 and area / box < opts["sew_fill"]
+        if bad:
+            for ci, t in old.items():
+                xf[ci] = t
+            continue
+        for ci in members[gb]:
+            group[ci] = ga
+        members[ga] += members.pop(gb)
+        sewn.update(keys)
+    return xf, sewn
+
+
+def _uw_weld(m, pf, cut, corner_uv):
+    """Corners that end up as one UV (joined across uncut edges) get one
+    position: their average (sewn seams line up only to within 1%)."""
+    faces, edges, base = m["faces"], m["edges"], m["base"]
+    pset = set(pf)
+    uf = _UF()
+    for f in pf:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            if key in cut:
+                continue
+            ent = edges[key]
+            if len(ent) != 2:
+                continue
+            g, j = ent[0] if ent[1][0] == f else ent[1]
+            if g <= f or g not in pset:
+                continue
+            gc = len(faces[g])
+            uf.union(base[f] + i, base[g] + (j + 1) % gc)
+            uf.union(base[f] + (i + 1) % c, base[g] + j)
+    groups = {}
+    for f in pf:
+        for i in range(len(faces[f])):
+            k = base[f] + i
+            groups.setdefault(uf.find(k), []).append(k)
+    for ks in groups.values():
+        if len(ks) > 1:
+            u = sum(corner_uv[k][0] for k in ks) / len(ks)
+            v = sum(corner_uv[k][1] for k in ks) / len(ks)
+            for k in ks:
+                corner_uv[k] = (u, v)
+
+
+def _uw_spread(m, cut, corner_uv):
+    """Lay the mesh's UV shells out in rows (biggest first), so none overlap
+    even before packing. Shells are corners joined across uncut edges."""
+    faces, edges, base = m["faces"], m["edges"], m["base"]
+    uf = _UF()
+    for f, fv in enumerate(faces):
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            if key in cut:
+                continue
+            ent = edges[key]
+            if len(ent) != 2:
+                continue
+            g, j = ent[0] if ent[1][0] == f else ent[1]
+            if g <= f:
+                continue
+            uf.union(f, g)
+    shells = {}
+    for f in range(len(faces)):
+        shells.setdefault(uf.find(f), []).append(f)
+    if len(shells) < 2:
+        return
+    boxes = []
+    for fs in shells.values():
+        ks = [base[f] + i for f in fs for i in range(len(faces[f]))]
+        us = [corner_uv[k][0] for k in ks]
+        vs = [corner_uv[k][1] for k in ks]
+        boxes.append((max(vs) - min(vs), max(us) - min(us), min(us), min(vs), ks))
+    boxes.sort(key=lambda t: -t[0])
+    width = math.sqrt(sum(h * w for h, w, _, _, _ in boxes)) * 1.4
+    gap = 0.02 * max(max(h, w) for h, w, _, _, _ in boxes)
+    x = y = row_h = 0.0
+    for h, w, u0, v0, ks in boxes:
+        if x > 0 and x + w > width:
+            x, y, row_h = 0.0, y + row_h + gap, 0.0
+        du, dv = x - u0, y - v0
+        for k in ks:
+            q = corner_uv[k]
+            corner_uv[k] = (q[0] + du, q[1] + dv)
+        x += w + gap
+        row_h = max(row_h, h)
+
+
+def _uw_mesh(m, opts, ctl, shared):
+    """Unwrap one mesh's data. shared: {signature: [(lengths, result)]}
+    across meshes, for copies. Returns dict(uv: per corner (u, v), cut: edge
+    keys that stay UV borders, heavy: faces for Unfold3D, stats)."""
+    _uw_prepare(m)
+    corner_uv = [None] * (m["base"][-1] + len(m["faces"][-1]))
+    cut_all, heavy = set(), []
+    stats = {"pieces": 0, "copies": 0, "charts": 0, "hard": 0, "organic": 0, "flat": 0, "unfolded": 0,
+             "relaxed": 0, "heavy": 0, "sewn": 0}
+    faces, base = m["faces"], m["base"]
+    for pf in _uw_pieces(m):
+        if ctl.get("cancel"):
+            raise Cancelled("unwrap")
+        stats["pieces"] += 1
+        ctl["text"] = "%s: piece %d" % (short_name(m["mesh"]), stats["pieces"])
+        sig = _uw_signature(m, pf)
+        lens = _uw_lengths(m, pf)
+        hit = None
+        for la, res in shared.get(sig, ()):
+            sc = _uw_same_shape(la, lens)
+            if sc is not None:
+                hit = (res, sc)
+                break
+        if hit is not None:  # a copy: same corners in the same order, scaled
+            (uvs, cut_local, heavy_local), sc = hit
+            local = {}
+            for f in pf:
+                for v in faces[f]:
+                    if v not in local:
+                        local[v] = len(local)
+            back = dict((i, v) for v, i in local.items())
+            k = 0
+            for f in pf:
+                for i in range(len(faces[f])):
+                    u = uvs[k]
+                    corner_uv[base[f] + i] = (u[0] * sc, u[1] * sc)
+                    k += 1
+            cut_all.update((min(back[a], back[b]), max(back[a], back[b])) for a, b in cut_local)
+            heavy.extend(pf[i] for i in heavy_local)
+            stats["copies"] += 1
+            ctl["done"] = ctl.get("done", 0.0) + len(pf)
+            continue
+        kind = _uw_kind(m, pf, opts)
+        stats[kind] += 1
+        charts, cut, sewable, hv = _uw_piece(m, pf, kind, opts, ctl)
+        o = dict(opts)
+        if kind == "organic":
+            o["sew"] = "off"  # pelts are already as joined as they get
+        xf, sewn = _uw_sew(m, charts, cut, sewable, o, ctl)
+        stats["charts"] += len(charts)
+        stats["sewn"] += len(sewn)
+        for ch in charts:
+            stats[ch["how"]] += 1
+        # corners take their chart's UV; corners joined across a sewn edge
+        # land on the same spot (within the 1% the sewing allowed)
+        for ci, ch in enumerate(charts):
+            c, s, tx, ty = xf[ci]
+            uv = ch["uv"]
+            for f in ch["faces"]:
+                for i in range(len(faces[f])):
+                    q = uv[ch["cl"][base[f] + i]]
+                    corner_uv[base[f] + i] = (c * q[0] - s * q[1] + tx, s * q[0] + c * q[1] + ty)
+        piece_cut = cut - sewn
+        _uw_weld(m, pf, piece_cut, corner_uv)
+        cut_all |= piece_cut
+        heavy.extend(hv)
+        # remember it for copies, in the piece's own numbering
+        local = {}
+        for f in pf:
+            for v in faces[f]:
+                if v not in local:
+                    local[v] = len(local)
+        pos = dict((f, k) for k, f in enumerate(pf))
+        uvs = [corner_uv[base[f] + i] for f in pf for i in range(len(faces[f]))]
+        cut_local = [(local[a], local[b]) for a, b in piece_cut if a in local and b in local]
+        shared.setdefault(sig, []).append((lens, (uvs, cut_local, [pos[f] for f in hv])))
+    _uw_spread(m, cut_all, corner_uv)
+    return {"uv": corner_uv, "cut": cut_all, "heavy": sorted(set(heavy)), "stats": stats}
+
+
+def unlok_unwrap_data(datas, opts=None, ctl=None):
+    """Unwrap mesh data from _uw_read (pure maths: safe on a worker thread).
+    Returns {mesh: result} (see _uw_mesh); ctl: {"cancel": bool} to stop,
+    and it reports "done" (faces) and "text"."""
+    o = dict(UNWRAP_DEFAULTS)
+    o.update(opts or {})
+    ctl = ctl if ctl is not None else {}
+    shared = {}
+    out = {}
+    for m in datas:
+        out[m["mesh"]] = _uw_mesh(m, o, ctl, shared)
+    return out
+
+
+def _uw_run_threaded(work, pr, total):
+    """Run work(ctl) on a worker thread while the main thread keeps the
+    Working window and progress alive (and Cancel instant)."""
+    ctl = {"done": 0.0, "text": "", "cancel": False}
+    box = {}
+
+    def target():
+        try:
+            box["result"] = work(ctl)
+        except Cancelled:
+            box["error"] = "cancelled"
+        except Exception as exc:
+            traceback.print_exc()
+            box["error"] = exc
+
+    th = threading.Thread(target=target)
+    th.daemon = True
+    th.start()
+    try:
+        while th.is_alive():
+            th.join(0.05)
+            pr.done = min(float(total), ctl["done"])
+            pr.detail = ctl["text"]
+            pr.update()
+    except Cancelled:
+        ctl["cancel"] = True
+        th.join()
+        raise
+    if box.get("error") == "cancelled":
+        raise Cancelled(pr.where())
+    if box.get("error") is not None:
+        raise box["error"]
+    return box.get("result")
+
+
+def _uw_write(xform, m, res, uv_set):
+    """Give the mesh the result's UV borders and positions, undoably: a
+    planar projection (one UV per vertex), then cut the border edges; if
+    that doesn't match (pinched vertices), cut everything and sew the rest.
+    Positions go in with write_uvs."""
+    edge_id = m["edge_id"]
+    n_edges = len(edge_id)
+
+    def comps(keys):
+        ids = sorted(edge_id[k] for k in keys if k in edge_id)
+        return ["%s.%s" % (xform, r.replace("f[", "e[")) for r in face_ranges(ids)]
+
+    def assign():
+        fn = _mesh_fn(xform)
+        _, ids = fn.getAssignedUVs(uv_set)
+        us, vs = fn.getUVs(uv_set)
+        us, vs = list(us), list(vs)
+        seen = {}
+        clash = False
+        for k, uid in enumerate(ids):
+            q = res["uv"][k]
+            got = seen.get(uid)
+            if got is None:
+                seen[uid] = q
+                us[uid], vs[uid] = q
+            elif abs(got[0] - q[0]) + abs(got[1] - q[1]) > 1e-4 * (1.0 + abs(q[0]) + abs(q[1])):
+                clash = True
+        return clash, us, vs
+
+    cmds.polyProjection(xform + ".f[*]", type="Planar", mapDirection="y", constructionHistory=False)
+    if res["cut"]:
+        cmds.polyMapCut(comps(res["cut"]), constructionHistory=False)
+    clash, us, vs = assign()
+    if clash:  # general route: every edge cut, then the inside sewn
+        cmds.polyMapCut("%s.e[0:%d]" % (xform, n_edges - 1), constructionHistory=False)
+        keep = [k for k in edge_id if k not in res["cut"]]
+        if keep:
+            cmds.polyMapSew(comps(keep), constructionHistory=False)
+        clash, us, vs = assign()
+    write_uvs(xform, uv_set, us, vs)
+    return not clash
+
+
+def unlok_unwrap(meshes, uv_set="map1", opts=None, progress=None, on_unfolded=None):
+    """The fast unwrapper on meshes (their current UV set is uv_set).
+    Returns ({mesh: error}, {mesh: [faces left for Unfold3D]}, stats)."""
+    pr = progress or Progress("", [])
+    failed, heavy = {}, {}
+    pr.stage("project", len(meshes), "Reading meshes")
+    datas = []
+    for xform in meshes:
+        pr.item(short_name(xform))
+        try:
+            d = _uw_read(xform)
+        except Exception as exc:
+            failed[xform] = "couldn't read: %s" % exc
+            continue
+        if d is not None:
+            datas.append(d)
+    total = sum(len(d["faces"]) for d in datas)
+    pr.stage("unfold", max(1, total), "Unwrapping (Unlok)", items=len(datas))
+    results = _uw_run_threaded(lambda ctl: unlok_unwrap_data(datas, opts, ctl), pr, total)
+    pr.stage("seams", len(datas), "Writing UVs")
+    stats = {}
+    for d in datas:
+        xform = d["mesh"]
+        pr.item(short_name(xform))
+        res = results[xform]
+        for k, v in res["stats"].items():
+            stats[k] = stats.get(k, 0) + v
+        try:
+            if not _uw_write(xform, d, res, uv_set):
+                failed[xform] = "UV borders didn't come out as planned"
+        except Exception as exc:
+            failed[xform] = "writing UVs failed: %s" % exc
+            continue
+        if res["heavy"]:
+            heavy[xform] = res["heavy"]
+    if on_unfolded:
+        on_unfolded([d["mesh"] for d in datas if d["mesh"] not in failed and d["mesh"] not in heavy])
+    return failed, heavy, stats
 
 
 def _pack_one_tile(shells, pad):
@@ -5249,7 +6613,8 @@ AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("
 
 def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", keep_score=AUTO_UV_KEEP_SCORE,
                 hard_angle=40.0, clean_first=True, pack=True, analyse_only=False, packing=None,
-                progress_callback=None, only=None, colours=False, score=True, score_cache=None):
+                progress_callback=None, only=None, colours=False, score=True, score_cache=None, unwrapper=None,
+                unwrap_opts=None):
     """The whole Auto UV pass on an asset, as one Ctrl+Z. (packing: unused
     since packing went pure-maths; kept for old callers.)
 
@@ -5262,6 +6627,8 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
     score_cache: a dict (kept by the caller, e.g. saved with the scene) of
     earlier scores; unchanged meshes aren't scored again. The result says
     how many were reused ("cached").
+    unwrapper: one of UNWRAP_METHODS (default Unfold3D, the panel uses
+    Unlok); unwrap_opts: overrides for UNWRAP_DEFAULTS.
     score: True scores every unmarked mesh first and keeps the good ones.
     "known" (what the panel uses) scores nothing: it keeps meshes that the
     last Check UVs (in score_cache) found good and that haven't changed
@@ -5279,14 +6646,16 @@ def run_auto_uv(asset, uv_set="map1", backup=True, backup_set="map1_backup", kee
         with pr:
             pr.refresh_view = bool(colours)
             return _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack,
-                                analyse_only, packing, pr, only, colours, score, score_cache)
+                                analyse_only, packing, pr, only, colours, score, score_cache, unwrapper,
+                                unwrap_opts)
     except Cancelled:
         return {"rows": [], "timing": {"total": time.time() - pr.t0}, "tiles": [], "backups": 0,
                 "cancelled": pr.where()}
 
 
 def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clean_first, pack, analyse_only,
-                 packing, pr, only=None, colours=False, score=True, score_cache=None):
+                 packing, pr, only=None, colours=False, score=True, score_cache=None, unwrapper=None,
+                 unwrap_opts=None):
     timing = {}
     t0 = time.time()
     meshes, instanced = asset.meshes()
@@ -5376,7 +6745,8 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 cmds.polyUVSet(m, currentUVSet=True, uvSet=uv_set)
         t = time.time()
         live = (lambda done: show_uv_colours(asset, {m: "auto" for m in done})) if colours else None
-        failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr, on_unfolded=live)
+        failed = auto_unwrap(todo, hard_angle=hard_angle, progress=pr, on_unfolded=live, method=unwrapper,
+                             opts=unwrap_opts, uv_set=uv_set)
         timing["unwrap"] = time.time() - t
         if pack:
             t = time.time()
@@ -7700,10 +9070,25 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_keep.setValue(AUTO_UV_KEEP_SCORE)
         grid.add_row("Keep above", self.auto_keep,
                      "Meshes whose UVs score at least this (1 = clean, 0 = none / garbage) are kept as they are.")
+        self.auto_method = ComboField(UNWRAP_METHODS)
+        grid.add_row("Unwrapper", self.auto_method,
+                     "Unlok (fast): the toolbox's own unwrapper. It runs in the background (Maya stays "
+                     "responsive), unwraps repeated pieces once, unfolds flat and developable parts (planks, "
+                     "boxes, cylinders) exactly, relaxes curved ones, and sews hard-surface pieces back into "
+                     "few shells. Only charts it can't flatten go to Unfold3D.\n"
+                     "Unfold3D (Maya): the old route through Maya's Unfold3D for every mesh.")
         self.auto_angle = FloatField(1.0, 179.0, 10.0, 90.0, decimals=0, step=5.0)
         self.auto_angle.setValue(40.0)
         grid.add_row("Seam angle", self.auto_angle,
-                     "Edges sharper than this, and edges marked hard, become UV seams.")
+                     "Edges sharper than this, and edges marked hard, become UV seams (hard-surface pieces; "
+                     "organic ones only cut very sharp edges and get a pelt cut).")
+        self.auto_join = ComboField(("As few shells as possible", "Compact shells", "Keep every cut"))
+        grid.add_row("Join shells", self.auto_join,
+                     "Unlok only. After cutting hard and sharp edges, hard-surface pieces are sewn back together "
+                     "wherever they unfold flat without overlapping, like unfolding a box.\n"
+                     "As few shells as possible: join everything that fits.\n"
+                     "Compact shells: only while the shell stays compact (packs tighter).\n"
+                     "Keep every cut: seams on every hard and sharp edge.")
         self.auto_clean = CheckField("Clean bad geometry first")
         self.auto_clean.setValue(True)
         self.auto_clean.setToolTip("Fix lamina, non-manifold and zero-area faces on the meshes being unwrapped.")
@@ -8016,6 +9401,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "fix_nonmanifold": self.fix_nonmanifold, "fix_zero": self.fix_zero, "uv_set": self.uv_set,
                 "auto_backup": self.auto_backup, "auto_backup_name": self.auto_backup_name,
                 "auto_keep": self.auto_keep, "auto_angle": self.auto_angle, "auto_clean": self.auto_clean,
+                "auto_method": self.auto_method, "auto_join": self.auto_join,
                 "auto_pack": self.auto_pack, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
@@ -8953,7 +10339,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     backup=self.auto_backup.value(),
                     backup_set=self.auto_backup_name.text().strip() or "map1_backup",
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
-                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(), score="known")
+                    clean_first=self.auto_clean.value(), pack=self.auto_pack.value(), score="known",
+                    unwrapper=self.auto_method.value(),
+                    unwrap_opts={"sew": {"Compact shells": "compact", "Keep every cut": "off"}.get(
+                        self.auto_join.value(), "max")})
 
     # ------------------------------------------------------------ UV states
     def _scores(self):

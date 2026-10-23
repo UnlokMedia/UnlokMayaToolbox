@@ -287,10 +287,8 @@ density. The actual layout is still being built; see
      1. backs up the current UVs into `map1_backup` (only if that set doesn't
         exist yet, so re-runs keep your originals)
      2. cleans bad geometry
-     3. re-unwraps every mesh scoring below *Keep above* (0.85): normal-based
-        projection, sew soft edges, cut hard edges and edges sharper than
-        *Seam angle* as seams, Unfold3D auto-seams for closed shapes, relax,
-        then extra cuts where shells are still stretched
+     3. re-unwraps every mesh scoring below *Keep above* (0.85) with the
+        chosen *Unwrapper* (below)
      4. packs each material group into its own UDIM tile, at even density
         and as big as fits, with sections on their own rows and each
         material in the same column for every section. This uses the
@@ -301,9 +299,52 @@ density. The actual layout is still being built; see
      percentage and the time left. Press **Esc** to stop at the next mesh;
      one Ctrl+Z then undoes what was done. A long pause only happens inside
      one Unfold3D call on a big mesh, and the bar names it first.
-   - **Only the shells that need it are unfolded.** A shell whose projection
-     is already clean (walls, planks, boxes) skips Unfold3D. A mesh with one
-     curved shell unfolds just that shell, so each Unfold3D call is shorter.
+   - **Unwrapper: Unlok (fast)**, the default, is the toolbox's own
+     unwrapper. It runs in the background, so Maya stays responsive and
+     Cancel works at once.
+     - **Repeats are unwrapped once.** Pieces with the same topology and
+       edge lengths are recognised, whether they're duplicated and combined
+       into one mesh or kept as separate meshes. One gets unwrapped; the
+       rest copy its UVs (scaled if the copy is scaled). A combined grid of
+       36 pegs costs about the same as one peg.
+     - **Hard surface or organic:** each piece is sorted by its edges.
+       - **Hard surface** (flat areas, hard or sharp edges) is cut along
+         hard edges and edges sharper than *Seam angle*. Each part is then
+         unfolded at its true size, and the parts are sewn back together
+         wherever they lie flat without overlapping, like unfolding a box.
+         A box or a plank comes out as one shell with no stretch.
+       - **Organic** (smoothly curved everywhere) only cuts very sharp
+         edges. A closed shape gets one pelt cut between its two farthest
+         points, and the result is relaxed.
+     - **Flattening:**
+       - Flat parts are projected.
+       - Developable ones (planks, boxes, cylinders, cones, tubes) are
+         unfolded triangle by triangle, which is exact. A ring (a
+         cylinder's side) gets one cut between its rims and unrolls with
+         no stretch.
+       - Curved parts are relaxed (as-rigid-as-possible).
+       - A part that would fold over or stretch badly is split and tried
+         again.
+     - **Join shells:**
+       - *As few shells as possible* (default): sew everything that fits.
+       - *Compact shells*: sew only while the shell stays compact, which
+         packs tighter.
+       - *Keep every cut*: leave a seam on every hard and sharp edge.
+     - **Very big curved parts** (over 8,000 triangles, e.g. a dense dome)
+       are cut and laid out here, then Unfold3D relaxes just those faces.
+     - **Speed:** the 47-mesh test building's unwrap maths takes 1.5 s, and
+       all of it bar the 19,200-face dome takes about 0.01 s. The whole
+       Auto UV run takes 3.9 s with Unlok vs 4.8 s with Unfold3D, at the
+       same quality score.
+   - **Unwrapper: Unfold3D (Maya)** is the old route:
+     - normal-based projection
+     - soft edges sewn; hard edges and edges sharper than *Seam angle* cut
+     - Unfold3D auto-seams for closed shapes, then relax
+     - extra cuts where shells are still stretched
+
+     A shell whose projection is already clean skips Unfold3D, and only
+     curved shells are unfolded. A single Unfold3D call on a big mesh still
+     blocks Maya until it's done.
    - **Restore Backup** copies the backup set back into `map1` for the
      selected meshes, or for all of them if nothing is selected.
    - **Meshes you've already UV'd:** select them and press one of these
@@ -491,6 +532,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   both hands-off tile modes and validation.
 - `tests/test_layout_extras.py`: orientation modes, `_stack` stacking and
   2D packing (fill, padding, stable re-plans, speed).
+- `tests/test_unlok_unwrap.py`: the Unlok unwrapper. Covers a box and a
+  plank (one shell, no stretch), a cylinder, a sphere pelt, a torus, a
+  combined grid of copies, cancel, undo, and Unlok vs Unfold3D on the test
+  building. `tests/bench_unwrap.py [--profile]` times it per mesh.
 - `tests/test_live_view.py`: shell outlines match their placements, the
   live-view hook, the background planner (same result, stops promptly),
   scene outlines and their density, the UV Editor label mesh.

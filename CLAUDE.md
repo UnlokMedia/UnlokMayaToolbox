@@ -388,6 +388,39 @@
     and it doesn't render.
   - It's built in NoUndo (the API create isn't undoable) and found again by
     its `unlokUdimLabels` tag attribute.
+- **Unlok unwrapper** (`unlok_unwrap`, the `_uw_*` functions;
+  `auto_unwrap(method=UNWRAP_METHODS[0])`, the panel default):
+  - **Threads:** `_uw_read` reads plain lists on the main thread.
+    `unlok_unwrap_data` is pure maths on a worker thread
+    (`_uw_run_threaded`, which drives the Progress / Working window).
+    `_uw_write` then writes back.
+  - **Writing (undoable):** a planar projection gives one UV per vertex,
+    then `polyMapCut` cuts the planned borders, then `write_uvs` sets the
+    positions. If the result's UV ids don't match the plan (pinched
+    vertices), it cuts every edge and `polyMapSew`s the rest instead.
+  - **Per piece:**
+    - `_uw_signature` + `_uw_same_shape` find copies (same topology in
+      local vertex order, all triangle edge lengths in proportion) and copy
+      their UVs.
+    - `_uw_kind` sorts hard surface from organic.
+    - `_uw_seams` makes the first cuts.
+    - Each region becomes a disk: closed regions get a pelt cut
+      (`_uw_far_pair` + `_uw_path_cut`), rings a cut between their rims,
+      anything else is split by normals (`_uw_split`).
+    - `_uw_flatten` tries, in order: planar projection, then hinge
+      unfolding (`_uw_hinge`, exact on developable surfaces), then ARAP
+      (`_uw_arap`, from the hinge result, then from Tutte), checked by
+      `_uw_stretch` and `_uw_overlap`.
+    - `_uw_sew` joins charts across sewable cuts with a 2D rigid fit (1%
+      tolerance), rejecting joins that make boundaries cross.
+    - `_uw_weld` merges sewn corners onto one position; `_uw_spread` lays
+      the shells out side by side.
+  - **Speed:** pure Python is slow at sparse solves, so `_uw_cg` keeps the
+    loops in `map` / `zip`. Charts needing relaxing above `relax_budget`
+    (8,000 triangles) are returned as "heavy" and get `u3dUnfold` on just
+    their faces. Before that cap, one 19,200-face dome took 104 s.
+  - **Defaults:** the engine still defaults to Unfold3D
+    (`run_auto_uv(unwrapper=None)`), so old tests keep their behaviour.
 - **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose
   projection isn't clean. Auto UV's "find" stage unfolds just those
   (component lists to `u3dUnfold` / `_auto_seam`), or the whole mesh when
