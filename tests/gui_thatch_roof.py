@@ -65,8 +65,12 @@ def frame_on(nodes, direction=(1.0, 0.55, 1.3), dist=1.9):
     c = [(bb[i] + bb[i + 3]) * 0.5 for i in range(3)]
     size = max(bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2])
     ln = sum(v * v for v in direction) ** 0.5
-    cmds.setAttr("persp.translate", *[c[i] + direction[i] / ln * size * dist for i in range(3)])
-    cmds.viewLookAt("persp", position=c)
+    cmds.undoInfo(stateWithoutFlush=False)  # camera moves mustn't come between the test's edits and its undos
+    try:
+        cmds.setAttr("persp.translate", *[c[i] + direction[i] / ln * size * dist for i in range(3)])
+        cmds.viewLookAt("persp", position=c)
+    finally:
+        cmds.undoInfo(stateWithoutFlush=True)
     pump()
 
 
@@ -196,6 +200,32 @@ def main():
     cmds.undo()
     wait(0.6)
     check("undoing the move puts the roof back", abs(centre_x(ns["thatch_parts"](root)["straw"]) - x0) < 0.05)
+
+    # --- moving the box's vertices warps the roof (an API callback starts the timer)
+    straw = ns["thatch_parts"](root)["straw"]
+    before = cmds.exactWorldBoundingBox(straw)
+    top = [v for v in ("%s.vtx[%d]" % (box, i) for i in range(8)) if cmds.pointPosition(v, world=True)[1] > 4.0]
+    cmds.move(0, 1.2, 0, [v for v in top if cmds.pointPosition(v, world=True)[0] > 0], relative=True)
+    wait(1.6)  # two polls: one sees it change, the next sees it settled
+    after = cmds.exactWorldBoundingBox(straw)
+    check("raising one end of the box's top raises that end of the roof", after[4] - before[4] > 0.5,
+          "top %.2f -> %.2f | %s" % (before[4], after[4], panel.status.text()))
+    cmds.undo()
+    wait(1.6)
+    check("undoing the vertex move puts the roof back", abs(cmds.exactWorldBoundingBox(straw)[4] - before[4]) < 0.05,
+          "%.2f vs %.2f" % (cmds.exactWorldBoundingBox(straw)[4], before[4]))
+    cmds.redo()
+    wait(1.6)
+    frame_on([root, house])
+    snap("15_warped_box.png")
+    corners = ["%s.vtx[%d]" % (box, i) for i in range(8)]
+    left = [v for v in corners if cmds.pointPosition(v, world=True)[0] < 0]
+    cmds.move(0, 0, -0.9, [v for v in left if cmds.pointPosition(v, world=True)[2] > 0], relative=True)
+    cmds.move(0, 0, 0.9, [v for v in left if cmds.pointPosition(v, world=True)[2] < 0], relative=True)
+    wait(1.6)
+    frame_on([root, house])
+    snap("16_tapered_box.png")
+    check("tapering the box tapers the roof", cmds.exactWorldBoundingBox(straw)[4] > before[4] + 0.5)
 
     # --- presets
     i = panel.preset_combo.findText("Roundhouse")

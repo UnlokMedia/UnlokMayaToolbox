@@ -250,6 +250,73 @@ def run():
     rep = tb["update_thatch_roofs"]({root: {"levels": 2}})
     check("a roof whose box is deleted keeps its place", rep["lost"] == [root] and rep["done"] == [root])
 
+    # --- a deformed box: the roof warps through its corners
+    def verts_where(node, test):
+        out = []
+        for i in range(8):
+            v = "%s.vtx[%d]" % (node, i)
+            if test(cmds.pointPosition(v, world=True)):
+                out.append(v)
+        return out
+
+    def straw_pts(r):
+        return mesh_fn(tb, tb["thatch_parts"](r)["straw"]).getPoints(om.MSpace.kWorld)
+
+    cmds.file(new=True, force=True)
+    b = box("b")
+    f = tb["thatch_frame"](b)
+    plain = dict(f)
+    for k in ("corners", "axis", "flip"):
+        plain.pop(k)
+    s = {"resolution": 40}
+    warped = tb["thatch_build"](f, s)["straw"][0]
+    straight = tb["thatch_build"](plain, s)["straw"][0]
+    check("a plain box warps to exactly the same roof", f.get("corners") and len(warped) == len(straight) and
+          max(abs(a[i] - b_[i]) for a, b_ in zip(warped, straight) for i in range(3)) < 1e-6)
+    root = tb["make_thatch_roof"](b, {"resolution": 50, "end_a": "Gable", "end_b": "Gable"})["root"]
+    cmds.move(0, 0, -0.8, verts_where(b, lambda q: q[0] > 0 and q[2] > 0), relative=True)
+    cmds.move(0, 0, 0.8, verts_where(b, lambda q: q[0] > 0 and q[2] < 0), relative=True)
+    check("moving the box's vertices is noticed", tb["thatch_box_moved"](root))
+    tb["update_thatch_roofs"]({root: {}})
+    pts = straw_pts(root)
+    narrow = max(abs(q.z) for q in pts if q.x > 2.6)
+    wide = max(abs(q.z) for q in pts if q.x < -2.6)
+    fn = mesh_fn(tb, tb["thatch_parts"](root)["straw"])
+    check("a tapered box tapers the roof, still a closed shell facing out", wide - narrow > 0.6 and
+          boundary_edges(fn) == 0 and signed_volume(fn) > 0.0, "half width %.2f -> %.2f" % (wide, narrow))
+    cmds.move(0, 1.0, 0, verts_where(b, lambda q: q[0] > 0 and q[1] > 4), relative=True)
+    tb["update_thatch_roofs"]({root: {}})
+    pts = straw_pts(root)
+    hi_end = max(q.y for q in pts if q.x > 2.6)
+    lo_end = max(q.y for q in pts if q.x < -2.6)
+    check("a taller end lifts the ridge there", hi_end - lo_end > 0.8, "%.2f vs %.2f" % (hi_end, lo_end))
+    cmds.file(new=True, force=True)
+    b = box("b")
+    root = tb["make_thatch_roof"](b, {"resolution": 50, "end_a": "Gable", "end_b": "Gable", "top": 0.0})["root"]
+    cmds.move(0, 0, 1.0, verts_where(b, lambda q: q[1] > 4), relative=True)
+    tb["update_thatch_roofs"]({root: {}})
+    pts = straw_pts(root)
+    top = max(q.y for q in pts)
+    ridge = [q.z for q in pts if q.y > top - 0.05]
+    fn = mesh_fn(tb, tb["thatch_parts"](root)["straw"])
+    check("a skewed box moves the ridge over with its top", abs(sum(ridge) / len(ridge) - 1.0) < 0.25 and
+          signed_volume(fn) > 0.0, "ridge z %.2f" % (sum(ridge) / len(ridge)))
+    cmds.file(new=True, force=True)
+    b = box("b")
+    cmds.scale(-6, 3, 4, b)
+    root = tb["make_thatch_roof"](b, {"resolution": 40, "style": "Planes", "density": 0.3})["root"]
+    parts = tb["thatch_parts"](root)
+    fn = mesh_fn(tb, parts["underlay"])
+    normals = mesh_fn(tb, parts["straw"]).getNormals(om.MSpace.kWorld)
+    up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
+    check("a mirrored box still makes a roof facing out", tb["thatch_frame"](b)["flip"] and
+          signed_volume(fn) > 0.0 and up > 0.9, "%.1f%% up" % (up * 100))
+    cyl = cmds.polyCylinder(r=2, h=3, name="notABox", constructionHistory=False)[0]
+    cmds.move(20, 4, 0, cyl)
+    f = tb["thatch_frame"](cyl)
+    check("any other mesh still works as a box (its bounding box)", not f.get("corners") and
+          abs(f["L"] - 2.0) < 1e-3 and abs(f["H"] - 3.0) < 1e-3)
+
     # --- selection: a roof is found from its box or any of its meshes
     cmds.file(new=True, force=True)
     cmds.undoInfo(state=True, infinity=True)

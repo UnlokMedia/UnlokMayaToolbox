@@ -17515,37 +17515,92 @@ def thatch_build(frame, settings):
 
 
 def _th_to_world(frame, mesh):
+    """Roof space -> world. A plain box is a straight transform; a deformed
+    box (its 8 corners in the frame) warps the roof through them like a
+    lattice (trilinear, carrying on past the box for the overhang)."""
     pts = mesh[0]
-    o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
-    world = [(o[0] + a[0] * p[0] + y[0] * p[1] + c[0] * p[2],
-              o[1] + a[1] * p[0] + y[1] * p[1] + c[1] * p[2],
-              o[2] + a[2] * p[0] + y[2] * p[1] + c[2] * p[2]) for p in pts]
+    C = frame.get("corners")
+    if not C:
+        o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
+        world = [(o[0] + a[0] * p[0] + y[0] * p[1] + c[0] * p[2],
+                  o[1] + a[1] * p[0] + y[1] * p[1] + c[1] * p[2],
+                  o[2] + a[2] * p[0] + y[2] * p[1] + c[2] * p[2]) for p in pts]
+        return (world,) + tuple(mesh[1:])
+    c0 = C[0]
+    terms = (_rl_sub(C[1], c0), _rl_sub(C[2], c0), _rl_sub(C[4], c0),  # x, y, z
+             _rl_add(_rl_sub(C[3], C[1]), _rl_sub(c0, C[2])),  # xy
+             _rl_add(_rl_sub(C[5], C[1]), _rl_sub(c0, C[4])),  # xz
+             _rl_add(_rl_sub(C[6], C[2]), _rl_sub(c0, C[4])),  # yz
+             reduce_add((C[7], C[1], C[2], C[4], _rl_mul(reduce_add((C[3], C[5], C[6], c0)), -1.0))))  # xyz
+    bx_, by_, bz_, bxy, bxz, byz, bxyz = terms
+    L2, H, W2 = 2.0 * frame["L"], frame["H"], 2.0 * frame["W"]
+    along_x, flip = frame["axis"] == "X", bool(frame.get("flip"))
+    world = []
+    for p in pts:
+        sa, sy, sc = p[0] / L2 + 0.5, p[1] / H, p[2] / W2 + 0.5
+        if flip:  # a mirrored box: keep the roof the right way out
+            sc = 1.0 - sc
+        sx, sz = (sa, sc) if along_x else (1.0 - sc, sa)  # across a Z ridge is the box's -X
+        k = (sx, sy, sz, sx * sy, sx * sz, sy * sz, sx * sy * sz)
+        world.append(tuple(c0[i] + bx_[i] * k[0] + by_[i] * k[1] + bz_[i] * k[2] + bxy[i] * k[3] + bxz[i] * k[4] +
+                           byz[i] * k[5] + bxyz[i] * k[6] for i in range(3)))
     return (world,) + tuple(mesh[1:])
+
+
+def _th_box_corners(shape, lo, hi):
+    """The 8 corners of a box mesh in world space, even moved, skewed or
+    tapered (index ix + 2 iy + 4 iz along the box's own axes, by which side
+    of the box's middle each lies), or None for a mesh that isn't a box."""
+    fn = om.MFnMesh(get_dag_path(shape))
+    if fn.numVertices != 8:
+        return None
+    mid = [(lo[k] + hi[k]) * 0.5 for k in range(3)]
+    corners = [None] * 8
+    for q, w in zip(fn.getPoints(om.MSpace.kObject), fn.getPoints(om.MSpace.kWorld)):
+        i = int(q.x > mid[0]) + 2 * int(q.y > mid[1]) + 4 * int(q.z > mid[2])
+        if corners[i] is not None:
+            return None
+        corners[i] = (w.x, w.y, w.z)
+    return corners
 
 
 def thatch_frame(box, ridge="Auto"):
     """The roof's frame from a box (any transform: its mesh's bounding box,
     or a unit cube): {"o": middle of the bottom face, "a": along the ridge,
     "y": up, "c": across (unit vectors, world space), "L", "W": half the
-    length and width, "H": height}."""
+    length and width, "H": height}. A box mesh (8 corners) also gives
+    "corners" (world space, see _th_box_corners), "axis" (the box axis the
+    ridge runs along) and "flip" (mirrored): the roof is warped through the
+    corners, so moving the box's vertices tapers, skews or tilts it."""
     m = cmds.xform(box, q=True, matrix=True, worldSpace=True)
     lo, hi = (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)
     shape = _log_shape(box)
     if shape:
         lo = cmds.getAttr(shape + ".boundingBoxMin")[0]
         hi = cmds.getAttr(shape + ".boundingBoxMax")[0]
-    rows = [tuple(m[0:3]), tuple(m[4:7]), tuple(m[8:11])]
-    edge = [_rl_mul(rows[k], hi[k] - lo[k]) for k in range(3)]
-    mid = [(lo[k] + hi[k]) * 0.5 for k in range(3)]
-    o = tuple(m[12 + i] + rows[0][i] * mid[0] + rows[1][i] * lo[1] + rows[2][i] * mid[2] for i in range(3))
+    corners = _th_box_corners(shape, lo, hi) if shape else None
+    if corners:  # each side: the average of its 4 edges
+        edge = [_rl_mul(reduce_add(_rl_sub(corners[b], corners[a]) for a, b in pairs), 0.25) for pairs in
+                (((0, 1), (2, 3), (4, 5), (6, 7)), ((0, 2), (1, 3), (4, 6), (5, 7)), ((0, 4), (1, 5), (2, 6), (3, 7)))]
+        o = _rl_mul(reduce_add(corners[i] for i in (0, 1, 4, 5)), 0.25)
+    else:
+        rows = [tuple(m[0:3]), tuple(m[4:7]), tuple(m[8:11])]
+        edge = [_rl_mul(rows[k], hi[k] - lo[k]) for k in range(3)]
+        mid = [(lo[k] + hi[k]) * 0.5 for k in range(3)]
+        o = tuple(m[12 + i] + rows[0][i] * mid[0] + rows[1][i] * lo[1] + rows[2][i] * mid[2] for i in range(3))
     sx, sy, sz = [_rl_len(e) for e in edge]
     if min(sx, sy, sz) < 1e-6:
         raise ValueError("the box is flat: give it some height")
     up = _rl_norm(edge[1])
     along_x = ridge == "X" or (ridge != "Z" and sx >= sz)
     a = _rl_norm(_rl_perp(up, edge[0] if along_x else edge[2]))
-    return {"o": o, "a": a, "y": up, "c": _rl_cross(a, up), "L": 0.5 * (sx if along_x else sz),
-            "W": 0.5 * (sz if along_x else sx), "H": sy}
+    frame = {"o": o, "a": a, "y": up, "c": _rl_cross(a, up), "L": 0.5 * (sx if along_x else sz),
+             "W": 0.5 * (sz if along_x else sx), "H": sy}
+    if corners:
+        frame["corners"] = corners
+        frame["axis"] = "X" if along_x else "Z"
+        frame["flip"] = _rl_dot(_rl_cross(edge[0], edge[1]), edge[2]) < 0.0
+    return frame
 
 
 def _th_same_frame(f, g, tol=1e-5):
@@ -17553,6 +17608,11 @@ def _th_same_frame(f, g, tol=1e-5):
         return False
     for k in ("o", "a", "y", "c"):
         if any(abs(p - q) > tol * max(1.0, abs(p)) for p, q in zip(f[k], g[k])):
+            return False
+    if bool(f.get("corners")) != bool(g.get("corners")) or f.get("axis") != g.get("axis"):
+        return False
+    for p, q in zip(f.get("corners") or (), g.get("corners") or ()):
+        if any(abs(a - b) > tol * max(1.0, abs(a)) for a, b in zip(p, q)):
             return False
     return all(abs(f[k] - g[k]) <= tol * max(1.0, abs(f[k])) for k in ("L", "W", "H"))
 
@@ -17882,6 +17942,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         super(ThatchRoofPanel, self).__init__(parent)
         self._jobs = []
         self._box_jobs = []
+        self._seen = None  # the box as the last poll saw it, while it differs from the roof's
         self._pending = set()
         self._root = None  # uuid of the roof being edited: it stays when you deselect it
         self._sel_timer = QtCore.QTimer(self)
@@ -17900,6 +17961,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self._redo_timer.setSingleShot(True)
         self._redo_timer.setInterval(50)
         self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
+        # Vertex edits on the box (and history, deformers, a parent moving) send no event we can
+        # rely on, so while the panel is up the box's 8 corners are compared every 0.4 s (well
+        # under a millisecond); the roof rebuilds once they've stopped changing.
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.setInterval(400)
+        self._poll_timer.timeout.connect(_guarded(self._poll_timer, self._poll_box))
         self._build()
         self._install_jobs()
         self._rebuild_stale()
@@ -17908,6 +17975,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def showEvent(self, event):
         super(ThatchRoofPanel, self).showEvent(event)
         self._sel_timer.start()
+        self._poll_timer.start()
+
+    def hideEvent(self, event):
+        super(ThatchRoofPanel, self).hideEvent(event)
+        self._poll_timer.stop()
 
     # ============================================================== layout
     def _build(self):
@@ -18406,9 +18478,34 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             if job in reg:
                 reg.remove(job)
 
+    def _poll_box(self):
+        """Rebuild the roof being edited when its box has changed (vertices
+        included) and held still for one poll."""
+        try:
+            root = self.target()
+            box = thatch_box(root) if root and self.follow.value() else None
+            if not box:
+                self._seen = None
+                return
+            data = thatch_data(root)
+            try:
+                frame = thatch_frame(box, data.get("ridge", "Auto"))
+            except ValueError:
+                return
+            if _th_same_frame(frame, data.get("frame")):
+                self._seen = None
+            elif self._seen is not None and _th_same_frame(frame, self._seen):
+                self._seen = None
+                self._rebuild({root: {}}, "Followed the box:")
+            else:
+                self._seen = frame  # still moving: wait for it to settle
+        except Exception:
+            traceback.print_exc()
+
     def _watch_box(self):
-        """Rebuild the roof being edited when its box moves (the jobs only
-        start a timer; the roof is rebuilt once the drag pauses)."""
+        """Rebuild the roof being edited soon after its box moves (the jobs
+        only start a timer; the roof is rebuilt once the drag pauses). Vertex
+        edits are caught by _poll_box."""
         self._kill(self._box_jobs)
         self._box_jobs = []
         root = self.target()
@@ -18428,7 +18525,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
-        for timer in (self._sel_timer, self._edit_timer, self._box_timer, self._redo_timer):
+        for timer in (self._sel_timer, self._edit_timer, self._box_timer, self._redo_timer, self._poll_timer):
             timer.stop()
         self._kill(self._jobs + self._box_jobs)
         self._jobs, self._box_jobs = [], []

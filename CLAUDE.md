@@ -323,10 +323,22 @@
   - **Presets:** `thatch_preset` resets every shape key and sets the look
     keys a preset names, so shape presets keep the style and look presets
     (Cambodian shack, Grass hut) set it.
+  - **Deformed boxes:** `_th_box_corners` sorts an 8-vertex mesh's corners
+    by which side of the box's middle (object space) each is on; the frame
+    keeps them (world space) with `axis` and `flip` (mirrored box). The
+    roof is built on the average box (L, W, H from the averaged edges) and
+    `_th_to_world` maps it trilinearly through the corners (exact for a
+    plain box: the old straight transform is kept for non-box meshes).
   - **Following the box:** the panel's attributeChange scriptJobs on the
     box's translate / rotate / scale / shear only restart a 150 ms timer;
-    `thatch_box_moved` compares the stored frame. Selecting a roof also
-    checks it (moves made while the toolbox was closed).
+    `thatch_box_moved` compares the stored frame (corners included).
+    Vertex edits send nothing reliable: neither an attribute-changed nor a
+    dirty-plug callback on the box's mesh fired for a scripted vertex move
+    in GUI Maya 2024. So while the panel is shown, `_poll_box` compares the
+    frame every 0.4 s and rebuilds once it has held still for one poll.
+    Selecting a roof also checks it (changes made while the toolbox was
+    closed). In GUI tests, take camera moves out of the undo queue and undo
+    before playblasting: a test's undos found an empty queue after them.
   - **UV hand-off:** both meshes get `unlokUvReady`; the straw also gets
     `UV_STACKED_ATTR` (True for planes / pieces). `_mark_tool_uvs` marks
     stacked meshes Hands off, the rest Keep UVs; `set_uv_status(..., "auto")`

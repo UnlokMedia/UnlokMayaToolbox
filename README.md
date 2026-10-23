@@ -295,9 +295,20 @@ textures.
    roof: the footprint is the wall tops, the bottom is the eave line and
    the top is the ridge. It's a wireframe that never renders. Any mesh works
    as a box (its bounding box).
+   - **Deform the box** for roofs that aren't rectangular: move its
+     vertices and the roof warps with them. Pull one end's corners in for
+     a tapered footprint, raise one end's top for a ridge that climbs, slide
+     the top sideways for an off-centre ridge, drop corners for a sloping
+     eave line. The roof is laid out on the box as if it were square, then
+     bent through its 8 corners like a lattice, so hips, levels and pieces
+     all follow (pieces stretch a little where the box is stretched). A
+     plain box gives exactly the same roof as before. Don't add vertices:
+     a box with more than 8 is used by its bounding box.
 2. **Make Roof** (one Ctrl+Z) thatches the selected box. From then on the
-   roof **follows its box**: move or scale the box and the roof rebuilds a
-   moment after you stop (undoing the move puts it back). Selecting the
+   roof **follows its box**: move, scale or deform the box and the roof
+   rebuilds a moment after you stop (undoing it puts it back). Vertex edits
+   are picked up while the Thatch Roof panel is on screen; otherwise press
+   **Rebuild** (or select the roof: a box that changed is caught then). Selecting the
    roof or its box puts the roof on the panel (the banner says
    **EDITING**); it stays there when you deselect it, so you can look at it
    and keep tweaking.
