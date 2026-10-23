@@ -2255,9 +2255,9 @@ class SegmentField(QtWidgets.QWidget):
 
     changed = QtCore.Signal()
 
-    def __init__(self, items, parent=None):
+    def __init__(self, items, parent=None, columns=0):
         super(SegmentField, self).__init__(parent)
-        lay = QtWidgets.QHBoxLayout(self)
+        lay = QtWidgets.QGridLayout(self) if columns else QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         self.group = QtWidgets.QButtonGroup(self)
@@ -2268,7 +2268,10 @@ class SegmentField(QtWidgets.QWidget):
             btn.setCheckable(True)
             btn.setProperty("unlokSegment", True)
             self.group.addButton(btn)
-            lay.addWidget(btn)
+            if columns:
+                lay.addWidget(btn, len(self.buttons) // columns, len(self.buttons) % columns)
+            else:
+                lay.addWidget(btn)
             self.buttons[item] = btn
         self.buttons[items[0]].setChecked(True)
         self.group.buttonClicked.connect(lambda *_: self.changed.emit())
@@ -13706,14 +13709,16 @@ ROPE_BAKED = "unlokRopeBaked"      # string on a baked rope: its old settings, o
 ROPE_GROUP = "lashings_GRP"
 ROPE_MATERIAL = "ropeNatural"      # material token in the rope's name (UnlokRenamer convention)
 ROPE_PRESET_VAR = "unlokRopePresets"  # optionVar (Maya's own prefs): user presets as JSON
-ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands")
+ROPE_LASHINGS = ("Auto", "Square", "Diagonal", "Round", "Sheer", "Bands", "Tripod", "Bundle")
 ROPE_STYLES = ("3 strands", "Twisted", "Smooth tube")
 ROPE_DEFAULTS = {"lashing": "Auto", "style": "Twisted", "thickness": 0.1, "wraps": 0, "fraps": -1,
                  "hitches": True, "tail": 0.1, "bite": 0.15, "wobble": 0.05, "tension": 0.5, "gravity": 0.0, "settle": 30, "seed": 0, "sides": 0,
                  "spacing": 0.0, "lay": 3.5}
 ROPE_KEYS = tuple(sorted(ROPE_DEFAULTS))
-ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4, "Saddle": 3}
-ROPE_AUTO_FRAPS = {"Square": 2, "Diagonal": 2, "Round": 0, "Sheer": 2, "Bands": 0, "Saddle": 0}
+ROPE_AUTO_WRAPS = {"Square": 3, "Diagonal": 3, "Round": 7, "Sheer": 8, "Bands": 4, "Saddle": 3, "Tripod": 4,
+                   "Bundle": 7}
+ROPE_AUTO_FRAPS = {"Square": 2, "Diagonal": 2, "Round": 0, "Sheer": 2, "Bands": 0, "Saddle": 0, "Tripod": 2,
+                   "Bundle": 0}
 ROPE_AUTO_SIDES = {"3 strands": 8, "Twisted": 18, "Smooth tube": 10}
 ROPE_AUTO_SPACING = {"3 strands": 0.2, "Twisted": 0.25, "Smooth tube": 0.5}  # sample step / rope diameter
 ROPE_PRESETS = {  # built in; user presets are kept in the ROPE_PRESET_VAR optionVar
@@ -13977,6 +13982,8 @@ def rope_lashing_kind(settings, angle):
     """The lashing a joint gets: the setting, made to fit the angle (a Square
     can't tie logs side by side, a Round can't tie a crossing)."""
     kind = settings.get("lashing", "Auto")
+    if kind in ("Tripod", "Bundle"):  # those need 3+ logs: a pair gets what Auto would give it
+        kind = "Auto"
     parallel = angle < ROPE_PARALLEL_DEG
     if kind == "Auto":
         return "Round" if parallel else ("Square" if angle >= ROPE_SQUARE_DEG else "Diagonal")
@@ -14400,6 +14407,186 @@ def _rl_pair_parts(pa, pb, s, target=None, rr=None):
     return {"kind": kind, "joint": J, "pa": pa, "pb": pb, "tie": tie, "parts": parts}
 
 
+def reduce_add(vectors):
+    out = (0.0, 0.0, 0.0)
+    for v in vectors:
+        out = _rl_add(out, v)
+    return out
+
+
+def _rl_side_by_side(poles, s, target, others, obstacles):
+    """3+ logs lying side by side (all within ROPE_PARALLEL_DEG of each
+    other and overlapping along their length): a Tripod lashing when they
+    stand in a row (figure-of-eight racking turns woven over and under
+    alternate logs, then frapping turns cinching each gap), a Bundle when
+    they're packed in a cluster (round turns around them all). None when
+    the logs aren't side by side, or Square / Diagonal / ... was asked for."""
+    kind = s.get("lashing", "Auto")
+    if kind not in ("Auto", "Tripod", "Bundle"):
+        return None
+    w = poles[0].a
+    axes = [q.a if _rl_dot(q.a, w) >= 0.0 else _rl_mul(q.a, -1.0) for q in poles]
+    w = _rl_norm((sum(a[0] for a in axes), sum(a[1] for a in axes), sum(a[2] for a in axes)))
+    # side by side = every log within 25 deg of the group's direction (splayed tripod legs count)
+    if any(math.degrees(math.acos(min(1.0, _rl_dot(a, w)))) > 25.0 for a in axes):
+        return None
+    lo, hi = -1e30, 1e30
+    for q in poles:
+        e = sorted((_rl_dot(_rl_add(q.c, _rl_mul(q.a, q.t0)), w), _rl_dot(_rl_add(q.c, _rl_mul(q.a, q.t1)), w)))
+        lo, hi = max(lo, e[0]), min(hi, e[1])
+    if lo >= hi:
+        return None
+
+    def t_at(q, z):  # q's axis param at height z along the group
+        aw = _rl_dot(q.a, w)
+        return (z - _rl_dot(q.c, w)) / (aw if abs(aw) > 1e-6 else 1e-6)
+
+    if target is not None:
+        zc = clamp(_rl_dot(target, w), lo, hi)
+    else:  # where the logs pack closest without running into each other (a tripod's top)
+        mid_z = 0.5 * (lo + hi)
+        best = None
+        for k in range(41):
+            z = lo + (hi - lo) * (0.05 + 0.9 * k / 40.0)
+            cs = [q.center(t_at(q, z)) for q in poles]
+            gc = _rl_mul(reduce_add(cs), 1.0 / len(cs))
+            spread = sum(_rl_len(_rl_perp(w, _rl_sub(c, gc))) for c in cs)
+            gaps = [_rl_len(_rl_perp(w, _rl_sub(cs[i], cs[j]))) - poles[i].r - poles[j].r
+                    for i in range(len(cs)) for j in range(i + 1, len(cs))]
+            clash = max(0.0, -min(gaps) - 0.1 * min(q.r for q in poles))
+            key = (round(clash, 4), round(spread, 3), abs(z - mid_z))
+            if best is None or key < best[0]:
+                best = (key, z)
+        zc = best[1]
+    cen = [q.center(t_at(q, zc)) for q in poles]
+    g = (0.0, 0.0, 0.0)
+    for c in cen:
+        g = _rl_add(g, _rl_mul(c, 1.0 / len(cen)))
+    flat = [_rl_perp(w, _rl_sub(c, g)) for c in cen]
+    # main direction of the logs' spread across the group (power iteration on the 2D spread)
+    x = _rl_norm(max(flat, key=_rl_len), _rl_any_perp(w))
+    for _ in range(30):
+        acc = (0.0, 0.0, 0.0)
+        for f in flat:
+            acc = _rl_add(acc, _rl_mul(f, _rl_dot(f, x)))
+        x = _rl_norm(_rl_perp(w, acc), x)
+    y = _rl_cross(w, x)
+    spread_x = sum(_rl_dot(f, x) ** 2 for f in flat)
+    spread_y = sum(_rl_dot(f, y) ** 2 for f in flat)
+    row = spread_y < 0.08 * spread_x
+    if kind == "Auto":
+        kind = "Tripod" if row else "Bundle"
+    order = sorted(range(len(poles)), key=lambda k: _rl_dot(flat[k], x))
+    group = [poles[k] for k in order]
+    rr, step = _rl_rope_size(s, min(q.r for q in group))
+    tie = _RopeTie(group, rr, step)
+    wraps = int(s["wraps"]) or ROPE_AUTO_WRAPS[kind]
+    fraps = ROPE_AUTO_FRAPS[kind] if int(s["fraps"]) < 0 else int(s["fraps"])
+    hitches = bool(s["hitches"])
+    if kind == "Tripod":
+        start, body, end = _rl_tripod(tie, w, x, y, zc, t_at, wraps, fraps, hitches)
+    else:
+        start, body, end = _rl_bundle(tie, w, g, zc, t_at, wraps, hitches)
+    pts, ups, scale = _rl_finish(tie, start + body + end, s, others, obstacles)
+    pa, pb = group[0], group[1]
+    return {"points": pts, "up": ups, "scale": scale, "radius": rr, "kind": kind, "joint": rope_joint(pa, pb),
+            "poles": [q.node for q in group]}
+
+
+def _rl_tripod(tie, w, x, y, zc, t_at, wraps, fraps, hitches):
+    """Tripod lashing on tie.poles (in a row along x, lying along w):
+    figure-of-eight racking turns, each going out over one log and under
+    the next and back the other way round, so every log is crossed on both
+    sides; then fraps through each gap; clove hitches on the outer logs."""
+    poles = tie.poles
+    n = len(poles)
+    d = tie.d
+
+    def side_arc(i, z, sy, sx):
+        """A short pass over log i on its y-side sy, travelling along +-x (sx)."""
+        q = poles[i]
+        t = t_at(q, z)
+        ye = _rl_norm(_rl_perp(q.a, _rl_mul(y, sy)), y)
+        xe = _rl_norm(_rl_perp(q.a, _rl_mul(x, sx)), x)
+        out = []
+        for ang in (-0.7, -0.35, 0.0, 0.35, 0.7):
+            u = _rl_norm(_rl_add(_rl_mul(ye, math.cos(ang)), _rl_mul(xe, math.sin(ang))))
+            out.append((_rl_add(q.center(t), _rl_mul(u, q.radius(t))), u, i))
+        return out
+
+    def end_arc(i, z0, z1, sy_in, outward):
+        """Half a turn round an outer log, from side sy_in round its outer side."""
+        q = poles[i]
+        ye = _rl_norm(_rl_perp(q.a, _rl_mul(y, sy_in)), y)
+        xe = _rl_norm(_rl_perp(q.a, _rl_mul(x, outward)), x)
+        return tie.arc(i, t_at(q, z0), t_at(q, z1), ye, xe)
+
+    def gap(i, z):
+        """Where the rope crosses the gap between log i and i + 1: crossings stack
+        along the logs there (it's the only way they can go), so lift along w."""
+        a, b = poles[i], poles[i + 1]
+        mid = _rl_lerp(a.center(t_at(a, z)), b.center(t_at(b, z)), 0.5)
+        return [(_rl_sub(mid, _rl_mul(w, tie.rr)), w, -1)]
+
+    # each racking turn: out along +x at height z, back along -x one rope width higher
+    z0 = zc - wraps * d
+    body = []
+    for k in range(wraps):
+        z = z0 + 2.0 * k * d
+        body += gap(0, z)
+        for i in range(1, n - 1):  # over / under alternately
+            body += side_arc(i, z, 1.0 if i % 2 else -1.0, 1.0)
+            body += gap(i, z)
+        sy_last = 1.0 if (n - 1) % 2 else -1.0
+        body += end_arc(n - 1, z, z + d, sy_last, 1.0)
+        for i in range(n - 2, 0, -1):  # back on the other side of every log
+            body += gap(i, z + d)
+            body += side_arc(i, z + d, -1.0 if i % 2 else 1.0, -1.0)
+        body += gap(0, z + d)
+        body += end_arc(0, z + d, z + 2.0 * d, 1.0, -1.0)
+    frap = []
+    for i in range(n - 1):  # cinch every gap: fraps through it, round the racking turns
+        a, b = poles[i], poles[i + 1]
+        ca, cb = a.center(t_at(a, zc)), b.center(t_at(b, zc))
+        gap_n = _rl_norm(_rl_sub(cb, ca), x)
+        dist = _rl_len(_rl_sub(cb, ca))
+        if dist - a.radius(t_at(a, zc)) - b.radius(t_at(b, zc)) < 0.5 * d:
+            continue  # touching: no room for rope between them
+        frap += tie.fraps(body, ca, gap_n, a.radius(t_at(a, zc)), dist - b.radius(t_at(b, zc)), fraps,
+                          (frap or body)[-1][0])
+    start, end = [], []
+    if hitches:
+        first, last = poles[0], poles[-1]
+        sg0 = 1.0 if _rl_dot(first.a, w) >= 0.0 else -1.0
+        sg1 = 1.0 if _rl_dot(last.a, w) >= 0.0 else -1.0
+        start = tie.clove_on(0, t_at(first, z0 - 2.6 * d), sg0, body[0][0], -1, _rl_flow(body, False))
+        done = body + frap
+        end = tie.clove_on(n - 1, t_at(last, z0 + 2.0 * wraps * d + 1.6 * d), sg1, done[-1][0], 1,
+                           _rl_flow(done, True))
+    return start, body + frap, end
+
+
+def _rl_bundle(tie, w, g, zc, t_at, wraps, hitches):
+    """Bundle lashing: tight round turns around every log in tie.poles at
+    once (their convex hull), clove hitches around the whole bundle."""
+    poles = tie.poles
+    d = tie.d
+
+    def items(o, p):
+        return [tie.section(i, o, p, t_at(q, _rl_dot(o, w))) for i, q in enumerate(poles)]
+    gz = _rl_sub(g, _rl_mul(w, _rl_dot(g, w) - zc))
+    z0 = -0.5 * wraps * d
+    origin = _rl_add(gz, _rl_mul(w, z0))
+    body = tie.loop(items(origin, w), origin, w, wraps, tie.linear(d))
+    start, end = [], []
+    if hitches:
+        o0 = _rl_add(gz, _rl_mul(w, z0 - 2.4 * d))
+        o1 = _rl_add(gz, _rl_mul(w, -z0 + 1.3 * d))
+        start = tie.clove(items, o0, w, body[0][0], -1, _rl_flow(body, False))
+        end = tie.clove(items, o1, w, body[-1][0], 1, _rl_flow(body, True))
+    return start, body, end
+
+
 def rope_path(poles, settings, target=None, others=(), obstacles=(), edges=None):
     """The rope centre line for a lashing (pure maths plus ray casts on the
     logs; nothing in the scene changes). Two logs: one lashing. More: one
@@ -14421,6 +14608,9 @@ def rope_path(poles, settings, target=None, others=(), obstacles=(), edges=None)
         pts, ups, scale = _rl_finish(tie, start + body + end, s, others, obstacles)
         return {"points": pts, "up": ups, "scale": scale, "radius": tie.rr, "kind": seg["kind"],
                 "joint": seg["joint"], "poles": [seg["pa"].node, seg["pb"].node]}
+    side_by_side = _rl_side_by_side(poles, s, target, others, obstacles)
+    if side_by_side is not None:
+        return side_by_side
     if edges is None:
         groups, _ = rope_pairs(poles, reach=3.0 * ROPE_PAIR_REACH)  # you picked these logs: be generous
         edges = [e for g in groups for e in g]
@@ -15778,14 +15968,17 @@ class RopeLashingPanel(QtWidgets.QWidget):
         card.add(prow)
         self._fill_presets()
         card.add(hint_label("Lashing"))
-        self.f["lashing"] = SegmentField(ROPE_LASHINGS)
+        self.f["lashing"] = SegmentField(ROPE_LASHINGS, columns=4)
         self.f["lashing"].setToolTip(
             "Auto: from the angle (Square across, Diagonal at a slant, Round side by side).\n"
             "Square: wraps in front of the crossbar and behind the upright, then fraps.\n"
             "Diagonal: wraps on one diagonal, then the other (X braces).\n"
             "Round: tight wraps around two logs side by side.\n"
             "Sheer: wraps, then fraps between the legs (A-frames).\n"
-            "Bands: plain wraps, no knots (background).")
+            "Bands: plain wraps, no knots (background).\n"
+            "Tripod: 3+ logs side by side in a row: figure-of-eight turns woven over and under, fraps in "
+            "every gap.\n"
+            "Bundle: 3+ logs packed together: tight turns round them all.")
         card.add(self.f["lashing"])
         card.add(hint_label("Rope"))
         self.f["style"] = SegmentField(ROPE_STYLES)

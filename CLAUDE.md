@@ -210,6 +210,14 @@
     crossing where a log ends into a **Saddle** (`_rl_saddle`). `rope_pairs`
     groups touching pairs into joints (pairs sharing a spot) and keeps a
     spanning set per joint, preferring the log a member bears on.
+  - **Side by side (3+ logs within 25 deg of their mean direction)**:
+    `_rl_side_by_side` runs before the joint chain. Height: the target, or
+    where the logs pack closest without clashing (a splayed tripod's top).
+    Row (spread across < 8% of along) -> `_rl_tripod`: racking turns out
+    along x at z and back at z + d (crossings in each gap stack along the
+    logs; explicit gap samples lift along w, lerped sideways ups were
+    degenerate and flung rope out), then `tie.fraps` per gap with room;
+    cluster -> `_rl_bundle` (hull loop of all sections).
   - **Combined lashings** (the user's rule: what's selected together is bound
     together): a joint with 3+ logs is one rope. Builders return (start
     hitch, body, end hitch); `rope_path` with 3+ poles walks the joint's

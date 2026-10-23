@@ -200,6 +200,13 @@ for stilt shacks, fences and frames.
        hitch on each leg (when the legs touch there's no room between them,
        so the hitches go around both and there are no fraps).
      - **Bands:** plain wraps, no knots (background).
+     - **Tripod** (3+ logs side by side in a row, or splayed tripod legs):
+       figure-of-eight racking turns woven over and under alternate logs,
+       then frapping turns cinching every gap, clove hitches on the outer
+       logs.
+     - **Bundle** (3+ logs packed together, e.g. 2 x 2): tight turns round
+       the whole bundle. Splayed legs (a standing tripod) are bound up where
+       they meet.
      - **Saddle** (picked by itself when a log ends at the other: a post
        under a beam, a rafter resting on a beam): wraps go over the top log
        on each side and half round the end log just below its end, crossing

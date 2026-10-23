@@ -363,6 +363,36 @@ def run():
     check("a combined lashing re-ties live like any other", up["done"] == [node] and
           mesh_fn(tb, node).numVertices != n0, str(up))
 
+    # --- 3+ logs side by side: a tripod weave in a row, a bundle when packed, tripod legs at their top
+    cmds.file(new=True, force=True)
+    row = [log_between("row%d" % i, (x, 0, 0), (x, 3, 0), 0.12) for i, x in enumerate((-0.27, 0.0, 0.27))]
+    poles = [P(x) for x in row]
+    path = tb["rope_path"](poles, {"seed": 3})
+    self_c, pole_c = clearance(path, poles)
+    check("three logs in a row: a Tripod lashing (woven, fraps in the gaps) that clears itself and the logs",
+          path["kind"] == "Tripod" and self_c > 0.75 and pole_c > 0.2,
+          "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
+    pack = [log_between("pack%d" % i, (x, 0, z), (x, 3, z), 0.1) for i, (x, z) in
+            enumerate(((0, 0), (0.2, 0), (0, 0.2), (0.2, 0.2)))]
+    poles = [P(x) for x in pack]
+    path = tb["rope_path"](poles, {"seed": 3})
+    self_c, pole_c = clearance(path, poles)
+    check("four logs packed 2 x 2: a Bundle lashing that clears itself and the logs",
+          path["kind"] == "Bundle" and self_c > 0.75 and pole_c > 0.2,
+          "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
+    legs = []
+    for k in range(3):
+        ang = 2.0 * math.pi * k / 3.0
+        legs.append(log_between("leg%d" % k, (5 + 1.0 * math.cos(ang), 0.0, 1.0 * math.sin(ang)),
+                                (5 - 0.35 * math.cos(ang), 3.6, -0.35 * math.sin(ang)), 0.1))
+    rep = tb["lash"](legs, {"style": "Smooth tube"})
+    ok = len(rep["made"]) == 1 and rep["kinds"].get("Bundle") == 1
+    top = cmds.exactWorldBoundingBox(rep["made"][0])[4] if rep["made"] else 0.0
+    check("splayed tripod legs: one lashing, up where the legs meet", ok and top > 2.4,
+          "%s, rope top at %.2f" % (rep["kinds"], top))
+    rep = tb["lash"](row, {"lashing": "Bundle", "style": "Smooth tube"})
+    check("Bundle can be picked for a row too", rep["kinds"] == {"Bundle": 1}, str(rep["kinds"]))
+
     # --- presets live in an optionVar
     var = tb["ROPE_PRESET_VAR"]
     old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None
