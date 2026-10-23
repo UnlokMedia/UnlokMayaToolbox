@@ -209,7 +209,8 @@
   - **End joints:** `rope_joint` flags `endA` / `endB`; `rope_path` turns a
     crossing where a log ends into a **Saddle** (`_rl_saddle`). `rope_pairs`
     groups touching pairs into joints (pairs sharing a spot) and keeps a
-    spanning set per joint, preferring the log a member bears on.
+    spanning set per joint, preferring the joint's hub (the log most
+    members touch, thickest first: the post), then the log a member bears on.
   - **Side by side (3+ logs within 25 deg of their mean direction)**:
     `_rl_side_by_side` runs before the joint chain. Height: the target, or
     where the logs pack closest without clashing (a splayed tripod's top).

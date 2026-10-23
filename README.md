@@ -173,7 +173,10 @@ for stilt shacks, fences and frames.
    each joint gets its own lashing. Logs selected together are bound
    together: where several logs meet at one spot (a post, a beam on it and
    rafters resting there) one continuous rope binds them all, joint after
-   joint, with one starting and one finishing hitch. For separate
+   joint, with one starting and one finishing hitch. Members are tied to
+   the joint's main log (a post with two beams and a brace: each to the
+   post), and to the log they rest on before tip-to-tip ties. A knee brace
+   whose end butts against a post gets its own saddle there. For separate
    lashings, select two logs at a time. For logs side by side, also select a
    vertex or edge to say where along them the lashing goes. Select an
    existing lashing to edit it.

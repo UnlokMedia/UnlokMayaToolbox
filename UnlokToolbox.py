@@ -15505,10 +15505,18 @@ def rope_pairs(poles, reach=ROPE_PAIR_REACH):
                 groups[top(x)] = top(y)
     keep = []  # [[(i, j), ...] per joint]
     for g in set(top(k) for k in range(len(pairs))):
-        # like a builder: tie each log to the one it bears on (a log that carries on past
-        # the joint) before tip-to-tip corner ties, then best contact, then thickest
-        members = sorted((k for k in range(len(pairs)) if top(k) == g),
+        # like a builder: tie members to the joint's main log (the one most of them touch,
+        # thickest first: the post) and to the log they bear on before tip-to-tip corner
+        # ties, then best contact, then thickest
+        group = [k for k in range(len(pairs)) if top(k) == g]
+        touches = {}
+        for k in group:
+            for v in pairs[k][:2]:
+                touches[v] = touches.get(v, 0) + 1
+        hub = max(touches, key=lambda v: (touches[v], poles[v].r))
+        members = sorted(group,
                          key=lambda k: (bool(pairs[k][2]["endA"] and pairs[k][2]["endB"]),
+                                        hub not in pairs[k][:2],
                                         max(0.0, pairs[k][2]["gap"]) / min(pairs[k][2]["rA"], pairs[k][2]["rB"]),
                                         -min(poles[pairs[k][0]].r, poles[pairs[k][1]].r)))
         joined = {}

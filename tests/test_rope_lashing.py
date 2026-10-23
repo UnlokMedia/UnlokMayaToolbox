@@ -393,6 +393,29 @@ def run():
     rep = tb["lash"](row, {"lashing": "Bundle", "style": "Smooth tube"})
     check("Bundle can be picked for a row too", rep["kinds"] == {"Bundle": 1}, str(rep["kinds"]))
 
+    # --- a post with two beams at a frame corner, and a knee brace under a beam
+    cmds.file(new=True, force=True)
+    post = log_between("post", (0, 0, 0), (0, 3, 0), 0.12)
+    beam_x = log_between("beamX", (-0.3, 2.4, 0.22), (2.5, 2.4, 0.22), 0.1)
+    beam_z = log_between("beamZ", (0.22, 2.2, -0.3), (0.22, 2.2, 2.5), 0.1)
+    pairs = tb["rope_pairs"]([P(post), P(beam_x), P(beam_z)])[0]
+    check("frame corner: both beams are tied to the post (not one beam to the other)",
+          len(pairs) == 1 and sorted(pairs[0]) == [(0, 1), (0, 2)], str(pairs))
+    corner = [P(post), P(beam_x), P(beam_z)]
+    path = tb["rope_path"](corner, {"seed": 2})
+    self_c, pole_c = clearance(path, corner)
+    # the beams touch each other right beside the post, so turns under the top beam get squeezed
+    # between them (real rope would squash there too): it must stay compact, not fully clear
+    check("frame corner: one rope, compact where the beams squeeze it", path["kind"] == "Combined" and
+          self_c > 0.55 and pole_c > -0.6, "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
+    cmds.file(new=True, force=True)
+    post = log_between("post", (0, 0, 0), (0, 3, 0), 0.12)
+    beam = log_between("beam", (-1.5, 2.6, 0.22), (1.5, 2.6, 0.22), 0.1)
+    knee = log_between("knee", (0.13, 1.95, 0.0), (1.2, 2.35, 0.0), 0.08)  # end butting the post
+    rep = tb["lash"]([post, beam, knee], {"style": "Smooth tube"})
+    check("knee brace: a square lashing for the beam, a saddle where the brace meets the post",
+          rep["kinds"] == {"Square": 1, "Saddle": 1}, str(rep["kinds"]))
+
     # --- presets live in an optionVar
     var = tb["ROPE_PRESET_VAR"]
     old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None
