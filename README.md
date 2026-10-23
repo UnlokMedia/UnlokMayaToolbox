@@ -256,6 +256,29 @@ density. The actual layout is still being built; see
      Smart Layout records what it placed in `<asset>_uvLaidOut_SET`. They
      stay separate from your own Keep UVs / Hands off sets, so you can
      always tell your hand-laid work from Auto UV's.
+   - **Why is it red? (the inspector):** click a mesh in the viewport, or a
+     row in the list.
+     - The box under the list shows its state, its UV score now, what Auto
+       UV last did to it, and for red meshes why it's red and what to do.
+       Its row is highlighted too.
+     - **Fix** does the right thing for the reason:
+       - re-unwraps it, forced even if an old Check UVs called it good;
+       - or, when its UVs already score fine and the red flag is just out
+         of date, clears the flag.
+     - **Re-unwrap with Unfold3D** tries Maya's unwrapper instead.
+     - **Select bad faces** selects the stretched, folded, overlapping or
+       UV-less faces that pull the score down.
+     - **Clear problem** accepts the UVs as they are.
+     - **Show only problems** filters the list down to the red meshes.
+     - The scores' reasons now say what's wrong and how much, e.g. "12%
+       stretched (over 4x off its shell), 3% overlapping".
+     - A mesh goes red when:
+       - Auto UV failed on it;
+       - its UVs score under *Keep above* after unwrapping;
+       - or it's instanced: it shares its shape with another transform,
+         so it can't get its own UVs. Make it unique, or mark it Hands off.
+     - Marking a red mesh Keep UVs or Hands off takes the red flag off. It
+       used to stay red, because the flag outranked your mark.
    - **Auto UV Selected:** only the selected meshes or groups, so you can
      work through an asset bit by bit. Each one is fitted into its own tile
      (see step 4 below); nothing else moves, and Hands off meshes are never

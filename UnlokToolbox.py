@@ -3836,6 +3836,8 @@ class SmartUdimAsset(object):
                     cmds.sets(gone, remove=node)
                 if st == status:
                     cmds.sets(meshes, add=node)
+            if status in ("keep", "handsoff"):  # you've decided about these: drop any old problem flag
+                self.update_tool_sets(remove={"problem": meshes})
         return len(meshes)
 
     # ------------------------------------------------------------ sections
@@ -4467,7 +4469,7 @@ def known_quality(xform, uv_set, cache, keep_score=AUTO_UV_KEEP_SCORE):
     return hit[4], hit[5]
 
 
-def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP_SCORE):
+def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP_SCORE, detail=None):
     """How laid out a mesh already is: (score 0..1, reason).
 
     Score = share of the surface (by 3D area) whose UVs are fine. A face is
@@ -4475,6 +4477,9 @@ def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP
     another face, or its area ratio is more than 4x off its shell's median.
     Comparing each face to *its own shell* keeps rectangulated / straightened
     shells and shells at different densities from counting as stretched.
+    The reason names what's wrong and how much of the surface it covers.
+    detail: a dict to fill with {category: [faces]} ("no_uv", "stretched",
+    "folded", "overlap") for the inspector; it also forces the overlap test.
     """
     fn = _mesh_fn(xform)
     if fn is None:
@@ -4521,21 +4526,26 @@ def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP
         med[s] = v[len(v) // 2]
     total = sum(a3) or 1.0
     bad = 0.0
+    cats = {"no_uv": [], "stretched": [], "folded": [], "overlap": []}
     for f in range(nf):
         if a3[f] <= 1e-12:
             continue
         s = face_shell[f]
         if auv[f] <= 0.0 or s not in med:
             bad += a3[f]
+            cats["no_uv"].append(f)
         elif abs(math.log(auv[f] / a3[f]) - med[s]) > AUTO_UV_STRETCH_TOL:
             bad += a3[f]
+            cats["stretched"].append(f)
         elif signs[f] != (wind[s] >= 0):
             bad += a3[f]  # folded over inside its shell
+            cats["folded"].append(f)
     oversplit_mesh = nf > 20 and nshell > nf * 0.5
     # The overlap test (Maya's polyUVOverlap) is the slow part, so only ask it
     # when it can change the verdict: not for meshes that already fail, not
     # for junk over-split UVs, and only about shells whose boxes overlap.
-    if check_overlap and not oversplit_mesh and max(0.0, 1.0 - bad / total) >= keep_score:
+    if (check_overlap or detail is not None) and not oversplit_mesh and (
+            detail is not None or max(0.0, 1.0 - bad / total) >= keep_score):
         boxes = {}
         k = 0
         for f, c in enumerate(counts):
@@ -4564,12 +4574,24 @@ def uv_quality(xform, uv_set="map1", check_overlap=True, keep_score=AUTO_UV_KEEP
                 faces = _parse_face_spec(comp.partition(".")[2])
                 if faces:
                     idx.update(faces)
-            bad += sum(a3[i] for i in idx if i < nf)
+            counted = set(cats["no_uv"]) | set(cats["stretched"]) | set(cats["folded"])
+            cats["overlap"] = sorted(i for i in idx if i < nf and i not in counted)
+            bad += sum(a3[i] for i in cats["overlap"])
     score = max(0.0, 1.0 - bad / total)
+    if detail is not None:
+        detail.update(cats)
+        detail["shells"] = nshell
     if oversplit_mesh:
         return score * 0.5, "over-split (%d shells for %d faces)" % (nshell, nf)
     if score < 1.0:
-        return score, "stretched / overlapping / folded UVs"
+        words = {"no_uv": "zero-area UVs", "stretched": "stretched (over 4x off its shell)",
+                 "folded": "folded over", "overlap": "overlapping"}
+        parts = []
+        for key in ("no_uv", "stretched", "folded", "overlap"):
+            share = sum(a3[i] for i in cats[key]) / total
+            if share > 0:
+                parts.append("%s%% %s" % (("%.1f" % (share * 100)).rstrip("0").rstrip("."), words[key]))
+        return score, ", ".join(parts) or "stretched / overlapping / folded UVs"
     return score, ""
 
 
@@ -4733,18 +4755,19 @@ def uv_states(asset, scores=None, keep_score=AUTO_UV_KEEP_SCORE, meshes=None, in
             out[m] = "handsoff"
         elif m in laid:
             out[m] = "laidout"
+        elif status.get(m) == "keep":  # your mark beats an old problem flag
+            out[m] = "keep"
         elif m in prob:
             out[m] = "problem"
         elif m in auto:
             out[m] = "auto"
-        elif status.get(m) == "keep":
-            out[m] = "keep"
         elif scores and m in scores and scores[m] is not None:
             out[m] = "good" if scores[m] >= keep_score else "needs"
         else:
             out[m] = "unknown"
     for m in instanced:
-        out[m] = "problem"
+        if out.get(m) != "handsoff":  # an instance can't get its own UVs: only Hands off is safe
+            out[m] = "problem"
     return out
 
 
@@ -7119,7 +7142,9 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
     todo = [m for m in order if scores[m][0] < keep_score and m not in marked_keep]
     tail = [{"mesh": m, "before": None, "reason": "marked Hands off: never unwrapped or moved", "after": None,
              "action": "hands off"} for m in handsoff]
-    tail += [{"mesh": m, "before": None, "reason": "instanced", "after": None, "action": "skip"} for m in instanced]
+    tail += [{"mesh": m, "before": None, "reason": "instanced: shares its shape with another transform, so its UVs "
+                                                   "can't be changed on their own", "after": None, "action": "skip"}
+             for m in instanced]
     if analyse_only:
         rows = [{"mesh": m, "before": scores[m][0], "reason": scores[m][1], "after": None,
                  "action": "keep UVs" if m in marked_keep else ("will unwrap" if m in todo else "keep")}
@@ -7199,9 +7224,13 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 rows.append({"mesh": m, "before": before, "reason": failed[m], "after": None,
                              "action": "failed"})
                 continue
+            reason = scores[m][1]
             if m in todo:  # only what was unwrapped needs checking: packing doesn't change a shell's quality
                 pr.item(short_name(m))
-                after = cached_quality(m, uv_set, score_cache, check_overlap=pack, keep_score=keep_score)[0]
+                after, why, _ = cached_quality(m, uv_set, score_cache, check_overlap=bool(pack),
+                                               keep_score=keep_score)
+                reason = ("unwrapped, but: %s" % why) if after < keep_score else ("unwrapped" + (
+                    " (%s)" % why if why else ""))
             else:
                 after = before
             action = "unwrapped" if m in todo else "kept"
@@ -7209,8 +7238,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
                 action = "check" if m in todo else "kept (check)"
             if m in marked_keep:
                 action = "keep UVs"
-            rows.append({"mesh": m, "before": before, "reason": scores[m][1], "after": after,
-                         "action": action})
+            rows.append({"mesh": m, "before": before, "reason": reason, "after": after, "action": action})
         unwrapped = [r["mesh"] for r in rows if r["action"] == "unwrapped"]
         trouble = [r["mesh"] for r in rows if r["action"] in ("failed", "check")] + list(instanced)
         asset.update_tool_sets(add={"auto": unwrapped, "problem": trouble},
@@ -9228,6 +9256,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self.refresh))
+        self._inspect_timer = QtCore.QTimer(self)  # selection changed: update the inspector
+        self._inspect_timer.setSingleShot(True)
+        self._inspect_timer.setInterval(150)
+        self._inspect_timer.timeout.connect(_guarded(self._inspect_timer, self.inspect_selection))
+        self._syncing = False
         self.states = {}
         self._applied = {}  # mesh -> state last coloured
         self._dirty = True  # the asset's sets / meshes changed since the last refresh
@@ -9574,7 +9607,37 @@ class SmartUdimPanel(QtWidgets.QWidget):
             ah.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.auto_tree.itemSelectionChanged.connect(self._auto_selected)
         self.auto_tree.itemDoubleClicked.connect(self._auto_double_clicked)
+        self.problems_only = CheckField("Show only problems")
+        self.problems_only.setToolTip("Hide every row that isn't red (Problem). Click a row, or a red mesh in the "
+                                      "viewport, to see why below.")
+        self.problems_only.changed.connect(self._apply_auto_filter)
+        card.add(self.problems_only)
         card.add(self.auto_tree)
+        # inspector: click a mesh (here or in the viewport) to see why it's that colour
+        self.inspect_label = QtWidgets.QLabel("Select a mesh (here or in the viewport) to see its UV state and "
+                                              "what's wrong with it.")
+        self.inspect_label.setWordWrap(True)
+        self.inspect_label.setTextFormat(QtCore.Qt.RichText)
+        self.inspect_label.setStyleSheet("QLabel { background: #2b2b2b; border: 1px solid #3a3a3a; "
+                                         "border-radius: 3px; padding: 6px; }")
+        card.add(self.inspect_label)
+        self.fix_btn = primary_button("Fix")
+        self.fix_btn.clicked.connect(lambda *_: self.inspector_fix())
+        self.fix_u3d_btn = secondary_button("Re-unwrap with Unfold3D", "Unwrap the selected meshes again with "
+                                                                       "Maya's Unfold3D instead of the Unlok "
+                                                                       "unwrapper.")
+        self.fix_u3d_btn.clicked.connect(lambda *_: self.inspector_fix(UNWRAP_METHODS[1]))
+        self.bad_faces_btn = secondary_button("Select bad faces", "Select the faces that make the score low "
+                                                                  "(stretched, folded, overlapping, no UVs).")
+        self.bad_faces_btn.clicked.connect(lambda *_: self.inspector_select_bad())
+        self.clear_btn = secondary_button("Clear problem", "The UVs are fine as they are: take the Problem flag "
+                                                           "off the selected meshes (they count as Auto UV'd).")
+        self.clear_btn.clicked.connect(lambda *_: self.inspector_clear())
+        self.inspect_row = button_row(self.fix_btn, self.fix_u3d_btn, self.bad_faces_btn, self.clear_btn)
+        self.inspect_row.setVisible(False)
+        card.add(self.inspect_row)
+        self._inspected = []
+        self._bad_faces = {}
         col.addWidget(card)
 
         # ---- 7. smart layout
@@ -10794,6 +10857,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         else:
             states = uv_states(asset, self._scores(), self.auto_keep.value())
         self.states = states
+        if getattr(self, "problems_only", None) is not None and self.problems_only.value():
+            self._apply_auto_filter()
         counts = {}
         for s in states.values():
             counts[s] = counts.get(s, 0) + 1
@@ -10901,7 +10966,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._update_guidance()
 
     @ui_safe
-    def auto_uv(self, selected=False):
+    def auto_uv(self, selected=False, unwrapper=None, force=False):
         asset = self._asset()
         if asset is None:
             self.set_status("Pick a root group first.", level="warn")
@@ -10918,9 +10983,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         self._progress_start()
         try:
+            opts = self._auto_options()
+            if unwrapper:
+                opts["unwrapper"] = unwrapper
+            if force:  # the inspector's Fix: unwrap even what a Check UVs once called good
+                opts["score"] = False
             result = run_auto_uv(asset, progress_callback=self._progress, only=only,
                                  colours=self.colour_box.value(), score_cache=self._score_cache,
-                                 target_tiles=self._planned_tiles(), **self._auto_options())
+                                 target_tiles=self._planned_tiles(), **opts)
         finally:
             self._progress_end()
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -11068,6 +11138,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             item.setToolTip(3, r["reason"] or r["action"])
             item.setForeground(3, QtGui.QBrush(QtGui.QColor(colors.get(r["action"], LEVEL_COLORS["info"]))))
             self.auto_tree.addTopLevelItem(item)
+        self._apply_auto_filter()
 
     @ui_safe
     def mark_status(self, status):
@@ -11136,10 +11207,170 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                      "they're finished and in their UDIM.")
 
     def _auto_selected(self):
+        if self._syncing:
+            return
         try:
             self._select_nodes([it.data(0, QtCore.Qt.UserRole) for it in self.auto_tree.selectedItems()])
         except Exception:
             traceback.print_exc()
+
+    # ------------------------------------------------------------ inspector
+    def _apply_auto_filter(self):
+        only = self.problems_only.value()
+        states = self.states or {}
+        for i in range(self.auto_tree.topLevelItemCount()):
+            it = self.auto_tree.topLevelItem(i)
+            it.setHidden(only and states.get(it.data(0, QtCore.Qt.UserRole)) != "problem")
+
+    def _why(self, mesh, diag):
+        """(what's wrong, what to do, fix kind) for a mesh. diag: the
+        live uv_quality (score, reason, detail) or None."""
+        state = (self.states or {}).get(mesh, "unknown")
+        row = (self._auto_items.get(mesh) or (None, None))[1]
+        snap = self.snapshot or {}
+        keep = self.auto_keep.value()
+        if mesh in set(snap.get("instanced") or ()):
+            return ("It's instanced: its shape is shared with another transform, so its UVs can't change on their "
+                    "own (Auto UV and the layout skip it).",
+                    "Make it unique (Modify > Convert > Instance to Object), or mark it Hands off if its UVs are "
+                    "already done.", "instanced")
+        if state != "problem":
+            return ("", "", None)
+        if row and row["action"] == "failed":
+            return ("Auto UV failed on it: %s." % row["reason"],
+                    "Re-unwrap it, or try Unfold3D if it fails again.", "reunwrap")
+        if diag is not None and diag[0] >= keep:
+            return ("Auto UV flagged it%s, but its UVs score %.2f now, which is fine (it was probably fixed "
+                    "since, or the flag is out of date)." % (
+                        (" (%s)" % row["reason"]) if row and row.get("reason") else "", diag[0]),
+                    "Clear the problem flag.", "clear")
+        if diag is not None:
+            return ("Its UVs score %.2f (under %.2f): %s." % (diag[0], keep, diag[1] or "low score"),
+                    "Re-unwrap it (Select bad faces shows where). If the Unlok unwrapper gives the same result, "
+                    "try Unfold3D.", "reunwrap")
+        return ("Auto UV flagged it: %s." % ((row or {}).get("reason") or "low score after unwrapping"),
+                "Re-unwrap it.", "reunwrap")
+
+    @ui_safe
+    def inspect_selection(self):
+        """Show the selected mesh's state and, for problems, why and what to
+        do. Also highlights its row in the list."""
+        asset = self._asset()
+        if asset is None or not self.isVisible():
+            return
+        meshes = sorted(self._items_in_root(selection_items()))
+        self._inspected = meshes
+        self._bad_faces = {}
+        self._syncing = True
+        try:  # mirror the viewport selection in the list
+            self.auto_tree.clearSelection()
+            first = None
+            for m in meshes:
+                hit = self._auto_items.get(m)
+                if hit:
+                    hit[0].setSelected(True)
+                    first = first or hit[0]
+            if first is not None:
+                self.auto_tree.scrollToItem(first)
+        finally:
+            self._syncing = False
+        if not meshes:
+            self.inspect_label.setText("Select a mesh (here or in the viewport) to see its UV state and what's "
+                                       "wrong with it.")
+            self.inspect_row.setVisible(False)
+            return
+        states = self.states or {}
+        uv_set = self.uv_set.text().strip() or "map1"
+        if len(meshes) > 1:
+            probs = [m for m in meshes if states.get(m) == "problem"]
+            counts = {}
+            for m in meshes:
+                counts[states.get(m, "unknown")] = counts.get(states.get(m, "unknown"), 0) + 1
+            parts = ", ".join("%d %s" % (n, UV_STATE_INFO.get(s, (s,))[0]) for s, n in sorted(counts.items()))
+            self.inspect_label.setText("<b>%d meshes selected</b>: %s.%s" % (
+                len(meshes), parts, " Fix re-unwraps the problem ones." if probs else ""))
+            self.fix_btn.setText("Fix %d problem(s)" % len(probs) if probs else "Fix")
+            self.fix_btn.setEnabled(bool(probs))
+            self.inspect_row.setVisible(True)
+            return
+        m = meshes[0]
+        state = states.get(m, "unknown")
+        label, colour, meaning = UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])
+        diag = None
+        fn = _mesh_fn(m)
+        if fn is not None and fn.numPolygons <= 200000:  # keep the click snappy
+            detail = {}
+            try:
+                s, why = uv_quality(m, uv_set, keep_score=self.auto_keep.value(), detail=detail)
+                diag = (s, why, detail)
+                self._bad_faces = {m: sorted(set(f for k in ("no_uv", "stretched", "folded", "overlap")
+                                                 for f in detail.get(k, ())))}
+            except Exception:
+                traceback.print_exc()
+        what, todo, kind = self._why(m, diag)
+        row = (self._auto_items.get(m) or (None, None))[1]
+        lines = ['<b>%s</b> &nbsp;<span style="color:%s">&#9632; %s</span>' % (short_name(m), colour, label),
+                 '<span style="color:#9a9a9a">%s</span>' % meaning]
+        if diag is not None:
+            lines.append("UV score now: <b>%.2f</b>%s%s" % (diag[0], (" - %s" % diag[1]) if diag[1] else "",
+                                                            ", %d shell(s)" % diag[2].get("shells", 0)))
+        if row:
+            lines.append("Last Auto UV: %s%s" % (row["action"], (" - %s" % row["reason"]) if row.get("reason")
+                                                 else ""))
+        if what:
+            lines.append('<span style="color:#e8a0a0">Why it\'s red: %s</span>' % what)
+            lines.append("<b>Fix:</b> %s" % todo)
+        self.inspect_label.setText("<br>".join(lines))
+        self._fix_kind = kind
+        self.fix_btn.setEnabled(kind in ("reunwrap", "clear"))
+        self.fix_btn.setText({"clear": "Fix: clear the flag", "reunwrap": "Fix: re-unwrap",
+                              "instanced": "Fix (instanced: see above)"}.get(kind, "Fix"))
+        self.bad_faces_btn.setEnabled(bool(self._bad_faces.get(m)))
+        self.inspect_row.setVisible(True)
+
+    @ui_safe
+    def inspector_fix(self, unwrapper=None):
+        """Fix what the inspector found: clear an out-of-date flag, or
+        re-unwrap (forced, even if a Check UVs once called it good)."""
+        meshes = [m for m in self._inspected if cmds.objExists(m)]
+        if not meshes:
+            return
+        if unwrapper is None and len(meshes) == 1 and getattr(self, "_fix_kind", None) == "clear":
+            self.inspector_clear()
+            return
+        states = self.states or {}
+        todo = meshes if unwrapper or len(meshes) == 1 else [m for m in meshes if states.get(m) == "problem"]
+        if not todo:
+            return
+        cmds.select(todo, replace=True)
+        self.auto_uv(selected=True, unwrapper=unwrapper, force=True)
+        self.inspect_selection()
+
+    @ui_safe
+    def inspector_select_bad(self):
+        comps = ["%s.%s" % (m, r) for m, faces in self._bad_faces.items() for r in face_ranges(faces)]
+        if comps:
+            cmds.select(comps, replace=True)
+            self.set_status("Selected %d bad face(s). Open the UV Editor to see them." % sum(
+                len(v) for v in self._bad_faces.values()))
+
+    @ui_safe
+    def inspector_clear(self):
+        asset = self._asset()
+        meshes = [m for m in self._inspected if cmds.objExists(m)]
+        if asset is None or not meshes:
+            return
+        with UndoChunk("Smart UDIM clear problem"):
+            asset.update_tool_sets(remove={"problem": meshes}, add={"auto": meshes})
+        for m in meshes:
+            hit = self._auto_items.get(m)
+            if hit and hit[1]["action"] in ("check", "failed", "kept (check)"):
+                hit[1]["action"] = "accepted"
+                hit[0].setText(3, "accepted")
+        self.refresh()
+        self._save_session()
+        self.set_status("Cleared the problem flag on %d mesh(es)." % len(meshes))
+        self.inspect_selection()
 
     @ui_safe
     def open_renamer(self):
@@ -11192,6 +11423,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._jobs = [
             cmds.scriptJob(event=["Undo", refresh]),
             cmds.scriptJob(event=["Redo", refresh]),
+            cmds.scriptJob(event=["SelectionChanged", lambda: self._inspect_timer.start()]),
         ]
         _registry()["jobs"].extend(self._jobs)
         # cheap change flags (never touch the scene in a callback): meshes or

@@ -424,6 +424,32 @@ def main():
     pump()
     check("unticking puts the real materials back", not cmds.ls("unlokUV_*_SG"), str(cmds.ls("unlokUV_*_SG")))
 
+    # --- inspector: click a red mesh, see why, fix it
+    victim = cmds.ls("woodBrown_C_rafter0002_GEP", long=True)[0]
+    asset = udim._asset()
+    asset.update_tool_sets(add={"problem": [victim]})
+    udim.refresh()
+    cmds.select(victim, replace=True)
+    udim.inspect_selection()
+    pump()
+    txt = udim.inspect_label.text()
+    check("clicking a red mesh shows why it's red and what to do", "Why it" in txt and "Fix:" in txt and
+          udim.inspect_row.isVisible(), txt[:300])
+    hit = udim._auto_items.get(victim)
+    check("...and highlights its row in the list", hit is not None and hit[0].isSelected())
+    udim.problems_only.setChecked(True)
+    pump()
+    shown = [udim.auto_tree.topLevelItem(i).data(0, ns["QtCore"].Qt.UserRole)
+             for i in range(udim.auto_tree.topLevelItemCount()) if not udim.auto_tree.topLevelItem(i).isHidden()]
+    check("Show only problems lists just the red meshes", victim in shown and
+          all(udim.states.get(m) == "problem" for m in shown), str([m.split("|")[-1] for m in shown]))
+    udim.problems_only.setChecked(False)
+    udim.inspector_fix()
+    pump()
+    check("Fix clears an out-of-date flag (the UVs score fine)", udim.states.get(victim) != "problem",
+          udim.states.get(victim))
+    window.grab().save(os.path.join(OUT, "10c_inspector.png"))
+
     # --- Plan with a mesh that still has junk UVs: it's left out, and the panel says so
     junk = cmds.polyPlane(w=2, h=2, sx=40, sy=40, name="woodGreen_C_junk0001_GEP")[0]
     cmds.polyForceUV(junk, unitize=True)

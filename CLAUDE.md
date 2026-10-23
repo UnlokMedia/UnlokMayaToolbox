@@ -200,9 +200,23 @@
     - `confirm=False` skips the question (used by the GUI test).
   - **UV states and colours** (`uv_states`, `show_uv_colours`,
     `hide_uv_colours`):
-    - States, in order of precedence: handsoff > laidout > problem > auto >
-      keep > good / needs (by score) > unknown. Instanced meshes are
-      problems.
+    - States, in order of precedence: handsoff > laidout > keep > problem >
+      auto > good / needs (by score) > unknown. Instanced meshes are
+      problems unless Hands off.
+    - Marking Keep UVs / Hands off (`set_uv_status`) also removes the mesh
+      from the problem set. The flag used to outrank the mark, so marked
+      meshes stayed red.
+    - Rows' `reason` after an unwrap is the after-check's (`unwrapped, but:
+      ...`), not the pre-run score's.
+    - `uv_quality(detail={})` fills the bad faces by category (no_uv,
+      stretched, folded, overlap) and forces the overlap test. Its reason
+      gives a percentage per category.
+    - **Inspector** (`inspect_selection`, run by a SelectionChanged
+      scriptJob through a guarded timer): mirrors the selection in the
+      list (`_syncing` stops the loop back to the viewport) and explains
+      the state (`_why`).
+      - `inspector_fix` either clears an out-of-date flag or calls
+        `auto_uv(selected=True, force=True)`; `force` sets score=False.
     - The panel's scores are each row's `before` from the last Check /
       Auto UV run; what happened since is in the tracking sets (roles
       `uvauto`, `uvlaidout`, `uvproblem`, via `update_tool_sets` inside

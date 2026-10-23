@@ -169,6 +169,28 @@ def run():
         r["before"] is not None for r in tb["run_auto_uv"](asset, analyse_only=True, score=False)["rows"]
         if r["action"] not in ("hands off", "skip")))
 
+    # --- problem bookkeeping and the inspector's diagnosis
+    rows = dict((r["mesh"], r) for r in res["rows"])
+    unwrapped = [m for m, r in rows.items() if r["action"] in ("unwrapped", "check")]
+    check("rows after unwrapping explain the result, not the old score",
+          all(rows[m]["reason"].startswith("unwrapped") for m in unwrapped),
+          str([rows[m]["reason"] for m in unwrapped][:3]))
+    victim = by["stoneGrey_C_column0003_GEP"]
+    cmds.polyEditUV(victim + ".map[0:3]", scaleU=12.0, scaleV=12.0)  # wreck a few faces
+    detail = {}
+    score, why = tb["uv_quality"](victim, detail=detail)
+    check("uv_quality says what's wrong and how much", "stretched" in why and "%" in why and detail.get("stretched"),
+          "%.2f %s, %d stretched faces" % (score, why, len(detail.get("stretched", []))))
+    asset.update_tool_sets(add={"problem": [victim]})
+    st = tb["uv_states"](asset)
+    check("a flagged mesh is red", st[victim] == "problem")
+    asset.set_uv_status([victim], "keep")
+    st = tb["uv_states"](asset)
+    check("marking it Keep UVs makes it green and drops the flag", st[victim] == "keep" and
+          victim not in asset.tool_members("problem"))
+    asset.set_uv_status([victim], "auto")
+    check("...and it doesn't come back when the mark is cleared", tb["uv_states"](asset)[victim] != "problem")
+
 
 try:
     run()
