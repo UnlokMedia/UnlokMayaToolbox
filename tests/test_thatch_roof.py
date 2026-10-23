@@ -273,9 +273,63 @@ def run():
     cmds.select(tb["thatch_parts"](root)["straw"])
     check("a baked roof is plain geometry (not a box, not a roof)", tb["thatch_selection"]() == ([], []))
 
-    # --- presets set the shape and keep the thatch style
+    # --- presets set the shape and keep the thatch style; look presets set the style too
     p = tb["thatch_preset"]("Roundhouse")
-    check("presets set the shape only", p["shape"] == "Cone" and "style" not in p and "stacks" not in p)
+    check("shape presets set the shape only", p["shape"] == "Cone" and "style" not in p and "stacks" not in p)
+    p = tb["thatch_preset"]("Cambodian shack (leaf panels)")
+    check("the Cambodian shack preset sets a makeshift leaf-panel roof", p["style"] == "Leaf Panels" and
+          p["end_a"] == "Gable" and p["ridge_sag"] > 0 and p["ragged"] > 0 and "stacks" not in p)
+
+    # --- makeshift: ridge sag, warp, ragged eaves, gaps
+    cmds.file(new=True, force=True)
+    b = box("b")
+    root = tb["make_thatch_roof"](b, {"resolution": 60, "end_a": "Gable", "end_b": "Gable"})["root"]
+    straw = tb["thatch_parts"](root)["straw"]
+
+    def top_at(x):
+        fn = mesh_fn(tb, straw)
+        return max(p.y for p in fn.getPoints(om.MSpace.kWorld) if abs(p.x - x) < 0.08)
+    mid0, end0 = top_at(0.0), top_at(2.6)
+    low0 = bbox(straw)[1]
+    tb["update_thatch_roofs"]({root: {"ridge_sag": 1.0}})
+    mid1, end1 = top_at(0.0), top_at(2.6)
+    check("ridge sag drops the middle of the ridge, not its ends", mid0 - mid1 > 0.15 and abs(end0 - end1) < 0.1,
+          "middle %.3f -> %.3f, end %.3f -> %.3f" % (mid0, mid1, end0, end1))
+    tb["update_thatch_roofs"]({root: {"ridge_sag": 0.0, "ragged": 1.5}})
+    fn = mesh_fn(tb, straw)
+    check("ragged eaves hang lower in places, still a closed shell", bbox(straw)[1] < low0 - 0.1 and
+          boundary_edges(fn) == 0 and signed_volume(fn) > 0.0, "low %.3f -> %.3f" % (low0, bbox(straw)[1]))
+    tb["update_thatch_roofs"]({root: {"ragged": 0.0, "warp": 1.5}})
+    fn = mesh_fn(tb, straw)
+    check("warp keeps a closed shell", boundary_edges(fn) == 0 and signed_volume(fn) > 0.0)
+    n0 = tb["update_thatch_roofs"]({root: {"warp": 0.0, "style": "Planes", "density": 0.5}})["pieces"]
+    n1 = tb["update_thatch_roofs"]({root: {"gaps": 0.6}})["pieces"]
+    check("gaps leave pieces out in clumps", 0.2 * n0 < n1 < 0.85 * n0, "%d -> %d" % (n0, n1))
+
+    # --- leaf panels: courses of panels, stacked UVs, fronts outwards
+    tb["update_thatch_roofs"]({root: {"gaps": 0.0}})
+    for preset in ("Cambodian shack (leaf panels)", "Cambodian shack (straw)", "Grass hut (messy)"):
+        s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"](preset))
+        s["stacks"] = 3
+        t0 = time.time()
+        rep = tb["update_thatch_roofs"]({root: s})
+        dt = time.time() - t0
+        fn = mesh_fn(tb, straw)
+        us, vs, good = uv_stats(fn)
+        tiles = set(int(math.floor(max(0.0, u - 1e-6))) for u in us)
+        check("%s: builds (%.2fs)" % (preset, dt), rep["pieces"] > 50 and dt < 6.0,
+              "%d pieces, %d faces" % (rep["pieces"], fn.numPolygons))
+        check("%s: 3 stacks, UVs the right way round" % preset, tiles == {0, 1, 2} and good > 0.999,
+              "%s, %.2f%% upright" % (sorted(tiles), good * 100))
+        if s["style"] == "Leaf Panels":
+            normals = fn.getNormals(om.MSpace.kWorld)
+            up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
+            check("leaf panels face out of the roof", up > 0.95, "%.1f%% up" % (up * 100))
+            bb = bbox(straw)
+            check("leaf panels cover the whole roof, over the ridge and past the verges",
+                  bb[4] > 2.5 + 3.0 - 0.3 and bb[0] < -3.0 and bb[3] > 3.0, str([round(v, 2) for v in bb]))
+            check("no underlay for the leaf panel shack", not cmds.getAttr(tb["thatch_parts"](root)["underlay"] +
+                                                                           ".visibility"))
 
     # --- Smart UDIM: surfaces are Keep UVs, stacked planes Hands off
     cmds.file(new=True, force=True)

@@ -302,9 +302,16 @@ textures.
    **EDITING**); it stays there when you deselect it, so you can look at it
    and keep tweaking.
 3. **Roof shape** (live):
-   - **Preset:** Cottage (hipped), Gabled cottage, Half-hipped, Tiered,
-     Roundhouse, Lean-to shed. Presets set the shape; how the straw is made
-     (step 4) stays.
+   - **Preset:** shape presets (Cottage (hipped), Gabled cottage,
+     Half-hipped, Tiered, Roundhouse, Lean-to shed) set the shape and keep
+     how the straw is made (step 4). Look presets set the whole look, step 4
+     included:
+     - **Cambodian shack (leaf panels):** a thin roof of folded palm-leaf
+       panels in ragged rows, sagging ridge, warped slopes, gaps, no
+       underlay (you see the panels from inside).
+     - **Cambodian shack (straw):** a thin, scruffy layer of long straw
+       planes, ragged hanging eaves, patchy.
+     - **Grass hut (messy):** a hipped hut of loose 3D grass bundles.
    - **Ridge** (two slopes), **Lean-to** (one slope, high along the box's -
      side) or **Cone** (round, elliptical in a long box: use a square box
      over a round wall).
@@ -315,6 +322,11 @@ textures.
      box's longer side).
    - **Overhang, Thickness, Softness** (how round the ridge and hips are),
      **Sag** (old thatch dips; below 0 it bellies out) and **Lumps**.
+   - **Makeshift** (for shacks rather than clean cottages): **Warp**
+     (crooked rafters, a wavy eave line), **Ridge sag** (the ridge pole dips
+     in the middle and drags the slopes down), **Ragged eaves** (an uneven,
+     hacked-off edge; planes and pieces hang further in places, panels
+     fray more) and **Gaps** (pieces or panels left out in clumps).
    - **Levels:** tiers from the eaves to the ridge cap; each level's bottom
      edge stands proud of the one below by *Level lip*. One level is a plain
      roof with a rounded eave lip.
@@ -335,6 +347,13 @@ textures.
      course above covers it. The bottom course hangs over the eaves.
    - **3D Pieces:** little tapered bundles with a cut butt end, for
      close-ups.
+   - **Leaf Panels:** folded palm-leaf (sla / attap) panels tied in courses
+     along the roof from the eaves up, each course overlapping the one
+     below with its bottom edge standing off and frayed; the top course
+     folds over the ridge. *Panel width* / *Panel length* size them,
+     *Density* packs the courses closer. Each panel fills 0..1 (U along the
+     roof, V up), on the same stacks as planes: one leaf-panel texture with
+     alpha per stack.
    - Pieces: *Density* (1 covers the roof about three deep), *Width*,
      *Length*, *Messiness* (random turn, roll and size), *Lift*, *Bend*,
      *Segments*; 3D pieces also *Sides* and *Flatness*.
@@ -359,7 +378,7 @@ stack tiles are kept free). Marking one Auto yourself sticks.
 
 **Speed:** on a 6 x 4 m roof at the defaults, a surface takes about 0.6 s
 (56,000 faces), planes 1 s (3,500 planes) and 3D pieces 1.4 s (92,000
-faces). Lower *Resolution* while you shape the roof if edits feel slow.
+faces); the leaf-panel shack about 0.7 s (250 panels). Lower *Resolution* while you shape the roof if edits feel slow.
 
 ### UV > Smart UDIM (in progress)
 

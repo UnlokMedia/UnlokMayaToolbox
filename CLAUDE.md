@@ -305,6 +305,24 @@
     "underlay") inside the chunk, filled in NoUndo (`_th_write` via
     `_rope_fill`). An unused underlay is a hidden 4-vertex placeholder
     (`THATCH_VERTS` = 4, so it's not stale).
+  - **Leaf Panels** (`_th_panels_mesh`): courses at height fractions
+    `dt` apart (panel length x 0.45 / density down the slope). `_th_contour`
+    finds where t crosses grid edges, sorts by (slope side, `along`) and
+    splits at jumps; panels are laid along each polyline (start jittered
+    per course, trimmed to 0.1 panel past the verge: untrimmed they stuck
+    out as shelves). Each of a panel's columns walks up the slope with
+    `_th_walk` (shared with pieces); bottoms lifted (lift x 0.25 x length,
+    less and the courses didn't read), bottom points frayed. A panel whose
+    contour runs the other way is reversed with U mirrored, so fronts face
+    out and UVs stay upright.
+  - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge
+    sag are in `height` (so courses and levels follow them); ragged moves
+    shell points near the eave down the slope (outer and inner together,
+    so the shell stays closed; the cone's jags wrap a whole number of
+    times); `gap_at` is clumped noise that pieces and panels skip.
+  - **Presets:** `thatch_preset` resets every shape key and sets the look
+    keys a preset names, so shape presets keep the style and look presets
+    (Cambodian shack, Grass hut) set it.
   - **Following the box:** the panel's attributeChange scriptJobs on the
     box's translate / rotate / scale / shear only restart a 150 ms timer;
     `thatch_box_moved` compares the stored frame. Selecting a roof also

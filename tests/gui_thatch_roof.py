@@ -166,6 +166,25 @@ def main():
     window.grab().save(os.path.join(OUT, "11_panel_pieces.png"))
     edit(style="Surface")
 
+    # --- look presets: Cambodian shacks and a grass hut
+    for name in ("Cambodian shack (leaf panels)", "Cambodian shack (straw)", "Grass hut (messy)"):
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText(name))
+        panel.load_preset()
+        pump()
+        check("%s loads" % name, ns["thatch_data"](root)["style"] == panel.f["style"].value() and
+              "on 1 roof" in panel.status.text(), panel.status.text())
+        frame_on([root, house])
+        snap("12_%s.png" % name.lower().replace(" (", "_").replace(")", "").replace(" ", "_"))
+        if name.startswith("Cambodian shack (leaf"):
+            frame_on(ns["thatch_parts"](root)["straw"], direction=(0.3, 0.15, 1.0), dist=0.55)
+            snap("13_leaf_panels_close.png")
+            frame_on([root, house], direction=(0.6, -0.25, 1.3))
+            snap("13_leaf_panels_below.png")
+            window.grab().save(os.path.join(OUT, "14_panel_leaf.png"))
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Cottage (hipped)"))
+    panel.load_preset()
+    edit(style="Surface", warp=0.0, ridge_sag=0.0, ragged=0.0, gaps=0.0)
+
     # --- the roof follows its box
     box = ns["thatch_box"](root)
     x0 = centre_x(ns["thatch_parts"](root)["straw"])
