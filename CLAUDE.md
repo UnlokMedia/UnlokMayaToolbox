@@ -211,6 +211,22 @@
     groups touching pairs into joints (pairs sharing a spot) and keeps a
     spanning set per joint, preferring the joint's hub (the log most
     members touch, thickest first: the post), then the log a member bears on.
+  - **Crowded logs in a combined joint:** when another member touches the
+    same log within a square lashing's reach (`crowding`, from contacts
+    between *all* the joint's logs, tied or not), a beam crossing within 30
+    deg of square goes one-sided: `_rl_saddle(inward=..., blocked=...)`,
+    turns round the shared log only on the free side (starting past the
+    beam), passes over the beam only on a side no other member crosses.
+    Without it the two lashings stacked on the same stretch of post and the
+    later rope floated off it. With only one side of the beam free, every
+    turn goes under the beam there, up its face and a whole turn round the
+    post, back down that side; alternating half turns left every other turn
+    on the wrong side, cutting across to the beam through the air. No room
+    on a short beam stub for the end hitch: it goes on the post. In a
+    combined chain the rope runs along the shared log's surface to the next
+    member. (Tried and worse: a full turn round the beam; starting the
+    turns past a brace crossing the post's far side; picking the turns'
+    side by which way the post is freer.)
   - **Side by side (3+ logs within 25 deg of their mean direction)**:
     `_rl_side_by_side` runs before the joint chain. Height: the target, or
     where the logs pack closest without clashing (a splayed tripod's top).

@@ -14237,16 +14237,23 @@ def _rl_square(tie, J, wraps, fraps, hitches):
     return start, out + frap, end
 
 
-def _rl_saddle(tie, J, wraps, hitches):
+def _rl_saddle(tie, J, wraps, hitches, inward=None, blocked=()):
     """Saddle lashing where log 0 ends at log 1 (a post under a beam, a
     rafter on a beam): each wrap goes over log 1 beside log 0, down and half
     round log 0 just below its end, over log 1 on the other side and half
     round log 0 the other way, so the rope crosses in an X on log 0's sides.
-    When log 1 ends there too, both passes go over the side it carries on."""
+    When log 1 ends there too, both passes go over the side it carries on.
+    inward (+-1 along log 0's axis): log 0 carries on past log 1 but its
+    other side is taken (another beam crosses close by), so all the turns
+    round log 0 go to the inward side of log 1 (a one-sided square lashing).
+    blocked: [(param, radius)] where other members cross log 1: the passes
+    over log 1 keep to a side without one."""
     E, B = tie.poles
     d, rr = tie.d, tie.rr
     te, tb = J["tA"], J["tB"]
-    inward = -float(J["endA"] or 1)  # along log 0's axis, away from the joint
+    through = inward is not None
+    if not through:
+        inward = -float(J["endA"] or 1)  # along log 0's axis, away from the joint
     up = _rl_mul(E.a, -inward)
     x = _rl_norm(_rl_perp(up, B.a), _rl_any_perp(up))  # along log 1, square to log 0
     y = _rl_cross(up, x)
@@ -14257,13 +14264,33 @@ def _rl_saddle(tie, J, wraps, hitches):
     ye = _rl_norm(_rl_perp(E.a, y), y)
     xe = _rl_norm(_rl_perp(E.a, x), x)
     re = J["rA"] + rr
-    t_end = E.t1 if J["endA"] > 0 else E.t0
-    t_end = te if (te - t_end) * inward > 0 else t_end  # never above the joint itself
+    if through:  # start just past log 1's side of the crossing
+        sin_ab = math.sqrt(max(0.09, 1.0 - _rl_dot(E.a, B.a) ** 2))
+        t_end = te + inward * J["rB"] / sin_ab
+    else:
+        t_end = E.t1 if J["endA"] > 0 else E.t0
+        t_end = te if (te - t_end) * inward > 0 else t_end  # never above the joint itself
     room = {1: B.t1 - tb - 2.0 * d, -1: tb - B.t0 - 2.0 * d}
     widest = (re + d * (wraps + 1)) / abs(bx)
-    sides = [sg for sg in (1, -1) if room[sg] > widest] or [max(room, key=room.get)]
+    def clear_side(sg):
+        return not any(0.0 < sg * (t_o - tb) < widest + r_o + 2.0 * d for t_o, r_o in blocked)
+    sides = [sg for sg in (1, -1) if room[sg] > widest and clear_side(sg)] or         [max((1, -1), key=lambda sg: (clear_side(sg), room[sg]))]
     out = []
-    for k in range(wraps):
+    if through and len(sides) == 1:
+        # one side only: every turn goes under log 1 there, beside log 0, up its face and a whole
+        # turn round log 0, back down on that same side. (Alternating round log 0 left every other
+        # turn on the wrong side, so the rope cut across to log 1 through the air.)
+        sg = sides[0]
+        side_e = _rl_mul(xe, sg * (1.0 if bx > 0.0 else -1.0))  # log 0's side the passes are on
+        most = max(re / abs(bx), room[sg])
+        for k in range(2 * wraps):
+            tbk = tb + sg * min((re + d * (k + 0.5)) / abs(bx), most)  # no room left: ride over
+            out += tie.arc(1, tbk, tbk, _rl_mul(yb, -1.0), over)
+            tek = t_end + inward * (0.45 * re + d * (k + 0.5))
+            out += tie.arc(0, tek, tek, ye, _rl_mul(side_e, -1.0))  # face, far side, back...
+            back = tie.arc(0, tek, tek, _rl_mul(ye, -1.0), side_e)
+            out += back[1:len(back) // 2 + 1]  # ...and round to the passes' side
+    for k in range(0 if out else wraps):
         for half in (0, 1):
             sg = sides[half % len(sides)]
             reach = (re + d * (k + 0.5 + (half if len(sides) == 1 else 0) * (wraps + 0.5))) / abs(bx)
@@ -14278,7 +14305,10 @@ def _rl_saddle(tie, J, wraps, hitches):
         start = tie.clove_on(0, t_end + inward * (low + 2.6 * d), -inward, out[0][0], -1, _rl_flow(out, False))
         sg = sides[0]
         far = tie.extent(out, 1, tb, sg)
-        end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1, _rl_flow(out, True))
+        if far + 3.6 * d < room[sg] + 2.0 * d:
+            end = tie.clove_on(1, tb + sg * (far + 1.6 * d), sg, out[-1][0], 1, _rl_flow(out, True))
+        else:  # log 1 ends too soon for a hitch past the turns: finish on log 0, past the start hitch
+            end = tie.clove_on(0, t_end + inward * (low + 5.8 * d), inward, out[-1][0], 1, _rl_flow(out, True))
     return start, out, end
 
 
@@ -14372,13 +14402,26 @@ def _rl_rope_size(s, rmin):
     return rr, max(0.02, spacing) * 2.0 * rr
 
 
-def _rl_pair_parts(pa, pb, s, target=None, rr=None):
+def _rl_pair_parts(pa, pb, s, target=None, rr=None, away=None):
     """One lashing between two logs, unfinished: its kind, joint, the two
     logs in the order the builder used, its tie and (start hitch, body, end
-    hitch) as raw samples."""
+    hitch) as raw samples. away = (shared log, point): another member
+    crosses that log close by at point, so a crossing lashing goes
+    one-sided, its turns round the shared log kept to the side away from
+    the point (stacked beams on a post don't fight for the same wood)."""
     J = rope_joint(pa, pb, target)
     kind = rope_lashing_kind(s, J["angle"])
-    if not J["inside"] and J["angle"] >= ROPE_PARALLEL_DEG and kind != "Bands":
+    inward = None
+    blocked = ()
+    if away is not None and J["inside"] and J["angle"] >= 60.0 and kind not in ("Bands", "Round", "Sheer"):
+        # a beam crossing square-ish to the log (a slanted brace keeps its own lashing)
+        hub, point, blocked = away
+        if hub is pb:
+            pa, pb = pb, pa
+            J = rope_joint(pa, pb, target)
+        kind = "Saddle"  # one-sided: the turns round the shared log all on the free side
+        inward = 1.0 if pa.closest_t(point) < J["tA"] else -1.0
+    elif not J["inside"] and J["angle"] >= ROPE_PARALLEL_DEG and kind != "Bands":
         kind = "Saddle"  # a log ends at the other: wraps over the other and round it below its end
         if not J["endA"] or (J["endB"] and abs(pb.a[1]) > abs(pa.a[1])):
             pa, pb = pb, pa  # log 0 is the one that ends (the more upright when both do)
@@ -14395,7 +14438,7 @@ def _rl_pair_parts(pa, pb, s, target=None, rr=None):
     hitches = bool(s["hitches"]) and kind != "Bands"
     tie = _RopeTie([pa, pb], rr, step)
     if kind == "Saddle":
-        parts = _rl_saddle(tie, J, wraps, hitches)
+        parts = _rl_saddle(tie, J, wraps, hitches, inward, blocked)
     elif kind == "Square":
         parts = _rl_square(tie, J, wraps, fraps, hitches)
     elif kind == "Diagonal":
@@ -14634,14 +14677,49 @@ def rope_path(poles, settings, target=None, others=(), obstacles=(), edges=None)
         order.append((k, m))
         stack.append(m)
     rr, step = _rl_rope_size(s, min(poles[k].r for k in seen))
+    # where every two logs here touch or cross (tied together or not), to spot members
+    # crowding the same stretch of a log
+    cross_at = {}
+    for i in range(len(poles)):
+        for j in range(i + 1, len(poles)):
+            Jij = rope_joint(poles[i], poles[j])
+            if Jij["gap"] > ROPE_PAIR_REACH * min(Jij["rA"], Jij["rB"]):
+                continue
+            cross_at.setdefault(i, []).append((Jij["tA"], j, Jij["rB"]))
+            cross_at.setdefault(j, []).append((Jij["tB"], i, Jij["rA"]))
+    reach_d = 2.06 * rr * 6.0  # a square lashing's turns reach about this far past the beam
+
+    def crowding(i, j):
+        """(shared log, point, [(param, radius) where others cross the other log]) when
+        another member crosses log i or j close to this pair."""
+        for hub, other in ((i, j), (j, i)):
+            mine = [c for c in cross_at.get(hub, []) if c[1] == other]
+            if not mine:
+                continue
+            t_me, _, r_me = mine[0]
+            for t_o, k, r_o in cross_at.get(hub, []):
+                if k != other and abs(t_o - t_me) < r_me + r_o + reach_d:
+                    blocked = [(t, r) for t, m, r in cross_at.get(other, []) if m != hub]
+                    return poles[hub], poles[hub].center(t_o), blocked
+        return None
     raw, first_joint, kinds = [], None, []
     for n_seg, (i, j) in enumerate(order):
-        seg = _rl_pair_parts(poles[i], poles[j], s, None, rr)
+        seg = _rl_pair_parts(poles[i], poles[j], s, None, rr, crowding(i, j))
         first_joint = first_joint or seg["joint"]
         kinds.append(seg["kind"])
         gi, gj = poles.index(seg["pa"]), poles.index(seg["pb"])
         start, body, end = [[(S, u, gi if pi == 0 else (gj if pi == 1 else -1)) for S, u, pi in part]
                             for part in seg["parts"]]
+        if raw and body and raw[-1][2] in (gi, gj):
+            # on to the next member down / up the shared log's surface, as a rigger runs it,
+            # not as one straight span through the air (which bowed out round the other logs)
+            hub_i = raw[-1][2]
+            hub = poles[hub_i]
+            nxt = body[0][0]
+            t = hub.closest_t(nxt)
+            dd = _rl_norm(_rl_perp(hub.a, _rl_sub(nxt, hub.center(t))), None)
+            if dd is not None:
+                raw.append((_rl_add(hub.center(t), _rl_mul(dd, hub.radius(t))), dd, hub_i))
         raw += (start if n_seg == 0 else []) + body + (end if n_seg == len(order) - 1 else [])
     tie = _RopeTie(list(poles), rr, step)
     pts, ups, scale = _rl_finish(tie, raw, s, others, obstacles)

@@ -175,8 +175,13 @@ for stilt shacks, fences and frames.
    rafters resting there) one continuous rope binds them all, joint after
    joint, with one starting and one finishing hitch. Members are tied to
    the joint's main log (a post with two beams and a brace: each to the
-   post), and to the log they rest on before tip-to-tip ties. A knee brace
-   whose end butts against a post gets its own saddle there. For separate
+   post), and to the log they rest on before tip-to-tip ties. Beams that
+   cross a post close together (a frame corner) each keep to their own
+   stretch of post: the lower beam's turns go round the post below it, the
+   upper beam's above it, and each passes over its beam on the side the
+   other doesn't cross, so nothing gets stacked or squeezed. A slanted brace
+   keeps its own lashing. A knee brace whose end butts against a post gets
+   its own saddle there. For separate
    lashings, select two logs at a time. For logs side by side, also select a
    vertex or edge to say where along them the lashing goes. Select an
    existing lashing to edit it.

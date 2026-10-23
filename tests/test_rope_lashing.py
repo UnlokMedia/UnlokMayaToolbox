@@ -327,8 +327,13 @@ def run():
     check("Gravity sags rope that isn't on a log", low_free(sag) is not None and low_free(tight) is not None and
           low_free(sag) < low_free(tight) - 0.5 * tight["radius"],
           "lowest free point %.4f vs %.4f" % (low_free(sag) or 0, low_free(tight) or 0))
-    check("Settle 0 skips the simulation (faster)", len(flat["points"]) > 100 and t_off < t_on,
-          "%.2fs off vs %.2fs on" % (t_off, t_on))
+    calls = []
+    real_settle = tb["_rl_settle"]
+    tb["_rl_settle"] = lambda *a, **k: calls.append(a[5]) or real_settle(*a, **k)
+    tb["rope_path"]([P(e), P(f)], dict(sheer_s, settle=0))
+    tb["_rl_settle"] = real_settle
+    check("Settle 0 skips the simulation", len(flat["points"]) > 100 and calls == [0],
+          "settle steps run: %s (%.2fs off vs %.2fs on)" % (calls, t_off, t_on))
 
     # --- logs that end at another: a saddle lashing; several logs at one joint: each tied in once
     cmds.file(new=True, force=True)
@@ -404,10 +409,10 @@ def run():
     corner = [P(post), P(beam_x), P(beam_z)]
     path = tb["rope_path"](corner, {"seed": 2})
     self_c, pole_c = clearance(path, corner)
-    # the beams touch each other right beside the post, so turns under the top beam get squeezed
-    # between them (real rope would squash there too): it must stay compact, not fully clear
-    check("frame corner: one rope, compact where the beams squeeze it", path["kind"] == "Combined" and
-          self_c > 0.55 and pole_c > -0.6, "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
+    # the beams touch each other beside the post: each beam's lashing keeps to the free stretch of
+    # post and the free side of its beam, so the rope never has to squeeze into that corner
+    check("frame corner: one rope that clears itself and the logs", path["kind"] == "Combined" and
+          self_c > 0.75 and pole_c > 0.2, "%s, self %.2f dia, logs %.2f radii" % (path["kind"], self_c, pole_c))
     cmds.file(new=True, force=True)
     post = log_between("post", (0, 0, 0), (0, 3, 0), 0.12)
     beam = log_between("beam", (-1.5, 2.6, 0.22), (1.5, 2.6, 0.22), 0.1)
