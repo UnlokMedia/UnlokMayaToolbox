@@ -443,6 +443,33 @@
     - `delete_section` holds sets by uuid: `sync_names` renames them
       mid-move.
     - `selection_items()` expands a selected group to every mesh under it.
+  - **Following Maya groups** (`group_links`, `link_groups`,
+    `unlink_groups`, `follow_links`, `pin_overrides`):
+    - **Links:** sections and material sets have `unlokUdimLinks`, multi
+      message connections from Maya groups; a section's `UDIM_GROUP`
+      counts too. Message connections survive renames and reparenting.
+      The closest linked parent decides (`_link_for`); a material link on
+      the same group beats a section link.
+    - **Material links are authoritative:** the whole mesh goes in.
+    - **Section links** only sort unassigned meshes, plus meshes under paths
+      that were just reparented or created (`changed`). Meshes placed by
+      hand before links existed are never yanked.
+    - **Pins:** `unlokUdimPins` on a material set holds meshes put there
+      by hand against a link. `assign`, the panel's New Group / New Section
+      / Move to Section call `pin_overrides`. `link_groups` unpins what's
+      under the groups (explicit wins).
+    - **Leaving a group:** a link-moved mesh gets `unlokUdimFollowed` JSON
+      (from sets by uuid, to, via group). When it's no longer under `via`
+      (moved out, or Ctrl+Z of the reparent) and still where the link put
+      it, `_restore_follow` puts it back. This runs before the section
+      rule, which would otherwise grab it first.
+    - **Live:** `MDagMessage.addParentAddedCallback` notes the child path
+      (`_reparented`, `_links_dirty`) and starts the refresh timer.
+      `refresh` then runs `_follow_groups` in **NoUndo**. An undoable sync
+      step would be redone the moment Ctrl+Z undid it. Membership is
+      derived from the hierarchy, and Ctrl+Z of the reparent is handled by
+      the restore above.
+    - Scan runs `follow_links` first.
   - **Saved session** (`save_session`, `load_session`):
     - The panel's progress is JSON in `unlokUdimSession` on the root set:
       pre-process report, Auto UV / Analyse result, layout_applied,

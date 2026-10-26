@@ -322,6 +322,32 @@ def main():
     check("Section from Group rebuilds it from the selected group",
           section_names() == ["eastWing", "house", "westWing"] and section_item("eastWing").childCount() >= 3,
           "%s | %s" % (section_names(), udim.status.text()))
+    # --- a material group follows a Maya group: meshes added to it later join live
+    asset = udim._asset()
+    west = cmds.ls("|house_GRP|westWing_GRP", long=True)[0]
+    porch = cmds.ls(cmds.group(empty=True, name="porch_GRP", parent=west), long=True)[0]
+    sec = section_item("westWing")
+    mat_item = sec.child(0)
+    target = mat_item.data(0, ns["QtCore"].Qt.UserRole)
+    udim.tree.clearSelection()
+    mat_item.setSelected(True)
+    cmds.select(porch, replace=True)
+    udim.follow_selected_groups()
+    pump()
+    cube = cmds.polyCube(name="ropeTan_C_tie0001_GEP")[0]
+    cube = cmds.ls(cmds.parent(cube, porch)[0], long=True)[0]  # like dragging it in the Outliner
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        pump(1)
+    members = asset.assignments().get(cube, [])
+    check("a mesh dropped into a followed group joins its material group by itself",
+          [s for s, _ in members] == [target], "%s | %s" % (members, udim.status.text()[:150]))
+    check("the list marks the followed group", mat_item is not None and "Follows" in (
+        [udim.tree.topLevelItem(i) for i in range(udim.tree.topLevelItemCount())
+         if udim.tree.topLevelItem(i).text(0) == "westWing"][0].child(0).toolTip(0)))
+    cmds.delete(porch)  # leave the scene as the later checks expect it
+    pump()
+    udim.refresh()
     listed = {udim.naming_list.topLevelItem(i).text(0): udim.naming_list.topLevelItem(i).text(1)
               for i in range(udim.naming_list.topLevelItemCount())}
     check("naming hand-off lists the bad name (and soft issues like glassClear)",

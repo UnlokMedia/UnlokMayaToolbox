@@ -418,6 +418,31 @@ density. The actual layout is still being built; see
    - **Start Fresh** forgets the saved reports and results. It leaves
      groups, marks, locks and UVs alone.
 2. **Scan:** sorts every mesh into sections and material groups.
+   - **Follow Maya groups** (step 3): a section or material group can
+     follow groups in your hierarchy, so you don't have to re-assign new
+     geometry.
+     - **Setting it up:** select e.g. `shackA_GRP` in the Outliner, highlight
+       a material group in the list and press **Follow Selected Groups**.
+       Pressing **Move to Group** or **New Material Group** with a group
+       selected does the same.
+     - **What it does:** every mesh in the group moves into that set, and
+       so does anything you add to the group later. It happens straight
+       away: no Scan, no button. A linked set has a link icon in the list,
+       and its tooltip names the groups.
+     - **The closest followed group wins**, so a sub-group can follow a
+       different set.
+     - **Followed sections** (Section from Group, or the top-level groups
+       of the first Scan) sort new meshes in by name or shader. A mesh you
+       move into their group goes along, keeping its material.
+     - **Moving a mesh out** of a followed group (or Ctrl+Z of the move)
+       puts it back in the set it came from.
+     - **A mesh you assign elsewhere by hand stays there**: it's pinned.
+       Following another group explicitly takes it back.
+     - **Renaming or moving** the group keeps the link. **Stop Following**
+       ends it; the meshes stay where they are.
+     - **Speed:** the check only runs after something was reparented or
+       created, and takes about 7 ms when nothing needs to move (400
+       meshes).
    - **Section from Group** (step 3): select one or more groups in the
      Outliner and press it. Each becomes a section named after the group
      (`westWing_GRP` -> `westWing`; with one group you can change the name)
@@ -803,6 +828,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   touching the previous undo step.
 - `tests/test_uv_states.py`: UV states, status colours (and the real
   shading coming back), tracking sets, Auto UV Selected.
+- `tests/test_follow_groups.py`: sets that follow Maya groups (new
+  meshes, moved meshes, Ctrl+Z, pins, sections, renames, speed).
 - `tests/test_sections.py`: section from group, move to section, delete
   section, split faces, later Scans, undo.
 - `tests/test_session.py`: Smart UDIM's saved progress survives a scene

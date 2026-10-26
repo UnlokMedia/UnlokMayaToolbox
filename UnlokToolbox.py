@@ -3442,6 +3442,9 @@ UDIM_STACK = "unlokUdimStack"
 UDIM_ORDER = "unlokUdimOrder"
 UDIM_SOURCE = "unlokUdimSource"
 UDIM_GROUP = "unlokUdimGroup"
+UDIM_LINKS = "unlokUdimLinks"  # multi message on a section / material set: Maya groups it follows
+UDIM_PINS = "unlokUdimPins"  # multi message on a material set: meshes you put there by hand (links leave them)
+FOLLOW_ATTR = "unlokUdimFollowed"  # JSON on a mesh a link moved: where it came from (to go back if it leaves)
 UDIM_ORIENT = "unlokUdimOrient"
 ORIENT_TOKENS = ("up", "keep", "axis")  # per-group orientation override in set names
 
@@ -3584,6 +3587,35 @@ def _linked_group(node):
         return None
     conns = cmds.listConnections(node + "." + UDIM_GROUP, source=True, destination=False) or []
     return long_name(conns[0]) if conns else None
+
+
+def _msg_inputs(node, attr):
+    """Long names of the nodes connected into a (multi) message attribute."""
+    if not cmds.attributeQuery(attr, node=node, exists=True):
+        return []
+    return [long_name(c) for c in (cmds.listConnections(node + "." + attr, source=True, destination=False) or [])]
+
+
+def _msg_connect(src, node, attr):
+    if not cmds.attributeQuery(attr, node=node, exists=True):
+        cmds.addAttr(node, longName=attr, attributeType="message", multi=True, indexMatters=False)
+    if long_name(src) not in _msg_inputs(node, attr):
+        cmds.connectAttr(src + ".message", node + "." + attr, nextAvailable=True)
+
+
+def _msg_disconnect(node, attr, src=None):
+    """Disconnect src (or everything) from a message attribute."""
+    if not cmds.attributeQuery(attr, node=node, exists=True):
+        return
+    pairs = cmds.listConnections(node + "." + attr, source=True, destination=False, plugs=True,
+                                 connections=True) or []
+    for mine, theirs in zip(pairs[0::2], pairs[1::2]):
+        if src is None or long_name(theirs.split(".")[0]) == long_name(src):
+            cmds.disconnectAttr(theirs, mine)
+
+
+def _under(path, group):
+    return path == group or path.startswith(group + "|")
 
 
 def undo_if_last(chunk_name):
@@ -4207,10 +4239,220 @@ class SmartUdimAsset(object):
                         cmds.sets(["%s.%s" % (xform, r) for r in face_ranges(gone)], remove=mat)
 
     def assign(self, items, material_set):
-        """Move meshes / faces into material_set (exclusively)."""
+        """Move meshes / faces into material_set (exclusively). A mesh that
+        a linked group would otherwise claim is pinned there."""
         with UndoChunk("Smart UDIM assign"):
             self._remove_items(items)
             self._add_items(items, material_set)
+            self.pin_overrides(list(items))
+
+    # ------------------------------------------------------------ group links
+    # A section or material set can follow Maya groups (UDIM_LINKS; a
+    # section's UDIM_GROUP counts too). Every mesh under a followed group
+    # belongs to the set of its closest followed parent, including meshes
+    # added to the group later: follow_links() keeps that true. Message
+    # connections survive renames and reparenting of the groups.
+    def group_links(self):
+        """({group: material set}, {group: section}, {mesh: material set it's
+        pinned to})."""
+        mat_links, sec_links, pins = {}, {}, {}
+        for sec in self.sections():
+            for g in [_linked_group(sec)] + _msg_inputs(sec, UDIM_LINKS):
+                if g:
+                    sec_links[g] = sec
+            for mat in self.materials(sec):
+                for g in _msg_inputs(mat, UDIM_LINKS):
+                    mat_links[g] = mat
+                for m in _msg_inputs(mat, UDIM_PINS):
+                    pins[m] = mat
+        return mat_links, sec_links, pins
+
+    @staticmethod
+    def _link_for(xform, mat_links, sec_links):
+        """(set, 'material' / 'section', group) from the closest followed
+        parent group, or (None, None, None)."""
+        parts = xform.split("|")
+        for i in range(len(parts) - 1, 1, -1):
+            g = "|".join(parts[:i])
+            if g in mat_links:
+                return mat_links[g], "material", g
+            if g in sec_links:
+                return sec_links[g], "section", g
+        return None, None, None
+
+    def link_groups(self, node, groups, material_source="Name, then shader"):
+        """node (a section or material set) follows these Maya groups from now
+        on; a group follows one set of each kind. Everything under them moves
+        in now (one Ctrl+Z). Returns [(mesh, set)] moved."""
+        role = set_role(node)
+        groups = [long_name(g) for g in groups if cmds.objExists(g)]
+        with UndoChunk("Smart UDIM follow group"):
+            for sec in self.sections():
+                for other in [sec] + (self.materials(sec) if role == "material" else []):
+                    if other != node and set_role(other) == role:
+                        for g in groups:
+                            _msg_disconnect(other, UDIM_LINKS, g)
+            for g in groups:
+                _msg_connect(g, node, UDIM_LINKS)
+            _, _, pins = self.group_links()
+            self._unpin([m for m in pins if any(_under(m, g) for g in groups)])  # an explicit link wins
+            moved = self.follow_links(material_source, changed=set(groups))
+        return moved
+
+    def unlink_groups(self, node):
+        """Stop node following any group (its meshes stay where they are)."""
+        with UndoChunk("Smart UDIM stop following"):
+            _msg_disconnect(node, UDIM_LINKS)
+            if cmds.attributeQuery(UDIM_GROUP, node=node, exists=True):
+                for src in cmds.listConnections(node + "." + UDIM_GROUP, source=True, destination=False,
+                                                 plugs=True) or []:
+                    cmds.disconnectAttr(src, node + "." + UDIM_GROUP)
+
+    def _unpin(self, meshes):
+        meshes = set(meshes)
+        if not meshes:
+            return
+        for mat in self.all_material_sets():
+            for m in _msg_inputs(mat, UDIM_PINS):
+                if m in meshes:
+                    _msg_disconnect(mat, UDIM_PINS, m)
+
+    def pin_overrides(self, meshes):
+        """After a manual move: a mesh under a followed group that now sits
+        somewhere else than that group's set is pinned where it is, so
+        following never moves it back."""
+        mat_links, sec_links, _ = self.group_links()
+        if not mat_links and not sec_links:
+            return
+        assigned = self.assignments()
+        sec_of = dict((mat, sec) for sec in self.sections() for mat in self.materials(sec))
+        self._unpin(meshes)
+        for m in meshes:
+            target, kind, _ = self._link_for(m, mat_links, sec_links)
+            cur = assigned.get(m, [])
+            if not target or not cur:
+                continue
+            if kind == "material" and not (len(cur) == 1 and cur[0][0] == target and cur[0][1] is None):
+                _msg_connect(m, cur[0][0], UDIM_PINS)
+            elif kind == "section" and any(sec_of.get(s) != target for s, _ in cur):
+                _msg_connect(m, cur[0][0], UDIM_PINS)
+
+    def follow_links(self, material_source="Name, then shader", changed=None):
+        """Put meshes where their followed groups say (see group_links).
+        - Under a followed material group: the whole mesh goes into it.
+        - Under a followed section: new (unsorted) meshes are sorted into it
+          by name / shader, and so are meshes under changed (paths that were
+          just reparented or created), keeping their material.
+        - A mesh a link moved that has left that group goes back where it
+          was before (e.g. after Ctrl+Z of the reparent).
+        Pinned meshes never move. Cheap when nothing needs moving. Runs in
+        the caller's undo state. Returns [(mesh, set or section)]."""
+        mat_links, sec_links, pins = self.group_links()
+        tagged = set()
+        for node in cmds.ls("*." + FOLLOW_ATTR, objectsOnly=True, long=True) or []:
+            tagged.add(long_name(node))
+        if not mat_links and not sec_links and not tagged:
+            return []
+        changed = [long_name(c) for c in (changed or ()) if cmds.objExists(c)]
+        meshes, instanced = self.meshes()
+        skip = set(instanced) | set(pins)
+        assigned = self.assignments()
+        sec_of = dict((mat, sec) for sec in self.sections() for mat in self.materials(sec))
+        to_mat, to_sec, new_sort, back = {}, {}, {}, []
+        for x in meshes:
+            if x in skip:
+                continue
+            target, kind, via = self._link_for(x, mat_links, sec_links)
+            cur = assigned.get(x, [])
+            if kind == "material":
+                if not (len(cur) == 1 and cur[0][0] == target and cur[0][1] is None):
+                    to_mat.setdefault(target, []).append((x, cur, via))
+                continue
+            if x in tagged:  # a link moved it before and it has left that group: back home first
+                back.append(x)
+                continue
+            if kind == "section":
+                if not cur:
+                    new_sort.setdefault(target, []).append(x)
+                    continue
+                if any(sec_of.get(s) != target for s, _ in cur) and any(_under(x, c) or _under(c, x)
+                                                                        for c in changed):
+                    to_sec.setdefault(target, []).append((x, cur, via))
+        moved = []
+        for mat, rows in to_mat.items():
+            for x, cur, via in rows:
+                self._record_follow(x, cur, mat, via)
+            items = dict((x, None) for x, _, _ in rows)
+            self._remove_items(items)
+            self._add_items(items, mat)
+            moved += [(x, mat) for x in items]
+        for sec, rows in to_sec.items():
+            items = {}
+            for x, cur, via in rows:
+                self._record_follow(x, cur, sec, via)
+                faces = set()
+                for _, fs in cur:
+                    if fs is None:
+                        faces = None
+                        break
+                    faces |= fs
+                items[x] = faces
+            self.move_to_section(items, sec, material_source, prune=False)
+            moved += [(x, sec) for x in items]
+        for sec, xs in new_sort.items():
+            batches = {}
+            for x in xs:
+                for key, faces, source in self._material_split(x, material_source):
+                    batches.setdefault(self.material_set(sec, key, source=source), {})[x] = faces
+            for mat, items in batches.items():
+                self._add_items(items, mat)
+            moved += [(x, sec) for x in xs]
+        for x in back:
+            got = self._restore_follow(x, assigned.get(x, []), sec_of)
+            if got:
+                moved.append((x, got))
+        if moved:
+            self.sync_names()
+        return moved
+
+    @staticmethod
+    def _record_follow(xform, cur, target, via):
+        """Remember where a link moved a mesh from (only its first move)."""
+        if not cur or cmds.attributeQuery(FOLLOW_ATTR, node=xform, exists=True):
+            if cmds.attributeQuery(FOLLOW_ATTR, node=xform, exists=True):
+                data = json.loads(cmds.getAttr(xform + "." + FOLLOW_ATTR) or "{}")
+                data["to"], data["via"] = cmds.ls(target, uuid=True)[0], cmds.ls(via, uuid=True)[0]
+                cmds.setAttr(xform + "." + FOLLOW_ATTR, json.dumps(data), type="string")
+            return
+        data = {"to": cmds.ls(target, uuid=True)[0], "via": cmds.ls(via, uuid=True)[0],
+                "from": [[cmds.ls(s, uuid=True)[0], None if fs is None else sorted(fs)] for s, fs in cur]}
+        cmds.addAttr(xform, longName=FOLLOW_ATTR, dataType="string")
+        cmds.setAttr(xform + "." + FOLLOW_ATTR, json.dumps(data), type="string")
+
+    def _restore_follow(self, xform, cur, sec_of):
+        """A mesh a link moved that is no longer under that group goes back
+        to where it was, if it's still where the link put it. Returns the
+        set it went back to, or None."""
+        try:
+            data = json.loads(cmds.getAttr(xform + "." + FOLLOW_ATTR) or "{}")
+        except (ValueError, RuntimeError):
+            data = {}
+        via = cmds.ls(data.get("via", ""), long=True) if data.get("via") else []
+        if via and _under(xform, long_name(via[0])):
+            return None  # still in the group (a closer link decided otherwise)
+        to = cmds.ls(data.get("to", ""), long=True) if data.get("to") else []
+        out = None
+        still = to and cur and all(s == to[0] or sec_of.get(s) == to[0] for s, _ in cur)
+        if still:
+            homes = [(cmds.ls(u, long=True), fs) for u, fs in data.get("from", [])]
+            homes = [(h[0], fs) for h, fs in homes if h and set_role(h[0]) == "material"]
+            if homes:
+                self._remove_items({xform: None})
+                for home, fs in homes:
+                    self._add_items({xform: None if fs is None else set(fs)}, home)
+                out = homes[0][0]
+        cmds.deleteAttr(xform + "." + FOLLOW_ATTR)
+        return out
 
     @staticmethod
     def _add_items(items, material_set):
@@ -4235,6 +4477,7 @@ class SmartUdimAsset(object):
                 members, odd = expand_members(mat)
                 mats.append({
                     "set": mat,
+                    "follows": _msg_inputs(mat, UDIM_LINKS),
                     "key": _get(mat, UDIM_KEY) or parse_group_name(mat)["key"],
                     "td": _get(mat, UDIM_TD, parse_group_name(mat)["td"] or 100.0),
                     "cov": _get(mat, UDIM_COV, -1.0),
@@ -4251,6 +4494,7 @@ class SmartUdimAsset(object):
                 "key": _get(sec, UDIM_KEY) or parse_group_name(sec)["key"],
                 "td": _get(sec, UDIM_TD, parse_group_name(sec)["td"] or 100.0),
                 "group": _linked_group(sec),
+                "follows": [g for g in [_linked_group(sec)] + _msg_inputs(sec, UDIM_LINKS) if g],
                 "materials": mats,
             })
         naming = []
@@ -4310,6 +4554,7 @@ class SmartUdimAsset(object):
             meshes, instanced = self.meshes()
             if not self.sections():
                 self._create_default_sections(group, meshes, sections_from_groups)
+            added += len(self.follow_links(material_source))  # followed groups claim their meshes first
             assigned = self.assignments()
             sections = self.sections()
             section_groups = [(s, _linked_group(s)) for s in sections]
@@ -8896,6 +9141,15 @@ def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
 # Smart UDIM - panel
 # =============================================================================
 
+def selected_groups():
+    """Selected transforms that are groups (no mesh of their own), long names."""
+    out = []
+    for node in cmds.ls(selection=True, long=True, transforms=True) or []:
+        if not cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
+            out.append(long_name(node))
+    return out
+
+
 def selection_items():
     """Current scene selection as {mesh transform: None (whole) or face set}.
     A selected group counts as every mesh under it."""
@@ -9451,6 +9705,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self.refresh))
+        self._links_dirty = False  # something was reparented / created: check the followed groups
+        self._reparented = set()
         self._inspect_timer = QtCore.QTimer(self)  # selection changed: update the inspector
         self._inspect_timer.setSingleShot(True)
         self._inspect_timer.setInterval(150)
@@ -9631,10 +9887,19 @@ class SmartUdimPanel(QtWidgets.QWidget):
             "to_group": ("Move to Group", "Move the selected meshes / faces (or everything in selected groups) "
                                           "into the highlighted material group.", self.assign_selection),
             "new_group": ("New Material Group", "Make a material group in the highlighted section from the "
-                                                "selected meshes / faces (or groups).", self.new_group),
+                                                "selected meshes / faces (or groups). Selected Maya groups are "
+                                                "followed: meshes added to them later join automatically.",
+                          self.new_group),
+            "follow": ("Follow Selected Groups", "The highlighted section or material group follows the Maya "
+                                                 "groups selected in the Outliner: every mesh inside them, now "
+                                                 "and added later, belongs to it automatically.",
+                       self.follow_selected_groups),
+            "unfollow": ("Stop Following", "The highlighted section or material group stops following its Maya "
+                                           "groups (its meshes stay where they are).", self.stop_following),
         }
         for title, keys in (("Sections", ("from_group", "to_section", "del_section", "up", "down")),
-                            ("Material groups", ("select", "to_group", "new_group"))):
+                            ("Material groups", ("select", "to_group", "new_group")),
+                            ("Follow Maya groups (new meshes join automatically)", ("follow", "unfollow"))):
             label = QtWidgets.QLabel(title)
             label.setProperty("unlokHint", True)
             card.add(label)
@@ -10273,6 +10538,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             if not self.status.text():
                 self.set_status("Select the asset's top group and press 'Use Selected Group'.")
             return
+        if self._links_dirty and not toolbox_busy():
+            self._follow_groups(asset)
         self.snapshot = asset.read()
         self._refresh_setups()
         self.root_label.setText("<b>%s</b> &nbsp;<span style='color:#8c8c8c'>(%s)</span>" % (
@@ -10282,6 +10549,24 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._fill_status_hint()
         self._update_states()
         self._watch_sets()
+
+    def _follow_groups(self, asset):
+        """Keep followed groups' meshes in their sets. Outside the undo queue:
+        it's bookkeeping derived from the hierarchy, and an undoable step
+        would just be redone the moment Ctrl+Z undid it. Ctrl+Z of the
+        reparent itself puts the mesh back (follow_links restores it)."""
+        self._links_dirty = False
+        changed, self._reparented = self._reparented, set()
+        try:
+            with NoUndo():
+                moved = asset.follow_links(self.source_combo.value(), changed=changed)
+        except Exception:
+            traceback.print_exc()
+            return
+        if moved:
+            names = sorted(set(parse_group_name(s)["key"] or short_name(s) for _, s in moved))
+            self.set_status("Followed groups: %d mesh(es) now in %s." % (
+                len(moved), ", ".join(names[:4]) + ("..." if len(names) > 4 else "")))
 
     # ============================================================ trees
     def _fill_tree(self):
@@ -10304,7 +10589,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 sitem = QtWidgets.QTreeWidgetItem([sec["key"], _num_token(sec["td"]), "", str(total), ""])
                 sitem.setData(0, QtCore.Qt.UserRole, sec["set"])
                 sitem.setToolTip(0, "%s\nSection: becomes its own band of UDIM rows%s" % (
-                    sec["set"], ("\nGroup: " + short_name(sec["group"])) if sec["group"] else ""))
+                    sec["set"], ("\nFollows: %s (new meshes in it are sorted in automatically)" % ", ".join(
+                        short_name(g) for g in sec["follows"])) if sec["follows"] else ""))
+                if sec["follows"]:
+                    sitem.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileLinkIcon))
                 sitem.setFont(0, bold)
                 sitem.setFlags(sitem.flags() | QtCore.Qt.ItemIsEditable)
                 self.tree.addTopLevelItem(sitem)
@@ -10313,7 +10601,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     cov = "%d%%" % round(mat["cov"]) if mat["cov"] >= 0 else "-"
                     mitem = QtWidgets.QTreeWidgetItem([mat["key"], _num_token(mat["td"]), cov, items, ""])
                     mitem.setData(0, QtCore.Qt.UserRole, mat["set"])
-                    mitem.setToolTip(0, "%s\nfrom %s" % (mat["set"], mat["source"]))
+                    mitem.setToolTip(0, "%s\nfrom %s%s" % (mat["set"], mat["source"], (
+                        "\nFollows: %s (every mesh in it, now and later, belongs here)" % ", ".join(
+                            short_name(g) for g in mat["follows"])) if mat["follows"] else ""))
+                    if mat["follows"]:
+                        mitem.setIcon(0, self.style().standardIcon(QtWidgets.QStyle.SP_FileLinkIcon))
                     mitem.setFlags(mitem.flags() | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
                     mitem.setCheckState(self.COL_STACK, QtCore.Qt.Checked if mat["stack"] else QtCore.Qt.Unchecked)
                     mitem.setCheckState(self.COL_LOCK, QtCore.Qt.Checked if mat["locked"] else QtCore.Qt.Unchecked)
@@ -10506,13 +10798,20 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if asset is None or len(targets) != 1:
             self.set_status("Highlight one material group in the list first.", level="warn")
             return
+        groups = self._groups_in_root()
         items = self._items_in_root(selection_items())
-        if not items:
+        if not items and not groups:
             self.set_status("Select meshes or faces (under the root) to assign.", level="warn")
             return
-        asset.assign(items, targets[0])
+        loose = dict((m, f) for m, f in items.items() if not any(_under(m, g) for g in groups))
+        with UndoChunk("Smart UDIM assign"):
+            if loose:
+                asset.assign(loose, targets[0])
+            if groups:
+                asset.link_groups(targets[0], groups, self.source_combo.value())
         self.refresh()
-        self.set_status("Moved %d mesh(es) into %s." % (len(items), targets[0]))
+        self.set_status("Moved %d mesh(es) into %s%s." % (len(items), parse_group_name(targets[0])["key"] or
+                                                          targets[0], self._follow_note(groups)))
 
     @ui_safe
     def new_group(self):
@@ -10537,13 +10836,65 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if not ok or not key.strip():
             return
         key = sanitize_key(key)
+        groups = self._groups_in_root()
         with UndoChunk("Smart UDIM new group"):
             mat = asset.material_set(sections[0], key, source="manual")
-            if items:
-                asset._remove_items(items)
-                asset._add_items(items, mat)
+            loose = dict((m, f) for m, f in items.items() if not any(_under(m, g) for g in groups))
+            if loose:
+                asset._remove_items(loose)
+                asset._add_items(loose, mat)
+                asset.pin_overrides(list(loose))
+            if groups:
+                asset.link_groups(mat, groups, self.source_combo.value())
         self.refresh()
-        self.set_status("Group %s ready%s." % (mat, (" with %d mesh(es)" % len(items)) if items else ""))
+        self.set_status("Group %s ready%s%s." % (mat, (" with %d mesh(es)" % len(items)) if items else "",
+                                                 self._follow_note(groups)))
+
+    def _groups_in_root(self):
+        asset = self._asset()
+        root = asset.root_group() if asset else None
+        if not root:
+            return []
+        root = long_name(root)
+        return [g for g in selected_groups() if _under(g, root) and g != root]
+
+    @staticmethod
+    def _follow_note(groups):
+        if not groups:
+            return ""
+        return ("; it now follows %s: meshes added to %s later join automatically" % (
+            ", ".join(short_name(g) for g in groups[:3]) + ("..." if len(groups) > 3 else ""),
+            "it" if len(groups) == 1 else "them"))
+
+    @ui_safe
+    def follow_selected_groups(self):
+        asset = self._asset()
+        targets = self._selected_role("material") or self._selected_role("section")
+        groups = self._groups_in_root()
+        if asset is None or len(targets) != 1:
+            self.set_status("Highlight one section or material group in the list first.", level="warn")
+            return
+        if not groups:
+            self.set_status("Select the Maya group(s) to follow in the Outliner (under the asset's root).",
+                            level="warn")
+            return
+        moved = asset.link_groups(targets[0], groups, self.source_combo.value())
+        self.refresh()
+        self.set_status("%s follows %s: %d mesh(es) moved in now, and meshes added later join automatically. "
+                        "One Ctrl+Z undoes it." % (parse_group_name(targets[0])["key"] or targets[0],
+                                                    ", ".join(short_name(g) for g in groups), len(moved)))
+
+    @ui_safe
+    def stop_following(self):
+        asset = self._asset()
+        targets = self._selected_role("material") + self._selected_role("section")
+        if asset is None or not targets:
+            self.set_status("Highlight the sections or material groups to stop following.", level="warn")
+            return
+        for t in targets:
+            asset.unlink_groups(t)
+        self.refresh()
+        self.set_status("%d set(s) no longer follow any group; their meshes stay where they are." % len(targets))
 
     @ui_safe
     def new_section(self):
@@ -10579,8 +10930,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             if item and not item.isSelected():
                 self.tree.clearSelection()
                 item.setSelected(True)
-            keys = {"section": ("to_section", "del_section", "up", "down", "select"),
-                    "material": ("to_group", "select")}.get(role, ())
+            keys = {"section": ("to_section", "del_section", "up", "down", "select", "follow", "unfollow"),
+                    "material": ("to_group", "select", "follow", "unfollow")}.get(role, ())
             keys = keys + ("from_group",) if "from_group" not in keys else keys
             menu = QtWidgets.QMenu(self)
             for key in keys:
@@ -10638,7 +10989,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if not items:
             self.set_status("Select meshes, faces or groups (under the root) to move.", level="warn")
             return
-        asset.move_to_section(items, secs[0], self.source_combo.value())
+        with UndoChunk("Smart UDIM move to section"):
+            asset.move_to_section(items, secs[0], self.source_combo.value())
+            asset.pin_overrides(list(items))
         self.refresh()
         self.set_status("Moved %d mesh(es) into %s. One Ctrl+Z undoes it." % (
             len(items), parse_group_name(secs[0])["key"] or secs[0]))
@@ -11697,7 +12050,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         # cheap change flags (never touch the scene in a callback): meshes or
         # sets added / removed anywhere, plus per-set watches (_watch_sets)
         mark = self._mark_dirty
-        for cid in (om.MDGMessage.addNodeAddedCallback(mark, "mesh"),
+        for cid in (om.MDagMessage.addParentAddedCallback(self._parent_added),
+                    om.MDGMessage.addNodeAddedCallback(mark, "mesh"),
                     om.MDGMessage.addNodeRemovedCallback(mark, "mesh"),
                     om.MDGMessage.addNodeAddedCallback(mark, "objectSet"),
                     om.MDGMessage.addNodeRemovedCallback(mark, "objectSet")):
@@ -11713,6 +12067,16 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     # bookkeeping attributes the panel writes itself: changing them is no reason to refresh
     _QUIET_ATTRS = (SESSION_ATTR, UV_COLOURS_ATTR, LAYOUT_SETTINGS_ATTR)
+
+    def _parent_added(self, child, parent, client=None):
+        """A DAG node got a parent (reparented, grouped, created, undone):
+        note its path for follow_links. Maya callback: no scene edits here."""
+        try:
+            self._reparented.add(child.fullPathName())
+            self._links_dirty = True
+        except Exception:
+            pass
+        self._mark_dirty()
 
     def _mark_dirty(self, *args):
         """Something in the asset changed (an edit, an undo, a redo): refresh
