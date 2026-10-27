@@ -8,7 +8,7 @@ cache (mayapy).
   than a tile is split into several squares
 - Fit sections to rows still gives each section one row
 - stacked groups and pins work in squares mode
-- Quick Plan reads no shells, is fast, and gives squares for every group
+- Quick Plan reads no mesh, a tile per group, a row per section in order
 - planning again re-uses the shells read before; a changed mesh is re-read
 """
 
@@ -152,22 +152,43 @@ def run():
     check("stacked groups place every copy in squares mode", got == len(g1["shells"]),
           "%d of %d" % (got, len(g1["shells"])))
 
-    # --- Quick Plan
-    t = time.time()
-    q = tb["collect_shells"](asset, estimate=True)
-    qp = tb["make_plan"](q, dict(base, mode=tb["FIT_ROWS"]))
-    secs = time.time() - t
-    check("Quick Plan reads no shells", not any(g["shells"] for g in q["groups"]) and q["estimate"])
-    have = set(b[4] for b in qp["blocks"])
-    want = set(g["set"] for g in q["groups"] if g["estimate"] > 0)
-    check("Quick Plan gives every group a square", want and want <= have, "%d of %d" % (len(have & want),
-                                                                                        len(want)))
-    check("Quick Plan: one row per section, no overlaps, quick",
-          all(len(r) <= 1 for r in tb["section_rows"](q, qp).values()) and not square_problems(tb, q, qp) and
-          secs < 3.0, "%.2fs, %d px/m vs real %d px/m" % (secs, qp["density"], rows["density"]))
-    ratio = qp["density"] / rows["density"]
-    check("Quick Plan's density is in the same ballpark as the real one", 0.5 < ratio < 2.0, "%.2f" % ratio)
-
+    # --- Quick Plan: from the set names only
+    def no_meshes(*a, **k):
+        raise RuntimeError("Quick Plan touched a mesh")
+    saved = dict((n, tb[n]) for n in ("expand_members", "_mesh_fn", "_group_print", "uv_footprints"))
+    tb.update(dict((n, no_meshes) for n in saved))
+    try:
+        t = time.time()
+        q = tb["quick_groups"](asset)
+        qp = tb["plan_layout"](q, dict(base, mode="Fixed density"))
+        secs = time.time() - t
+        ok = True
+    except RuntimeError as e:
+        ok, secs, q, qp = str(e), 0.0, None, None
+    tb.update(saved)
+    check("Quick Plan reads no mesh at all (set names only), instantly", ok is True and secs < 0.5,
+          "%s, %.3fs" % (ok, secs))
+    if q:
+        per = {}
+        for b in qp["blocks"]:
+            per[b[4]] = per.get(b[4], []) + [b]
+        check("Quick Plan: every material group gets exactly one whole tile",
+              set(per) == set(g["set"] for g in q["groups"]) and all(len(v) == 1 and v[0][3] > 0.98
+                                                                       for v in per.values()))
+        sr = tb["section_rows"](q, qp)
+        order = [min(sr[si]) for si in sorted(sr)]
+        check("Quick Plan: a row per section, in section order",
+              all(len(r) == 1 for r in sr.values()) and order == sorted(order) and len(set(order)) == len(order),
+              str(order))
+        secs_before = asset.sections()
+        asset.move_section(secs_before[0], len(secs_before) - 1)
+        q2 = tb["quick_groups"](asset)
+        qp2 = tb["plan_layout"](q2, dict(base, mode="Fixed density"))
+        top = max(tb["section_rows"](q2, qp2).items(), key=lambda kv: max(kv[1]))[0]
+        moved = [g["section"] for g in q2["groups"] if g["section_index"] == top]
+        check("moving a section to the end puts its row on top", moved and moved[0] == secs_before[0],
+              "%s vs %s" % (moved[:1], secs_before[0]))
+        cmds.undo()
 
 try:
     run()

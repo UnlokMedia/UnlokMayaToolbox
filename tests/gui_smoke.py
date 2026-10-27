@@ -617,12 +617,44 @@ def main():
     pump()
     secs = time.time() - t0
     blocks = [it for it in viewer.items if it.get("block")]
-    check("Quick Plan opens the UV Viewer with a square per group, quickly",
-          viewer.isVisible() and blocks and (udim._plan or {}).get("estimate") and secs < 5.0,
+    check("Quick Plan opens the UV Viewer with a tile per material group, instantly",
+          viewer.isVisible() and len(blocks) == len(udim._collected["groups"]) and
+          (udim._plan or {}).get("quick") and secs < 1.0,
           "%d squares, %.2fs | %s" % (len(blocks), secs, udim.layout_summary.text()[:120]))
     viewer.canvas.frame()
     pump()
     viewer.grab().save(os.path.join(OUT, "11g_quick_plan.png"))
+    # click a tile: its group's meshes are selected
+    b = blocks[0]["box"]
+    at = viewer.canvas.to_px((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0).toPoint()
+    viewer.canvas.mousePressEvent(mouse(QtCore.QEvent.MouseButtonPress, at, QtCore.Qt.LeftButton))
+    viewer.canvas.mouseReleaseEvent(mouse(QtCore.QEvent.MouseButtonRelease, at, QtCore.Qt.NoButton))
+    want = set(ns["expand_members"](blocks[0]["group"])[0])
+    got = set(cmds.ls(selection=True, long=True, objectsOnly=True) or [])
+    check("clicking a Quick Plan tile selects its group's meshes", want and want <= got,
+          "%d of %d selected" % (len(want & got), len(want)))
+    # drag the bottom section's name to the top row: the sections reorder
+    rows = sorted(viewer.row_sections)
+    first, last = viewer.row_sections[rows[0]], viewer.row_sections[rows[-1]]
+    band_x = viewer.canvas.origin.x() - viewer.canvas.band_width() / 2.0
+    p0 = QtCore.QPoint(int(band_x), int(viewer.canvas.to_px(0, rows[0] + 0.5).y()))
+    p1 = QtCore.QPoint(int(band_x), int(viewer.canvas.to_px(0, rows[-1] + 0.5).y()))
+    viewer.canvas.mousePressEvent(mouse(QtCore.QEvent.MouseButtonPress, p0, QtCore.Qt.LeftButton))
+    viewer.canvas.mouseMoveEvent(mouse(QtCore.QEvent.MouseMove, p1, QtCore.Qt.LeftButton))
+    viewer.grab().save(os.path.join(OUT, "11g2_quick_plan_reorder.png"))
+    viewer.canvas.mouseReleaseEvent(mouse(QtCore.QEvent.MouseButtonRelease, p1, QtCore.Qt.NoButton))
+    pump()
+    secs_now = udim._asset().sections()
+    check("dragging a section's name to the top row moves that section last (top)",
+          secs_now and secs_now[-1] == first and (udim._plan or {}).get("quick") and
+          viewer.row_sections.get(max(viewer.row_sections)) == first,
+          "order %s" % [ns["short_name"](s) for s in secs_now])
+    cmds.undo()  # the reorder
+    udim.refresh()
+    udim.quick_plan()
+    pump()
+    check("...and one Ctrl+Z puts it back", udim._asset().sections()[0] == first and last in udim._asset().sections())
+    blocks = [it for it in viewer.items if it.get("block")]
     item = blocks[0]
     group = item["group"]
     target_tile = max(viewer.tiles) + 1 if (max(viewer.tiles) - 1001) % 10 < 9 else max(viewer.tiles) + 10
@@ -639,8 +671,8 @@ def main():
     uid = (cmds.ls(group, uuid=True) or [None])[0]
     node = cmds.ls(uid)[0] if uid else group
     st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if v.get("uuid") == uid]
-    check("dragging a Quick Plan square pins its group and stays a Quick Plan",
-          ns["group_pin"](node)[:1] == [target_tile] and (udim._plan or {}).get("estimate") and st and
+    check("dragging a Quick Plan tile pins its group there and stays a Quick Plan",
+          ns["group_pin"](node) == [target_tile] and (udim._plan or {}).get("quick") and st and
           target_tile in st[0]["tiles"], "pin %s, tiles %s" % (ns["group_pin"](node), st and st[0]["tiles"]))
     viewer.grab().save(os.path.join(OUT, "11h_quick_plan_dragged.png"))
     udim.plan_live()
@@ -650,7 +682,7 @@ def main():
     pump()
     st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if v.get("uuid") == uid]
     check("Plan after a Quick Plan packs the real shells, keeping the pin",
-          udim._plan and not udim._plan.get("estimate") and udim._plan["placements"] and st and
+          udim._plan and not udim._plan.get("quick") and udim._plan["placements"] and st and
           set(st[0]["tiles"]) <= set(ns["group_pin"](node)) and target_tile in st[0]["tiles"],
           "tiles %s, pin %s | %s" % (st and st[0]["tiles"], ns["group_pin"](node),
                                                         udim.layout_summary.text()[:120]))

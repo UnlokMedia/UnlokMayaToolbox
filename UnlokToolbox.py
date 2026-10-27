@@ -8424,7 +8424,7 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
 
 
 def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None, ready_only=True,
-                   keep_score=AUTO_UV_KEEP_SCORE, only=None, estimate=False):  # rotate: kept for old callers
+                   keep_score=AUTO_UV_KEEP_SCORE, only=None):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
@@ -8441,11 +8441,6 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     it is: listed as locked (its tiles taken from its last layout, else from
     where its UVs are), and its shells become obstacles, so the chosen
     groups can still fill the gaps in tiles they shared (prefer).
-
-    estimate: Quick Plan. No shells are read and nothing is scored: each
-    group gets "estimate" (its meshes' 3D area, m^2) and "members" (its
-    meshes), whatever state their UVs are in, so a plan can be made (and
-    groups pinned) before Auto UV. plan_layout turns the area into squares.
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     only = set(only) if only is not None else None
@@ -8514,18 +8509,6 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                         info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
                                               "area": area})
                     continue
-                if estimate:
-                    try:
-                        if faces is None:
-                            got = cmds.polyEvaluate(xform, worldArea=True) or 0.0
-                        else:
-                            fa = cmds.polyEvaluate(xform, worldFaceArea=True) or []
-                            got = sum(fa[i] for i in faces if i < len(fa))
-                    except Exception:
-                        got = 0.0
-                    info["estimate"] = info.get("estimate", 0.0) + got * unit_scale
-                    info.setdefault("members", []).append(xform)
-                    continue
                 if not ready(xform):
                     continue
                 shells, clash = _read_shells(xform, faces, uv_set, unit_scale, caches, claimed)
@@ -8537,14 +8520,34 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                     shell_obj.group = mat
                 info["shells"].extend(shells)
             groups.append(info)
-            if estimate and "estimate" not in info:
-                info["estimate"] = 0.0
             fixed.extend(info["fixed"])
     keep_layout = sorted(m for m, st in asset.uv_status().items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
-            "keep_layout": keep_layout, "estimate": bool(estimate),
+            "keep_layout": keep_layout,
             "only": sorted(only) if only is not None else None}
+
+
+def quick_groups(asset):
+    """Quick Plan's input, from the sets alone: every section in order and
+    its material groups (name, TD %, pin, lock and stored tiles). No mesh is
+    touched (no members, areas or UVs), so it's instant on any scene.
+    plan_layout gives each group one whole tile, a row per section: an
+    overview to reorder sections, pin groups and spot a material in the
+    wrong section before anything is read."""
+    groups, locked = [], []
+    for si, sec in enumerate(asset.sections()):
+        sec_td = _get(sec, UDIM_TD, 100.0)
+        for mat in asset.materials(sec):
+            info = {"set": mat, "uuid": (cmds.ls(mat, uuid=True) or [""])[0],
+                    "key": _get(mat, UDIM_KEY) or parse_group_name(mat)["key"], "section": sec,
+                    "section_index": si, "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
+                    "print": "", "old_print": "", "stack": False, "orient": None,
+                    "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()],
+                    "fixed": [], "pin": group_pin(mat), "quick": True}
+            (locked if _get(mat, LAYOUT_LOCK, False) else groups).append(info)
+    return {"groups": groups, "locked": locked, "skipped": [], "conflicts": 0, "fixed": [], "handsoff": [],
+            "not_ready": {}, "keep_layout": [], "only": None, "quick": True}
 
 
 LAYOUT_SHELL_CAP = 4000  # more UV shells than this on one mesh = junk / over-split: layout skips it
@@ -8832,9 +8835,6 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
     return _sort_pieces(out)
 
 
-SQUARE_FILL = 0.45  # Quick Plan: share of a material's square its shells fill (measured: padding, gaps, upright pieces)
-
-
 def _piece_cell(item, growth, pad, limit):
     """(rw, rh): the room a piece takes in a square, padding included (a
     compound's size already has it). Oversize pieces are clamped to a tile."""
@@ -8945,19 +8945,6 @@ def _group_squares(items, growth, pad, limit, can_turn, hints, key):
     return out
 
 
-def _estimate_squares(area_uv, limit):
-    """Quick Plan: the square sides for a group known only by its UV area
-    (tiles, slack included): whole tiles, then one square for the rest."""
-    full = limit * limit
-    out = []
-    while area_uv > full + 1e-12:
-        out.append(limit)
-        area_uv -= full
-    if area_uv > 1e-10:
-        out.append(math.sqrt(area_uv))
-    return out
-
-
 def plan_layout(collected, settings, density_scale=1.0):
     """Pure-math layout plan. Returns a dict with per-shell placements, group
     stats, tiles used and warnings. Nothing in the scene changes.
@@ -8967,8 +8954,7 @@ def plan_layout(collected, settings, density_scale=1.0):
     (a group bigger than a tile: whole-tile squares plus one for the rest).
     Squares never overlap, so no material ends up in another's gaps; a tile
     may hold several squares. plan['blocks'] lists them. Groups from a
-    Quick Plan (collect_shells(estimate=True)) have no shells, only an area:
-    their squares are estimated (SQUARE_FILL)."""
+    Quick Plan (quick_groups) have no shells: each gets one whole tile."""
     s = dict(LAYOUT_DEFAULTS)
     s.update(settings or {})
     res = float(s["map_size"])
@@ -9042,10 +9028,10 @@ def plan_layout(collected, settings, density_scale=1.0):
 
     def pieces(g):
         """(mode, density, compensate, pieces, stacked) for one group;
-        pieces is None for a Quick Plan estimate (no shells read)."""
+        pieces is None for a Quick Plan group (no shells read)."""
         mode = g.get("orient") or default_mode
         density = td * g["td"] / 100.0
-        if g.get("estimate") is not None:
+        if g.get("quick"):
             return mode, density, 1.0, None, {}
         compensate = 1.0
         sizes = []
@@ -9130,9 +9116,8 @@ def plan_layout(collected, settings, density_scale=1.0):
                         "own_fixed": own_fixed, "n_stacked": sum(len(v[1]) for v in stacked.values()),
                         "dups": dict((id(rep[0]), (rep[2], dups)) for rep, dups in stacked.values() if dups)}
                 infos.append(info)
-                if unique is None:  # Quick Plan: only the group's 3D area is known
-                    area_uv = g["estimate"] * (density / res) ** 2 * (1.0 + growth) / SQUARE_FILL
-                    sqs = [(None, side) for side in _estimate_squares(area_uv, limit)]
+                if unique is None:  # Quick Plan: one whole tile per material group
+                    sqs = [(None, limit)]
                 else:
                     sqs = [(sq, sq[3]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis", hints,
                                                                 g["set"])]
@@ -9167,7 +9152,6 @@ def plan_layout(collected, settings, density_scale=1.0):
                 info["rows"].add(tv)
                 blocks.append((udim, x, y, side, g["set"], g["key"]))
                 if sq is None:
-                    info["area"] += side * side * SQUARE_FILL
                     continue
                 for (msh, mk, ma, mw, mh), ox, oy in sq[0].leaves():
                     placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
@@ -9293,7 +9277,7 @@ def plan_layout(collected, settings, density_scale=1.0):
     return {"placements": placements, "stats": stats, "tiles": sorted(tiles_used | reserved),
             "new_tiles": sorted(tiles_used), "warnings": warnings, "density": td, "settings": s,
             "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around, "blocks": blocks,
-            "squares": squares, "estimate": bool(collected.get("estimate"))}
+            "squares": squares, "quick": bool(collected.get("quick"))}
 
 
 def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
@@ -9342,7 +9326,7 @@ def section_rows(collected, plan):
         if g.get("pin"):
             continue
         st = plan["stats"].get(g["set"]) or {}
-        if "placed_rows" in st:  # squares (and Quick Plan estimates, which have no shells)
+        if "placed_rows" in st:  # squares (and Quick Plan groups, which have no shells)
             got.update(st["placed_rows"])
             continue
         for sh in g["shells"]:
@@ -10601,7 +10585,19 @@ class UVCanvas(QtWidgets.QWidget):
                 p.fillRect(band, QtGui.QColor(60, 60, 60, 160))
                 p.drawText(band.adjusted(4, 0, -2, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft | QtCore.Qt.TextWordWrap,
                            name)
-        if self._moving and self._moving.get("active"):  # dragging a group: ghost + target tile
+        if self._moving and self._moving.get("active") and self._moving.get("row") is not None:
+            mv = self._moving  # dragging a section's name: the row it would move to
+            width = self.band_width()
+            for row, colour in ((mv["row"], "#8a8a8a"), (mv.get("target"), "#7fd6c9")):
+                if row is None:
+                    continue
+                top, bottom = self.to_px(0, row + 1), self.to_px(0, row)
+                band = QtCore.QRectF(self.origin.x() - width - 4, top.y(), width + 4 + 10 * self.scale,
+                                     bottom.y() - top.y())
+                p.setPen(QtGui.QPen(QtGui.QColor(colour), 2, QtCore.Qt.DashLine))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRect(band)
+        elif self._moving and self._moving.get("active"):  # dragging a group: ghost + target tile
             mv = self._moving
             t = mv.get("tile")
             if t:
@@ -10650,6 +10646,11 @@ class UVCanvas(QtWidgets.QWidget):
             self._drag = (event.pos(), QtCore.QPointF(self.origin))
             return
         if event.button() == QtCore.Qt.LeftButton:
+            u, w = self.to_uv(event.pos())
+            if u < 0.0 and self.viewer.show_rows and int(math.floor(w)) in self.viewer.row_sections:
+                self._moving = {"row": int(math.floor(w)), "start": event.pos(), "active": False, "group": None,
+                                "item": None}  # a section's name: drag it to another row
+                return
             item = self._item_at(event.pos())
             self._moving = {"item": item, "start": event.pos(), "group": item and item.get("group"),
                             "active": False} if item else None
@@ -10668,6 +10669,15 @@ class UVCanvas(QtWidgets.QWidget):
             self.update()
             return
         mv = self._moving
+        if mv and mv.get("row") is not None and (event.buttons() & QtCore.Qt.LeftButton):
+            d = event.pos() - mv["start"]
+            if mv["active"] or abs(d.y()) > 6:
+                mv["active"] = True
+                rows = sorted(self.viewer.row_sections)
+                w = int(math.floor(self.to_uv(event.pos())[1]))
+                mv["target"] = min(max(w, rows[0]), rows[-1])
+                self.update()
+            return
         if mv and mv["group"] and (event.buttons() & QtCore.Qt.LeftButton):
             d = event.pos() - mv["start"]
             if mv["active"] or abs(d.x()) + abs(d.y()) > 6:
@@ -10684,13 +10694,20 @@ class UVCanvas(QtWidgets.QWidget):
         mv, self._moving = self._moving, None
         if not mv:
             return
+        if mv.get("row") is not None:  # a section's name dropped on another row
+            self.update()
+            if mv["active"] and mv.get("target") is not None and mv["target"] != mv["row"]:
+                self.viewer.drop_section(mv["row"], mv["target"])
+            return
         if mv["active"]:  # dropped: pin the group to that tile
             self.update()
             if mv.get("tile"):
                 self.viewer.drop_group(mv["group"], mv["tile"])
             return
-        item = mv["item"]  # a plain click selects the mesh
-        if item and item.get("mesh") and cmds.objExists(item["mesh"]):
+        item = mv["item"]  # a plain click selects the mesh (a Quick Plan tile: the group's meshes)
+        if item and item.get("block") and cmds.objExists(item.get("group") or ""):
+            cmds.select(item["group"], replace=True)
+        elif item and item.get("mesh") and cmds.objExists(item["mesh"]):
             cmds.select(item["mesh"], replace=True)
 
     def keyPressEvent(self, event):
@@ -10712,6 +10729,7 @@ class UVViewer(QtWidgets.QWidget):
         self.resize(940, 680)
         self.items, self.tiles, self.reserved, self.rows = [], set(), set(), {}
         self.blocks = []  # material squares of the plan on show: ((u0, v0, u1, v1), key)
+        self.row_sections = {}  # UDIM row -> section set (dragging a row's name reorders sections)
         self.source = "plan"
         self.banner = ""
         self.show_rows = self.show_tiles = self.show_reserved = True
@@ -10771,6 +10789,8 @@ class UVViewer(QtWidgets.QWidget):
     # ---------------------------------------------------------------- data
     def colour_of(self, item):
         mode = self.mode.value()
+        if item.get("block"):  # a Quick Plan tile: only its material means anything
+            return _key_color(item.get("key") or "default", 255)
         if mode == "UV status":
             state = (self.panel.states or {}).get(item["mesh"], "unknown")
             return QtGui.QColor(UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])[1])
@@ -10810,13 +10830,13 @@ class UVViewer(QtWidgets.QWidget):
             hull = [(tu + b[0], tv + b[1]), (tu + b[2], tv + b[1]), (tu + b[2], tv + b[3]), (tu + b[0], tv + b[3])]
             items.append({"hull": hull, "box": (tu + b[0], tv + b[1], tu + b[2], tv + b[3]), "mesh": fx["mesh"],
                           "key": fx["key"], "group": fx["set"], "section": "", "density": None, "fixed": True})
-        est = dict((g["set"], g) for g in collected["groups"] if g.get("estimate") is not None)
+        est = dict((g["set"], g) for g in collected["groups"] if g.get("quick"))
         self.blocks = []
         for udim, x, y, side, node, key in plan.get("blocks") or []:
             tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
             box = (tu + x, tv + y, tu + x + side, tv + y + side)
             self.blocks.append((box, key))
-            if node in est:  # Quick Plan: the square is all there is (drag it to pin the group)
+            if node in est:  # Quick Plan: the tile is all there is (click selects, drag pins)
                 items.append({"hull": [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])],
                               "box": box, "mesh": "", "key": key, "group": node, "section": est[node]["section"],
                               "density": (plan["stats"].get(node) or {}).get("density"), "block": True})
@@ -10830,10 +10850,14 @@ class UVViewer(QtWidgets.QWidget):
             for r in rows:
                 self.rows[r] = names.get(si, "")
         self.target = plan.get("density")
-        if plan.get("estimate"):
-            self.banner = ("Quick Plan: about %d px/m, %d tile(s), squares sized from 3D area. Drag a square onto "
-                           "a tile to pin its group, then Plan." % (round(plan.get("density", 0)),
-                                                                    len(plan.get("new_tiles", []))))
+        self.row_sections = {}
+        sec_of = dict((g["section_index"], g["section"]) for g in collected["groups"] + collected["locked"])
+        for si, rows in section_rows(collected, plan).items():
+            for r in rows:
+                self.row_sections[r] = sec_of.get(si)
+        if plan.get("quick"):
+            self.banner = ("Quick Plan: a row per section, a tile per material. Drag a section's name up or "
+                           "down to reorder; click a tile to select its meshes; drag a tile to pin it.")
             self.canvas.update()
             return
         self.banner = ("Planning... %d px/m" % round(plan.get("density", 0))) if searching else \
@@ -10888,6 +10912,13 @@ class UVViewer(QtWidgets.QWidget):
         self.banner = "Scene UVs (%d shells on %d mesh(es))" % (len(items), len(meshes))
         self.canvas.frame()
 
+    def drop_section(self, row, target_row):
+        """A section's name was dragged to another row: move the section
+        there (sections are laid out bottom to top) and plan again."""
+        sec, target = self.row_sections.get(row), self.row_sections.get(target_row)
+        if sec and target and sec != target:
+            self.panel.move_section_to(sec, target)
+
     def drop_group(self, group, tile):
         """A group was dragged onto a tile: pin it there, then re-plan (plan
         view) or re-lay out just that group (scene view)."""
@@ -10911,8 +10942,9 @@ class UVViewer(QtWidgets.QWidget):
                               "mesh.")
             return
         if item.get("block"):
-            self.info.setText("%s%s  |  Quick Plan square (from 3D area)  |  drag it onto a tile to pin the group "
-                              "there" % (item.get("key"), (" (%s)" % item["section"]) if item.get("section") else ""))
+            sec = parse_group_name(item.get("section") or "")["key"] or item.get("section") or ""
+            self.info.setText("%s in %s  |  click to select its meshes; drag onto a tile to pin it there" % (
+                item.get("key"), sec))
             return
         d = ("%d px/m" % round(item["density"])) if item.get("density") else "density n/a"
         self.info.setText("%s  |  %s%s  |  %s%s" % (
@@ -11432,10 +11464,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         more.add_full(self.lay_comp)
         card.add(grid)
         card.add(more)
-        quick_btn = secondary_button("Quick Plan", "Stage 1, instant: a square per material group sized from its "
-                                                   "meshes' 3D area and the texel density. No UVs are read, so it "
-                                                   "works before Auto UV. It opens the UV Viewer: drag a square "
-                                                   "onto a tile to pin its group there, then Plan.")
+        quick_btn = secondary_button("Quick Plan", "Stage 1, instant, from the set names only (no mesh is read): "
+                                                   "a row per section, a tile per material group, in the UV "
+                                                   "Viewer. Drag a section's name up or down to reorder sections, "
+                                                   "click a tile to select its meshes (is that glass really in "
+                                                   "this shack?), drag a tile to pin it. Then Plan.")
         quick_btn.clicked.connect(lambda *_: self.quick_plan())
         plan_btn = secondary_button("Plan", "Stage 2: pack the real UV shells, each material group in its own "
                                             "square(s), without changing anything. Runs in the background (Maya "
@@ -12408,7 +12441,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _replan(self):
         try:
-            if self._plan is not None and self._plan.get("estimate") and self._worker is None:
+            if self._plan is not None and self._plan.get("quick") and self._worker is None:
                 self.quick_plan()  # settings changed while a Quick Plan is on show: stay in stage 1
             elif self._plan is not None or self._worker is not None:
                 self.plan_live()
@@ -12425,7 +12458,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if asset is None or not asset.sections():
             self.set_status("Pick a root and Scan first.", level="warn")
             return
-        if self._collected is None or self._collected.get("estimate"):  # a Quick Plan's groups have no shells
+        if self._collected is None or self._collected.get("quick"):  # a Quick Plan's groups have no shells
             uv_set = self.uv_set.text().strip() or "map1"
             try:
                 with Progress("Plan", [("read", 1)], status_progress(self.status)) as pr:
@@ -12561,7 +12594,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             for m in mats:
                 set_group_pin(m, tiles)
         had_plan = self._plan is not None
-        quick = had_plan and self._plan.get("estimate")
+        quick = had_plan and self._plan.get("quick")
         self._collected = None  # pins are read when shells are collected
         self.refresh()
         if quick:  # dragged a square in a Quick Plan: re-run the quick one
@@ -12617,32 +12650,43 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     @ui_safe
     def quick_plan(self):
-        """Stage 1: one square per material group, sized from its meshes' 3D
-        area at the texel density (collect_shells(estimate=True)): no UV
-        shells are read, so it's instant and works before Auto UV. Opens the
-        UV Viewer, where dragging a square onto a tile pins its group; Plan
-        then packs the real shells, honouring the pins."""
+        """Stage 1, from the set names only (quick_groups): a row per section,
+        a tile per material group. No mesh is read. Opens the UV Viewer to
+        reorder sections (drag a row's name), check what's in each (click a
+        tile to select its meshes) and pin groups (drag a tile); Plan then
+        packs the real shells."""
         asset = self._asset()
         if asset is None or not asset.sections():
             self.set_status("Pick a root and Scan first.", level="warn")
             return None
         t0 = time.time()
         self._stop_worker()
-        uv_set = self.uv_set.text().strip() or "map1"
-        try:
-            with Progress("Quick Plan", [("read", 1)], status_progress(self.status)) as pr:
-                pr.stage("read", 1, "Measuring the groups")
-                col = collect_shells(asset, uv_set, estimate=True)
-                plan = make_plan(col, dict(self._layout_settings(), squares=True))
-        except Cancelled:
-            self.set_status("Quick Plan cancelled. Nothing changed.", level="warn")
-            return None
+        col = quick_groups(asset)
+        plan = plan_layout(col, dict(self._layout_settings(), squares=True, new_row_per_section=True))
         self._collected, self._plan = col, plan
         self.udim_map.set_plan(col, plan)
         self.open_viewer()
         self._summarise_plan(time.time() - t0)
         self._update_guidance()
         return plan
+
+    def move_section_to(self, section, target):
+        """Move a section to where target is in the order (one Ctrl+Z), then
+        plan again in the same stage."""
+        asset = self._asset()
+        secs = asset.sections() if asset else []
+        if section not in secs or target not in secs or section == target:
+            return
+        asset.move_section(section, secs.index(target) - secs.index(section))
+        quick = self._plan is not None and self._plan.get("quick")
+        self._collected = None
+        self.refresh()
+        if quick:
+            self.quick_plan()
+        elif self._plan is not None:
+            self.plan_live()
+        self.set_status("Moved %s to row %d of %d. One Ctrl+Z undoes it." % (
+            parse_group_name(section)["key"] or short_name(section), secs.index(target) + 1, len(secs)))
 
     @ui_safe
     def open_viewer(self):
@@ -12666,7 +12710,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         t0 = time.time()
         self._stop_worker()
         settings = self._layout_settings()
-        if self._collected is None or self._collected.get("estimate"):  # else a re-plan: no scene read
+        if self._collected is None or self._collected.get("quick"):  # else a re-plan: no scene read
             uv_set = self.uv_set.text().strip() or "map1"
             pr = Progress("Plan", [("read", 80), ("fit", 20)], status_progress(self.status))
             try:
@@ -12699,12 +12743,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _summarise_plan(self, seconds):
         plan, col = self._plan, self._collected
-        if plan.get("estimate"):
-            lines = ["Quick Plan: %d material group(s) as squares -> %d tile(s) at %d px/m, estimated from 3D "
-                     "area in %.2fs (no UVs read)." % (len(col["groups"]), len(plan["new_tiles"]),
-                                                       round(plan["density"]), seconds),
-                     "Drag a square onto a tile in the UV Viewer to pin its group there, then Plan to pack the "
-                     "real shells."]
+        if plan.get("quick"):
+            n_secs = len(set(g["section_index"] for g in col["groups"]))
+            lines = ["Quick Plan: %d section(s), %d material group(s), a tile each (from the set names; no mesh "
+                     "read, %.2fs)." % (n_secs, len(col["groups"]), seconds),
+                     "In the UV Viewer: drag a section's name up or down to reorder, click a tile to select its "
+                     "meshes, drag a tile to pin it. Then Plan packs the real shells."]
             lines.extend(plan["warnings"][:3])
             self.layout_summary.setText("\n".join(lines))
             return
@@ -12891,12 +12935,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
         """{mesh: udim} where the current layout plan puts most of each mesh."""
         if self._plan is None or self._collected is None:
             return {}
-        if self._collected.get("estimate"):  # Quick Plan: each mesh to its group's first tile
+        if self._collected.get("quick"):  # Quick Plan: each mesh to its group's tile
             out = {}
             for g in self._collected["groups"]:
                 tiles = self._plan["stats"].get(g["set"], {}).get("tiles") or []
-                for m in g.get("members", []) if tiles else ():
-                    out.setdefault(m, tiles[0])
+                if tiles and cmds.objExists(g["set"]):
+                    for m in expand_members(g["set"])[0]:
+                        out.setdefault(m, tiles[0])
             return out
         area = {}
         for g in self._collected["groups"]:

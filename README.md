@@ -722,10 +722,14 @@ density. The actual layout is still being built; see
      hold several squares. Turn it off for the old freeform packing (tighter,
      harder to read).
    - **Two stages:**
-     - **Quick Plan** (instant): a square per group sized from its meshes'
-       3D area and the density. It reads no UVs, so it works before Auto
-       UV. It opens the UV Viewer with the squares; drag one onto a tile to
-       pin its group there. Its density is an estimate.
+     - **Quick Plan** (instant): an overview from the set names alone, no
+       mesh is read. The UV Viewer opens with a row per section and a tile
+       per material group. Use it to arrange and check before anything
+       heavy runs:
+       - drag a section's name up or down to reorder sections (one Ctrl+Z);
+       - click a tile to select that group's meshes (why is there glass in
+         shackD?);
+       - drag a tile onto another tile to pin the group there.
      - **Plan**: packs the real shells into each group's square(s),
        honouring pins. Changing a setting re-plans. **Apply Layout** writes
        it.
@@ -817,8 +821,9 @@ density. The actual layout is still being built; see
        doesn't fit at that density, the rest spills into the next free tile,
        with a warning. Auto UV fits the group's meshes into its pinned tile.
        *Unpin* gives the group back to the layout.
-     - **Drag in the UV Viewer:** drag any shell (or a Quick Plan square)
-       onto another tile, and its whole group is pinned there.
+     - **Drag in the UV Viewer:** drag any shell (or a Quick Plan tile)
+       onto another tile, and its whole group is pinned there (a group of
+       several squares gets that many tiles from there).
        - **On a plan:** it re-plans straight away (a Quick Plan stays
          quick).
        - **On the scene's UVs:** that group is re-laid out on the spot
@@ -956,7 +961,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   sheet, and scores tiny shells, stars, straight and upright shells.
 - `tests/test_squares.py`: one square per material group (shells inside
   their own squares, no overlaps, big groups split, pins, stacks, Fit
-  rows), Quick Plan, and the shell cache. `tests/bench_plan.py` times
+  rows), Quick Plan (no mesh read, a tile per group, rows in section
+  order), and the shell cache. `tests/bench_plan.py` times
   Plan on a bigger asset.
 - `tests/test_manage_layout.py`: tile parsing, pins (own tile, others kept
   out, spill-over warning, Fit to rows), Re-layout Selected (others

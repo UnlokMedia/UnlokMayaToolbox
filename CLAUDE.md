@@ -553,14 +553,19 @@
       `section_rows` prefers. Squares never overlap, so materials never fill
       each other's gaps (the user asked for this after freeform plans mixed
       colours in tiles).
-    - **Quick Plan** (`collect_shells(estimate=True)`, panel `quick_plan`):
-      no shells read and no scoring; each group gets `estimate` (3D area,
-      m^2) and `members`. `plan_layout` sizes its squares from the area
-      (`_estimate_squares`, `SQUARE_FILL` = 0.45, measured against real
-      packing). The viewer shows them as draggable items (`block`); drag
-      pins, and `pin_groups` / `_replan` re-run the quick plan while one is
-      on show. `plan_layout` / `plan_live` in the panel re-collect when
-      `_collected["estimate"]`, so a Quick Plan is never applied.
+    - **Quick Plan** (`quick_groups`, panel `quick_plan`): from the sets
+      alone (names, TD %, pins, locks): **no mesh is touched**, not even
+      members (the user: it should only care about the group naming; a
+      first version measured mesh areas and got stuck on big scenes).
+      Groups carry `quick`; `plan_layout` gives each one whole tile, a row
+      per section. It's for arranging and debugging: in the viewer a
+      section's name band drags to another row (`UVCanvas` row drag ->
+      `UVViewer.drop_section` -> `move_section_to`, one Ctrl+Z), a click on
+      a tile selects the group's set (its meshes), a tile drag pins.
+      `pin_groups` / `_replan` / `move_section_to` re-run the quick plan
+      while one is on show; `plan_layout` / `plan_live` in the panel
+      re-collect when `_collected["quick"]`, so it's never applied.
+      `_planned_tiles` expands members only when Auto UV asks.
     - The in-panel `UdimMapWidget` is hidden (it lagged on big plans: a
       rect per shell, hit-tested on every mouse move); the UV Viewer button
       shows the layout.
