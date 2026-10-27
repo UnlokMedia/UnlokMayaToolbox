@@ -500,8 +500,16 @@
       didn't reach the panel during a scripted GUI session (the GUI test
       opens scenes from a script).
   - **UV status** (per mesh, whole meshes only):
-    - Stored as membership of two child sets of the root set, roles
-      `uvkeep` / `uvhandsoff` (`status_set`, `uv_status`, `set_uv_status`).
+    - Stored as membership of three child sets of the root set, roles
+      `uvkeep` / `uvkeeplayout` / `uvhandsoff` (`status_set`, `uv_status`,
+      `set_uv_status`).
+    - **Keep Layout** (`keeplayout`) is Keep UVs plus "keep the
+      arrangement". `collect_shells` lists those meshes in
+      `collected["keep_layout"]`.
+    - `plan_layout` takes their shells out of `sizes` and packs each mesh
+      as one `_layout_unit` compound: one k from the mesh's total 3D/UV
+      area, shells at their current offsets (hull boxes about `cx`/`cy`),
+      angle 0, shrunk to fit a tile with a warning.
       `sections()` ignores them because they have a role.
     - Auto UV:
       - Keep UVs meshes are scored but never unwrapped.

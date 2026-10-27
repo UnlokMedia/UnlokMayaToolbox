@@ -147,8 +147,76 @@ def bundles(tb):
     check("...without needing many more tiles", tiles_kept <= tiles_loose + 1, "%d vs %d" % (tiles_kept, tiles_loose))
 
 
+def keep_layout(tb):
+    """Keep Layout: the mesh is scaled and moved as one block, every shell
+    staying where it was relative to the others; Keep UVs re-packs."""
+    cmds.file(new=True, force=True)
+    root = cmds.group(empty=True, name="props_GRP")
+
+    def staggered(name):
+        parts = []
+        for i in range(3):
+            pl = cmds.polyPlane(w=1 + i, h=1, sx=1, sy=1)[0]
+            cmds.move(i * 3, 0, 0, pl)
+            cmds.polyEditUV(pl + ".map[*]", scaleU=0.2, scaleV=0.2, pivotU=0, pivotV=0)
+            cmds.polyEditUV(pl + ".map[*]", u=0.1 + i * 0.3, v=0.05 + i * 0.25)
+            parts.append(pl)
+        m = cmds.polyUnite(parts, constructionHistory=False, name=name)[0]
+        return cmds.ls(cmds.parent(m, root)[0], long=True)[0]
+
+    kept = staggered("woodBrown_C_sign0001_GEP")
+    loose = staggered("woodBrown_C_sign0002_GEP")
+    asset = tb["SmartUdimAsset"].for_group(root)
+    asset.scan()
+    asset.set_uv_status([kept], "keeplayout")
+    asset.set_uv_status([loose], "keep")
+    check("Keep Layout is a mark of its own", asset.uv_status().get(kept) == "keeplayout" and
+          tb["uv_states"](asset)[kept] == "keeplayout")
+
+    def centres(m):
+        fn = tb["_mesh_fn"](m)
+        _, ids = fn.getUvShellsIds("map1")
+        us, vs = fn.getUVs("map1")
+        acc = {}
+        for s, u, v in zip(ids, us, vs):
+            a = acc.setdefault(s, [0.0, 0.0, 0])
+            a[0] += u
+            a[1] += v
+            a[2] += 1
+        return [(a[0] / a[2], a[1] / a[2]) for _, a in sorted(acc.items())]
+
+    before_k, before_l = centres(kept), centres(loose)
+    col = tb["collect_shells"](asset)
+    settings = dict(tb["LAYOUT_DEFAULTS"], texel_density=40.0, map_size="2048", orientation="Upright")
+    plan = tb["make_plan"](col, settings)
+    tb["apply_layout"](asset, col, plan)
+    after_k, after_l = centres(kept), centres(loose)
+
+    def ratios(a, b):
+        out = []
+        for i in range(1, len(a)):
+            da = (a[i][0] - a[0][0], a[i][1] - a[0][1])
+            db = (b[i][0] - b[0][0], b[i][1] - b[0][1])
+            out.append((db[0] / da[0] if abs(da[0]) > 1e-9 else None, db[1] / da[1] if abs(da[1]) > 1e-9 else None))
+        return [r for pair in out for r in pair if r is not None]
+
+    rk = ratios(before_k, after_k)
+    check("Keep Layout keeps every shell where it was relative to the others (one scale)",
+          rk and max(rk) - min(rk) < 1e-3 * max(abs(x) for x in rk), str([round(x, 4) for x in rk]))
+    rl = ratios(before_l, after_l)
+    check("...while Keep UVs re-packs its shells", not rl or max(rl) - min(rl) > 1e-3 * max(abs(x) for x in rl),
+          str([round(x, 4) for x in rl]))
+    d3 = sum(cmds.polyEvaluate(kept, worldArea=True) for _ in [0]) * 1e-4
+    fn = tb["_mesh_fn"](kept)
+    nf = cmds.polyEvaluate(kept, face=True)
+    _, auv = tb["_face_areas"](kept, nf)
+    density = (sum(auv) / d3) ** 0.5 * 2048
+    check("...at the target texel density as a whole", abs(density / 40.0 - 1.0) < 0.05, "%.1f px/m" % density)
+
+
 try:
     run()
+    keep_layout(ns["load_toolbox"]())
     bundles(ns["load_toolbox"]())
 except Exception:
     traceback.print_exc()

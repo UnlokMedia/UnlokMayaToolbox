@@ -3453,19 +3453,21 @@ SECTION_SUFFIX = "UDS"
 # Per-mesh UV status, stored as membership of two sets under the root set:
 #   keep     = never re-unwrap, but still categorise, scale and pack
 #   handsoff = never touch: no unwrap, no layout; the plan works around it
-UV_STATUSES = ("auto", "keep", "handsoff")
+UV_STATUSES = ("auto", "keep", "keeplayout", "handsoff")
 # Bool on a mesh shape: a tool made its UVs (Rope Lashing), so Scan marks it
 # Keep UVs: never re-unwrapped or scored, still laid out.
 UV_READY_ATTR = "unlokUvReady"
 # Bool on a mesh shape: its UVs are stacked on purpose (Thatch Roof's planes and
 # pieces), so Scan marks it Hands off instead: layout would unstack it.
 UV_STACKED_ATTR = "unlokUvStacked"
-UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "handsoff": "Hands off"}
+UV_STATUS_LABELS = {"auto": "Auto", "keep": "Keep UVs", "keeplayout": "Keep Layout", "handsoff": "Hands off"}
 # Tool-owned tracking sets (also under the root): what Auto UV unwrapped, what
 # Smart Layout laid out, and what needs a human (Auto UV failed / still bad).
-_STATUS_ROLE = {"keep": "uvkeep", "handsoff": "uvhandsoff", "auto": "uvauto", "laidout": "uvlaidout",
+_STATUS_ROLE = {"keep": "uvkeep", "keeplayout": "uvkeeplayout", "handsoff": "uvhandsoff", "auto": "uvauto",
+                "laidout": "uvlaidout",
                 "problem": "uvproblem"}
-_STATUS_SUFFIX = {"keep": "uvKeep_SET", "handsoff": "uvHandsOff_SET", "auto": "uvAuto_SET",
+_STATUS_SUFFIX = {"keep": "uvKeep_SET", "keeplayout": "uvKeepLayout_SET", "handsoff": "uvHandsOff_SET",
+                  "auto": "uvAuto_SET",
                   "laidout": "uvLaidOut_SET", "problem": "uvProblem_SET"}
 ROOT_SUFFIX = "smartUDIM_SET"
 
@@ -4027,10 +4029,10 @@ class SmartUdimAsset(object):
         return node
 
     def uv_status(self):
-        """{mesh transform: 'keep' / 'handsoff'}; meshes not listed are 'auto'.
-        Hands off wins when a mesh is in both sets."""
+        """{mesh transform: 'keep' / 'keeplayout' / 'handsoff'}; meshes not
+        listed are 'auto'. Hands off wins when a mesh is in two sets."""
         out = {}
-        for status in ("keep", "handsoff"):
+        for status in ("keep", "keeplayout", "handsoff"):
             node = self.status_set(status)
             if node:
                 for xform in expand_members(node)[0]:
@@ -4038,12 +4040,13 @@ class SmartUdimAsset(object):
         return out
 
     def set_uv_status(self, meshes, status):
-        """Mark whole meshes 'auto', 'keep' or 'handsoff' (one Ctrl+Z)."""
+        """Mark whole meshes 'auto', 'keep', 'keeplayout' or 'handsoff' (one
+        Ctrl+Z)."""
         meshes = [m for m in meshes if cmds.objExists(m)]
         if not meshes or status not in UV_STATUSES:
             return 0
         with UndoChunk("Smart UDIM UV status"):
-            for st in ("keep", "handsoff"):
+            for st in ("keep", "keeplayout", "handsoff"):
                 node = self.status_set(st, create=(st == status))
                 if node is None:
                     continue
@@ -4057,7 +4060,7 @@ class SmartUdimAsset(object):
                     cmds.sets(gone, remove=node)
                 if st == status:
                     cmds.sets(meshes, add=node)
-            if status in ("keep", "handsoff"):  # you've decided about these: drop any old problem flag
+            if status in ("keep", "keeplayout", "handsoff"):  # you've decided about these: drop any problem flag
                 self.update_tool_sets(remove={"problem": meshes})
             else:  # Auto on purpose: a tool's "UVs ready" tag mustn't turn it back into Keep UVs on the next Scan
                 for m in meshes:
@@ -5308,7 +5311,7 @@ def _clip_to_tiles(boxes):
     return out
 
 
-UV_STATE_ORDER = ("needs", "problem", "unknown", "good", "keep", "auto", "laidout", "handsoff")
+UV_STATE_ORDER = ("needs", "problem", "unknown", "good", "keep", "keeplayout", "auto", "laidout", "handsoff")
 UV_STATE_INFO = {  # state: (label, colour, what it means)
     "needs": ("Needs UVs", "#e8c23a", "No usable UVs yet: Auto UV will unwrap these."),
     "problem": ("Problem", "#e05050", "Auto UV failed or the result still needs a look (or the mesh is "
@@ -5316,6 +5319,9 @@ UV_STATE_INFO = {  # state: (label, colour, what it means)
     "unknown": ("Not checked", "#8a8a8a", "Not scored yet: press Check UVs."),
     "good": ("Good UVs", "#57c785", "Already laid out well enough, so Auto UV keeps them."),
     "keep": ("Keep UVs", "#2fa84f", "You marked these Keep UVs: never re-unwrapped."),
+    "keeplayout": ("Keep Layout", "#1f8a6e", "You marked these Keep Layout: never re-unwrapped, and the layout "
+                                             "moves and scales each as one block (its shells stay where they "
+                                             "are relative to each other)."),
     "auto": ("Auto UV'd", "#a4d65e", "Unwrapped by Auto UV."),
     "laidout": ("Laid out", "#5aa9e6", "Placed by Smart Layout."),
     "handsoff": ("Hands off", "#3c5fd0", "You marked these Hands off: never touched."),
@@ -5339,8 +5345,8 @@ def uv_states(asset, scores=None, keep_score=AUTO_UV_KEEP_SCORE, meshes=None, in
             out[m] = "handsoff"
         elif m in laid:
             out[m] = "laidout"
-        elif status.get(m) == "keep":  # your mark beats an old problem flag
-            out[m] = "keep"
+        elif status.get(m) in ("keep", "keeplayout"):  # your mark beats an old problem flag
+            out[m] = status[m]
         elif m in prob:
             out[m] = "problem"
         elif m in auto:
@@ -7993,7 +7999,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
         instanced = [m for m in instanced if m in only]
     status = asset.uv_status()
     handsoff = [m for m in meshes if status.get(m) == "handsoff"]  # not even scored: never touched
-    marked_keep = set(m for m in meshes if status.get(m) == "keep")
+    marked_keep = set(m for m in meshes if status.get(m) in ("keep", "keeplayout"))
     meshes = [m for m in meshes if status.get(m) != "handsoff"]
     rows = []
     scores = {}
@@ -8399,7 +8405,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     not_ready = {}
     checked = set()
     trusted = asset.tool_members("auto") | asset.tool_members("laidout") | set(
-        m for m, st in asset.uv_status().items() if st == "keep")
+        m for m, st in asset.uv_status().items() if st in ("keep", "keeplayout"))
 
     def ready(xform):
         if xform in checked:
@@ -8472,8 +8478,10 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                 info["shells"].extend(shells)
             groups.append(info)
             fixed.extend(info["fixed"])
+    keep_layout = sorted(m for m, st in asset.uv_status().items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
+            "keep_layout": keep_layout,
             "only": sorted(only) if only is not None else None}
 
 
@@ -8639,6 +8647,30 @@ class _Compound(object):
                     yield leaf
             else:
                 yield item, ox + x, oy + y
+
+
+def _layout_unit(items, density, res, pad, usable, key, warnings):
+    """A Keep Layout mesh as one block: one scale for the whole mesh (its
+    total 3D area at the target density), every shell where it was relative
+    to the others, never turned. Shrunk to fit a tile if it must."""
+    shells = [it[0] for it in items]
+    area3 = sum(sh.area3d for sh in shells)
+    auv = sum(sh.area_uv for sh in shells)
+    k = math.sqrt(area3 * (density / res) ** 2 / auv) if auv > 0 else 1.0
+    boxes = []
+    for sh in shells:
+        xs, ys = [q[0] for q in sh.hull], [q[1] for q in sh.hull]
+        boxes.append((sh, sh.cx + min(xs), sh.cy + min(ys), sh.cx + max(xs), sh.cy + max(ys)))
+    u0, v0 = min(b[1] for b in boxes), min(b[2] for b in boxes)
+    u1, v1 = max(b[3] for b in boxes), max(b[4] for b in boxes)
+    big = max(u1 - u0, v1 - v0) * k
+    if big > usable:
+        k *= usable / big * 0.999
+        warnings.append("%s: a Keep Layout mesh (%s) is bigger than a tile at this density, so it was scaled "
+                        "down to fit one." % (key, short_name(shells[0].mesh)))
+    children = [((sh, k, 0.0, (b1 - a0) * k, (b2 - a1) * k), (a0 - u0) * k, (a1 - v0) * k)
+                for sh, a0, a1, b1, b2 in boxes]
+    return (_Compound(children), 1.0, 0.0, (u1 - u0) * k + pad, (v1 - v0) * k + pad)
 
 
 def _cell(item, growth, pad):
@@ -8832,6 +8864,15 @@ def plan_layout(collected, settings, density_scale=1.0):
             else:
                 warnings.append("%s: a piece is bigger than a whole tile at %d px/m (raise Map size or lower "
                                 "the density, or turn on Auto-compensate)." % (g["key"], round(density)))
+        # Keep Layout meshes: taken out here, packed as one block each below
+        units = {}
+        keep_layout = collected.get("keep_layout")
+        if keep_layout:
+            kl = set(keep_layout)
+            free = []
+            for item in sizes:
+                (units.setdefault(item[0].mesh, []) if item[0].mesh in kl else free).append(item)
+            sizes = free
         # _stack groups: identical pieces share one spot (one footprint for N copies)
         stacked = {}
         unique = []
@@ -8852,6 +8893,10 @@ def plan_layout(collected, settings, density_scale=1.0):
         # pieces 90 degrees when that sits lower.
         unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
                                    t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
+        for mesh in sorted(units):
+            unique.append(_layout_unit(units[mesh], density * compensate, res, pad, usable, g["key"], warnings))
+        if units:
+            _sort_pieces(unique)
         if not g.get("stack"):  # compounds: shells of a mesh together, similar pieces in blocks
             if s.get("keep_meshes"):
                 unique = _mesh_bundles(unique, growth, pad, usable)
@@ -10898,12 +10943,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                  "but still sort them into groups, scale them to texel density and "
                                                  "pack them with everything else.")
         mark_keep.clicked.connect(lambda *_: self.mark_status("keep"))
+        mark_layout = secondary_button("Keep Layout", "You've UV'd these and laid their shells out the way you "
+                                                      "want: never re-unwrap them, and the layout scales each "
+                                                      "to texel density and moves it as one block, keeping "
+                                                      "every shell where it is relative to the others.")
+        mark_layout.clicked.connect(lambda *_: self.mark_status("keeplayout"))
         mark_off = secondary_button("Hands off", "These are finished and already sit in their UDIM: never unwrap "
                                                  "or move them. The layout plans everything else around them.")
         mark_off.clicked.connect(lambda *_: self.mark_status("handsoff"))
         mark_auto = secondary_button("Auto", "Back to normal: the UV score decides whether to unwrap.")
         mark_auto.clicked.connect(lambda *_: self.mark_status("auto"))
-        card.add(button_row(mark_label, mark_keep, mark_off, mark_auto))
+        card.add(button_row(mark_label, mark_keep, mark_layout, mark_off, mark_auto))
         self.status_hint = hint_label("")
         card.add(self.status_hint)
         run_auto = primary_button("Auto UV")
@@ -12752,7 +12802,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                   "check": LEVEL_COLORS["warn"], "kept (check)": LEVEL_COLORS["warn"],
                   "will unwrap": LEVEL_COLORS["warn"], "failed": LEVEL_COLORS["skip"],
                   "skip": LEVEL_COLORS["skip"], "keep": LEVEL_COLORS["info"]}
-        colors.update({"keep UVs": LEVEL_COLORS["info"], "hands off": LEVEL_COLORS["info"]})
+        colors.update({"keep UVs": LEVEL_COLORS["info"], "keep layout": LEVEL_COLORS["info"],
+                       "hands off": LEVEL_COLORS["info"]})
         status = ((self.snapshot or {}).get("status")) or {}
         fmt = lambda v: "-" if v is None else "%.2f" % v  # noqa: E731
         for r in self.auto_result["rows"]:
@@ -12791,8 +12842,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             for r in self.auto_result.get("rows") or []:
                 if r["mesh"] not in marked:
                     continue
-                if status == "keep":
-                    r["action"] = "keep UVs"
+                if status in ("keep", "keeplayout"):
+                    r["action"] = "keep UVs" if status == "keep" else "keep layout"
                 elif status == "handsoff":
                     r["action"] = "hands off"
                 elif r.get("before") is None:
@@ -12825,10 +12876,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _fill_status_hint(self):
         status = (self.snapshot or {}).get("status") or {}
         keep = sum(1 for s in status.values() if s == "keep")
+        lay = sum(1 for s in status.values() if s == "keeplayout")
         off = sum(1 for s in status.values() if s == "handsoff")
-        if keep or off:
-            self.status_hint.setText("Marked: %d Keep UVs (laid out, never unwrapped), %d Hands off (never "
-                                     "touched). Double-click Status below to change one." % (keep, off))
+        if keep or lay or off:
+            self.status_hint.setText("Marked: %d Keep UVs (laid out, never unwrapped), %d Keep Layout (moved and "
+                                     "scaled as one block), %d Hands off (never touched). Double-click Status "
+                                     "below to change one." % (keep, lay, off))
         else:
             self.status_hint.setText("Already UV'd some meshes? Select them and mark Keep UVs, or Hands off if "
                                      "they're finished and in their UDIM.")

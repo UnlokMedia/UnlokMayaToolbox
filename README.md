@@ -691,6 +691,13 @@ density. The actual layout is still being built; see
      - **Keep UVs:** UV'd but not laid out. They're never re-unwrapped, but
        still sorted into groups, scaled to texel density and packed with
        everything else.
+     - **Keep Layout:** UV'd *and* laid out the way you want, e.g. you
+       unwrapped a mesh and arranged its shells yourself. They're never
+       re-unwrapped. The layout scales each mesh to texel density as a
+       whole (one scale for all its shells) and moves it as one block, so
+       every shell stays where it is relative to the others. The block is
+       never turned, and is shrunk only if it can't fit in a tile (with a
+       warning).
      - **Hands off:** finished and already in their UDIM. Auto UV and the
        layout never touch them (no unwrap, no backup copy, no moving), and
        Auto UV's packing starts above their tiles. Validation still checks
