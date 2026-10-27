@@ -577,6 +577,44 @@
     - The in-panel `UdimMapWidget` is hidden (it lagged on big plans: a
       rect per shell, hit-tested on every mouse move); the UV Viewer button
       shows the layout.
+    - **Trimmed panel (2026-10-27, after a review):**
+      - Step 7 keeps Density, Map size, Mode (+ Max tiles), Padding,
+        Orientation and one *Tidy blocks* (`lay_tidy` = group_similar +
+        keep_meshes).
+      - Fixed in `_layout_settings`: squares, a new row per section,
+        auto-compensate, no growth, hands-off packed around. The engine
+        still has the options.
+      - *Labels in UV Editor* lives in the viewer; `labels_btn` is a hidden
+        panel checkbox it toggles.
+      - Step 6 lost *Fit each mesh* (always "fit"), *Re-unwrap with
+        Unfold3D* and *Clear problem* (Fix clears). Restore Backup is in
+        Options.
+      - Step 3 shows five buttons; the rest are in `_tree_menu` (plus Stack
+        and Orientation). The Stack / Orient / Pin columns hide until a
+        group uses them.
+      - The UV set field is in step 1.
+    - **Speed rules from the review:**
+      - Apply writes the plan on show when `_plan_is_current()`, and
+        doesn't plan again afterwards.
+      - Do It All runs Auto UV with `pack=False`, since the layout places
+        everything anyway.
+      - `collect_shells(score_cache=)` reuses Check UVs scores through
+        `known_quality`. Never use `cached_quality` here: its key includes
+        check_overlap, so it would overwrite them.
+      - Auto UV backs up only what it rewrites.
+      - Refreshes:
+        - `_timed_refresh` skips while the panel is hidden; `showEvent`
+          catches up.
+        - `_quietly` hides our own label mesh from the callbacks.
+        - Shading-group sets are ignored (`_set_added`).
+        - `_watch_sets` re-arms only when the set list changes.
+      - The inspector diagnoses only problem / needs / unknown meshes (or
+        any mesh with step 6 open), up to 20k faces.
+      - The viewer draws only `plan["blocks"]` mid-search and turns
+        antialiasing off above 2k items.
+      - Ticking colours never runs Check UVs; unscored meshes show grey.
+      - `hide_uv_colours` finds coloured shapes with one `ls "*.attr"`.
+        It lists each node twice, so dedupe it.
     - `plan_layout` is pure math: exact density per shell, a 2D packer
       tile by tile, sections on new rows, locked tiles reserved.
       `plan_fit_to_tiles` binary-searches the density.

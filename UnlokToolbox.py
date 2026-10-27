@@ -5445,9 +5445,9 @@ def hide_uv_colours(asset=None):
     yourself while colours were on keeps your new shading."""
     restored = 0
     with NoUndo():
-        for shape in cmds.ls(type="mesh", long=True) or []:
-            if not cmds.attributeQuery(ORIG_SHADING_ATTR, node=shape, exists=True):
-                continue
+        coloured = cmds.ls("*." + ORIG_SHADING_ATTR, objectsOnly=True, long=True, recursive=True) or []
+        coloured = sorted(set(cmds.ls(coloured, type="mesh", long=True) or [])) if coloured else []  # ls repeats
+        for shape in coloured:  # one query found them, not one per mesh in the scene
             xform = long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])
             try:
                 orig = json.loads(cmds.getAttr(shape + "." + ORIG_SHADING_ATTR) or "{}")
@@ -8074,9 +8074,10 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
             if dirty:
                 _run_cleanup(dirty, True, True, True)
             timing["clean"] = time.time() - t
-        if backup:
-            pr.stage("backup", len(meshes), "Backing up UVs")
-            backups = backup_uvs(meshes, uv_set, backup_set, pr)
+        if backup:  # only what this run rewrites (the old group packing rewrites every mesh)
+            changed = meshes if (pack and pack != "fit") else todo
+            pr.stage("backup", len(changed), "Backing up UVs")
+            backups = backup_uvs(changed, uv_set, backup_set, pr)
         for m in meshes:
             fn = _mesh_fn(m)
             if fn is not None and uv_set in fn.getUVSetNames():
@@ -8424,7 +8425,7 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
 
 
 def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None, ready_only=True,
-                   keep_score=AUTO_UV_KEEP_SCORE, only=None):  # rotate: kept for old callers
+                   keep_score=AUTO_UV_KEEP_SCORE, only=None, score_cache=None):  # rotate: for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
@@ -8441,14 +8442,18 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     it is: listed as locked (its tiles taken from its last layout, else from
     where its UVs are), and its shells become obstacles, so the chosen
     groups can still fill the gaps in tiles they shared (prefer).
+
+    score_cache: the panel's Check UVs scores (cached_quality), so a mesh
+    that isn't in a tracking set is only scored again if it changed.
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     only = set(only) if only is not None else None
     exclude = set(exclude)
     not_ready = {}
     checked = set()
+    status = asset.uv_status()  # read once: it expands the status sets
     trusted = asset.tool_members("auto") | asset.tool_members("laidout") | set(
-        m for m, st in asset.uv_status().items() if st in ("keep", "keeplayout"))
+        m for m, st in status.items() if st in ("keep", "keeplayout"))
 
     def ready(xform):
         if xform in checked:
@@ -8458,13 +8463,14 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             progress.item(short_name(xform))
         bad = oversplit(xform, uv_set)
         if not bad and ready_only and xform not in trusted:
-            score = uv_quality(xform, uv_set, check_overlap=False)[0]
+            got = known_quality(xform, uv_set, score_cache, keep_score) if score_cache is not None else None
+            score = got[0] if got else uv_quality(xform, uv_set, check_overlap=False)[0]
             if score < keep_score:
                 bad = "needs UVs (score %.2f)" % score
         if bad:
             not_ready[xform] = bad
         return not bad
-    handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
+    handsoff = set(m for m, st in status.items() if st == "handsoff")
     fixed = []  # hands-off shells: [{"set", "key", "mesh", "udim", "box", "area"}]
     caches = {}
     claimed = set()
@@ -8521,7 +8527,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                 info["shells"].extend(shells)
             groups.append(info)
             fixed.extend(info["fixed"])
-    keep_layout = sorted(m for m, st in asset.uv_status().items() if st == "keeplayout")
+    keep_layout = sorted(m for m, st in status.items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
             "keep_layout": keep_layout,
@@ -10235,9 +10241,10 @@ def selection_items():
         if cmds.listRelatives(node, shapes=True, type="mesh", noIntermediate=True):
             items[node] = None
         elif cmds.objectType(node, isAType="transform"):
-            for shape in cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True,
-                                            noIntermediate=True) or []:
-                items[long_name(cmds.listRelatives(shape, parent=True, fullPath=True)[0])] = None
+            shapes = cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True,
+                                        noIntermediate=True) or []
+            for xform in (cmds.listRelatives(shapes, parent=True, fullPath=True) or []) if shapes else []:
+                items[long_name(xform)] = None
     if comps:
         for face in cmds.ls(cmds.polyListComponentConversion(comps, toFace=True) or [], long=True) or []:
             node, _, spec = face.partition(".")
@@ -10250,6 +10257,20 @@ def selection_items():
     return items
 
 
+_RENAMER_SPEC = []
+
+
+def _renamer_importable():
+    """Is unlok_renamer importable? Looked up once (it walks sys.path)."""
+    if not _RENAMER_SPEC:
+        try:
+            import importlib.util
+            _RENAMER_SPEC.append(importlib.util.find_spec("unlok_renamer") is not None)
+        except Exception:
+            _RENAMER_SPEC.append(False)
+    return _RENAMER_SPEC[0]
+
+
 def _unlok_renamer_main():
     """UnlokRenamer's main(): from the Script Editor if it was pasted and run
     there (secure setups), else from an importable unlok_renamer.py; None if
@@ -10258,8 +10279,7 @@ def _unlok_renamer_main():
     if hasattr(__main__, "RenamerWindow") and callable(getattr(__main__, "main", None)):
         return __main__.main
     try:
-        import importlib.util
-        if importlib.util.find_spec("unlok_renamer") is not None:
+        if _renamer_importable():
             import unlok_renamer
             return unlok_renamer.main
     except Exception:
@@ -10593,7 +10613,7 @@ class UVCanvas(QtWidgets.QWidget):
     def paintEvent(self, event):
         v = self.viewer
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, len(v.items) <= 2000)  # thousands of outlines: speed first
         p.fillRect(self.rect(), QtGui.QColor("#262626"))
         s = self.scale
         font = p.font()
@@ -10868,7 +10888,8 @@ class UVViewer(QtWidgets.QWidget):
         self.source = "plan"
         items = []
         res = float(plan["settings"].get("map_size", 2048) or 2048)
-        for g in collected["groups"]:
+        squares_only = searching and bool(plan.get("blocks"))  # mid-search: outlines wait for the result
+        for g in ([] if squares_only else collected["groups"]):
             for sh in g["shells"]:
                 pl = plan["placements"].get(id(sh))
                 if not pl:
@@ -10892,9 +10913,10 @@ class UVViewer(QtWidgets.QWidget):
             tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
             box = (tu + x, tv + y, tu + x + side, tv + y + side)
             self.blocks.append((box, key))
-            if node in est:  # Quick Plan: the tile is all there is (click selects, drag pins)
+            if node in est or squares_only:  # Quick Plan / mid-search: the square is all there is
                 items.append({"hull": [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])],
-                              "box": box, "mesh": "", "key": key, "group": node, "section": est[node]["section"],
+                              "box": box, "mesh": "", "key": key, "group": node,
+                              "section": (est.get(node) or {}).get("section", ""),
                               "density": (plan["stats"].get(node) or {}).get("density"), "block": True})
         self.items = items
         self.tiles = set(plan.get("tiles", []))
@@ -11041,7 +11063,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(60)
-        self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self.refresh))
+        self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self._timed_refresh))
+        self._quiet = False  # building our own helper mesh (UV Editor labels): not a reason to refresh
         self._links_dirty = False  # something was reparented / created: check the followed groups
         self._reparented = set()
         self._inspect_timer = QtCore.QTimer(self)  # selection changed: update the inspector
@@ -11157,6 +11180,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         setups.addWidget(self.setup_combo, 1)
         setups.addWidget(fresh)
         card.add_layout(setups)
+        uvs = QtWidgets.QHBoxLayout()
+        self.uv_set = QtWidgets.QLineEdit("map1")
+        self.uv_set.setToolTip("The UV set every step checks, unwraps and lays out.")
+        uvs.addWidget(QtWidgets.QLabel("UV set"))
+        uvs.addWidget(self.uv_set, 1)
+        card.add_layout(uvs)
         self.resume_label = hint_label("")
         self.resume_label.setVisible(False)
         card.add(self.resume_label)
@@ -11246,21 +11275,20 @@ class SmartUdimPanel(QtWidgets.QWidget):
             "unfollow": ("Stop Following", "The highlighted section or material group stops following its Maya "
                                            "groups (its meshes stay where they are).", self.stop_following),
         }
-        for title, keys in (("Sections", ("from_group", "to_section", "del_section", "up", "down")),
-                            ("Material groups", ("select", "to_group", "new_group", "pin", "unpin")),
-                            ("Follow Maya groups (new meshes join automatically)",
-                             ("follow", "unfollow", "check"))):
-            label = QtWidgets.QLabel(title)
-            label.setProperty("unlokHint", True)
-            card.add(label)
-            grid = QtWidgets.QGridLayout()
-            grid.setSpacing(3)
-            for i, key in enumerate(keys):
-                text, tip, fn = self._group_actions[key]
-                b = secondary_button(text, tip)
-                b.clicked.connect(lambda *_, f=fn: f())
-                grid.addWidget(b, i // 3, i % 3)
-            card.add_layout(grid)
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(3)
+        for i, key in enumerate(("select", "to_group", "new_group", "from_group", "check")):
+            text, tip, fn = self._group_actions[key]
+            b = secondary_button(text, tip)
+            b.clicked.connect(lambda *_, f=fn: f())
+            grid.addWidget(b, i // 3, i % 3)
+        card.add_layout(grid)
+        more = QtWidgets.QLabel("Right-click a section or group for the rest: move sections up / down (or drag "
+                                "them in Quick Plan), move to section, pin to tiles, follow Maya groups, stack, "
+                                "orientation, rename.")
+        more.setWordWrap(True)
+        more.setProperty("unlokHint", True)
+        card.add(more)
         self.tree_hint = hint_label("")
         card.add(self.tree_hint)
         col.addWidget(card)
@@ -11294,9 +11322,6 @@ class SmartUdimPanel(QtWidgets.QWidget):
         for w in (self.fix_lamina, self.fix_nonmanifold, self.fix_zero):
             w.setValue(True)
             grid.add_full(w)
-        self.uv_set = QtWidgets.QLineEdit("map1")
-        self.uv_set.setToolTip("UV set to check (and later lay out from).")
-        grid.add_row("UV set", self.uv_set)
         card.add(grid)
         run = primary_button("Run Pre-process")
         run.setMinimumHeight(28)
@@ -11356,13 +11381,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.auto_clean.setValue(True)
         self.auto_clean.setToolTip("Fix lamina, non-manifold and zero-area faces on the meshes being unwrapped.")
         grid.add_full(self.auto_clean)
-        self.auto_pack = CheckField("Fit each mesh into its UDIM tile (Smart Layout lays them out later)")
-        self.auto_pack.setValue(True)
-        self.auto_pack.setToolTip("After unwrapping, each mesh's shells are scaled to fill one tile: the tile "
-                                  "the current layout plan puts it in, else the one its group was laid out in, "
-                                  "else the tile its old UVs were in, else 1001 (no UVs yet). Meshes sharing a "
-                                  "tile overlap until Smart Layout lays them out.")
-        grid.add_full(self.auto_pack)
+        restore = secondary_button("Restore Backup", "Copy the backup set back into the UV set, for the selected "
+                                                     "meshes (or all of them when nothing is selected).")
+        restore.clicked.connect(lambda *_: self.restore_backup())
+        grid.add_full(restore)
         card.add(grid)
         analyse = secondary_button("Check UVs", "Optional: score every mesh's existing UVs (are there any, are "
                                                 "they stretched, overlapping or folded?) without changing "
@@ -11371,10 +11393,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                 "Skip it when you know everything unmarked needs UVs. Not texel "
                                                 "density: that's step 7.")
         analyse.clicked.connect(lambda *_: self.analyse_uvs())
-        restore = secondary_button("Restore Backup", "Copy the backup set back into the UV set, for the selected "
-                                                     "meshes (or all of them when nothing is selected).")
-        restore.clicked.connect(lambda *_: self.restore_backup())
-        card.add(button_row(analyse, restore))
+        card.add(analyse)
         mark_label = QtWidgets.QLabel("Selected meshes:")
         mark_keep = secondary_button("Keep UVs", "You've UV'd these but not laid them out: never re-unwrap them, "
                                                  "but still sort them into groups, scale them to texel density and "
@@ -11443,17 +11462,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.inspect_label)
         self.fix_btn = primary_button("Fix")
         self.fix_btn.clicked.connect(lambda *_: self.inspector_fix())
-        self.fix_u3d_btn = secondary_button("Re-unwrap with Unfold3D", "Unwrap the selected meshes again with "
-                                                                       "Maya's Unfold3D instead of the Unlok "
-                                                                       "unwrapper.")
-        self.fix_u3d_btn.clicked.connect(lambda *_: self.inspector_fix(UNWRAP_METHODS[1]))
         self.bad_faces_btn = secondary_button("Select bad faces", "Select the faces that make the score low "
                                                                   "(stretched, folded, overlapping, no UVs).")
         self.bad_faces_btn.clicked.connect(lambda *_: self.inspector_select_bad())
-        self.clear_btn = secondary_button("Clear problem", "The UVs are fine as they are: take the Problem flag "
-                                                           "off the selected meshes (they count as Auto UV'd).")
-        self.clear_btn.clicked.connect(lambda *_: self.inspector_clear())
-        self.inspect_row = button_row(self.fix_btn, self.fix_u3d_btn, self.bad_faces_btn, self.clear_btn)
+        self.inspect_row = button_row(self.fix_btn, self.bad_faces_btn)
         self.inspect_row.setVisible(False)
         card.add(self.inspect_row)
         self._inspected = []
@@ -11485,47 +11497,17 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_padding = IntField(0, 128, 0, 32)
         self.lay_padding.setValue(LAYOUT_DEFAULTS["padding_px"])
         more.add_row("Padding px", self.lay_padding, "Gap between shells and around each tile, in pixels.")
-        self.lay_growth = FloatField(0.0, 100.0, 0.0, 50.0, decimals=0, step=5.0)
-        more.add_row("Spare room %", self.lay_growth, "Leave this much extra space around every shell so small "
-                                                      "model changes still fit without moving anything.")
         self.lay_orient = ComboField(ORIENTATIONS)
         more.add_row("Orientation", self.lay_orient,
                      "Main axis: each shell's longest direction along U, lying flat (packs tightest).\n"
                      "Upright: world up along +V, so brick courses stay level and walls read upright.\n"
                      "Keep: never rotate (you already straightened them).\n"
                      "Override per group in the Orient column (or _up / _keep / _axis in the set name).")
-        self.lay_handsoff = ComboField(HANDSOFF_MODES)
-        more.add_row("Hands-off tiles", self.lay_handsoff,
-                     "What happens to the tiles your Hands off meshes sit in (step 6).\n"
-                     "Pack around them: other pieces fill the free space around them (no space wasted).\n"
-                     "Reserve their tiles: nothing else goes in those tiles. Simple and predictable, but a "
-                     "small hands-off piece can leave the rest of its tile empty.")
-        self.lay_rows = CheckField("Each section starts a new row")
-        self.lay_rows.setValue(True)
-        more.add_full(self.lay_rows)
-        self.lay_squares = CheckField("One square per material group")
-        self.lay_squares.setValue(True)
-        self.lay_squares.setToolTip("Each material group is packed into its own square: the smallest square its "
-                                    "shells fit at the texel density. A group bigger than a tile gets whole-tile "
-                                    "squares plus one for the rest. Squares never overlap, so a material never "
-                                    "ends up in another's gaps; a tile can hold several squares.\n"
-                                    "Off: shells of different groups share tiles freeform (tighter, harder to "
-                                    "read).")
-        more.add_full(self.lay_squares)
-        self.lay_similar = CheckField("Group similar shells into tidy blocks")
-        self.lay_similar.setValue(True)
-        self.lay_similar.setToolTip("Shells of nearly the same size (planks, bolts, brackets) are laid out next to "
-                                    "each other in a neat grid, like PolyRaven's size-based distribute.")
-        more.add_full(self.lay_similar)
-        self.lay_keep = CheckField("Keep each mesh's shells together")
-        self.lay_keep.setValue(True)
-        self.lay_keep.setToolTip("A mesh's shells are packed close together (a rope binding's strands, a lamp's "
-                                 "parts), so shells near each other in UV belong to the same mesh. Identical "
-                                 "meshes then line up as blocks.")
-        more.add_full(self.lay_keep)
-        self.lay_comp = CheckField("Auto-compensate pieces bigger than a tile")
-        self.lay_comp.setValue(True)
-        more.add_full(self.lay_comp)
+        self.lay_tidy = CheckField("Tidy blocks")
+        self.lay_tidy.setValue(True)
+        self.lay_tidy.setToolTip("Each mesh's shells stay together (a rope binding's strands, a lamp's parts), "
+                                 "and shells of nearly the same size (planks, bolts) line up in neat grids.")
+        more.add_full(self.lay_tidy)
         card.add(grid)
         card.add(more)
         quick_btn = secondary_button("Quick Plan", "Stage 1, instant, from the set names only (no mesh is read): "
@@ -11542,7 +11524,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                    "searches) or the scene's UVs, with section rows, tile numbers, "
                                                    "colour modes and click-to-select.")
         viewer_btn.clicked.connect(lambda *_: self.open_viewer())
-        self.labels_btn = CheckField("Labels in UV Editor")
+        self.labels_btn = CheckField("Labels in UV Editor", self)  # toggled from the UV Viewer
         self.labels_btn.setToolTip("Show tile borders, UDIM numbers and section names in Maya's own UV Editor: a "
                                    "helper mesh (unlokUdimLabels, doesn't render) is added to the selection. "
                                    "Untick to remove it.")
@@ -11560,16 +11542,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                           "around). One Ctrl+Z.")
         relayout.clicked.connect(lambda *_: self.relayout_selected())
         card.add(relayout)
-        card.add(self.labels_btn)
+        self.labels_btn.hide()
         self.udim_map = UdimMapWidget(self)  # kept for scripts; the UV Viewer button shows the layout
         self.udim_map.groupClicked.connect(self._map_clicked)
         self.udim_map.hide()
         self.layout_summary = hint_label("")
         card.add(self.layout_summary)
         col.addWidget(card)
-        for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
-                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp, self.lay_similar,
-                  self.lay_keep, self.lay_squares):
+        for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_orient,
+                  self.lay_tidy):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -11657,7 +11638,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                       len(snap["unassigned"]))
         elif snap["overlaps"]:
             self.next_banner.set_text("%d mesh(es) are in two groups. Highlight the right group and press "
-                                      "<b>Assign Selection</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
+                                      "<b>Move to Group</b>." % len(snap["overlaps"]), tag="CHECK", tone="warn")
         elif res and problems:
             self.next_banner.set_text("Validation found <b>%d problem(s)</b>%s. Click them in step 8 to select "
                                       "the faces." % (problems, (" and %d warning(s)" % warns) if warns else ""),
@@ -11677,31 +11658,25 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                       "this layout. Run <b>Auto UV</b> (step 6) first, or Apply to lay out the "
                                       "rest." % n, tag="CHECK", tone="warn")
         elif auto_done and self._plan is not None:
-            self.next_banner.set_text("Check the map in step 7 (hover for details), then press <b>Apply "
-                                      "Layout</b>.")
+            self.next_banner.set_text("Open the <b>UV Viewer</b> (step 7) to check the plan, then press "
+                                      "<b>Apply Layout</b>.")
         elif auto_done and not any(r["action"] in ("failed", "check") for r in self.auto_result["rows"]):
             self.next_banner.set_text("UVs are in place. Set the texel density in <b>step 7</b> and press "
                                       "<b>Plan</b> for an even-density UDIM layout.")
         elif auto_done:
-            rows = self.auto_result["rows"]
-            n_check = sum(1 for r in rows if r["action"] in ("failed", "check"))
-            if n_check:
-                self.next_banner.set_text("Auto UV done. <b>%d mesh(es)</b> still need a look (amber / red in step "
-                                          "6): click one to select it." % n_check, tag="CHECK", tone="warn")
-            else:
-                self.next_banner.set_text("Auto UV done: everything is unwrapped and packed into UDIMs. Polish "
-                                          "by hand from here; old UVs are in the backup set.", tag="DONE",
-                                          tone="done")
+            n_check = sum(1 for r in self.auto_result["rows"] if r["action"] in ("failed", "check"))
+            self.next_banner.set_text("Auto UV done. <b>%d mesh(es)</b> still need a look (amber / red in step "
+                                      "6): click one to see why." % n_check, tag="CHECK", tone="warn")
         elif not self.report:
-            self.next_banner.set_text("Check the groups in step 3, then <b>Run Pre-process</b>. No good UVs yet? "
-                                      "Press <b>Auto UV</b> in step 6 to unwrap and pack the lot.")
+            self.next_banner.set_text("Check the groups in step 3 (<b>Quick Plan</b> in step 7 shows them as "
+                                      "rows), then press <b>Auto UV</b> in step 6. Pre-process is optional.")
         elif skipped:
             self.next_banner.set_text("%d mesh(es) will be skipped (no UVs / instanced). Fix them and run "
                                       "<b>Pre-process</b> again, or carry on without them." % len(skipped),
                                       tag="CHECK", tone="warn")
         else:
             self.next_banner.set_text("Press <b>Auto UV</b> (step 6) to unwrap what isn't laid out and pack it "
-                                      "all into UDIMs, or <b>Analyse</b> to see the worst meshes first.")
+                                      "all into UDIMs, or <b>Check UVs</b> to see the worst meshes first.")
 
     def _summarise_steps(self, snap, asset, has_root, scanned, prepped, skipped, auto_done, res, problems, warns):
         """One line per step, shown while it's folded (progressive disclosure)."""
@@ -11796,12 +11771,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "fix_nonmanifold": self.fix_nonmanifold, "fix_zero": self.fix_zero, "uv_set": self.uv_set,
                 "auto_backup": self.auto_backup, "auto_backup_name": self.auto_backup_name,
                 "auto_keep": self.auto_keep, "auto_angle": self.auto_angle, "auto_clean": self.auto_clean,
-                "auto_method": self.auto_method, "auto_join": self.auto_join,
-                "auto_pack": self.auto_pack, "lay_density": self.lay_density,
+                "auto_method": self.auto_method, "auto_join": self.auto_join, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
-                "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
-                "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
-                "lay_similar": self.lay_similar, "lay_keep": self.lay_keep, "lay_squares": self.lay_squares,
+                "lay_padding": self.lay_padding, "lay_orient": self.lay_orient, "lay_tidy": self.lay_tidy,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -12013,6 +11985,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                          ", ".join(mat["odd"][:5]))
                     sitem.addChild(mitem)
                 sitem.setExpanded(not expanded or sec["set"] in expanded)
+            mats = [m for sec in snap["sections"] for m in sec["materials"]]
+            for c, used in ((self.COL_STACK, any(m["stack"] for m in mats)),
+                            (self.COL_ORIENT, any(m["orient"] for m in mats)),
+                            (self.COL_PIN, any(m["pin"] for m in mats))):
+                self.tree.setColumnHidden(c, not used)  # only once a group uses it (set it from the menu)
             notes = []
             if snap["unassigned"]:
                 notes.append("%d mesh(es) not in any group yet; press Scan." % len(snap["unassigned"]))
@@ -12351,15 +12328,30 @@ class SmartUdimPanel(QtWidgets.QWidget):
             if item and not item.isSelected():
                 self.tree.clearSelection()
                 item.setSelected(True)
-            keys = {"section": ("to_section", "del_section", "up", "down", "select", "follow", "unfollow"),
-                    "material": ("to_group", "select", "pin", "unpin", "follow", "unfollow")}.get(role, ())
-            keys = keys + ("from_group",) if "from_group" not in keys else keys
+            keys = {"section": ("select", "up", "down", "to_section", "new_group", "del_section", None, "follow",
+                                "unfollow"),
+                    "material": ("select", "to_group", None, "pin", "unpin", None, "follow", "unfollow")
+                    }.get(role, ("new_group",))
+            keys = keys + (None, "from_group", "check")
             menu = QtWidgets.QMenu(self)
+            menu.setToolTipsVisible(True)
             for key in keys:
+                if key is None:
+                    menu.addSeparator()
+                    continue
                 text, tip, fn = self._group_actions[key]
-                act = menu.addAction(text)
+                act = menu.addAction(text.replace("&&", "&"))
                 act.setToolTip(tip)
                 act.triggered.connect(lambda *_, f=fn: f())
+            if role == "material":  # the columns that only show once something is set
+                menu.addSeparator()
+                stacked = item.checkState(self.COL_STACK) == QtCore.Qt.Checked
+                st = menu.addAction("Stack identical pieces" + (" (on)" if stacked else ""))
+                st.setToolTip("Identical pieces share one spot in UV (one footprint for every copy).")
+                st.triggered.connect(lambda *_: item.setCheckState(
+                    self.COL_STACK, QtCore.Qt.Unchecked if stacked else QtCore.Qt.Checked))
+                orient = menu.addAction("Orientation: %s (click to cycle)" % item.text(self.COL_ORIENT))
+                orient.triggered.connect(lambda *_: self._item_double_clicked(item, self.COL_ORIENT))
             if role in ("section", "material"):
                 menu.addSeparator()
                 ren = menu.addAction("Rename")
@@ -12478,18 +12470,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _layout_settings(self):
         return {"texel_density": self.lay_density.value(), "map_size": self.lay_map.value(),
                 "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
-                "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
-                "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
-                "handsoff_tiles": self.lay_handsoff.value(), "group_similar": self.lay_similar.value(),
-                "keep_meshes": self.lay_keep.value(), "squares": self.lay_squares.value(),
-                "auto_compensate": self.lay_comp.value()}
+                "padding_px": self.lay_padding.value(), "orientation": self.lay_orient.value(),
+                "new_row_per_section": True, "group_similar": self.lay_tidy.value(),
+                "keep_meshes": self.lay_tidy.value(), "squares": True, "auto_compensate": True}
 
     def _update_layout_enabled(self):
         mode = self.lay_mode.value()
         self.lay_tiles.setEnabled(mode == "Fit to tiles")
         self.lay_tiles_label.setEnabled(mode == "Fit to tiles")
         self.lay_density.setEnabled(mode == "Fixed density")
-        self.lay_rows.setEnabled(mode != FIT_ROWS)  # that mode always gives each section its own row
 
     LIVE_REPLAN_WORK = 60000  # shells x packs per re-plan above which settings don't re-plan live
 
@@ -12527,7 +12516,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             try:
                 with Progress("Plan", [("read", 1)], status_progress(self.status)) as pr:
                     pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
-                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value())
+                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(),
+                                                     score_cache=self._score_cache)
             except Cancelled:
                 self._collected = None
                 self.set_status("Plan cancelled. Nothing changed.", level="warn")
@@ -12594,9 +12584,18 @@ class SmartUdimPanel(QtWidgets.QWidget):
         return tiles, rows
 
     @ui_safe
+    def _quietly(self, fn, *args):
+        """Run fn (making / deleting our own helper mesh) without our scene
+        callbacks queueing a refresh, which would drop the shells just read."""
+        self._quiet = True
+        try:
+            return fn(*args)
+        finally:
+            self._quiet = False
+
     def toggle_uv_editor_labels(self, on=True):
         if not on:
-            remove_uv_label_mesh()
+            self._quietly(remove_uv_label_mesh)
             self._uv_labels = None
             return
         tiles, rows = self._label_data()
@@ -12604,7 +12603,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("Nothing to label yet: Plan or Apply a layout first.", level="warn")
             self.labels_btn.setValue(False)
             return
-        self._uv_labels = build_uv_label_mesh(tiles, rows)
+        self._uv_labels = self._quietly(build_uv_label_mesh, tiles, rows)
         if self._uv_labels:
             with NoUndo():
                 cmds.select(self._uv_labels, add=True)
@@ -12619,7 +12618,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return
         if self._uv_labels and cmds.objExists(self._uv_labels):
             tiles, rows = self._label_data()
-            self._uv_labels = build_uv_label_mesh(tiles, rows)
+            self._uv_labels = self._quietly(build_uv_label_mesh, tiles, rows)
 
     # ------------------------------------------------------------ managing the layout
     def _groups_of_selection(self):
@@ -12693,7 +12692,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         try:
             with Progress("Re-layout", [("read", 1), ("write", 1)], status_progress(self.status)) as pr:
                 pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
-                col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(), only=groups)
+                col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(), only=groups,
+                                     score_cache=self._score_cache)
                 plan = make_plan(col, settings)
                 result = apply_layout(asset, col, plan, uv_set=uv_set, backup=self.auto_backup.value(),
                                       backup_set=self.auto_backup_name.text().strip() or "map1_backup",
@@ -12782,7 +12782,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             try:
                 with pr:
                     pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
-                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value())
+                    self._collected = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(),
+                                                     score_cache=self._score_cache)
                     pr.stage("fit", 46, "Finding the density")
                     self._plan = make_plan(self._collected, settings, progress=pr)
             except Cancelled:
@@ -12852,13 +12853,24 @@ class SmartUdimPanel(QtWidgets.QWidget):
         lines.extend(plan["warnings"][:4])
         self.layout_summary.setText("\n".join(lines))
 
+    def _plan_is_current(self):
+        """The plan on show matches the scene (shells still read) and the
+        current settings, so Apply can write it without planning again."""
+        plan, col = self._plan, self._collected
+        if plan is None or col is None or plan.get("quick") or self._worker is not None:
+            return False
+        if col.get("only") is not None:  # a re-layout of some groups, not a full plan
+            return False
+        s = plan.get("settings") or {}
+        return all(s.get(k) == v for k, v in self._layout_settings().items())
+
     @ui_safe
     def apply_layout(self):
         asset = self._asset()
         if asset is None:
             return
         self._replan_timer.stop()
-        if self.plan_layout(quiet=True) is None:  # always apply exactly what the current settings plan
+        if not self._plan_is_current() and self.plan_layout(quiet=True) is None:  # apply what the settings plan
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
@@ -12879,7 +12891,6 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.validation = None
         self.check_tree.clear()
         self.refresh()
-        self.plan_layout(quiet=True)  # re-read so the map shows what's in the scene now
         self._save_session()
         self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
             result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
@@ -13028,7 +13039,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     backup=self.auto_backup.value(),
                     backup_set=self.auto_backup_name.text().strip() or "map1_backup",
                     keep_score=self.auto_keep.value(), hard_angle=self.auto_angle.value(),
-                    clean_first=self.auto_clean.value(), pack="fit" if self.auto_pack.value() else False,
+                    clean_first=self.auto_clean.value(), pack="fit",
                     score="known",
                     unwrapper=self.auto_method.value(),
                     unwrap_opts={"sew": {"Compact shells": "compact", "Keep every cut": "off"}.get(
@@ -13076,9 +13087,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 self.colour_box.setValue(False)
                 self.set_status("Pick an asset first.", level="warn")
                 return
-            if self.colour_box.value():
-                if not self._scores():
-                    self.analyse_uvs()  # need scores to tell yellow from green
+            if self.colour_box.value():  # meshes nobody scored yet show grey (Unknown): no surprise scan
                 self._applied = {}
                 self._update_states()
                 self.set_status("Colouring meshes by UV status (your real materials come back when you untick "
@@ -13163,7 +13172,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._update_guidance()
 
     @ui_safe
-    def auto_uv(self, selected=False, unwrapper=None, force=False):
+    def auto_uv(self, selected=False, unwrapper=None, force=False, pack=None):
         asset = self._asset()
         if asset is None:
             self.set_status("Pick a root group first.", level="warn")
@@ -13185,9 +13194,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 opts["unwrapper"] = unwrapper
             if force:  # the inspector's Fix: unwrap even what a Check UVs once called good
                 opts["score"] = False
+            if pack is not None:
+                opts["pack"] = pack
             result = run_auto_uv(asset, progress_callback=self._progress, only=only,
                                  colours=self.colour_box.value(), score_cache=self._score_cache,
-                                 target_tiles=self._planned_tiles(), **opts)
+                                 target_tiles=self._planned_tiles() if opts["pack"] == "fit" else None, **opts)
         finally:
             self._progress_end()
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -13262,7 +13273,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 self._update_guidance()
                 return None
         self._chain_banner(2, 4, "Auto UV")
-        auto = self.auto_uv()
+        auto = self.auto_uv(pack=False)  # the layout places everything next: no per-tile fit first
         if not auto:
             self._update_guidance()
             return None  # cancelled or failed: auto_uv already said why
@@ -13328,7 +13339,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                   self._status_text(mesh, st, laid)])
                 item.setData(0, QtCore.Qt.UserRole, mesh)
                 item.setToolTip(0, mesh)
-                item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
+                item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Keep Layout, Hands off.")
                 self.auto_tree.addTopLevelItem(item)
             return
         colors = {"unwrapped": LEVEL_COLORS["fixed"], "kept": LEVEL_COLORS["info"],
@@ -13344,7 +13355,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                               r["action"], self._status_text(r["mesh"], status.get(r["mesh"],
                                                                                                    "auto"), laid)])
             self._auto_items[r["mesh"]] = (item, r)
-            item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
+            item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Keep Layout, Hands off.")
             item.setData(0, QtCore.Qt.UserRole, r["mesh"])
             item.setToolTip(0, r["mesh"])
             item.setToolTip(3, r["reason"] or r["action"])
@@ -13517,7 +13528,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         label, colour, meaning = UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])
         diag = None
         fn = _mesh_fn(m)
-        if fn is not None and fn.numPolygons <= 200000:  # keep the click snappy
+        if fn is not None and fn.numPolygons <= 20000 and (state in ("problem", "needs", "unknown") or
+                                                           self.step_auto.expanded):  # keep every click snappy
             detail = {}
             try:
                 s, why = uv_quality(m, uv_set, keep_score=self.auto_keep.value(), detail=detail)
@@ -13656,8 +13668,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         for cid in (om.MDagMessage.addParentAddedCallback(self._parent_added),
                     om.MDGMessage.addNodeAddedCallback(mark, "mesh"),
                     om.MDGMessage.addNodeRemovedCallback(mark, "mesh"),
-                    om.MDGMessage.addNodeAddedCallback(mark, "objectSet"),
-                    om.MDGMessage.addNodeRemovedCallback(mark, "objectSet")):
+                    om.MDGMessage.addNodeAddedCallback(self._set_added, "objectSet"),
+                    om.MDGMessage.addNodeRemovedCallback(self._set_added, "objectSet")):
             self._callbacks.append(cid)
             _registry()["callbacks"].append(cid)
         # New / Open: API scene messages fire during the file command itself
@@ -13674,6 +13686,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _parent_added(self, child, parent, client=None):
         """A DAG node got a parent (reparented, grouped, created, undone):
         note its path for follow_links. Maya callback: no scene edits here."""
+        if self._quiet:
+            return
         try:
             self._reparented.add(child.fullPathName())
             self._links_dirty = True
@@ -13684,11 +13698,35 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _mark_dirty(self, *args):
         """Something in the asset changed (an edit, an undo, a redo): refresh
         soon. Called from Maya callbacks, so it only starts a Qt timer."""
+        if self._quiet:
+            return
         self._dirty = True
         try:
             self._refresh_timer.start()
         except Exception:
             pass
+
+    def _set_added(self, node, *args):
+        """objectSet added / removed: shading groups (any material change,
+        our UV colours) aren't the asset's sets."""
+        try:
+            if om.MFnDependencyNode(node).typeName == "shadingEngine":
+                return
+        except Exception:
+            pass
+        self._mark_dirty()
+
+    def _timed_refresh(self):
+        """The refresh timer: only while the panel is on screen. Changes made
+        while another tab is up wait for showEvent (Rope Lashing previews,
+        other tools' meshes)."""
+        if self.isVisible():
+            self.refresh()
+
+    def showEvent(self, event):
+        super(SmartUdimPanel, self).showEvent(event)
+        if self._dirty:
+            self._refresh_timer.start()
 
     def _attr_changed(self, msg, plug, other, client=None):
         try:
@@ -13700,7 +13738,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _watch_sets(self):
         """Per-set change flags for this asset's sets (membership and
-        attributes such as locks), re-armed after every refresh."""
+        attributes such as locks), re-armed when the list of sets changes."""
+        asset = self._asset()
+        root = asset.root_set() if asset is not None else None
+        nodes = ([root] + list(_child_sets(root)) if root else []) + [
+            m for sec in (asset.sections() if asset is not None else []) for m in asset.materials(sec)]
+        key = tuple(cmds.ls(nodes, uuid=True) or ()) if nodes else ()
+        if key and key == getattr(self, "_watched", None) and self._set_callbacks:
+            return
+        self._watched = key
         reg = _registry()["callbacks"]
         for cid in self._set_callbacks:
             try:

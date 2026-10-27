@@ -468,9 +468,15 @@ density. The actual layout is still being built; see
    - **Delete Section:** its meshes go back to the section of the group
      they're in (or the first section).
    - **Move to Group / New Material Group** do the same for material groups
-     inside a section. Every button accepts groups as well as meshes,
-     right-clicking the list offers the same actions, and empty material
-     groups are tidied away. Each action is one Ctrl+Z.
+     inside a section. Every action accepts groups as well as meshes, and
+     empty material groups are tidied away. Each action is one Ctrl+Z.
+   - **Buttons vs right-click:** the step shows the everyday buttons
+     (Select, Move to Group, New Material Group, Section from Group, Check
+     & Fix Groups). Right-click a section or group for the rest: move
+     sections up / down (or drag them in Quick Plan), move to section,
+     delete section, pin / unpin, follow Maya groups, stack, orientation,
+     rename. The Stack, Orient and Pin columns only show once a group uses
+     them.
    - **Material groups:** come from the UnlokRenamer naming
      (`woodGreen_C_beam0001_GEP` goes into `woodGreen`). A variant letter
      after the colour makes its own group (`glassClearA`, `glassClearB`).
@@ -484,9 +490,8 @@ density. The actual layout is still being built; see
      `westWing_UDS`, which contains `td100_woodGreen`. Rename a set to
      `td150_woodGreen` to give it 150% texel density, or add `_stack` to
      stack identical shells. You can make sets by hand too.
-   - **In the tree:** double-click **TD %** to edit it, tick **Stack**,
-     **Assign Selection** to move meshes or faces between groups, **New
-     Group / New Section**, and **Move Up / Down** to set the section order.
+   - **In the tree:** double-click **TD %** to edit it; right-click for
+     stacking, orientation, pins and section order.
 4. **Naming issues:** lists meshes whose names break the convention, so you
    can fix them in UnlokRenamer and re-scan.
 5. **Pre-process:**
@@ -545,10 +550,8 @@ density. The actual layout is still being built; see
        - re-unwraps it, forced even if an old Check UVs called it good;
        - or, when its UVs already score fine and the red flag is just out
          of date, clears the flag.
-     - **Re-unwrap with Unfold3D** tries Maya's unwrapper instead.
      - **Select bad faces** selects the stretched, folded, overlapping or
        UV-less faces that pull the score down.
-     - **Clear problem** accepts the UVs as they are.
      - **Show only problems** filters the list down to the red meshes.
      - The scores' reasons now say what's wrong and how much, e.g. "12%
        stretched (over 4x off its shell), 3% overlapping".
@@ -714,13 +717,15 @@ density. The actual layout is still being built; see
      The whole run is one Ctrl+Z.
 
 7. **Smart layout**: the even-density UDIM layout.
-   - **One square per material group** (More options, on by default).
-     Each material group gets its own square: the smallest square its
-     shells fit at the texel density. A group bigger than a tile gets
-     whole-tile squares plus one smaller square for the rest. Squares never
-     overlap, so no material lands in another's gaps or corners. A tile can
-     hold several squares. Turn it off for the old freeform packing (tighter,
-     harder to read).
+   - **One square per material group.** Each material group gets its own
+     square: the smallest square its shells fit at the texel density. A
+     group bigger than a tile gets whole-tile squares plus one smaller
+     square for the rest. Squares never overlap, so no material lands in
+     another's gaps or corners. A tile can hold several squares.
+   - **Options:** Density, Map size and Mode up front; More options has
+     Padding, Orientation and Tidy blocks. Each section always starts a
+     new row, a piece bigger than a tile always lowers just its own group
+     (with a warning), and hands-off pieces are always packed around.
    - **Two stages:**
      - **Quick Plan** (a second or less): an overview to arrange and check
        before anything heavy runs. Each section gets a row, with its
@@ -761,7 +766,7 @@ density. The actual layout is still being built; see
      - Wheel zooms, middle-drag or Alt+drag pans, F frames. Hover a shell
        to see its mesh, group, section and density; click it to select the
        mesh.
-   - **Labels in UV Editor** (checkbox): tile borders, UDIM numbers and
+   - **Labels in UV Editor** (a UV Viewer button): tile borders, UDIM numbers and
      section names inside Maya's own UV Editor. They're drawn by a helper
      mesh, `unlokUdimLabels`, which doesn't render and is added to the
      selection (the UV Editor only shows selected meshes). It updates with
@@ -797,14 +802,11 @@ density. The actual layout is still being built; see
      then picks the quarter turn that points world Y up the tile, so planks,
      posts and pipes read the right way up for texturing. (Auto UV's
      per-mesh fit does the same.)
-   - **Group similar shells into tidy blocks** (More options, on by
-     default): shells of nearly the same size (planks, bolts, brackets) are
-     laid out side by side in a grid and packed as one block. It's like
-     PolyRaven's size-based distribute, rewritten from scratch.
-   - **Keep each mesh's shells together** (More options, on by default): a
-     mesh's shells are packed close together, so shells near each other in
-     UV belong to the same mesh (a rope binding's strands, a lamp's parts).
-     Identical meshes then line up as blocks.
+   - **Tidy blocks** (More options, on by default): a mesh's shells are
+     packed close together, so shells near each other in UV belong to the
+     same mesh (a rope binding's strands, a lamp's parts). Shells of nearly
+     the same size (planks, bolts, brackets) are laid out side by side in a
+     grid and packed as one block, like PolyRaven's size-based distribute.
    - **Managing a finished layout:**
      - **Fix one mesh:** click it; the inspector says what's wrong. **Fix**
        or **Auto UV Selected** re-unwraps just it. If you've edited it by
@@ -857,21 +859,13 @@ density. The actual layout is still being built; see
    - **Stacking:** in a group marked `_stack` (Stack column), identical
      pieces such as repeated windows or tiles share one spot, so they cost
      one footprint, not N. Validation knows these overlaps are intentional.
-   - **Hands-off tiles:** what happens to the tiles your Hands off meshes
-     sit in. Either way they stay exactly where they are, show hatched in
-     the map, and their tiles are never handed out as fresh tiles.
-     - *Pack around them* (default): other pieces fill the free space
-       around them, keeping the padding. Their own group gets first go.
-     - *Reserve their tiles:* nothing else goes in those tiles. The plan
-       warns when a hands-off piece fills under half its tile.
+   - **Hands-off pieces** stay exactly where they are, and their tiles are
+     never handed out as fresh tiles. Other squares fill the free space
+     around them, keeping the padding; their own group gets first go.
    - **Fit to tiles:** finds the highest density that fits your tile budget.
-   - **Auto-compensate:** lowers only a group whose piece is bigger than a
-     tile, and tells you so.
    - **Locks (Lock column):** a locked group keeps its UVs and its tiles stay
      reserved, so you can re-lay everything else around finished work.
      Groups whose geometry changed since they were laid out get flagged.
-     *Spare room %* leaves slack around every shell so small changes still
-     fit.
    - **Coverage:** written into the set names (`c222` = 2.22 tiles).
 
 8. **Check & hand off**:

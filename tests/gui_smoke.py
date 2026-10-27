@@ -533,11 +533,8 @@ def main():
     udim.plan_layout()
     check("UDIM map shows the hands-off piece", len(udim.udim_map.fixed) > 0 and
           "hands-off" in udim.layout_summary.text(), udim.layout_summary.text()[-200:])
-    udim.lay_handsoff.setValue("Reserve their tiles")
-    udim.plan_layout()
-    check("Hands-off tiles can be reserved instead", "tiles reserved" in udim.layout_summary.text(),
-          udim.layout_summary.text()[-200:])
-    udim.lay_handsoff.setValue("Pack around them")
+    check("Step 7 shows only the options people change", not hasattr(udim, "lay_handsoff") and
+          not hasattr(udim, "lay_rows") and not hasattr(udim, "lay_squares") and udim.labels_btn.isHidden())
     udim.plan_layout()
     pump()
     udim.lay_density.spin.setValue(1024.0)  # like a user edit: emits, so it live re-plans from cached shells
