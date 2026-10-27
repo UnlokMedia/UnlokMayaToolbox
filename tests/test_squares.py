@@ -153,6 +153,42 @@ def run():
     check("stacked groups place every copy in squares mode", got == len(g1["shells"]),
           "%d of %d" % (got, len(g1["shells"])))
 
+    # --- the largest shell caps the density; Fit largest shell lays out at it
+    top = tb["largest_shells"](col, base, 5)
+    fixed_s = dict(base, mode="Fixed density")
+    usable = 1.0 - 2.0 * float(base["padding_px"]) / float(base["map_size"])
+
+    def lowered(pl):
+        return [w for w in pl["warnings"] if "didn't fit a tile" in w]
+
+    def size_of(pl, r):
+        for g in col["groups"]:
+            for sh in g["shells"]:
+                if sh.mesh == r["mesh"] and sh.uv_ids == r["uv_ids"] and id(sh) in pl["placements"]:
+                    q = pl["placements"][id(sh)]
+                    return max(q[6], q[7])
+        return 0.0
+    at = tb["plan_layout"](col, dict(fixed_s, texel_density=top[0]["density"] * 0.999))
+    over = tb["plan_layout"](col, dict(fixed_s, texel_density=top[0]["density"] * 1.05))
+    got = size_of(at, top[0])
+    check("the largest shell's density makes it just fill a UDIM (inside the padding)",
+          top and abs(got - usable) < 0.01 and not lowered(at) and lowered(over) and
+          all(a["density"] <= b["density"] for a, b in zip(top, top[1:])),
+          "%d px/m -> %.4f of %.4f; over: %s" % (top[0]["density"], got, usable, lowered(over)[:1]))
+    fit = tb["make_plan"](col, dict(base, mode=tb["FIT_LARGEST"]))
+    check("Fit largest shell: that density for everything, nothing shrunk, squares clean",
+          abs(fit["density"] - top[0]["density"]) < 0.01 * top[0]["density"] and not lowered(fit) and
+          fit["largest"]["mesh"] == top[0]["mesh"] and not square_problems(tb, col, fit) and
+          len(fit["placements"]) == len(at["placements"]),
+          "%d px/m, %d tiles, %s" % (fit["density"], len(fit["new_tiles"]), lowered(fit)[:1]))
+    cmds.polyAutoProjection(top[0]["mesh"])  # cut the largest shell up: the cap goes up
+    after = tb["largest_shells"](tb["collect_shells"](asset), base, 1)
+    check("cutting the largest shell up raises the cap (planning again re-reads just that mesh)",
+          after and (after[0]["density"] > top[0]["density"] or after[0]["mesh"] != top[0]["mesh"]),
+          "%d -> %d px/m (%s)" % (top[0]["density"], after[0]["density"] if after else 0,
+                                  after and tb["short_name"](after[0]["mesh"])))
+    cmds.undo()
+
     # --- Quick Plan: from the set names only
     def no_meshes(*a, **k):
         raise RuntimeError("Quick Plan touched a mesh")

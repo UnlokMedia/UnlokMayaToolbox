@@ -5359,6 +5359,17 @@ class HandsOffFinder(object):
         return [dict(base, udim=udim, box=box, area=area) for udim, box, area in got]
 
 
+def _id_ranges(ids):
+    """Sorted ids as (first, last) runs, for compact component names."""
+    out = []
+    for i in sorted(ids):
+        if out and i == out[-1][1] + 1:
+            out[-1][1] = i
+        else:
+            out.append([i, i])
+    return [tuple(r) for r in out]
+
+
 def _clip_to_tiles(boxes):
     out = []
     for u0, v0, u1, v1, area in boxes:
@@ -8244,7 +8255,8 @@ LAYOUT_PIN = "unlokUdimPin"  # tiles a material group is pinned to: "1012" or "1
 LAYOUT_TILES = "unlokUdimTiles"
 LAYOUT_PRINT = "unlokUdimPrint"
 FIT_ROWS = "Fit sections to rows"
-LAYOUT_MODES = (FIT_ROWS, "Fixed density", "Fit to tiles")
+FIT_LARGEST = "Fit largest shell"
+LAYOUT_MODES = (FIT_ROWS, FIT_LARGEST, "Fixed density", "Fit to tiles")
 MAP_SIZES = ("1024", "2048", "4096", "8192")
 # Main axis: longest direction along U (lying flat). Upright: world up along +V
 # (brick courses stay horizontal, walls read upright). Keep: never rotate.
@@ -9536,11 +9548,75 @@ def plan_fit_rows(collected, settings, progress=None, on_attempt=None):
     return best
 
 
+def largest_shells(collected, settings, count=5):
+    """The shells that cap the texel density, largest first: for each, the
+    highest density (px/m, before group / section TD %) at which it still
+    fits one UDIM tile inside the padding. A Keep Layout mesh counts as one
+    block. [{"mesh", "uv_ids", "set", "key", "section", "density"}]; the
+    first is the largest shell, and its density is the most any layout
+    can give everything without shrinking something. Pure maths."""
+    s = dict(LAYOUT_DEFAULTS)
+    s.update(settings or {})
+    res = float(s["map_size"])
+    usable = (1.0 - 2.0 * float(s["padding_px"]) / res) / (1.0 + max(0.0, float(s["growth"])))
+    orientation = s.get("orientation") or "Main axis"
+    default_mode = _ORIENT_MODE.get(orientation, "axis")
+    keep_layout = set(collected.get("keep_layout") or ())
+    out = []
+    for g in collected["groups"]:
+        if g.get("quick"):
+            continue
+        tdp = g["td"] / 100.0
+        mode = g.get("orient") or default_mode
+        blocks = {}
+        for sh in g["shells"]:
+            if sh.mesh in keep_layout:  # one block: the whole mesh's arrangement
+                blocks.setdefault(sh.mesh, []).append(sh)
+                continue
+            _, w0, h0 = sh.dims.get(mode, sh.dims["axis"])
+            size = max(w0, h0) * math.sqrt(sh.area3d / sh.area_uv) * tdp  # tiles per (px/m / res)
+            if size > 0:
+                out.append({"mesh": sh.mesh, "uv_ids": sh.uv_ids, "set": g["set"], "key": g["key"],
+                            "section": g["section"], "density": usable * res / size})
+        for mesh, shells in blocks.items():
+            area3 = sum(sh.area3d for sh in shells)
+            auv = sum(sh.area_uv for sh in shells)
+            xs = [sh.cx + q[0] for sh in shells for q in sh.hull]
+            ys = [sh.cy + q[1] for sh in shells for q in sh.hull]
+            size = max(max(xs) - min(xs), max(ys) - min(ys)) * math.sqrt(area3 / auv) * tdp if auv > 0 else 0.0
+            if size > 0:
+                out.append({"mesh": mesh, "uv_ids": sorted(set(u for sh in shells for u in sh.uv_ids)),
+                            "set": g["set"], "key": g["key"], "section": g["section"],
+                            "density": usable * res / size})
+    out.sort(key=lambda r: (r["density"], r["mesh"], r["uv_ids"][:1]))
+    return out[:count] if count else out
+
+
+def plan_fit_largest(collected, settings, progress=None, on_attempt=None):
+    """Every shell at the density at which the largest shell just fills one
+    UDIM tile (largest_shells): nothing is shrunk, every group keeps its TD
+    %, and the layout takes as many tiles as that needs (a row per
+    section). plan['largest'] names the shell that set it."""
+    top = largest_shells(collected, settings, 1)
+    s = dict(settings, mode="Fixed density")
+    if top:
+        s["texel_density"] = top[0]["density"] * 0.999
+    plan = plan_layout(collected, s)
+    plan["settings"]["mode"] = FIT_LARGEST  # the panel's own settings, so Apply knows the plan is current
+    plan["settings"]["texel_density"] = settings.get("texel_density", LAYOUT_DEFAULTS["texel_density"])
+    plan["largest"] = top[0] if top else None
+    if on_attempt:
+        on_attempt(plan)
+    return plan
+
+
 def make_plan(collected, settings, progress=None, on_attempt=None):
     """on_attempt(plan) sees every layout tried (live viewer); it may raise
     Cancelled to stop the search (a newer plan superseded this one)."""
     if settings.get("mode") == FIT_ROWS:
         return plan_fit_rows(collected, settings, progress, on_attempt)
+    if settings.get("mode") == FIT_LARGEST:
+        return plan_fit_largest(collected, settings, progress, on_attempt)
     if settings.get("mode") == "Fit to tiles":
         return plan_fit_to_tiles(collected, settings, progress, on_attempt)
     plan = plan_layout(collected, settings)
@@ -11590,6 +11666,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         grid.add_row("Mode", self.lay_mode, "Fit sections to rows (default, foolproof): the highest density at "
                                             "which every section fits on its own row of UDIMs. Every shell gets "
                                             "that same density (times its TD %).\n"
+                                            "Fit largest shell: the density at which the largest shell just "
+                                            "fills one UDIM; everything else is smaller, so nothing is shrunk, "
+                                            "and it takes as many tiles as that needs. Find Largest Shell shows "
+                                            "which shell that is, so you can cut it and go again.\n"
                                             "Fixed density: use the density above.\n"
                                             "Fit to tiles: the highest density that fits in Max tiles.")
         self.lay_tiles = IntField(1, 1000, 1, 60)
@@ -11642,7 +11722,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                           "stays exactly where it is (its shells are worked "
                                                           "around). One Ctrl+Z.")
         relayout.clicked.connect(lambda *_: self.relayout_selected())
-        card.add(relayout)
+        largest = secondary_button("Find Largest Shell", "Select the largest UV shell (the one that caps the texel "
+                                                         "density: it has to fit one UDIM) and list the next few "
+                                                         "with the most density each allows. Cut it up, press "
+                                                         "this again, and repeat until the density is good. "
+                                                         "Changes nothing.")
+        largest.clicked.connect(lambda *_: self.find_largest_shell())
+        card.add(button_row(relayout, largest))
         self.labels_btn.hide()
         self.udim_map = UdimMapWidget(self)  # kept for scripts; the UV Viewer button shows the layout
         self.udim_map.groupClicked.connect(self._map_clicked)
@@ -12816,6 +12902,52 @@ class SmartUdimPanel(QtWidgets.QWidget):
         return result
 
     @ui_safe
+    def find_largest_shell(self, select=True):
+        """Select the largest UV shell (largest_shells: the one that caps the
+        density) and list the next few. Reads shells like Plan (only meshes
+        that changed since are read again), changes nothing."""
+        asset = self._asset()
+        if asset is None or not asset.sections():
+            self.set_status("Pick a root and Scan first.", level="warn")
+            return None
+        col = self._collected
+        if col is None or col.get("quick") or col.get("only") is not None:
+            uv_set = self.uv_set.text().strip() or "map1"
+            try:
+                with Progress("Find Largest Shell", [("read", 1)], status_progress(self.status)) as pr:
+                    pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
+                    col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(),
+                                         score_cache=self._score_cache)
+            except Cancelled:
+                self.set_status("Cancelled. Nothing changed.", level="warn")
+                return None
+            self._stop_worker()
+            self._collected, self._plan = col, None
+        settings = self._layout_settings()
+        top = largest_shells(col, settings, 6)
+        if not top:
+            self.set_status("No laid-out-ready shells to measure (run Auto UV first).", level="warn")
+            return []
+        first = top[0]
+        if select and cmds.objExists(first["mesh"]):
+            uvs = ["%s.map[%d:%d]" % (first["mesh"], a, b) for a, b in _id_ranges(first["uv_ids"])]
+            faces = cmds.polyListComponentConversion(uvs, fromUV=True, toFace=True) or []
+            cmds.select(faces or first["mesh"], replace=True)
+
+        def name(r):
+            sec = parse_group_name(r["section"])["key"] or short_name(r["section"])
+            return "%s (%s, %s)" % (short_name(r["mesh"]), r["key"], sec)
+        lines = ["Largest shell (selected): %s. The most density it allows is %d px/m at %s maps, %d px padding: "
+                 "Fit largest shell lays everything out at that." % (
+                     name(first), round(first["density"]), settings["map_size"], settings["padding_px"])]
+        if len(top) > 1:
+            lines.append("Next: " + "; ".join("%s %d px/m" % (name(r), round(r["density"])) for r in top[1:]))
+        lines.append("Cut it into smaller shells (or lower its group's TD %), then press Find Largest Shell again.")
+        self.layout_summary.setText("\n".join(lines))
+        self.set_status("Largest shell: %s, up to %d px/m." % (name(first), round(first["density"])))
+        return top
+
+    @ui_safe
     def quick_plan(self):
         """Stage 1 (quick_groups): a row per section, its materials listed by
         the row's name, and an estimated square per material from its 3D area
@@ -12933,6 +13065,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         lines = ["%d shells from %d groups -> %d tile(s) at %d px/m (%s map), planned in %.2fs." % (
             n_shells, len(col["groups"]), len(plan["new_tiles"]), round(plan["density"]),
             plan["settings"]["map_size"], seconds)]
+        big = plan.get("largest")
+        if big:
+            lines.append("Set by the largest shell, %s (%s): it just fills one UDIM. Find Largest Shell selects "
+                         "it." % (short_name(big["mesh"]), big["key"]))
         widest = plan.get("widest_section")
         if widest and widest[1] is not None:
             secs = sorted(set((g["section_index"], g["section"]) for g in col["groups"]))
@@ -13369,6 +13505,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                         else " (no backup: the Back up UVs box is off)",
                         ("%d px/m" % settings["texel_density"]) if settings["mode"] == "Fixed density" else
                         ("the best density for %d tiles" % settings["max_tiles"]) if settings["mode"] == "Fit to tiles"
+                        else "the density at which the largest shell fills one UDIM"
+                        if settings["mode"] == FIT_LARGEST
                         else "the highest density that fits each section on one row", settings["map_size"],
                         settings["orientation"].lower(),
                         "Locked groups keep their tiles. " if any(_get(m, LAYOUT_LOCK, False)

@@ -803,6 +803,24 @@ density. The actual layout is still being built; see
      Hands off pieces stay as they are. The summary says which section is
      widest and how many tiles it uses. *Fixed density* (your own px/m) and
      *Fit to tiles* (a tile budget) are still there.
+     - A very low density here means a section has too much UV area for
+       one row of 10 tiles. One big shell doesn't cause it: a shell too big
+       for a tile only lowers its own group, with a warning.
+   - **Mode: Fit largest shell.** Every shell gets the density at which the
+     largest shell just fills one UDIM (inside the padding). Everything else
+     is smaller, so nothing gets shrunk, groups keep their TD %, and the
+     layout takes as many tiles as that needs (still a row per section). The
+     summary names the shell that set it.
+   - **Find Largest Shell** (step 7): selects the largest shell's faces and
+     lists the next few, each with the most density it allows. It changes
+     nothing. To raise the density:
+     1. Cut that shell into smaller ones (or lower its group's TD %).
+     2. Press Find Largest Shell again.
+     3. Repeat until the density is good, then Plan.
+   - **Re-laying out after editing UVs is safe:** Plan re-reads every mesh
+     whose UVs changed and works out all sizes again. Locked groups keep
+     their tiles (unlock to re-lay them), and Keep Layout meshes move as
+     one block.
    - **Density:** every shell is scaled to exactly the target texel density,
      times its group's and section's TD %. A group renamed `td150_...` gets
      1.5x.

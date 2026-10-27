@@ -544,6 +544,20 @@ def main():
     check("changing a setting re-plans live (in the background)", "1024 px/m" in udim.layout_summary.text(),
           udim.layout_summary.text()[:120])
 
+    # --- Find Largest Shell and Fit largest shell
+    top = udim.find_largest_shell()
+    sel = cmds.ls(selection=True, long=True, flatten=True) or []
+    check("Find Largest Shell selects the largest shell's faces and lists the next ones",
+          top and sel and all(".f[" in s and s.startswith(top[0]["mesh"] + ".") for s in sel) and
+          "Largest shell" in udim.layout_summary.text(),
+          "%d faces | %s" % (len(sel), udim.layout_summary.text()[:120]))
+    udim.lay_mode.setValue(ns["FIT_LARGEST"])
+    udim.plan_layout()
+    pump()
+    check("Fit largest shell lays everything out at the largest shell's density",
+          udim._plan and abs(udim._plan["density"] - top[0]["density"]) < 0.01 * top[0]["density"] and
+          "Set by the largest shell" in udim.layout_summary.text(), udim.layout_summary.text()[:160])
+
     # --- background Plan, the UV Viewer and labels in Maya's UV Editor
     udim.lay_mode.setValue("Fit sections to rows")
     udim.plan_live()

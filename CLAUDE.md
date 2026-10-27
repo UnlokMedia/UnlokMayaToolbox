@@ -678,6 +678,17 @@
       - The per-group override is the `unlokUdimOrient` attribute plus the
         `_up` / `_keep` / `_axis` name token.
     - Placements are `(tile_u, tile_v, x, y, scale, angle, w, h)`.
+    - **Fit largest shell** (`FIT_LARGEST`, `plan_fit_largest`):
+      `largest_shells` gives each shell the most global density (before TD
+      %) at which its larger side, in its orientation, still fits inside
+      the padding: `usable * res / (side0 * sqrt(area3d / area_uv) * td%)`.
+      Keep Layout meshes count as one block. The plan is a Fixed density
+      plan at the lowest of those x 0.999, with `plan['largest']`. Its
+      settings keep the panel's mode and density, so `_plan_is_current`
+      works. The panel's *Find Largest Shell* selects the top shell's faces
+      (`_id_ranges` -> map components -> faces) and lists the next five.
+      The user's loop: cut the largest, find again, until the density is
+      good.
     - **Fit sections to rows** (`FIT_ROWS`, `plan_fit_rows`, the panel's
       default mode):
       - It bisects one density scale (like `plan_fit_to_tiles`) until every
