@@ -8274,6 +8274,125 @@ def fit_meshes_to_tiles(meshes, tiles, uv_set="map1", padding=8.0 / 2048, progre
     return out
 
 
+def mesh_tiles(meshes, uv_set="map1"):
+    """UDIMs each mesh's UVs touch, from one C++ bounding-box query per mesh
+    (handsoff_box: never reads UVs). {mesh: set(udim)}."""
+    out = {}
+    for m in meshes:
+        box = handsoff_box(m, uv_set)
+        if not box:
+            continue
+        u0, v0, u1, v1 = box
+        tiles = set()
+        for tv in range(int(math.floor(v0 + 1e-6)), int(math.floor(v1 - 1e-6)) + 1):
+            for tu in range(int(math.floor(u0 + 1e-6)), int(math.floor(u1 - 1e-6)) + 1):
+                if 0 <= tu < 10 and tv >= 0:
+                    tiles.add(1001 + tu + 10 * tv)
+        out[m] = tiles
+    return out
+
+
+def free_tile_for(meshes, others, uv_set="map1"):
+    """Where a quick look lays `meshes` out: the one UDIM they already share
+    if no other mesh uses it (pressing again re-lays them in place), else
+    the first UDIM nothing in `others` touches."""
+    used = set()
+    for tiles in mesh_tiles(others, uv_set).values():
+        used |= tiles
+    mine = set()
+    for tiles in mesh_tiles(meshes, uv_set).values():
+        mine |= tiles
+    if len(mine) == 1 and not mine & used:
+        return next(iter(mine))
+    udim = 1001
+    while udim in used:
+        udim += 1
+        if (udim - 1001) % 10 == 0 and udim > 1001 + 10 * 99:
+            break
+    return udim
+
+
+def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upright", udim=1001, keys=None):
+    """A quick look: every UV shell of `meshes` laid out together in one
+    UDIM, at the highest even texel density that fits, the neat way Smart
+    Layout does it: each material (keys: {mesh: material key}; one block
+    without) in its own square (mesh bundles, grids of similar pieces, rows
+    by height; long pieces of a material all lying the same way), squares
+    placed biggest first and never in each other's gaps. Not a plan: no
+    sets, tiles or density are stored, and Apply Layout later lays
+    everything out properly. Undoable (call it inside an UndoChunk).
+    Returns the number of shells placed."""
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    caches, claimed = {}, set()
+    shells = []
+    for m in meshes:
+        got, _ = _read_shells(m, None, uv_set, unit_scale, caches, claimed)
+        shells += [sh for sh in got if sh.area_uv > 0 and sh.area3d > 0]
+    if not shells:
+        return 0
+    mode = _ORIENT_MODE.get(orientation, "up")
+    pad = padding
+    usable = 1.0 - 2.0 * pad
+    limit = 1.0 - pad
+    by_key = {}
+    for sh in shells:
+        by_key.setdefault((keys or {}).get(sh.mesh, ""), []).append(sh)
+    base = {}  # material -> [(shell, k at density 1, angle, w, h)]
+    for key, group in by_key.items():
+        for sh, (a, w0, h0) in zip(group, _group_dims(group, mode)):
+            k0 = math.sqrt(sh.area3d / sh.area_uv)
+            base.setdefault(key, []).append((sh, k0, a, w0 * k0, h0 * k0))
+    hints = {}
+
+    def pack(s):
+        """[(square, x, y)] at density scale s, or None if it doesn't fit."""
+        squares = []
+        for key in sorted(base):
+            items = _sort_pieces([(sh, k * s, a, w * s, h * s) for sh, k, a, w, h in base[key]])
+            items = _similar_blocks(_mesh_bundles(items, 0.0, pad, usable, hints), 0.0, pad, usable)
+            cells = _by_height([(it,) + _piece_cell(it, 0.0, pad, limit) for it in items])
+            sq = _smallest_square(cells, limit, mode == "axis", hints, "together:" + key)
+            if sq is None:
+                return None
+            squares.append(sq)
+        pk = _TilePacker((0, 0), pad)
+        out = []
+        for sq in sorted(squares, key=lambda q: -q[3]):  # biggest first
+            spot = pk.find(sq[3], sq[3])
+            if spot is None:
+                return None
+            pk.place(spot, sq[3], sq[3])
+            out.append((sq, spot[3], spot[4]))
+        return out
+
+    hi = usable / max(max(w, h) for its in base.values() for _, _, _, w, h in its)  # the biggest piece fills a tile
+    best = pack(hi)
+    if best is None:  # bisect down to the highest density that fits
+        lo = 0.0
+        for _ in range(16):
+            mid = (lo + hi) / 2.0
+            got = pack(mid)
+            if got is not None:
+                lo, best = mid, got
+            else:
+                hi = mid
+    if best is None:
+        return 0  # too many shells for one UDIM even tiny (their padding alone fills it)
+    tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
+    by_mesh = {}
+    for sq, x, y in best:
+        for (sh, k, a, w, h), ox, oy in sq[0].leaves():
+            by_mesh.setdefault(sh.mesh, []).append((sh, x + ox, y + oy, k, a))
+    for m, placed in sorted(by_mesh.items()):
+        fn = _mesh_fn(m)
+        us, vs = fn.getUVs(uv_set)
+        us, vs = list(us), list(vs)
+        for sh, x, y, k, a in placed:
+            _place_shell(us, vs, sh, tu, tv, x, y, k, a)
+        write_uvs(m, uv_set, us, vs)
+    return sum(len(v) for v in by_mesh.values())
+
+
 AUTO_UV_STAGES = [("score", 8), ("clean", 4), ("backup", 2), ("project", 12), ("seams", 8), ("find", 3), ("unfold", 40),
                   ("fix", 10), ("pack", 12), ("check", 4)]
 
@@ -12066,6 +12185,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         row = button_row(run_auto, run_sel)
         row.layout().setStretch(0, 1)
         card.add(row)
+        quick_look = secondary_button("Auto UV + Lay Out Selected",
+                                      "A quick look as you go: Auto UV the selected meshes or groups, then lay "
+                                      "them out together in one UDIM of their own (the one they're in if nothing "
+                                      "else uses it, else the first free one), neat rows and grids at one "
+                                      "density, upright. Not the plan: Apply Layout later lays everything out "
+                                      "properly. Two Ctrl+Z steps (Auto UV, then the lay-out).")
+        quick_look.clicked.connect(lambda *_: self.auto_uv_lay_out_selected())
+        card.add(quick_look)
         self.auto_progress = QtWidgets.QProgressBar()
         self.auto_progress.setRange(0, 1000)
         self.auto_progress.setTextVisible(False)
@@ -13986,6 +14113,47 @@ class SmartUdimPanel(QtWidgets.QWidget):
             ("; %d backed up to %s" % (result["backups"], self.auto_backup_name.text())) if result["backups"]
             else ""), level=level)
         return result
+
+    @ui_safe
+    def auto_uv_lay_out_selected(self):
+        """Auto UV the selection, then lay it out together in one free UDIM
+        (lay_out_together): a quick look as you go, not the plan."""
+        asset = self._asset()
+        if asset is None or not asset.sections():
+            self.set_status("Pick a root and Scan first.", level="warn")
+            return None
+        meshes = sorted(self._items_in_root(selection_items()))
+        if not meshes:
+            self.set_status("Select the meshes or groups to Auto UV and lay out first.", level="warn")
+            return None
+        result = self.auto_uv(selected=True)
+        if result is None or result.get("cancelled"):
+            return None
+        status = asset.uv_status()
+        meshes = [m for m in meshes if cmds.objExists(m) and status.get(m) not in ("handsoff", "keeplayout")]
+        if not meshes:
+            self.set_status("Nothing to lay out: the selection is all Hands off / Keep Layout.", level="warn")
+            return None
+        uv_set = self.uv_set.text().strip() or "map1"
+        mine = set(meshes)
+        others = [m for m in asset.meshes()[0] if m not in mine]
+        udim = free_tile_for(meshes, others, uv_set)
+        res = float(self.lay_map.value())
+        assigned = asset.assignments()
+        keys = dict((m, (_get(assigned[m][0][0], UDIM_KEY) or parse_group_name(assigned[m][0][0])["key"]))
+                    for m in meshes if assigned.get(m))
+        with UndoChunk("Lay Out Selected"):
+            n = lay_out_together(meshes, uv_set, padding=self.lay_padding.value() / res,
+                                 orientation=self.lay_orient.value(), udim=udim, keys=keys)
+        self._collected, self._plan = None, None  # UVs moved: any plan on show is stale
+        self.refresh()
+        if not n:
+            self.set_status("Auto UV done, but the selection's shells don't fit one UDIM even small (too many for "
+                            "the padding): lay them out with Plan / Apply Layout.", level="warn")
+            return None
+        self.set_status("Auto UV, then laid out %d shell(s) from %d mesh(es) together in UDIM %d: a quick look. "
+                        "Apply Layout lays everything out properly." % (n, len(meshes), udim))
+        return udim
 
     def _chain_banner(self, step, total, text):
         self.next_banner.set_text("<b>Do It All</b>, step %d of %d: %s  (Esc stops it)" % (step, total, text),

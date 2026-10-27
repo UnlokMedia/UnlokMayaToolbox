@@ -391,6 +391,20 @@
     - `fit_meshes_to_tiles` packs each mesh's shells into its tile with
       `_pack_one_tile`.
     - `pack=True` is still the old `pack_udims` (one tile per group).
+  - **Auto UV + Lay Out Selected** (`auto_uv_lay_out_selected`, the user's
+    "quick look as I go"): `auto_uv(selected=True)`, then
+    `lay_out_together(meshes, udim=free_tile_for(...), keys=)` in its own
+    "Lay Out Selected" chunk. One square per material key (from
+    `asset.assignments()`, mesh level), the same neat machinery as the
+    squares layout (`_mesh_bundles`, `_similar_blocks`, `_smallest_square`,
+    `_group_dims`), squares placed biggest first with a `_TilePacker`;
+    the density scale starts where the biggest piece fills a tile and is
+    bisected down until everything fits. `free_tile_for` uses
+    `mesh_tiles` (one `polyEvaluate -boundingBox2d` per mesh via
+    `handsoff_box`, never a UV read): the selection's own single tile if
+    no other mesh touches it, else the first untouched UDIM. Nothing is
+    stored (no sets, tiles, density, laid-out tracking); it drops the
+    panel's `_collected` / `_plan`.
   - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
     `auto_uv()` -> `apply_layout()` (re-plans itself) -> `validate()`.
     - Each step method returns its result (None when cancelled or failed),

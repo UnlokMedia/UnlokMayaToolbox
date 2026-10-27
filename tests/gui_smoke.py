@@ -728,6 +728,20 @@ def main():
     for w in QtWidgets.QApplication.topLevelWidgets():  # the UV Editor it opened
         if w.isVisible() and "UV Editor" in (w.windowTitle() or ""):
             w.close()
+    # --- Auto UV + Lay Out Selected: a quick look in a UDIM of its own
+    meshes_now = udim._asset().meshes()[0]
+    status_now = udim._asset().uv_status()
+    pick = [m for m in meshes_now if status_now.get(m) is None][:3]
+    cmds.select(pick, replace=True)
+    quick = udim.auto_uv_lay_out_selected()
+    pump()
+    others_tiles = set()
+    for t in ns["mesh_tiles"]([m for m in meshes_now if m not in pick]).values():
+        others_tiles |= t
+    check("Auto UV + Lay Out Selected puts the selection together in a UDIM of its own",
+          quick and all(ns["mesh_tiles"]([m])[m] == {quick} for m in pick) and quick not in others_tiles and
+          "quick look" in udim.status.text(), "%s | %s" % (quick, udim.status.text()[:160]))
+
     # --- shells too big for a UDIM: the plan says so, Apply's split cuts them
     # at their 50% line and plans again (its Ctrl+Z: tests/test_squares.py)
     udim.lay_mode.setValue("Fixed density")

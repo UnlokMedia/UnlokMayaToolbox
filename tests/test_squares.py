@@ -329,6 +329,39 @@ def run():
                   late["handsoff_late"], whole, [(b[0], b[5]) for b in landed][:3]))
         cmds.undo()
 
+    # --- quick look: a selection laid out together in a free UDIM of its own
+    every = asset.meshes()[0]
+    picked = [m for m in every if "wall" in m or "column" in m][:8]
+    others = [m for m in every if m not in picked]
+    udim = tb["free_tile_for"](picked, others)
+    used_by_others = set()
+    for t in tb["mesh_tiles"](others).values():
+        used_by_others |= t
+    with tb["UndoChunk"]("Lay Out Selected"):
+        assigned = asset.assignments()
+        keys = dict((m, tb["_get"](assigned[m][0][0], tb["UDIM_KEY"]) or
+                     tb["parse_group_name"](assigned[m][0][0])["key"]) for m in picked if assigned.get(m))
+        n = tb["lay_out_together"](picked, udim=udim, keys=keys)
+    tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
+    inside = all(tb["mesh_tiles"]([m])[m] == {udim} for m in picked)
+    boxes, ratios = [], []
+    unit = tb["_UNIT_TO_M"][cmds.currentUnit(q=True, linear=True)] ** 2
+    for m in picked:
+        shells_, _ = tb["_read_shells"](m, None, "map1", unit, {}, set())
+        for sh in shells_:
+            xs = [sh.cx + q[0] for q in sh.hull]
+            ys = [sh.cy + q[1] for q in sh.hull]
+            boxes.append((min(xs), min(ys), max(xs), max(ys)))
+            ratios.append(sh.area_uv / sh.area3d)
+    clash = [1 for i, a in enumerate(boxes) for b in boxes[i + 1:]
+             if a[0] < b[2] - 1e-6 and b[0] < a[2] - 1e-6 and a[1] < b[3] - 1e-6 and b[1] < a[3] - 1e-6]
+    even = max(ratios) / min(ratios) < 1.05
+    cmds.undo()
+    check("Lay Out Selected: the selection together in a UDIM nothing else uses, even density, nothing overlapping",
+          n > 0 and udim not in used_by_others and inside and not clash and even,
+          "udim %d, %d shells, inside %s, %d box overlaps, density spread %.3f" % (
+              udim, n, inside, len(clash), max(ratios) / min(ratios)))
+
     # --- a floor too big for a UDIM: split at its thirds (40 m at 128 px/m on
     # 2048 maps: a tile holds 16 m), one Ctrl+Z, and then it fits whole parts
     yard = cmds.group(empty=True, name="yard_GRP", parent=root)

@@ -566,6 +566,15 @@ density. The actual layout is still being built; see
      work through an asset bit by bit. Each one is fitted into its own tile
      (see step 4 below); nothing else moves, and Hands off meshes are never
      touched.
+   - **Auto UV + Lay Out Selected:** a quick look as you go. Select some
+     meshes or groups, press it, and they're unwrapped and then laid out
+     together in one UDIM of their own: the one they already share if
+     nothing else uses it (press again to redo them in place), else the
+     first free one. Each material gets its own block, with neat rows and
+     grids at one even density, upright. It isn't the plan: nothing is
+     stored, and Apply Layout later lays everything out properly. Hands off
+     and Keep Layout meshes aren't moved. Two Ctrl+Z steps (Auto UV, then
+     the lay-out).
    - **Speed on big assets:**
      - Meshes whose projection is already clean (every edge's UV length
        the same multiple of its 3D length: walls, planks, boxes) skip
