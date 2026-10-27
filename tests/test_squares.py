@@ -216,6 +216,52 @@ def run():
         check("Quick Plan: hands-off pieces stay put and squares pack around them",
               boxes and not hit and g3["area"] < before and set(u for u, _ in boxes) <= set(qp3["tiles"]),
               "%d fixed boxes, overlaps %s, area %.2f -> %.2f" % (len(boxes), hit[:3], before, g3["area"] or 0))
+
+        # ...and it's never read: every per-UV reader is a trap for that mesh
+        touched = []
+        real = dict((n, tb[n]) for n in ("_mesh_fn", "uv_footprints", "mesh_fingerprint", "uv_quality",
+                                         "oversplit", "_mesh_cache"))
+
+        def trap(name):
+            def fn(xform, *a, **k):
+                if xform == mesh:
+                    touched.append(name)
+                    raise RuntimeError("read a Hands off mesh with %s" % name)
+                return real[name](xform, *a, **k)
+            return fn
+        tb.update(dict((n, trap(n)) for n in real))
+        errors = []
+        for label, call in (("Quick Plan", lambda: tb["quick_groups"](asset)),
+                            ("Plan", lambda: tb["collect_shells"](asset)),
+                            ("Validate", lambda: tb["validate_layout"](asset)),
+                            ("hand-off sheet", lambda: tb["render_handoff_sheet"](asset, px_per_tile=64))):
+            try:
+                call()
+            except Exception as e:
+                errors.append("%s: %s" % (label, e))
+        tb.update(real)
+        col_ho = tb["collect_shells"](asset)
+        spots = [fx for fx in col_ho["fixed"] if fx["mesh"] == mesh]
+        check("a Hands off mesh is never read (one UV-box query), in Quick Plan, Plan, Validate and the sheet",
+              not touched and not errors and spots, "%s %s, %d spot(s)" % (touched[:3], errors[:2], len(spots)))
+        # out of time: its group's tiles from the last layout are blocked whole
+        cmds.addAttr(g["set"], longName=tb["LAYOUT_TILES"], dataType="string") if not cmds.attributeQuery(
+            tb["LAYOUT_TILES"], node=g["set"], exists=True) else None
+        cmds.setAttr(g["set"] + "." + tb["LAYOUT_TILES"], "1005,1006", type="string")
+        real_finder = tb["HandsOffFinder"]
+        tb["HandsOffFinder"] = lambda uv_set="map1": real_finder(uv_set, budget=0.0)
+        try:
+            late = tb["collect_shells"](asset)
+            q_late = tb["quick_groups"](asset)
+        finally:
+            tb["HandsOffFinder"] = real_finder
+        whole = sorted(fx["udim"] for fx in late["fixed"] if fx["mesh"] == mesh and fx["box"] == (0.0, 0.0, 1.0, 1.0))
+        plan_late = tb["plan_layout"](late, dict(base, mode="Fixed density"))
+        landed = [b for b in plan_late["blocks"] if b[0] in (1005, 1006)]
+        check("past the time limit, its group's tiles are blocked whole and nothing else lands there",
+              late["handsoff_late"] == [mesh] and q_late["handsoff_late"] == [mesh] and whole == [1005, 1006] and
+              not [b for b in landed if b[4] != g["set"]], "late %s, blocked %s, landed %s" % (
+                  late["handsoff_late"], whole, [(b[0], b[5]) for b in landed][:3]))
         cmds.undo()
 
 try:

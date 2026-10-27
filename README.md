@@ -708,10 +708,16 @@ density. The actual layout is still being built; see
        every shell stays where it is relative to the others. The block is
        never turned, and is shrunk only if it can't fit in a tile (with a
        warning).
-     - **Hands off:** finished and already in their UDIM. Auto UV and the
-       layout never touch them (no unwrap, no backup copy, no moving), and
-       Auto UV's packing starts above their tiles. Validation still checks
-       them for overlaps, tile crossings and padding, but not for density.
+     - **Hands off:** finished and already in their UDIM, or too heavy or
+       fragile to be checked. Nothing reads them: no unwrap, no score, no
+       Pre-process, no backup copy, no moving. Plans, Validate, the sheet
+       and the UV Viewer only ask Maya for the box around their UVs (one
+       quick query per mesh, worked out inside Maya). Plans keep other
+       squares out of that box, so a hands-off piece that uses only a corner
+       of a tile still lets others share it. If finding them all takes over
+       20 seconds, the rest block their group's whole tiles from the last
+       layout instead. Validate only checks that the box is inside the UDIM
+       range.
      - **Auto:** back to normal, where the score decides.
    - About 7 s for a 47-mesh test building that includes a 19,000-face dome.
      The whole run is one Ctrl+Z.
@@ -738,8 +744,7 @@ density. The actual layout is still being built; see
        146 px/m on the test building).
        - Hands off pieces show where they sit (hatched), like in Plan, and
          the squares pack around them; their area isn't counted in their
-         group's square. They're the only meshes Quick Plan reads (their
-         UV footprints, remembered until they change).
+         group's square.
        - Drag a section's name up or down to reorder sections (one Ctrl+Z).
        - Click a square to select that group's meshes.
        - Drag a square onto a tile to pin the group there.

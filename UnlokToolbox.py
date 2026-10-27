@@ -5295,6 +5295,70 @@ def uv_footprints(xform, uv_set="map1", faces=None):
     return _clip_to_tiles(boxes.values())
 
 
+HANDSOFF_BUDGET = 20.0  # seconds a plan may spend locating Hands off meshes; then their groups' tiles are blocked
+
+
+def handsoff_box(xform, uv_set="map1"):
+    """(u0, v0, u1, v1) around a Hands off mesh's UVs, from one polyEvaluate
+    -boundingBox2d: worked out inside Maya (no UV comes into Python, the
+    current UV set stays as it is; about 0.1 s on 2M faces). None when it
+    has no UVs or Maya can't tell. Hands off is how people protect heavy,
+    fragile or deliberately odd meshes, so this is all anything reads."""
+    try:
+        (u0, u1), (v0, v1) = cmds.polyEvaluate(xform, boundingBox2d=True, uvSetName=uv_set)
+    except Exception:
+        return None
+    if u1 - u0 <= 0.0 and v1 - v0 <= 0.0:
+        return None
+    return float(u0), float(v0), float(u1), float(v1)
+
+
+class HandsOffFinder(object):
+    """Where a plan's Hands off meshes sit: each one's UV box (handsoff_box)
+    clipped to every UDIM tile it covers, so other pieces can share a tile
+    it barely uses. Once `budget` seconds are spent, the rest aren't
+    measured: spots() returns None and the caller blocks the group's whole
+    tiles instead (`late` lists them)."""
+
+    def __init__(self, uv_set="map1", budget=HANDSOFF_BUDGET):
+        self.uv_set = uv_set
+        self.budget = budget
+        self.spent = 0.0
+        self.late = []
+        self.memo = {}
+
+    def spots(self, xform):
+        if xform in self.memo:
+            return self.memo[xform]
+        if self.spent >= self.budget:
+            self.late.append(xform)
+            self.memo[xform] = None
+            return None
+        t = time.time()
+        box = handsoff_box(xform, self.uv_set)
+        self.spent += time.time() - t
+        out = []
+        if box and box[3] <= 100.0:  # past V 100 is no UDIM: nothing to keep clear
+            out = _clip_to_tiles([box + ((box[2] - box[0]) * (box[3] - box[1]),)])
+        self.memo[xform] = out
+        return out
+
+    def fixed(self, info, xform, blocked):
+        """Fixed pieces for one Hands off member of a group (dicts as in
+        collected['fixed']); `blocked` remembers tiles already blocked
+        whole for this group."""
+        got = self.spots(xform)
+        base = {"set": info["set"], "key": info["key"], "mesh": xform}
+        if got is None:  # out of time: its group's tiles from the last layout, whole
+            out = []
+            for t in info["tiles"]:
+                if (info["set"], t) not in blocked:
+                    blocked.add((info["set"], t))
+                    out.append(dict(base, udim=t, box=(0.0, 0.0, 1.0, 1.0), area=1.0))
+            return out
+        return [dict(base, udim=udim, box=box, area=area) for udim, box, area in got]
+
+
 def _clip_to_tiles(boxes):
     out = []
     for u0, v0, u1, v1, area in boxes:
@@ -8103,11 +8167,10 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
             t = time.time()
             avoid = set()
             all_handsoff = [m for m, st in status.items() if st == "handsoff"]  # not just the selection's
-            for m in all_handsoff:  # packing only needs the highest row they use: one read, no shell work
-                fn = _mesh_fn(m)
-                if fn is not None and uv_set in fn.getUVSetNames() and fn.numUVs(uv_set):
-                    top = int(math.floor(max(fn.getUVs(uv_set)[1])))
-                    avoid.add(1001 + 10 * max(0, top))
+            for m in all_handsoff:  # packing only needs the highest row they use: their UV box
+                box = handsoff_box(m, uv_set)
+                if box:
+                    avoid.add(1001 + 10 * max(0, min(99, int(math.floor(box[3])))))
             exclude = set(failed) | set(instanced) | set(all_handsoff)
             groups = None
             if only is not None:  # pack just the groups these meshes are in, around their finished members
@@ -8471,6 +8534,8 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             not_ready[xform] = bad
         return not bad
     handsoff = set(m for m, st in status.items() if st == "handsoff")
+    finder = HandsOffFinder(uv_set)  # Hands off meshes: one UV-box query each, never read
+    blocked = set()
     fixed = []  # hands-off shells: [{"set", "key", "mesh", "udim", "box", "area"}]
     caches = {}
     claimed = set()
@@ -8485,7 +8550,8 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             info = {"set": mat, "uuid": cmds.ls(mat, uuid=True)[0], "key": key, "section": sec,
                     "section_index": si,
                     "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
-                    "print": _group_print(members), "old_print": _get(mat, LAYOUT_PRINT, "") or "",
+                    "print": _group_print(dict((x, fs) for x, fs in members.items() if x not in handsoff)),
+                    "old_print": _get(mat, LAYOUT_PRINT, "") or "",
                     "stack": bool(_get(mat, UDIM_STACK, False)), "orient": _get(mat, UDIM_ORIENT, "") or None,
                     "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()],
                     "fixed": [], "pin": group_pin(mat)}
@@ -8493,6 +8559,11 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                 where = set()
                 for xform, faces in members.items():
                     if xform in exclude:
+                        continue
+                    if xform in handsoff:
+                        got = finder.fixed(info, xform, blocked)
+                        where.update(fx["udim"] for fx in got)
+                        kept_fixed.extend(got)
                         continue
                     for udim, box, area in uv_footprints(xform, uv_set, faces):
                         where.add(udim)
@@ -8511,9 +8582,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                 if xform in exclude:
                     continue
                 if xform in handsoff:
-                    for udim, box, area in uv_footprints(xform, uv_set, faces):
-                        info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
-                                              "area": area})
+                    info["fixed"].extend(finder.fixed(info, xform, blocked))
                     continue
                 if not ready(xform):
                     continue
@@ -8530,6 +8599,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     keep_layout = sorted(m for m, st in status.items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
+            "handsoff_late": sorted(finder.late),
             "keep_layout": keep_layout,
             "only": sorted(only) if only is not None else None}
 
@@ -8570,14 +8640,15 @@ def quick_groups(asset, budget=QUICK_AREA_BUDGET, uv_set="map1"):
     seconds; later groups get no area (listed, not drawn). plan_layout then
     gives each section a row and each measured group an estimated square.
 
-    Hands off meshes are the one exception to "no mesh is read": like the
-    real Plan, their UV footprints (uv_footprints, remembered per mesh until
-    it changes) become fixed pieces the squares pack around, and their area
-    is left out of their group's square. They're always read, budget or
-    not, since squares landing on top of them would be wrong."""
+    Hands off meshes are never read: like the real Plan, each one's UV box
+    comes from one Maya query (HandsOffFinder; blocked whole tiles after 20
+    s) and becomes a fixed piece the squares pack around, and their area is
+    left out of their group's square."""
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     t0 = time.time()
     handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
+    finder = HandsOffFinder(uv_set)
+    blocked = set()
     groups, locked, fixed = [], [], []
     for si, sec in enumerate(asset.sections()):
         sec_td = _get(sec, UDIM_TD, 100.0)
@@ -8594,16 +8665,15 @@ def quick_groups(asset, budget=QUICK_AREA_BUDGET, uv_set="map1"):
             mine = {}
             if handsoff:  # only sets can hold them: read the members just then
                 mine = dict((x, fs) for x, fs in expand_members(mat)[0].items() if x in handsoff)
-            for xform, faces in sorted(mine.items()):
-                for udim, box, area in uv_footprints(xform, uv_set, faces):
-                    info["fixed"].append({"set": mat, "key": info["key"], "mesh": xform, "udim": udim, "box": box,
-                                          "area": area})
+            for xform in sorted(mine):
+                info["fixed"].extend(finder.fixed(info, xform, blocked))
             if time.time() - t0 < budget:
                 info["area"] = _set_area(mat, unit_scale, skip=set(mine))
             groups.append(info)
             fixed.extend(info["fixed"])
     return {"groups": groups, "locked": locked, "skipped": [], "conflicts": 0, "fixed": fixed,
-            "handsoff": sorted(handsoff), "not_ready": {}, "keep_layout": [], "only": None, "quick": True}
+            "handsoff": sorted(handsoff), "not_ready": {}, "keep_layout": [], "only": None, "quick": True,
+            "handsoff_late": sorted(finder.late)}
 
 
 LAYOUT_SHELL_CAP = 4000  # more UV shells than this on one mesh = junk / over-split: layout skips it
@@ -9995,12 +10065,10 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
     for xform in meshes:
         if progress:
             progress.item(short_name(xform))
-        if xform in handsoff:  # finished work, often heavy: just check it's inside the UDIM range
-            fn = _mesh_fn(xform)
-            if fn is not None and uv_set in fn.getUVSetNames() and fn.numUVs(uv_set):
-                us, vs = fn.getUVs(uv_set)
-                if min(us) < -1e-6 or min(vs) < -1e-6 or max(us) > 10.0 + 1e-6:
-                    junk.append((xform, "Hands off, but its UVs are outside the UDIM range"))
+        if xform in handsoff:  # often heavy or fragile: only its UV box, worked out inside Maya
+            box = handsoff_box(xform, uv_set)
+            if box and (box[0] < -1e-6 or box[1] < -1e-6 or box[2] > 10.0 + 1e-6):
+                junk.append((xform, "Hands off, but its UVs are outside the UDIM range"))
             continue
         bad = oversplit(xform, uv_set)
         if bad:
@@ -10093,6 +10161,7 @@ def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
     outlined in its material colour, tile numbers, section names per row and a
     legend. Returns a QImage."""
     stored = layout_settings_of(asset)
+    handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
     groups = []
     for sec in asset.sections():
         sec_key = _get(sec, UDIM_KEY) or parse_group_name(sec)["key"]
@@ -10106,6 +10175,14 @@ def render_handoff_sheet(asset, uv_set="map1", px_per_tile=512):
     for g in groups:
         polys, edges = [], []
         for xform, faces in g["members"].items():
+            if xform in handsoff:  # never read: drawn as the box around its UVs
+                box = handsoff_box(xform, uv_set)
+                if box:
+                    u0, v0, u1, v1 = box[0], box[1], box[2] - 1e-6, box[3] - 1e-6
+                    corners = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+                    polys.append(corners)
+                    edges.extend((corners[i], corners[(i + 1) % 4]) for i in range(4))
+                continue
             fn = _mesh_fn(xform)
             if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
                 continue
@@ -10994,7 +11071,13 @@ class UVViewer(QtWidgets.QWidget):
                 for m in meshes:
                     pr.item(short_name(m))
                     key, mat, sec = owner.get(m, ("default", "", ""))
-                    for o in scene_shell_outlines(m, uv_set, unit, density):
+                    if status.get(m) == "handsoff":  # never read: the box around its UVs
+                        box = handsoff_box(m, uv_set)
+                        outlines = [{"box": box, "density": None, "hull": [
+                            (box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])]}] if box else []
+                    else:
+                        outlines = scene_shell_outlines(m, uv_set, unit, density)
+                    for o in outlines:
                         b = o["box"]
                         if b[0] < 0 or b[1] < 0 or b[0] >= 10:
                             continue
@@ -12462,6 +12545,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("Pick a root group first.", level="warn")
             return
         meshes, instanced = asset.meshes()
+        status = asset.uv_status()
+        meshes = [m for m in meshes if status.get(m) != "handsoff"]  # never checked, never fixed
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             t0 = time.time()
@@ -12838,6 +12923,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                      "meshes, drag a square to pin it. Then Plan packs the real shells."]
             if unsized:
                 lines.append("Not measured (time limit), listed on their row only: %s." % ", ".join(unsized[:8]))
+            if col.get("handsoff_late"):
+                lines.append("%d Hands off mesh(es) weren't located within %d s: their groups' tiles are blocked "
+                             "whole." % (len(col["handsoff_late"]), HANDSOFF_BUDGET))
             lines.extend(plan["warnings"][:3])
             self.layout_summary.setText("\n".join(lines))
             return
@@ -12857,6 +12945,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         changed = [st["key"] for st in plan["stats"].values() if st.get("changed") and not st.get("locked")]
         if changed:
             lines.append("Changed since last layout: %s." % ", ".join(sorted(set(changed))))
+        if col.get("handsoff_late"):
+            lines.append("%d Hands off mesh(es) weren't located within %d s: their groups' tiles are blocked "
+                         "whole." % (len(col["handsoff_late"]), HANDSOFF_BUDGET))
         if col.get("fixed"):
             lines.append("%d hands-off piece(s) stay put on tile(s) %s (%s)." % (
                 len(col["fixed"]), ", ".join(str(t) for t in plan.get("fixed_tiles", [])),
@@ -13545,9 +13636,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.step_auto.set_expanded(True, user=True)
         label, colour, meaning = UV_STATE_INFO.get(state, UV_STATE_INFO["unknown"])
         diag = None
-        fn = _mesh_fn(m)
-        if fn is not None and fn.numPolygons <= 20000 and (state in ("problem", "needs", "unknown") or
-                                                           self.step_auto.expanded):  # keep every click snappy
+        fn = _mesh_fn(m) if state != "handsoff" else None
+        if state != "handsoff" and fn is not None and fn.numPolygons <= 20000 and (
+                state in ("problem", "needs", "unknown") or self.step_auto.expanded):  # keep every click snappy
             detail = {}
             try:
                 s, why = uv_quality(m, uv_set, keep_score=self.auto_keep.value(), detail=detail)

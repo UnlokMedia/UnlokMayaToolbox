@@ -566,10 +566,10 @@
       `_estimate_squares` / `SQUARE_FILL` (0.45: 145 vs 146 px/m on the test
       building) and gives every Quick Plan section its row even with no
       squares. The viewer lists each row's materials in its name band.
-      Hands off meshes are the one thing it reads per mesh: their
-      `uv_footprints` (cached) become `fixed` pieces the squares pack
-      around (the user caught squares landing on them), and `_set_area`
-      skips them. `expand_members` runs only when the asset has any.
+      Hands off meshes become `fixed` pieces from `HandsOffFinder` (one
+      UV-box query each, never read), so squares pack around them (the
+      user caught squares landing on them), and `_set_area` skips them.
+      `expand_members` runs only when the asset has any.
       It's for arranging and debugging: in the viewer a section's name
       band drags to another row (`UVCanvas` row drag ->
       `UVViewer.drop_section` -> `move_section_to`, one Ctrl+Z), a click on
@@ -735,12 +735,24 @@
   - The engine default is still `score=True` (score first), so tests and
     scripts keep the old behaviour.
   - The after-check covers only what was unwrapped.
-- **Hands off meshes stay cheap everywhere:**
-  - never scored
-  - `uv_footprints` reads whole meshes per UV and remembers them by
-    fingerprint (`_FOOTPRINTS`)
-  - Auto UV packing only reads their top V row
-  - Validate only range-checks them
+- **Hands off meshes are never read** (2026-10-27, the user's rule: Hands
+  off is how they protect dense, fragile or deliberately odd meshes that
+  would crash UV checks):
+  - Never scored, never pre-processed (Pre-process skips them), never
+    diagnosed by the inspector.
+  - The one thing anything asks is `handsoff_box`: `polyEvaluate
+    -boundingBox2d -uvSetName` works the box out inside Maya, without
+    changing the current UV set (0.1 s on 2M faces).
+  - `HandsOffFinder` (Plan and Quick Plan) clips that box to each UDIM it
+    covers, so other squares can share a tile it barely uses. After
+    `HANDSOFF_BUDGET` (20 s) the rest go in `late` (`handsoff_late`), and
+    their group's stored tiles (`LAYOUT_TILES`) are blocked whole.
+  - Validate range-checks the box. The sheet and the viewer's Read Scene
+    UVs draw the box. The old group packing takes its top row from it.
+  - `_group_print` leaves them out.
+  - Don't add `uv_footprints`, `mesh_fingerprint`, `_mesh_fn` UV reads,
+    `uv_quality` or `oversplit` calls on them; `tests/test_squares.py`
+    traps all of those.
   - one-shader meshes skip the per-face shading loop (`_shading_of`,
     `shader_face_groups`)
 
