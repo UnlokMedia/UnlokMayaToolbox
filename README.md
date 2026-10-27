@@ -622,15 +622,24 @@ density. The actual layout is still being built; see
        rest copy its UVs (scaled if the copy is scaled). A combined grid of
        36 pegs costs about the same as one peg.
      - **Hard surface or organic:** each piece is sorted by its edges.
-       - **Hard surface** (flat areas, hard or sharp edges) is cut along
-         hard edges and edges sharper than *Seam angle*. When a mesh mixes
-         hard and soft edges, its soft edges are trusted as "one surface":
-         only hard edges (and anything sharper than 80 degrees) are cut, so
-         a low-poly pipe's soft sides stay one tube even when it bends.
-         Each part is then
-         unfolded at its true size, and the parts are sewn back together
-         wherever they lie flat without overlapping, like unfolding a box.
-         A box or a plank comes out as one shell with no stretch.
+       - **Hard surface** (flat areas and folds) is unwrapped like this:
+         1. The mesh's own hard edges are ignored, as if every edge were
+            softened. Imports leave stray hard edges across flat walls and
+            floors, and those used to chop them up.
+         2. Only real folds are cut: edges sharper than *Seam angle*. A
+            flat or gently bent surface is never cut through, however
+            messy its topology. Boolean slivers can't fake a fold.
+         3. The parts are sewn back into box unfolds: only round outside
+            corners (an inside corner is where a leg meets a rail, or a
+            wall a floor, so those parts stay apart), only while the shell
+            stays compact, with nothing lying on itself. Joins are rigid,
+            so nothing stretches. A box, a crate or a plank comes out as
+            one shell; a railing comes out as its rail plus one shell per
+            leg.
+         4. Whatever doesn't make a nice unfold stays cut at its folds.
+         5. Every shell is turned square to the grid (its tightest box
+            along U and V), the mesh's up pointing up the tile, so a house
+            turned off the world grid still gives square walls.
        - **Organic** (smoothly curved everywhere) only cuts very sharp
          edges. A closed shape gets one pelt cut between its two farthest
          points, and the result is relaxed.
@@ -649,32 +658,23 @@ density. The actual layout is still being built; see
          again.
      - **Tubes, planks and boxes** (posts, pipes, beams, planks, crates,
        bolts, bevelled or not) come out as one straight strip plus their
-       caps.
+       caps, but only when what's left after cutting the caps really is a
+       tube (a railing or a wall with n-gons used to come out as one
+       windy, stretched shell).
        - The caps are found by shape: n-gon caps, or faces looking along
          the piece's axis. So a bevel or soft shading can't merge a cap into
          the side, which used to bend the side into a banana or a star.
        - The side unrolls straight onto a rectangle, even when the pipe
          bends, and the caps are sewn on at the ends.
-     - **Hard edges** count only when they're the minority (soft sides,
-       hard caps). A bevel often hardens every edge, and cutting them all
-       shredded posts into strips.
      - **Tiny bits** (bevel corners, slivers) are merged into a neighbour
        before flattening. A small leftover shell is sewn on as a flap only
        where it shares a good stretch of edge (30% of its outline), so round
        caps and bolt heads are their own shells instead of hanging off a
        corner. Tiny few-sided bevel corners still go on.
      - **Join shells:**
-       - *As few shells as possible* (default): sew everything that fits.
-         Joining it all is right for planks, boxes and pipes, not for
-         branchy boxy pieces: a low-poly railing with legs and a corner
-         came out as one windy arc with the legs hanging off. When a boxy
-         piece (flat faces and real folds, nothing gently curved) leaves a
-         big shell filling little of its box, it's unwrapped plainly
-         instead: every edge cut, then faces rejoined (same-plane faces
-         first) only while each shell stays a near-rectangle. The railing
-         becomes long rail strips plus one net per leg.
-       - *Compact shells*: sew only while the shell stays compact, which
-         packs tighter.
+       - *As few shells as possible* (default): sew into box unfolds as
+         above. Two matching end caps go on the same side (symmetric).
+       - *Compact shells*: sew only near-rectangles, which packs tighter.
        - *Keep every cut*: leave a seam on every hard and sharp edge.
      - **Big curved parts** (over 6,000 triangles, e.g. a dense dome or
        rock) are relaxed coarse-to-fine, still without Unfold3D:

@@ -912,11 +912,57 @@
       `_uw_tutte(bpos=)` fills it, then ARAP relaxes it. A circle start
       never converged for long bent tubes.
     - `_uw_multilevel(bpos=)` uses the same start on its coarse level.
-  - **Soft edges:** `_uw_seams` and `_uw_kind` trust hardness only when
-    hard edges are under half of a piece's edges (soft sides, hard caps).
-    Then only hard edges plus anything over `organic_angle` are cut.
-    `polyBevel3` hardens about 86% of edges; cutting them all shredded
-    posts into strips that sewed into stars.
+  - **The user's recipe (2026-10-27): soften, cut the folds, sew box
+    unfolds, else leave it cut, never cut through flat planes.**
+    - **Hardness is ignored:** `_uw_seams` / `_uw_kind` go by fold angle
+      only (`hard_angle`), as if every edge were softened first. Imports
+      leave stray hard edges across flat walls and floors, and trusting
+      them chopped those planes. (The old rule trusted hardness when it
+      was the minority; a low-poly pipe's 45-degree sides are now cut and
+      sewn back into one strip instead.)
+    - **Slivers** (`_uw_prepare`): faces with next to no width against
+      the mesh (2 x area <= 1e-4 x longest edge x mesh size: boolean
+      leftovers) borrow the normal of the neighbour across their longest
+      edge for fold angles (`fold_nrm`), so they can't fake a fold in a
+      flat wall. A ratio test (area vs longest edge) also caught long thin
+      bevel strips and broke soft planks; don't use one.
+    - **Inside corners never sew** (`m["concave"]`: g's centre in front of
+      f's plane). A box unfolds round its outside corners; an inside
+      corner is where two parts meet (a leg under a rail, a wall on a
+      floor), so legs never hang off a rail.
+    - **Box unfolds only:** a join (main pass and flaps) must leave the
+      shell filling `box_fill` (0.48; a cube's cross is 0.5; "compact":
+      `sew_fill` 0.7) to 101% of its tightest box (`_tight_box_area`;
+      over 100% means it lies on itself), and `_uw_tris_overlap` (points
+      just inside each triangle tested against the other side; only up to
+      4,000 triangles) finds no faces lying flush on each other.
+    - **Caps shortcut only on real tubes:** `_uw_tube_split` checks that
+      cutting the caps leaves only discs and rings (skipped over 5,000
+      faces: a dome cost a second more and has no railings). A railing
+      (rail plus legs: a sphere with many holes) or a wall with n-gons got
+      the shortcut and came out as one windy, stretched shell.
+    - `_uw_absorb_small` never merges across folds over 60 degrees: a
+      window's reveal glued to its wall can't lie flat (it was relaxed).
+    - **Square on** (`_uw_straighten`, in `_uw_spread`): each shell's
+      tightest box goes along U and V, then a quarter turn puts the mesh's
+      +Y (object space; `_uw_read` reads object points) up the tile, or a
+      flat-lying piece's long side along U.
+    - **Symmetric caps:** flaps of equal edge length go on the edge nearest
+      the middle of the shell they join, so a plank's two end caps sit on
+      one column of its strip.
+    - **Writing at boolean seams** (`_uw_write`): Maya keeps one UV for
+      faces on different sides of a non-manifold spot even with every edge
+      cut, and `polyForceUV -unshare` does nothing (no
+      `polySplitTextureUV` in 2024). `assign()` puts such a UV where the
+      biggest faces (3D area) want it, so the wall keeps its shape and a
+      hidden back-to-back face is squashed; the write counts as planned
+      when the faces that lost out are under 2% of the mesh. First come
+      used to win, and a house wall came out folded.
+    - The plain-cut fallback tried first (cut every face, rejoin only
+      near-rectangles when a boxy piece came out windy) chopped flat slabs
+      with holes into 46 shells and was removed.
+    - Tests: `tests/test_unlok_unwrap.py` (railing with inset legs, stray
+      hard edges, holed slab, a turned boolean house, a post's caps).
   - **Caps** (layout quality, 2026-10-27; `tests/bench_uv_quality.py`
     scores it):
     - `_uw_poly_caps`: n-gon or pole-fan seeds grown over the flat cap.
@@ -939,28 +985,10 @@
     groups (under 20% of the biggest, aspect <= 6) along one edge, but
     only when the edges that line up afterwards (`_flap_contact`, all of
     them, not just the aligning one) make 30% of the flap's outline
-    (`flap_contact`). The user found caps hung off a corner by one edge
-    "cut in weird places". Crumbs (under 3% of the biggest, <= 9 outline
+    (`flap_contact`) and the shell stays a box unfold (above). The user
+    found caps hung off a corner by one edge "cut in weird places". Crumbs (under 3% of the biggest, <= 9 outline
     edges: bevel corners) still go on by any edge; loose they shattered
     planks into 10 shells. Organic pieces sew flaps only (`sew="flaps"`).
-  - **Plain cuts** (the user: "sometimes I'd rather it just cut along all
-    hard edges"): in `_uw_mesh`, a hard piece sewn in "max"/"compact" is
-    scored by `_uw_fill_score` (UV area / tightest box per sewn shell).
-    If a shell with 10%+ of the area fills under 0.45 (or under
-    `windy_fill` 0.7 on pieces over 24 faces: a single box's cross net
-    fills 0.5 and stays), the piece is `_uw_boxy` (under 10% of edge
-    length gently curved; a bent strip shattered into 221 shells without
-    this) and has at most `PLAIN_MAX_FACES`, it's unwrapped again with
-    `plain=True`: every edge cut, no caps shortcut, no `_uw_absorb_small`,
-    sewing same-plane faces first, each join kept only if the shell fills
-    `plain_fill` (0.85) to 101% of its tightest box (over 100% means it
-    lies on itself) and `_uw_tris_overlap` finds no stacked faces (the
-    edge-crossing test misses flush overlaps), and no flap pass. Kept when
-    its mean fill beats the first try by 0.05 (`stats["plain"]`). The
-    test railing (`tests/test_unlok_unwrap.py`) went from a windy arc
-    with legs to 12 rectangular shells.
-  - **No stars:** joins leaving the shell under 12% of its box are refused,
-    even in "max".
   - **Defaults:** the engine still defaults to Unfold3D
     (`run_auto_uv(unwrapper=None)`), so old tests keep their behaviour.
 - **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose

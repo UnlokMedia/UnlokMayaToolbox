@@ -5890,11 +5890,10 @@ UNWRAP_METHODS = ("Unlok (fast)", "Unfold3D (Maya)")
 UNWRAP_DEFAULTS = {
     "hard_angle": 40.0,  # hard surface: cut edges sharper than this, and hard edges
     "organic_angle": 80.0,  # organic: only cut edges sharper than this
-    "sew": "max",  # "max": join all it can; "compact": only while the shell stays compact; "off"
-    "sew_fill": 0.35,  # "compact": joined shells must fill this much of their box
+    "sew": "max",  # "max": join into box unfolds; "compact": only near-rectangles; "off"
+    "box_fill": 0.48,  # "max": a join must leave the shell filling this much of its tightest box (a cube's cross: 0.5)
+    "sew_fill": 0.7,  # "compact": the same, stricter
     "flap_contact": 0.3,  # a small leftover piece joins a shell only along this share of its outline
-    "windy_fill": 0.7,  # hard piece: a big shell filling less of its box than this -> try plain cuts
-    "plain_fill": 0.85,  # plain cuts: joins only while the shell fills this much of its tightest box
     "planar_angle": 6.0,  # a chart whose faces all stay within this of its normal is projected
     "relax_iterations": 16,
     "multilevel_from": 6000,  # triangles: bigger curved charts relax coarse-to-fine
@@ -5987,6 +5986,41 @@ def _uw_prepare(m):
         area.append(ln * 0.5)
         nrm.append((nx / ln, ny / ln, nz / ln) if ln > 0 else (0.0, 0.0, 0.0))
     m["base"], m["edges"], m["nrm"], m["area"] = base, edges, nrm, area
+    # Slivers (boolean leftovers: next to no width, against the mesh) have
+    # unreliable normals, so they'd fake folds in the middle of a flat wall
+    # and cut it. For fold angles each takes the normal of the neighbour it
+    # shares its longest edge with (the plane it lies in).
+    fold_nrm = list(nrm)
+    size = max([max(q[k] for q in pts) - min(q[k] for q in pts) for k in range(3)] or [1.0]) or 1.0
+    slivers = []
+    for f, fv in enumerate(faces):
+        c = len(fv)
+        longest = 0.0
+        for i in range(c):
+            pa, pb = pts[fv[i]], pts[fv[(i + 1) % c]]
+            longest = max(longest, (pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2)
+        if 2.0 * area[f] <= 1e-4 * math.sqrt(longest) * size:  # next to no width (not a thin bevel strip)
+            slivers.append(f)
+    for _ in range(3):  # a few passes: slivers next to slivers
+        for f in slivers:
+            fv = faces[f]
+            c = len(fv)
+            best = None
+            for i in range(c):
+                a, b = fv[i], fv[(i + 1) % c]
+                pa, pb = pts[a], pts[b]
+                ln = (pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2
+                for g, _j in edges[(a, b) if a < b else (b, a)]:
+                    if g != f and fold_nrm[g] != (0.0, 0.0, 0.0) and (best is None or ln > best[0]):
+                        best = (ln, g)
+            if best is not None:
+                fold_nrm[f] = fold_nrm[best[1]]
+    cent = []
+    for fv in faces:
+        k = float(len(fv))
+        cent.append((sum(pts[v][0] for v in fv) / k, sum(pts[v][1] for v in fv) / k, sum(pts[v][2] for v in fv) / k))
+    span = max([abs(c) for q in pts for c in q] or [1.0]) or 1.0
+    concave = set()
     # edge -> cosine of its dihedral angle, or None where it must always be cut
     # (open border, non-manifold, flipped neighbours)
     dcos = {}
@@ -5998,9 +6032,14 @@ def _uw_prepare(m):
         if faces[f][i] == faces[g][j]:  # both run the same way: normals disagree
             dcos[key] = None
             continue
-        a, b = nrm[f], nrm[g]
+        a, b = fold_nrm[f], fold_nrm[g]
         dcos[key] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+        if dcos[key] < 0.999:  # a fold: inside (valley) when g's middle sits in front of f
+            cf, cg = cent[f], cent[g]
+            if a[0] * (cg[0] - cf[0]) + a[1] * (cg[1] - cf[1]) + a[2] * (cg[2] - cf[2]) > 1e-9 * span:
+                concave.add(key)
     m["dcos"] = dcos
+    m["concave"] = concave
 
 
 def _uw_pieces(m):
@@ -6078,9 +6117,7 @@ def _uw_kind(m, pf, opts):
         for i in range(len(fv)):
             a, b = fv[i], fv[(i + 1) % len(fv)]
             keys.add((a, b) if a < b else (b, a))
-    n_hard = len(keys & hard)
-    if not n_hard or n_hard >= 0.5 * len(keys):
-        hard = set()  # all hard (or all soft) says nothing about the shape
+    hard = set()  # existing hard edges say nothing (imports leave them anywhere): as if softened, angles only
     seen = set()
     for f in pf:
         fv = faces[f]
@@ -6110,31 +6147,11 @@ def _uw_seams(m, pf, kind, opts):
     than organic_angle."""
     faces, dcos, hard = m["faces"], m["dcos"], m["hard"]
     limit = math.cos(math.radians(opts["hard_angle"] if kind == "hard" else opts["organic_angle"]))
-    if kind == "hard":
-        # A piece with both hard and soft edges has its smoothing set up by
-        # hand: soft edges mean "one surface" (the sides of a low-poly pipe,
-        # bent or not), so only hard edges are cut, plus anything sharper
-        # than organic_angle. All-hard or all-soft pieces go by angle.
-        n_hard = n_soft = 0
-        for f in pf:
-            fv = faces[f]
-            c = len(fv)
-            for i in range(c):
-                a, b = fv[i], fv[(i + 1) % c]
-                key = (a, b) if a < b else (b, a)
-                if dcos.get(key) is None:
-                    continue
-                if key in hard:
-                    n_hard += 1
-                else:
-                    n_soft += 1
-        # Hardness only means something when it's mixed: a bevel (or an import)
-        # often hardens every edge, and cutting them all shreds the piece.
-        use_hard = bool(n_hard and n_soft) and n_hard < 0.5 * (n_hard + n_soft)
-        if use_hard:
-            limit = math.cos(math.radians(max(opts["hard_angle"], opts["organic_angle"])))
-    else:
-        use_hard = False
+    # The mesh's own hard edges are ignored, as if every edge were softened
+    # first (the user's recipe): imports leave stray hard edges across flat
+    # walls and floors, and cutting along them chopped those planes up. The
+    # cuts are the real folds, then the sewing joins what unfolds cleanly.
+    use_hard = False
     cut, sewable = set(), set()
     for f in pf:
         fv = faces[f]
@@ -6147,7 +6164,11 @@ def _uw_seams(m, pf, kind, opts):
                 cut.add(key)
             elif (use_hard and key in hard) or d < limit:
                 cut.add(key)
-                sewable.add(key)
+                if key not in m["concave"]:
+                    # a box unfolds round its outside corners only: an inside
+                    # corner (a leg under a rail, a wall on a floor) is where
+                    # two parts meet, and stays cut
+                    sewable.add(key)
     return cut, sewable
 
 
@@ -6247,10 +6268,13 @@ def _uw_absorb_small(m, regions, cut, sewable, frac=0.015):
     r_area = [sum(area[f] for f in r) for r in regions]
     total = sum(r_area) or 1.0
     shared = {}  # (small region, other) -> [length, [edge keys]]
+    dcos = m["dcos"]
     for key in sewable & cut:
         ent = edges.get(key)
         if not ent or len(ent) != 2:
             continue
+        if (dcos.get(key) or 0.0) < 0.5:
+            continue  # never across a fold over 60 degrees: a window's reveal glued to its wall can't lie flat
         a, b = rid.get(ent[0][0]), rid.get(ent[1][0])
         if a is None or b is None or a == b:
             continue
@@ -7273,35 +7297,39 @@ def _uw_flatten(ch, opts, ctl):
     return None
 
 
+def _uw_tube_split(m, pf, cut):
+    """Does cutting `cut` leave only discs (caps) and rings (a tube's side),
+    with at least one ring? The test for the caps shortcut."""
+    rings = 0
+    for fids in _uw_regions(m, pf, cut):
+        ch = _uw_build(m, fids, cut)
+        loops, chi, ok = _uw_topology(ch["T"], len(ch["P"]))
+        if not ok:
+            return False
+        if chi == 0 and len(loops) == 2:
+            rings += 1
+        elif not (chi == 1 and len(loops) == 1):
+            return False
+    return rings > 0
+
+
 def _uw_piece(m, pf, kind, opts, ctl):
     """Charts for one piece. Returns (corner -> (chart, local UV), chart
     list, cut edges, sewable edges, faces for Unfold3D)."""
     cut, sewable = _uw_seams(m, pf, kind, opts)
-    if opts.get("plain"):
-        # plain: every face starts apart and the sewing (plain_fill) joins
-        # them back only into near rectangles, so a rail's sides make
-        # strips and each leg its own strip (a leg's face that's level with
-        # the rail's would otherwise stay one flat comb with it)
-        for f in pf:
-            fv = m["faces"][f]
-            for i in range(len(fv)):
-                a, b = fv[i], fv[(i + 1) % len(fv)]
-                key = (a, b) if a < b else (b, a)
-                cut.add(key)
-                if m["dcos"].get(key) is not None:
-                    sewable.add(key)
-    if kind == "hard" and not opts.get("plain"):
+    if kind == "hard":
         # A tube-shaped hard piece (plank, beam, post, crate, bolt, bevelled or
         # not) unwraps best as its side, unrolled in one straight strip, plus
-        # its two caps: so only the caps are cut, not every bevel step.
+        # its two caps: so only the caps are cut, not every bevel step. Only
+        # when that's what is left: discs and rings. On anything else (a
+        # railing: rail and legs as one sphere with many holes; a wall with
+        # n-gons) it made one windy, stretched shell, so the folds stay cut.
         caps = _uw_poly_caps(m, pf) or _uw_tube_caps(m, pf)
         if caps:
-            cut = set(k for k in cut if m["dcos"].get(k) is None) | caps
-            sewable = set(caps)
-    regions = _uw_regions(m, pf, cut)
-    if not opts.get("plain"):  # plain: every hard edge stays cut; compact sewing joins what reads well
-        regions = _uw_absorb_small(m, regions, cut, sewable)
-    work = [(r, 0, None) for r in regions]
+            tube_cut = set(k for k in cut if m["dcos"].get(k) is None) | caps
+            if len(pf) > 5000 or _uw_tube_split(m, pf, tube_cut):  # dense pieces (a dome): no railings there
+                cut, sewable = tube_cut, set(caps)
+    work = [(r, 0, None) for r in _uw_absorb_small(m, _uw_regions(m, pf, cut), cut, sewable)]
     charts = []
     heavy = []
     while work:
@@ -7311,7 +7339,7 @@ def _uw_piece(m, pf, kind, opts, ctl):
         ch = _uw_build(m, fids, cut)
         ch["hint"] = hint
         loops, chi, ok = _uw_topology(ch["T"], len(ch["P"]))
-        if depth == 0 and hint is None and not opts.get("plain") and not (ok and chi == 0 and len(loops) == 2):
+        if depth == 0 and hint is None and not (ok and chi == 0 and len(loops) == 2):
             # Caps merged into a tube's side (soft or bevelled): cut them off.
             # Never on an open tube (it's already a ring), and the one-axis
             # test only on closed pieces: on a U-bend's or a wobbly tube's
@@ -7379,9 +7407,6 @@ def _uw_area(UV, T):
     return s
 
 
-PLAIN_MAX_FACES = 1500  # plain cuts start from one chart per face: only for low-poly pieces
-
-
 def _uw_tris_overlap(ta, tb):
     """Do two sets of 2D triangles overlap in area? Points just inside each
     triangle (its centre, its corners pulled 2% in) are tested against the
@@ -7423,34 +7448,6 @@ def _uw_tris_overlap(ta, tb):
     return test(ta, tb) or test(tb, ta)
 
 
-def _uw_boxy(m, pf, opts):
-    """Is a piece built from flat faces and real folds (a railing, a frame,
-    a bracket), with almost no gently curved edges (a bent strip, a pipe's
-    sides, anything smooth)? Only those are worth plain cuts."""
-    faces, dcos, pts = m["faces"], m["dcos"], m["pts"]
-    flat_cos = math.cos(math.radians(2.0))
-    sharp_cos = math.cos(math.radians(opts["hard_angle"]))
-    seen = set()
-    curved = total = 0.0
-    for f in pf:
-        fv = faces[f]
-        for i in range(len(fv)):
-            a, b = fv[i], fv[(i + 1) % len(fv)]
-            key = (a, b) if a < b else (b, a)
-            if key in seen:
-                continue
-            seen.add(key)
-            d = dcos.get(key)
-            if d is None:
-                continue
-            pa, pb = pts[a], pts[b]
-            ln = math.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2)
-            total += ln
-            if sharp_cos < d < flat_cos:
-                curved += ln
-    return total > 0 and curved < 0.1 * total
-
-
 def _tight_box_area(pts):
     """Area of the smallest box round 2D points, at any angle (one of its
     sides lies along a hull edge)."""
@@ -7465,51 +7462,6 @@ def _tight_box_area(pts):
         b = (max(xs) - min(xs)) * (max(ys) - min(ys))
         box = b if box == 0.0 else min(box, b)
     return box
-
-
-def _uw_fill_score(m, charts, xf, sewn):
-    """How tidy a piece's shells came out: (area-weighted mean fill, worst
-    fill of a shell holding 10%+ of the area), fill = UV area / its
-    tightest box. A plank's strip or a box net fills most of its box; a
-    railing unrolled as one tube (a windy arc with legs) or a comb of legs
-    fills little."""
-    chart_of = {}
-    for ci, ch in enumerate(charts):
-        for f in ch["faces"]:
-            chart_of[f] = ci
-    parent = list(range(len(charts)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for key in sewn:
-        ent = m["edges"].get(key)
-        if ent and len(ent) == 2:
-            a, b = chart_of.get(ent[0][0]), chart_of.get(ent[1][0])
-            if a is not None and b is not None:
-                parent[find(a)] = find(b)
-    groups = {}
-    for ci in range(len(charts)):
-        groups.setdefault(find(ci), []).append(ci)
-    out = []
-    for cis in groups.values():
-        pts, area = [], 0.0
-        for ci in cis:
-            c, s, tx, ty = xf[ci]
-            uv = [(c * q[0] - s * q[1] + tx, s * q[0] + c * q[1] + ty) for q in charts[ci]["uv"]]
-            pts += uv
-            area += abs(_uw_area(uv, charts[ci]["T"]))
-        box = _tight_box_area(pts)
-        out.append((area, area / box if box > 0 else 1.0))
-    total = sum(a for a, _ in out)
-    if total <= 0:
-        return 1.0, 1.0
-    mean = sum(a * f for a, f in out) / total
-    worst = min([f for a, f in out if a >= 0.1 * total] or [1.0])
-    return mean, worst
 
 
 def _uw_sew(m, charts, cut, sewable, opts, ctl):
@@ -7545,14 +7497,7 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
         p, q = pts[key[0]], pts[key[1]]
         return math.sqrt((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2)
 
-    if opts.get("plain"):
-        # plain cuts: faces in one plane join first (a rail's side runs on as
-        # one long strip), then folds, so a leg can't take a bite of the rail
-        dcos = m["dcos"]
-        order = sorted(pairs.items(), key=lambda kv: (-max(round(dcos.get(k) or 0.0, 3) for k in kv[1]),
-                                                     -sum(elen(k) for k in kv[1])))
-    else:
-        order = sorted(pairs.items(), key=lambda kv: -sum(elen(k) for k in kv[1]))
+    order = sorted(pairs.items(), key=lambda kv: -sum(elen(k) for k in kv[1]))
 
     def world(ci, uv):
         c, s, tx, ty = xf[ci]
@@ -7581,6 +7526,9 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
                     segs.append((world(ci, ch["uv"][a]), world(ci, ch["uv"][b]), (ci, a), (ci, b)))
         return segs
 
+    area_of = {}
+    for ci, ch in enumerate(charts):
+        area_of[ci] = abs(_uw_area(ch["uv"], ch["T"]))
     for (a, b), keys in (order if opts["sew"] in ("max", "compact") else ()):
         if ctl.get("cancel"):
             raise Cancelled("sew")
@@ -7619,19 +7567,19 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
             c0, s0, x0, y0 = xf[ci]
             xf[ci] = (c * c0 - s * s0, s * c0 + c * s0, c * x0 - s * y0 + tx, s * x0 + c * y0 + ty)
         sa, sb = boundary(ga), boundary(gb)
-        bad = _uw_segments_cross(sa, sb) or (opts.get("plain") and _uw_tris_overlap(tris(ga), tris(gb)))
-        if not bad:  # never a spoky star; "compact" asks for a tidier shell still
+        bad = _uw_segments_cross(sa, sb)
+        if not bad:
+            # A nice box unfold only: the joined shell must still fill most of
+            # its tightest box (a cube's cross fills half), so legs never hang
+            # off a rail and nothing winds round. Rigid joins never stretch.
             allp = [p for seg in sa + sb for p in (seg[0],)]
-            area = sum(abs(_uw_area([world(ci, q) for q in charts[ci]["uv"]], charts[ci]["T"]))
-                       for ci in members[ga] + members[gb])
-            if opts.get("plain"):  # plain cuts: a join must leave a near rectangle (no combs, no Ls)
-                box = _tight_box_area(allp)
-                # (over 100%: it would lie on top of itself, which the edge test misses)
-                bad = box > 0 and not opts.get("plain_fill", 0.85) <= area / box <= 1.01
-            else:
-                box = (max(p[0] for p in allp) - min(p[0] for p in allp)) * (max(p[1] for p in allp) -
-                                                                             min(p[1] for p in allp))
-                bad = box > 0 and area / box < (opts["sew_fill"] if opts["sew"] == "compact" else 0.12)
+            area = sum(area_of[ci] for ci in members[ga] + members[gb])
+            box = _tight_box_area(allp)
+            need = opts["sew_fill"] if opts["sew"] == "compact" else opts.get("box_fill", 0.48)
+            # over 100%: it would lie on top of itself, which the edge test misses
+            bad = box > 0 and not need <= area / box <= 1.01
+            if not bad and sum(len(charts[ci]["T"]) for ci in members[ga] + members[gb]) <= 4000:
+                bad = _uw_tris_overlap(tris(ga), tris(gb))  # faces lying flush on each other (low-poly props)
         if bad:
             for ci, t in old.items():
                 xf[ci] = t
@@ -7643,10 +7591,6 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
     # Small shells left over (caps, bevel corners, end faces) are sewn on as a
     # flap along one shared edge, the longest that fits without overlapping:
     # a whole seam rarely lines up for them (a round cap on a straight rim).
-    area_of = {}
-    for ci, ch in enumerate(charts):
-        area_of[ci] = abs(_uw_area(ch["uv"], ch["T"]))
-
     def g_area(gi):
         return sum(area_of[ci] for ci in members[gi])
 
@@ -7687,8 +7631,17 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
                     keys_.append(key_)
         return total, keys_
 
-    if opts.get("plain"):  # plain cuts: leftovers (a leg's end cap) stay their own shells
-        return xf, sewn
+    def g_centre(gi):
+        segs = boundary(gi)
+        return (sum(s[0][0] for s in segs) / len(segs), sum(s[0][1] for s in segs) / len(segs))
+
+    def edge_mid(ci, key):
+        (f, i), (g, j) = edges[key]
+        if chart_of[f] != ci:
+            (f, i), (g, j) = (g, j), (f, i)
+        p0, p1 = corner_uv(ci, f, i), corner_uv(ci, f, (i + 1) % len(faces[f]))
+        return ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0)
+
     biggest = max(g_area(gi) for gi in members)
     small = sorted((gi for gi in members if g_area(gi) < opts.get("flap_below", 0.2) * biggest and
                     g_aspect(gi) <= 6.0), key=g_area)
@@ -7700,7 +7653,19 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
             for x, y in ((a, b), (b, a)):  # y is in the small shell
                 if group[y] == gb and group[x] != gb:
                     options += [(elen(k), x, y, k) for k in keys]
-        for _, a, b, key in sorted(options, key=lambda t: (-t[0], t[3])):
+        # longest edge first; among equal ones the one nearest the middle of
+        # the shell it joins, so a plank's two end caps go on the same
+        # column of its strip (symmetric), not one each side
+        centres = {}
+        for _, a, b, key in options:
+            if group[a] not in centres:
+                centres[group[a]] = g_centre(group[a])
+
+        def near(t):
+            mid, cen = edge_mid(t[1], t[3]), centres[group[t[1]]]
+            return math.hypot(mid[0] - cen[0], mid[1] - cen[1])
+
+        for _, a, b, key in sorted(options, key=lambda t: (-round(t[0], 6), round(near(t), 6), t[3])):
             ga = group[a]
             if ga == gb:
                 continue
@@ -7726,6 +7691,15 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
             joined = _flap_contact(ga, gb, la) if not _uw_segments_cross(boundary(ga), sb) else None
             perimeter = sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q, _, _ in sb)
             crumb = g_area(gb) < 0.03 * biggest and len(sb) <= 9  # a bevel corner (3 sides x 3 steps): on, not loose
+            if joined and not crumb:  # like the main pass: the shell must stay a compact box unfold
+                sa = boundary(ga)
+                box = _tight_box_area([s[0] for s in sa + sb])
+                fill = (g_area(ga) + g_area(gb)) / box if box > 0 else 1.0
+                need = opts["sew_fill"] if opts["sew"] == "compact" else opts.get("box_fill", 0.48)
+                if not need <= fill <= 1.01 or (
+                        sum(len(charts[ci]["T"]) for ci in members[ga] + members[gb]) <= 4000 and
+                        _uw_tris_overlap(tris(ga), tris(gb))):
+                    joined = None
             if not joined or (joined[0] < opts.get("flap_contact", 0.3) * perimeter and not crumb):
                 # crossing, or hanging on by a corner (a round cap on one rim
                 # edge, a bolt head, a bevel tab): it stays its own shell
@@ -7776,6 +7750,67 @@ def _uw_weld(m, pf, cut, corner_uv):
                 corner_uv[k] = (u, v)
 
 
+def _uw_straighten(m, fs, corner_uv):
+    """Square one shell to the grid: turn it so its tightest box lies along
+    U and V (rotating calipers on its hull), then a quarter turn so the
+    mesh's up (+Y) points up the tile, or, for a flat-lying piece, its long
+    side along U. A wall of a house turned off the world grid comes out
+    square on, not at whatever angle its projection gave."""
+    faces, base, pts = m["faces"], m["base"], m["pts"]
+    ks, vs = [], []
+    for f in fs:
+        for i, v in enumerate(faces[f]):
+            ks.append(base[f] + i)
+            vs.append(v)
+    uv = [corner_uv[k] for k in ks]
+    if len(uv) < 3 or any(q is None for q in uv):
+        return
+    hull = convex_hull(uv)
+    if len(hull) < 3:
+        return
+    best = None
+    for i in range(len(hull)):
+        q0, q1 = hull[i], hull[(i + 1) % len(hull)]
+        ang = math.atan2(q1[1] - q0[1], q1[0] - q0[0])
+        c_, s_ = math.cos(-ang), math.sin(-ang)
+        xs = [q[0] * c_ - q[1] * s_ for q in hull]
+        ys = [q[0] * s_ + q[1] * c_ for q in hull]
+        b = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        if best is None or b < best[0] - 1e-12:
+            best = (b, -ang)
+    a = best[1]
+    cu = sum(q[0] for q in uv) / len(uv)
+    cv = sum(q[1] for q in uv) / len(uv)
+    c, s = math.cos(a), math.sin(a)
+    rot = [(c * (q[0] - cu) - s * (q[1] - cv), s * (q[0] - cu) + c * (q[1] - cv)) for q in uv]
+    # which way is up: fit the height (Y) over the shell's UVs
+    ys = [pts[v][1] for v in vs]
+    p3 = [pts[v] for v in vs]
+    diag = math.sqrt(sum((max(q[k] for q in p3) - min(q[k] for q in p3)) ** 2 for k in range(3))) or 1.0
+    turns = 0
+    if max(ys) - min(ys) > 0.05 * diag:
+        my = sum(ys) / len(ys)
+        suu = sum(q[0] * q[0] for q in rot)
+        svv = sum(q[1] * q[1] for q in rot)
+        suv = sum(q[0] * q[1] for q in rot)
+        suy = sum(q[0] * (y - my) for q, y in zip(rot, ys))
+        svy = sum(q[1] * (y - my) for q, y in zip(rot, ys))
+        det = suu * svv - suv * suv
+        if abs(det) > 1e-18:
+            gu = (svv * suy - suv * svy) / det
+            gv = (suu * svy - suv * suy) / det
+            # the quarter turn that points the height gradient along +V
+            turns = max(range(4), key=lambda t: ((gu, gv), (-gv, gu), (-gu, -gv), (gv, -gu))[t][1])
+    else:  # lying flat (a floor): long side along U
+        w = max(q[0] for q in rot) - min(q[0] for q in rot)
+        h = max(q[1] for q in rot) - min(q[1] for q in rot)
+        turns = 1 if h > w * 1.0001 else 0
+    for _ in range(turns):
+        rot = [(-q[1], q[0]) for q in rot]
+    for k, q in zip(ks, rot):
+        corner_uv[k] = (q[0] + cu, q[1] + cv)
+
+
 def _uw_spread(m, cut, corner_uv):
     """Lay the mesh's UV shells out in rows (biggest first), so none overlap
     even before packing. Shells are corners joined across uncut edges."""
@@ -7798,6 +7833,8 @@ def _uw_spread(m, cut, corner_uv):
     shells = {}
     for f in range(len(faces)):
         shells.setdefault(uf.find(f), []).append(f)
+    for fs in shells.values():
+        _uw_straighten(m, fs, corner_uv)
     if len(shells) < 2:
         return
     boxes = []
@@ -7870,22 +7907,6 @@ def _uw_mesh(m, opts, ctl, shared):
         if kind == "organic" and o["sew"] != "off":
             o["sew"] = "flaps"  # pelts are already as joined as they get; small bits still go on as flaps
         xf, sewn = _uw_sew(m, charts, cut, sewable, o, ctl)
-        if kind == "hard" and o["sew"] != "off":
-            # Joining everything suits planks, boxes and pipes, not branchy
-            # shapes (a railing with legs and a corner came out as one windy
-            # arc with the legs hanging off). When a big shell fills little
-            # of its box, unwrap the piece plainly instead: every hard and
-            # sharp edge cut, no tube shortcut, joined only while compact;
-            # keep it if it's clearly tidier.
-            mean, worst = _uw_fill_score(m, charts, xf, sewn)
-            windy = worst < 0.45 or (worst < opts.get("windy_fill", 0.7) and len(pf) > 24)  # a box's cross is fine
-            if windy and len(pf) <= PLAIN_MAX_FACES and _uw_boxy(m, pf, opts):
-                o2 = dict(o, plain=True, sew="compact", sew_fill=max(o["sew_fill"], opts.get("windy_fill", 0.7)))
-                plain = _uw_piece(m, pf, kind, o2, ctl)
-                xf2, sewn2 = _uw_sew(m, plain[0], plain[1], plain[2], o2, ctl)
-                if _uw_fill_score(m, plain[0], xf2, sewn2)[0] > mean + 0.05:
-                    (charts, cut, sewable, hv), xf, sewn = plain, xf2, sewn2
-                    stats["plain"] = stats.get("plain", 0) + 1
         stats["charts"] += len(charts)
         stats["sewn"] += len(sewn)
         for ch in charts:
@@ -7984,29 +8005,48 @@ def _uw_write(xform, m, res, uv_set):
         us, vs = fn.getUVs(uv_set)
         us, vs = list(us), list(vs)
         seen = {}
-        clash = False
+        clash = set()
+        weight = {}  # uid -> {position: 3D area of the faces that want it there}
         for k, uid in enumerate(ids):
             q = res["uv"][k]
+            w = weight.setdefault(uid, {})
+            w[q] = w.get(q, 0.0) + face_area[k]
             got = seen.get(uid)
             if got is None:
                 seen[uid] = q
                 us[uid], vs[uid] = q
             elif abs(got[0] - q[0]) + abs(got[1] - q[1]) > 1e-4 * (1.0 + abs(q[0]) + abs(q[1])):
-                clash = True
-        return clash, us, vs
+                clash.add(uid)
+        lost = 0.0
+        for uid in clash:  # one UV wanted in two places: where the biggest faces want it
+            best = max(weight[uid].items(), key=lambda t: t[1])
+            us[uid], vs[uid] = best[0]
+            lost += sum(weight[uid].values()) - best[1]
+        return clash, us, vs, lost
 
+    face_area = []  # per corner: its face's 3D area
+    for f, fv in enumerate(m["faces"]):
+        face_area.extend([m["area"][f] if "area" in m else 1.0] * len(fv))
+    total_area = sum(m["area"]) if "area" in m else float(len(m["faces"]))
     cmds.polyProjection(xform + ".f[*]", type="Planar", mapDirection="y", constructionHistory=False)
     if res["cut"]:
         cmds.polyMapCut(comps(res["cut"]), constructionHistory=False)
-    clash, us, vs = assign()
+    clash, us, vs, lost = assign()
     if clash:  # general route: every edge cut, then the inside sewn
         cmds.polyMapCut("%s.e[0:%d]" % (xform, n_edges - 1), constructionHistory=False)
         keep = [k for k in edge_id if k not in res["cut"]]
         if keep:
             cmds.polyMapSew(comps(keep), constructionHistory=False)
-        clash, us, vs = assign()
+        clash, us, vs, lost = assign()
+    # Booleans leave non-manifold spots where Maya keeps one UV for faces on
+    # different sides even with every edge cut (a house's walls: a big wall
+    # face shared a UV with the hidden back-to-back faces where two walls
+    # met). Maya can't split those (polyForceUV -unshare does nothing), so
+    # assign() puts each such UV where the biggest faces want it: the wall
+    # keeps its shape and only the tiny hidden face is squashed. (First come
+    # used to win, and the wall came out folded.)
     write_uvs(xform, uv_set, us, vs)
-    return not clash
+    return not clash or lost <= 0.02 * total_area  # only tiny (hidden) faces lost out: as planned
 
 
 def unlok_unwrap(meshes, uv_set="map1", opts=None, progress=None, on_unfolded=None):
@@ -11881,11 +11921,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         grid.add_row("Join shells", self.auto_join,
                      "Unlok only. After cutting hard and sharp edges, hard-surface pieces are sewn back together "
                      "wherever they unfold flat without overlapping, like unfolding a box.\n"
-                     "As few shells as possible: join everything that fits. A boxy piece that comes out "
-                     "windy or branchy that way (a railing with legs and corners) is cut plainly instead: "
-                     "every edge, rejoined only into near-rectangles (rail strips, one net per leg). Small "
+                     "Existing hard edges are ignored (as if softened): only real folds are cut, never a "
+                     "flat or gently curved surface.\n"
+                     "As few shells as possible: sew pieces into box unfolds (a crate's cross, a plank's strip "
+                     "with its end caps) while the shell stays compact; legs never hang off a rail. Small "
                      "caps and bolt heads stay their own shells.\n"
-                     "Compact shells: only while the shell stays compact (packs tighter).\n"
+                     "Compact shells: only near-rectangles (packs tighter).\n"
                      "Keep every cut: seams on every hard and sharp edge.")
         self.auto_clean = CheckField("Clean bad geometry first")
         self.auto_clean.setValue(True)

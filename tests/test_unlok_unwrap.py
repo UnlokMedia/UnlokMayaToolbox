@@ -11,6 +11,7 @@
 """
 
 import os
+import random
 import sys
 import time
 import traceback
@@ -91,8 +92,9 @@ def run():
         return [area[s] / max(tb["_tight_box_area"](pts[s]), 1e-12) for s in pts]
 
     # --- a low-poly railing (one mesh: a rail with a corner, legs extruded from
-    # it): joining it all made one windy arc with the legs hanging off; now
-    # it's cut plainly into strips and leg nets, every shell near-rectangular
+    # it): the caps shortcut made it one windy, stretched arc with the legs
+    # hanging off; now only real tubes get it, folds stay cut and only box
+    # unfolds are sewn: nothing stretched, every shell fills its box well
     rail = cmds.polyCube(w=300, h=8, d=8, sx=7, name="railing")[0]
     cmds.move(150, 100, 0, rail)
     cmds.makeIdentity(rail, apply=True)
@@ -110,17 +112,77 @@ def run():
                           constructionHistory=False)
     bottoms = sorted(faces_where(lambda n, bb: n[1] < -0.99),
                      key=lambda f: tuple(round(x, 1) for x in cmds.xform(f, q=True, bb=True, ws=True)[::2]))
+    legs = (len(bottoms) + 1) // 2
     for i, f in enumerate(bottoms):
         if i % 2 == 0:
+            cmds.polyExtrudeFacet(f, localScale=(0.4, 0.5, 1), constructionHistory=False)  # thinner leg, inset
             cmds.polyExtrudeFacet(f, localTranslateZ=96, constructionHistory=False)
     cmds.polySoftEdge(rail, angle=0, constructionHistory=False)
     cmds.delete(rail, constructionHistory=True)
     failed, secs, st = unwrap([rail])
     fills = shell_fills(rail)
     flips, good, worst = stretch(rail)
-    check("railing: cut plainly into near-rectangular shells, not one windy arc with legs",
-          not failed and st.get("plain") and len(fills) > 4 and min(fills) > 0.6 and flips == 0 and worst < 1.01,
-          "%d shells, worst fill %.2f, stretch %.3f, %s" % (len(fills), min(fills or [0]), worst, st))
+    # every leg its own shell (an inside corner joins it to the rail, and box
+    # unfolds only fold round outside corners); the rail's flat L-shaped top
+    # stays one piece (flat planes are never cut through)
+    check("railing: cut at its folds and sewn only into box unfolds, not one windy arc with legs",
+          not failed and not st.get("relaxed") and len(fills) >= 1 + legs and flips == 0 and worst < 1.01,
+          "%d shells for %d legs, stretch %.3f, %s" % (len(fills), legs, worst, st))
+
+    # --- flat planes are never cut through: stray hard edges inside a floor
+    # (an import's leftovers) and a thick slab with a hatch hole stay whole
+    floor = cmds.polyPlane(w=800, h=800, sx=16, sy=16, name="strayFloor")[0]
+    cmds.polySoftEdge(floor, angle=30, constructionHistory=False)
+    random.seed(7)
+    cmds.polySoftEdge(["%s.e[%d]" % (floor, e) for e in range(cmds.polyEvaluate(floor, edge=True))
+                       if random.random() < 0.15], angle=0, constructionHistory=False)
+    slab = cmds.polyPlane(w=800, h=400, sx=16, sy=8, name="hatchSlab")[0]
+    cmds.delete(["%s.f[%d]" % (slab, r * 16 + c) for r in range(3, 5) for c in range(6, 10)])
+    cmds.polyExtrudeFacet(slab + ".f[*]", localTranslateZ=20, constructionHistory=False)
+    failed, secs, st = unwrap([floor, slab])
+    check("flat planes stay whole: stray hard edges ignored, a holed slab not chopped",
+          not failed and shells(floor) == 1 and shells(slab) <= 2,
+          "floor %d, slab %d shells %s" % (shells(floor), shells(slab), st))
+
+    # --- a house turned off the world grid: thick walls with boolean window
+    # and door holes (n-gons, non-manifold seams where the walls meet).
+    # Nothing folded or stretched, every shell square to the grid
+    walls = []
+    for (x, z, w, d) in ((0, -300, 820, 20), (0, 300, 820, 20), (-400, 0, 20, 580), (400, 0, 20, 580)):
+        b = cmds.polyCube(w=w, h=300, d=d)[0]
+        cmds.move(x, 150, z, b)
+        walls.append(b)
+    house = cmds.polyUnite(walls, constructionHistory=False)[0]
+    cmds.polyMergeVertex(house, distance=0.01, constructionHistory=False)
+    for (x, y, z, w, h, d) in ((-200, 160, -300, 120, 100, 60), (150, 160, -300, 160, 100, 60),
+                               (0, 100, 300, 100, 200, 60), (-400, 170, 50, 60, 90, 180)):
+        c = cmds.polyCube(w=w, h=h, d=d)[0]
+        cmds.move(x, y, z, c)
+        house = cmds.polyCBoolOp(house, c, operation=2, constructionHistory=False)[0]
+    house = cmds.rename(house, "house")
+    cmds.rotate(4, 17, 2, house)
+    cmds.makeIdentity(house, apply=True)
+    cmds.polySoftEdge(house, angle=30, constructionHistory=False)
+    failed, secs, st = unwrap([house])
+    det = {}
+    score = tb["uv_quality"](house, detail=det)[0]
+    fn = tb["_mesh_fn"](house)
+    counts, ids = fn.getAssignedUVs("map1")
+    _, shell_of = fn.getUvShellsIds("map1")
+    us, vs = fn.getUVs("map1")
+    by_shell = {}
+    k = 0
+    for c in counts:
+        by_shell.setdefault(shell_of[ids[k]], []).extend((us[ids[k + i]], vs[ids[k + i]]) for i in range(c))
+        k += c
+    tilted = 0
+    for pts_ in by_shell.values():
+        axis = (max(q[0] for q in pts_) - min(q[0] for q in pts_)) * (max(q[1] for q in pts_) - min(q[1] for q in pts_))
+        if axis > tb["_tight_box_area"](pts_) * 1.01:
+            tilted += 1
+    check("a turned house with boolean holes: nothing folded, nothing stretched, every shell square on",
+          not failed and not det.get("folded") and score > 0.99 and not st.get("relaxed") and tilted == 0,
+          "score %.3f, folded %s, %d of %d shells tilted, %s" % (score, det.get("folded"), tilted, len(by_shell), st))
 
     # --- a post: its round caps are their own shells, not hung off a corner
     post = cmds.polyCylinder(r=10, h=200, sx=16, sy=4, name="post")[0]
