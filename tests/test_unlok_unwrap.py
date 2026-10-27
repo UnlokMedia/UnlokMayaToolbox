@@ -73,6 +73,61 @@ def run():
     check("box: sewn into one shell (box unfold)", shells(box) == 1, "%d shells" % shells(box))
     check("box: no stretch, nothing flipped", flips == 0 and worst < 1.01, "flips %d worst %.3f" % (flips, worst))
 
+    def shell_fills(m):
+        """Per UV shell: its UV area / its tightest box."""
+        fn = tb["_mesh_fn"](m)
+        counts, ids = fn.getAssignedUVs("map1")
+        _, shell_of = fn.getUvShellsIds("map1")
+        us, vs = fn.getUVs("map1")
+        pts, area = {}, {}
+        k = 0
+        for c in counts:
+            poly = [(us[ids[k + i]], vs[ids[k + i]]) for i in range(c)]
+            s = shell_of[ids[k]]
+            pts.setdefault(s, []).extend(poly)
+            area[s] = area.get(s, 0.0) + abs(0.5 * sum(poly[i][0] * poly[(i + 1) % c][1] -
+                                                         poly[(i + 1) % c][0] * poly[i][1] for i in range(c)))
+            k += c
+        return [area[s] / max(tb["_tight_box_area"](pts[s]), 1e-12) for s in pts]
+
+    # --- a low-poly railing (one mesh: a rail with a corner, legs extruded from
+    # it): joining it all made one windy arc with the legs hanging off; now
+    # it's cut plainly into strips and leg nets, every shell near-rectangular
+    rail = cmds.polyCube(w=300, h=8, d=8, sx=7, name="railing")[0]
+    cmds.move(150, 100, 0, rail)
+    cmds.makeIdentity(rail, apply=True)
+
+    def faces_where(test):
+        out = []
+        for f in cmds.ls(rail + ".f[*]", flatten=True):
+            n = [float(x) for x in cmds.polyInfo(f, faceNormals=True)[0].split()[2:5]]
+            if test(n, cmds.xform(f, q=True, bb=True, ws=True)):
+                out.append(f)
+        return out
+
+    cmds.polyExtrudeFacet(faces_where(lambda n, bb: n[0] > 0.99), localTranslateZ=8, constructionHistory=False)
+    cmds.polyExtrudeFacet(faces_where(lambda n, bb: n[2] > 0.99 and bb[0] > 299), localTranslateZ=200, divisions=3,
+                          constructionHistory=False)
+    bottoms = sorted(faces_where(lambda n, bb: n[1] < -0.99),
+                     key=lambda f: tuple(round(x, 1) for x in cmds.xform(f, q=True, bb=True, ws=True)[::2]))
+    for i, f in enumerate(bottoms):
+        if i % 2 == 0:
+            cmds.polyExtrudeFacet(f, localTranslateZ=96, constructionHistory=False)
+    cmds.polySoftEdge(rail, angle=0, constructionHistory=False)
+    cmds.delete(rail, constructionHistory=True)
+    failed, secs, st = unwrap([rail])
+    fills = shell_fills(rail)
+    flips, good, worst = stretch(rail)
+    check("railing: cut plainly into near-rectangular shells, not one windy arc with legs",
+          not failed and st.get("plain") and len(fills) > 4 and min(fills) > 0.6 and flips == 0 and worst < 1.01,
+          "%d shells, worst fill %.2f, stretch %.3f, %s" % (len(fills), min(fills or [0]), worst, st))
+
+    # --- a post: its round caps are their own shells, not hung off a corner
+    post = cmds.polyCylinder(r=10, h=200, sx=16, sy=4, name="post")[0]
+    failed, secs, st = unwrap([post])
+    check("post: side plus two separate caps (caps aren't hung on by one edge)", not failed and shells(post) == 3,
+          "%d shells %s" % (shells(post), st))
+
     # --- a plank with some divisions: one shell
     plank = cmds.polyCube(w=4, h=0.1, d=0.3, sx=6, sy=1, sz=2, name="plank")[0]
     failed, secs, st = unwrap([plank])

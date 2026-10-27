@@ -659,10 +659,20 @@ density. The actual layout is still being built; see
        hard caps). A bevel often hardens every edge, and cutting them all
        shredded posts into strips.
      - **Tiny bits** (bevel corners, slivers) are merged into a neighbour
-       before flattening. Small leftover shells (caps, end faces) are sewn
-       on along one edge as a flap.
+       before flattening. A small leftover shell is sewn on as a flap only
+       where it shares a good stretch of edge (30% of its outline), so round
+       caps and bolt heads are their own shells instead of hanging off a
+       corner. Tiny few-sided bevel corners still go on.
      - **Join shells:**
        - *As few shells as possible* (default): sew everything that fits.
+         Joining it all is right for planks, boxes and pipes, not for
+         branchy boxy pieces: a low-poly railing with legs and a corner
+         came out as one windy arc with the legs hanging off. When a boxy
+         piece (flat faces and real folds, nothing gently curved) leaves a
+         big shell filling little of its box, it's unwrapped plainly
+         instead: every edge cut, then faces rejoined (same-plane faces
+         first) only while each shell stays a near-rectangle. The railing
+         becomes long rail strips plus one net per leg.
        - *Compact shells*: sew only while the shell stays compact, which
          packs tighter.
        - *Keep every cut*: leave a seam on every hard and sharp edge.

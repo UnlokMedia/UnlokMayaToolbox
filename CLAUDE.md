@@ -936,8 +936,29 @@
   - **Small bits:** `_uw_absorb_small` merges regions under 1.5% of the
     piece into the neighbour with the longest shared sewable cut.
   - **Flaps:** after the seam sewing, `_uw_sew` attaches compact small
-    groups (under 20% of the biggest, aspect <= 6) along one edge.
-    Organic pieces sew flaps only (`sew="flaps"`).
+    groups (under 20% of the biggest, aspect <= 6) along one edge, but
+    only when the edges that line up afterwards (`_flap_contact`, all of
+    them, not just the aligning one) make 30% of the flap's outline
+    (`flap_contact`). The user found caps hung off a corner by one edge
+    "cut in weird places". Crumbs (under 3% of the biggest, <= 9 outline
+    edges: bevel corners) still go on by any edge; loose they shattered
+    planks into 10 shells. Organic pieces sew flaps only (`sew="flaps"`).
+  - **Plain cuts** (the user: "sometimes I'd rather it just cut along all
+    hard edges"): in `_uw_mesh`, a hard piece sewn in "max"/"compact" is
+    scored by `_uw_fill_score` (UV area / tightest box per sewn shell).
+    If a shell with 10%+ of the area fills under 0.45 (or under
+    `windy_fill` 0.7 on pieces over 24 faces: a single box's cross net
+    fills 0.5 and stays), the piece is `_uw_boxy` (under 10% of edge
+    length gently curved; a bent strip shattered into 221 shells without
+    this) and has at most `PLAIN_MAX_FACES`, it's unwrapped again with
+    `plain=True`: every edge cut, no caps shortcut, no `_uw_absorb_small`,
+    sewing same-plane faces first, each join kept only if the shell fills
+    `plain_fill` (0.85) to 101% of its tightest box (over 100% means it
+    lies on itself) and `_uw_tris_overlap` finds no stacked faces (the
+    edge-crossing test misses flush overlaps), and no flap pass. Kept when
+    its mean fill beats the first try by 0.05 (`stats["plain"]`). The
+    test railing (`tests/test_unlok_unwrap.py`) went from a windy arc
+    with legs to 12 rectangular shells.
   - **No stars:** joins leaving the shell under 12% of its box are refused,
     even in "max".
   - **Defaults:** the engine still defaults to Unfold3D
