@@ -3444,6 +3444,7 @@ UDIM_SOURCE = "unlokUdimSource"
 UDIM_GROUP = "unlokUdimGroup"
 UDIM_LINKS = "unlokUdimLinks"  # multi message on a section / material set: Maya groups it follows
 UDIM_PINS = "unlokUdimPins"  # multi message on a material set: meshes you put there by hand (links leave them)
+LINK_INFO = "unlokUdimLinkInfo"  # JSON {group uuid: name} of what a set was linked to (spots broken links)
 FOLLOW_ATTR = "unlokUdimFollowed"  # JSON on a mesh a link moved: where it came from (to go back if it leaves)
 UDIM_ORIENT = "unlokUdimOrient"
 ORIENT_TOKENS = ("up", "keep", "axis")  # per-group orientation override in set names
@@ -3616,6 +3617,30 @@ def _msg_disconnect(node, attr, src=None):
 
 def _under(path, group):
     return path == group or path.startswith(group + "|")
+
+
+def _link_info(node):
+    try:
+        return json.loads(_get(node, LINK_INFO, "") or "{}")
+    except ValueError:
+        return {}
+
+
+def _set_link_info(node, info):
+    if not cmds.attributeQuery(LINK_INFO, node=node, exists=True):
+        cmds.addAttr(node, longName=LINK_INFO, dataType="string")
+    cmds.setAttr(node + "." + LINK_INFO, json.dumps(info, sort_keys=True), type="string")
+
+
+def _record_links(node, drop=()):
+    """Remember the groups node follows now (uuid -> name), on top of what it
+    remembered, minus drop: a link whose group is deleted later shows up as
+    broken instead of vanishing."""
+    info = dict((u, n) for u, n in _link_info(node).items() if u not in drop)
+    for g in [_linked_group(node)] + _msg_inputs(node, UDIM_LINKS):
+        if g and cmds.objExists(g):
+            info[cmds.ls(g, uuid=True)[0]] = g
+    _set_link_info(node, info)
 
 
 def undo_if_last(chunk_name):
@@ -3900,6 +3925,7 @@ class SmartUdimAsset(object):
         cmds.setAttr(node + "." + UDIM_ORDER, (max(orders) + 1) if orders else 0)
         if group:
             cmds.connectAttr(group + ".message", node + "." + UDIM_GROUP, force=True)
+            _record_links(node)
         cmds.sets(node, add=root)
         return node
 
@@ -4294,6 +4320,12 @@ class SmartUdimAsset(object):
                             _msg_disconnect(other, UDIM_LINKS, g)
             for g in groups:
                 _msg_connect(g, node, UDIM_LINKS)
+            gone = set(cmds.ls(groups, uuid=True) or [])
+            for sec in self.sections():  # other sets of the same kind forget these groups
+                for other in [sec] + (self.materials(sec) if role == "material" else []):
+                    if other != node and set_role(other) == role and set(_link_info(other)) & gone:
+                        _record_links(other, drop=gone)
+            _record_links(node)
             _, _, pins = self.group_links()
             self._unpin([m for m in pins if any(_under(m, g) for g in groups)])  # an explicit link wins
             moved = self.follow_links(material_source, changed=set(groups))
@@ -4303,10 +4335,115 @@ class SmartUdimAsset(object):
         """Stop node following any group (its meshes stay where they are)."""
         with UndoChunk("Smart UDIM stop following"):
             _msg_disconnect(node, UDIM_LINKS)
+            _set_link_info(node, {})
             if cmds.attributeQuery(UDIM_GROUP, node=node, exists=True):
                 for src in cmds.listConnections(node + "." + UDIM_GROUP, source=True, destination=False,
                                                  plugs=True) or []:
                     cmds.disconnectAttr(src, node + "." + UDIM_GROUP)
+
+    def group_candidates(self):
+        """Maya groups under the root (transforms with no mesh of their own),
+        long names, shallowest first."""
+        root = self.root_group()
+        if not root:
+            return []
+        out = []
+        for node in [root] + (cmds.listRelatives(root, allDescendents=True, type="transform", fullPath=True) or []):
+            if not cmds.listRelatives(node, shapes=True, noIntermediate=True):
+                out.append(long_name(node))
+        return sorted(out, key=lambda g: (g.count("|"), g))
+
+    def _suggest_group(self, mat, members, taken, all_meshes):
+        """The Maya group a material set looks like it was made from: the
+        closest group holding all its meshes, mostly (80%+) its meshes."""
+        if len(members) < 2:
+            return None
+        parents = [m.rsplit("|", 1)[0] for m in members]
+        common = parents[0]
+        for q in parents[1:]:
+            while common and not _under(q, common):
+                common = common.rsplit("|", 1)[0]
+        root = long_name(self.root_group() or "")
+        if not common or common == root or not _under(common, root) or common in taken:
+            return None
+        inside = [m for m in all_meshes if _under(m, common)]
+        if not inside or len(set(inside) & set(members)) < 0.8 * len(inside):
+            return None
+        return common
+
+    def group_health(self, material_source="Name, then shader"):
+        """What Check & Fix Groups shows, without changing anything:
+        broken: [{set, role, name, uuid, guess}] links whose group is gone;
+        suggest: [{set, group}] unlinked material groups that look made from
+        a Maya group; moves: [(mesh, target)] meshes not where their
+        followed groups say; unsorted: meshes in no group; empty: empty
+        material groups."""
+        meshes, instanced = self.meshes()
+        assigned = self.assignments()
+        mat_links, sec_links, _ = self.group_links()
+        broken, suggest = [], []
+        taken = set(mat_links)
+        candidates = self.group_candidates()
+        by_name = {}
+        for g in candidates:
+            by_name.setdefault(short_name(g), g)
+        for sec in self.sections():
+            for node in [sec] + self.materials(sec):
+                now = [g for g in [_linked_group(node)] + _msg_inputs(node, UDIM_LINKS) if g]
+                linked = set(cmds.ls(now, uuid=True) or []) if now else set()  # ls([]) would list everything
+                for uid, name in sorted(_link_info(node).items()):
+                    if uid in linked:
+                        continue
+                    alive = cmds.ls(uid, long=True)
+                    guess = long_name(alive[0]) if alive else by_name.get(short_name(name))
+                    broken.append({"set": node, "uuid": uid, "name": name, "role": set_role(node),
+                                   "guess": guess if guess and guess in candidates else None})
+        for sec in self.sections():
+            for mat in self.materials(sec):
+                if _msg_inputs(mat, UDIM_LINKS) or _link_info(mat):
+                    continue
+                members = [m for m, f in expand_members(mat)[0].items() if f is None]
+                own = set(g for g, s in sec_links.items() if s == sec)  # its section follows these already
+                g = self._suggest_group(mat, members, taken | own, meshes)
+                if g:
+                    suggest.append({"set": mat, "group": g})
+                    taken.add(g)
+        moves = self.follow_links(material_source, everything=True, dry=True)
+        inst = set(instanced)
+        unsorted = [m for m in meshes if m not in assigned and m not in inst]
+        empty = [mat for sec in self.sections() for mat in self.materials(sec) if not (cmds.sets(mat, q=True) or [])]
+        return {"broken": broken, "suggest": suggest, "moves": moves, "unsorted": unsorted, "empty": empty,
+                "candidates": candidates}
+
+    def fix_groups(self, choices, move=True, sort=True, prune=True, material_source="Name, then shader"):
+        """Apply Check & Fix Groups (one Ctrl+Z). choices: [(set, uuid of the
+        broken link or None, action, group)] with action 'link' (follow
+        group; replaces a broken link), 'unlink' (forget the broken link)
+        or 'leave'. Then: meshes moved to where links say (move), meshes in
+        no group sorted in (sort), empty material groups removed (prune).
+        Returns a summary dict."""
+        out = {"linked": 0, "unlinked": 0, "moved": 0, "sorted": 0, "pruned": 0}
+        ids = [(cmds.ls(s, uuid=True)[0], uid, action, group) for s, uid, action, group in choices
+               if cmds.objExists(s)]
+        with UndoChunk("Smart UDIM fix groups"):
+            for sid, uid, action, group in ids:
+                node = cmds.ls(sid)[0]
+                if action == "link" and group and cmds.objExists(group):
+                    if uid:
+                        _record_links(node, drop={uid})
+                    self.link_groups(node, [group], material_source)
+                    out["linked"] += 1
+                elif action == "unlink" and uid:
+                    _record_links(node, drop={uid})
+                    out["unlinked"] += 1
+            if move:
+                out["moved"] = len(self.follow_links(material_source, everything=True))
+            if sort:
+                out["sorted"] = self.scan(material_source)["added"]
+            if prune:
+                out["pruned"] = self.prune_empty_groups()
+            self.sync_names()
+        return out
 
     def _unpin(self, meshes):
         meshes = set(meshes)
@@ -4337,7 +4474,7 @@ class SmartUdimAsset(object):
             elif kind == "section" and any(sec_of.get(s) != target for s, _ in cur):
                 _msg_connect(m, cur[0][0], UDIM_PINS)
 
-    def follow_links(self, material_source="Name, then shader", changed=None):
+    def follow_links(self, material_source="Name, then shader", changed=None, everything=False, dry=False):
         """Put meshes where their followed groups say (see group_links).
         - Under a followed material group: the whole mesh goes into it.
         - Under a followed section: new (unsorted) meshes are sorted into it
@@ -4346,7 +4483,9 @@ class SmartUdimAsset(object):
         - A mesh a link moved that has left that group goes back where it
           was before (e.g. after Ctrl+Z of the reparent).
         Pinned meshes never move. Cheap when nothing needs moving. Runs in
-        the caller's undo state. Returns [(mesh, set or section)]."""
+        the caller's undo state. Returns [(mesh, set or section)].
+        everything: the section rule applies to every mesh, not just changed
+        ones (Check & Fix Groups). dry: only say what would move."""
         mat_links, sec_links, pins = self.group_links()
         tagged = set()
         for node in cmds.ls("*." + FOLLOW_ATTR, objectsOnly=True, long=True) or []:
@@ -4375,9 +4514,13 @@ class SmartUdimAsset(object):
                 if not cur:
                     new_sort.setdefault(target, []).append(x)
                     continue
-                if any(sec_of.get(s) != target for s, _ in cur) and any(_under(x, c) or _under(c, x)
-                                                                        for c in changed):
+                if any(sec_of.get(s) != target for s, _ in cur) and (everything or any(
+                        _under(x, c) or _under(c, x) for c in changed)):
                     to_sec.setdefault(target, []).append((x, cur, via))
+        if dry:
+            return ([(x, mat) for mat, rows in to_mat.items() for x, _, _ in rows] +
+                    [(x, sec) for sec, rows in to_sec.items() for x, _, _ in rows] +
+                    [(x, sec) for sec, xs in new_sort.items() for x in xs] + [(x, None) for x in back])
         moved = []
         for mat, rows in to_mat.items():
             for x, cur, via in rows:
@@ -9906,6 +10049,110 @@ class UdimMapWidget(QtWidgets.QWidget):
         self.setMinimumHeight(int(max(120, min(520, self.rows * self._tile_px() + 24))))
 
 
+class GroupHealthDialog(QtWidgets.QDialog):
+    """Check & Fix Groups: every broken or missing link with a choice, plus
+    the meshes that would move, be sorted or the empty groups removed."""
+
+    def __init__(self, report, parent=None):
+        super(GroupHealthDialog, self).__init__(parent)
+        self.setWindowTitle("Check & Fix Groups")
+        self.setMinimumWidth(560)
+        self.report = report
+        self.rows = []  # (set, uuid or None, combo, [(action, group)])
+        lay = QtWidgets.QVBoxLayout(self)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        cands = report["candidates"]
+
+        def label_of(node):
+            return parse_group_name(node)["key"] or short_name(node)
+
+        def combo(first, extra):
+            box = QtWidgets.QComboBox()
+            opts = []
+            for text, action, group in first + [("Follow %s  (%s)" % (short_name(g), g), "link", g)
+                                                for g in cands if g not in [x[2] for x in first]]:
+                box.addItem(text)
+                opts.append((action, group))
+            box.setMaxVisibleItems(20)
+            return box, opts
+
+        if report["broken"]:
+            head = QtWidgets.QLabel("<b>Broken links</b>: these groups followed a Maya group that's gone. Pick "
+                                    "the group they should follow now:")
+            head.setWordWrap(True)
+            bl.addWidget(head)
+            for b in report["broken"]:
+                first = []
+                if b["guess"]:
+                    first.append(("Follow %s  (best guess)" % short_name(b["guess"]), "link", b["guess"]))
+                first += [("Leave it for now", "leave", None), ("Forget this link", "unlink", None)]
+                box, opts = combo(first, [])
+                row = QtWidgets.QHBoxLayout()
+                row.addWidget(QtWidgets.QLabel("%s  (%s, was %s)" % (label_of(b["set"]), b["role"],
+                                                                     short_name(b["name"]))), 1)
+                row.addWidget(box, 1)
+                bl.addLayout(row)
+                self.rows.append((b["set"], b["uuid"], box, opts))
+        if report["suggest"]:
+            head = QtWidgets.QLabel("<b>Not following a group yet</b>: these material groups look like they were "
+                                    "made from a Maya group. Following it puts meshes added there later into "
+                                    "them automatically:")
+            head.setWordWrap(True)
+            bl.addWidget(head)
+            for sg in report["suggest"]:
+                first = [("Follow %s" % short_name(sg["group"]), "link", sg["group"]),
+                         ("Leave unlinked", "leave", None)]
+                box, opts = combo(first, [])
+                row = QtWidgets.QHBoxLayout()
+                row.addWidget(QtWidgets.QLabel(label_of(sg["set"])), 1)
+                row.addWidget(box, 1)
+                bl.addLayout(row)
+                self.rows.append((sg["set"], None, box, opts))
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(body)
+        if self.rows:
+            lay.addWidget(scroll, 1)
+
+        def names(meshes):
+            shown = [short_name(m) for m in meshes[:20]]
+            return "\n".join(shown) + ("\n..." if len(meshes) > 20 else "")
+
+        moves = report["moves"]
+        self.move = CheckField("Move %d mesh(es) into the groups they follow" % len(moves))
+        self.move.setValue(bool(moves))
+        self.move.setEnabled(bool(moves))
+        self.move.setToolTip(names([m for m, _ in moves]) or "Nothing to move.")
+        self.sort = CheckField("Sort %d mesh(es) that aren't in any group (by name / shader)" %
+                               len(report["unsorted"]))
+        self.sort.setValue(bool(report["unsorted"]))
+        self.sort.setEnabled(bool(report["unsorted"]))
+        self.sort.setToolTip(names(report["unsorted"]) or "Every mesh is in a group.")
+        self.prune = CheckField("Remove %d empty material group(s)" % len(report["empty"]))
+        self.prune.setValue(bool(report["empty"]))
+        self.prune.setEnabled(bool(report["empty"]))
+        self.prune.setToolTip(names(report["empty"]) or "No empty groups.")
+        for w in (self.move, self.sort, self.prune):
+            lay.addWidget(w)
+        lay.addWidget(hint_label("Applying it all is one Ctrl+Z. Meshes you assigned by hand (pinned) stay where "
+                                 "they are."))
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("Fix")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def choices(self):
+        out = []
+        for node, uid, box, opts in self.rows:
+            action, group = opts[box.currentIndex()]
+            out.append((node, uid, action, group))
+        return out
+
+
 VIEW_COLOURS = ("Material group", "UV status", "Texel density")
 
 
@@ -10505,6 +10752,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     self.pin_dialog),
             "unpin": ("Unpin", "The highlighted material groups go back to being placed by the layout.",
                       lambda: self.pin_groups(self._selected_role("material"), [])),
+            "check": ("Check && Fix Groups...", "Find meshes that aren't in the groups they should be, groups "
+                                                "whose linked Maya group is gone (relink them), groups that "
+                                                "look like they should follow a Maya group, and empty groups. "
+                                                "Shows what it found before changing anything; one Ctrl+Z.",
+                      lambda: self.check_groups()),
             "follow": ("Follow Selected Groups", "The highlighted section or material group follows the Maya "
                                                  "groups selected in the Outliner: every mesh inside them, now "
                                                  "and added later, belongs to it automatically.",
@@ -10514,7 +10766,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         }
         for title, keys in (("Sections", ("from_group", "to_section", "del_section", "up", "down")),
                             ("Material groups", ("select", "to_group", "new_group", "pin", "unpin")),
-                            ("Follow Maya groups (new meshes join automatically)", ("follow", "unfollow"))):
+                            ("Follow Maya groups (new meshes join automatically)",
+                             ("follow", "unfollow", "check"))):
             label = QtWidgets.QLabel(title)
             label.setProperty("unlokHint", True)
             card.add(label)
@@ -11506,6 +11759,31 @@ class SmartUdimPanel(QtWidgets.QWidget):
         return ("; it now follows %s: meshes added to %s later join automatically" % (
             ", ".join(short_name(g) for g in groups[:3]) + ("..." if len(groups) > 3 else ""),
             "it" if len(groups) == 1 else "them"))
+
+    @ui_safe
+    def check_groups(self, confirm=True):
+        """Check & Fix Groups: report, ask, fix (one Ctrl+Z). confirm=False
+        takes the suggested choices without the dialog (tests)."""
+        asset = self._asset()
+        if asset is None:
+            self.set_status("Pick an asset first.", level="warn")
+            return None
+        report = asset.group_health(self.source_combo.value())
+        if not (report["broken"] or report["suggest"] or report["moves"] or report["unsorted"] or report["empty"]):
+            self.set_status("Groups are in order: every mesh is where its groups say, no broken links.")
+            return {}
+        dlg = GroupHealthDialog(report, self)
+        if confirm and dlg.exec_() != QtWidgets.QDialog.Accepted:
+            self.set_status("Check & Fix Groups: nothing changed.")
+            return None
+        res = asset.fix_groups(dlg.choices(), move=dlg.move.value(), sort=dlg.sort.value(), prune=dlg.prune.value(),
+                               material_source=self.source_combo.value())
+        self._collected = None
+        self.refresh()
+        self.set_status("Groups fixed: %d link(s) made, %d forgotten, %d mesh(es) moved, %d sorted, %d empty "
+                        "group(s) removed. One Ctrl+Z undoes it." % (res["linked"], res["unlinked"], res["moved"],
+                                                                     res["sorted"], res["pruned"]))
+        return res
 
     @ui_safe
     def follow_selected_groups(self):

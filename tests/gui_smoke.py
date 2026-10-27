@@ -348,6 +348,23 @@ def main():
     cmds.delete(porch)  # leave the scene as the later checks expect it
     pump()
     udim.refresh()
+
+    # --- Check & Fix Groups: a stray mesh in no group gets sorted in
+    stray = cmds.polyCube(name="woodBrown_C_stray0001_GEP")[0]
+    stray = cmds.ls(cmds.parent(stray, "|house_GRP")[0], long=True)[0]
+    report = asset.group_health()
+    dlg = ns["GroupHealthDialog"](report, udim)
+    dlg.show()
+    pump()
+    dlg.grab().save(os.path.join(OUT, "08b_check_fix_groups.png"))
+    dlg.close()
+    udim.check_groups(confirm=False)
+    pump()
+    check("Check & Fix Groups sorts a mesh that's in no group", stray in asset.assignments() and
+          ("Groups fixed" in udim.status.text() or "in order" in udim.status.text()), udim.status.text()[:200])
+    cmds.delete(stray)
+    pump()
+    udim.refresh()
     listed = {udim.naming_list.topLevelItem(i).text(0): udim.naming_list.topLevelItem(i).text(1)
               for i in range(udim.naming_list.topLevelItemCount())}
     check("naming hand-off lists the bad name (and soft issues like glassClear)",

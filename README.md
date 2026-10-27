@@ -443,6 +443,20 @@ density. The actual layout is still being built; see
      - **Speed:** the check only runs after something was reparented or
        created, and takes about 7 ms when nothing needs to move (400
        meshes).
+     - **Check & Fix Groups...** looks over the whole asset first and shows
+       what it found before changing anything:
+       - **Broken links:** a group that followed a Maya group which is now
+         gone. Pick the group it should follow now (a group with the same
+         name is offered first), leave it, or forget the link.
+       - **Not following a group yet:** material groups that look like they
+         were made from a Maya group (all its meshes, nearly nothing else).
+         It suggests following that group, so meshes added there later join.
+       - **Meshes not where their followed groups say:** moved, unless you
+         pinned them there by hand.
+       - **Meshes in no group:** sorted in by name or shader.
+       - **Empty material groups:** removed.
+
+       Fix applies it all as one Ctrl+Z.
    - **Section from Group** (step 3): select one or more groups in the
      Outliner and press it. Each becomes a section named after the group
      (`westWing_GRP` -> `westWing`; with one group you can change the name)

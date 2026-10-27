@@ -470,6 +470,23 @@
       derived from the hierarchy, and Ctrl+Z of the reparent is handled by
       the restore above.
     - Scan runs `follow_links` first.
+    - **Check & Fix Groups** (`group_health`, `fix_groups`,
+      `GroupHealthDialog`, panel `check_groups(confirm=)`):
+      - Every link is also remembered as JSON `unlokUdimLinkInfo`
+        {group uuid: name}, written by `_record_links` in `link_groups` /
+        `create_section` and cleared by `unlink_groups`. A remembered uuid
+        that isn't connected any more is a broken link. Guess: the node
+        with that uuid, else a group with the same short name.
+      - Suggestions (`_suggest_group`): the closest common parent group of
+        a material set's whole-mesh members, if 80%+ of the meshes under it
+        are in the set and neither the set's section nor another set
+        follows it.
+      - The moves come from `follow_links(everything=True, dry=True)`.
+      - `fix_groups` does relinks, then follow (everything), then `scan`
+        (unsorted), then `prune_empty_groups`, all in one chunk.
+      - **Gotchas:** `cmds.ls([])` lists every node in the scene: guard
+        empty lists before an `ls` of names. Deleting a Maya group also
+        deletes an *empty* set whose only connection was to it.
   - **Saved session** (`save_session`, `load_session`):
     - The panel's progress is JSON in `unlokUdimSession` on the root set:
       pre-process report, Auto UV / Analyse result, layout_applied,

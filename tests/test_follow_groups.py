@@ -145,8 +145,74 @@ def run():
           sets_of(after) and sets_of(after) != [wood_a] or section_key(after) == ["shackA"], str(sets_of(after)))
 
 
+def health(tb):
+    """Check & Fix Groups: broken links, suggested links, unsorted meshes,
+    empty groups; then one fix."""
+    cmds.file(new=True, force=True)
+    root = cmds.group(empty=True, name="yard_GRP")
+    shed = cmds.group(empty=True, name="shed_GRP", parent=root)
+
+    def cube(name, parent):
+        c = cmds.polyCube(name=name)[0]
+        return cmds.ls(cmds.parent(c, parent)[0], long=True)[0]
+
+    for i in range(3):
+        cube("woodBrown_C_board%04d_GEP" % (i + 1), shed)
+    asset = tb["SmartUdimAsset"].for_group(root)
+    asset.scan(sections_from_groups=True)
+    sec = asset.sections()[0]
+    # a broken link: a group that's deleted, then made again under the same name
+    porch = cmds.ls(cmds.group(empty=True, name="porch_GRP", parent=root), long=True)[0]
+    cube("metalGrey_C_rail0001_GEP", porch)
+    mat = asset.material_set(sec, "metalGrey", source="manual")
+    asset.link_groups(mat, [porch])
+    cmds.ungroup(porch)  # the group goes, its mesh stays (in the set)
+    porch2 = cmds.ls(cmds.group(empty=True, name="porch_GRP", parent=root), long=True)[0]
+    # a hand-made group holding every mesh of a Maya group (no link yet)
+    shack = cmds.group(empty=True, name="shackD_GRP", parent=root)
+    parts = [cube("ropeTan_C_tie%04d_GEP" % (i + 1), shack) for i in range(3)]
+    asset.scan(sections_from_groups=False)
+    tie = asset.material_set(sec, "ropeTan", source="manual")
+    cmds.ls(parts, long=True)
+    asset.assign(dict((m, None) for m in parts), tie)
+    # a mesh in no group, an empty group
+    loose = cube("glassClear_C_pane0001_GEP", root)
+    empty = asset.material_set(sec, "paintRed", source="manual")
+    rep = asset.group_health()
+    broken = [b for b in rep["broken"] if b["set"] == mat]
+    check("a link whose group was deleted is reported", broken and tb["short_name"](broken[0]["name"]) == "porch_GRP",
+          str(rep["broken"]))
+    check("...with the group of the same name as the best guess", broken and broken[0]["guess"] == porch2,
+          str(broken and broken[0]["guess"]))
+    sug = [s for s in rep["suggest"] if s["set"] == tie]
+    check("a hand-made group of a Maya group's meshes gets that group suggested",
+          sug and sug[0]["group"] == cmds.ls(shack, long=True)[0], str(rep["suggest"]))
+    check("meshes in no group are listed", cmds.ls(loose, long=True)[0] in rep["unsorted"], str(rep["unsorted"]))
+    check("empty groups are listed", empty in rep["empty"], str(rep["empty"]))
+    choices = [(broken[0]["set"], broken[0]["uuid"], "link", broken[0]["guess"]),
+               (sug[0]["set"], None, "link", sug[0]["group"])]
+    res = asset.fix_groups(choices)
+    after = asset.group_health()
+    check("after fixing: nothing broken, nothing suggested, nothing unsorted, no empty groups",
+          not after["broken"] and not after["suggest"] and not after["unsorted"] and not after["empty"],
+          "%s | %s" % (res, dict((k, len(v)) for k, v in after.items() if k != "candidates")))
+    newcomer = cube("ropeTan_C_tie0009_GEP", shack)
+    with tb["NoUndo"]():
+        asset.follow_links(changed={newcomer})
+    tie_now = [m for m in asset.all_material_sets() if "ropeTan" in m][0]
+    check("the suggested link now pulls new meshes in", tie_now in [s for s, _ in asset.assignments().get(newcomer,
+                                                                                                         [])])
+    cmds.undo()  # the cube... (the follow ran outside the undo queue)
+    cmds.undo()  # parent
+    cmds.undo()  # Check & Fix Groups
+    rep2 = asset.group_health()
+    check("one Ctrl+Z undoes Check & Fix Groups", any(b["set"] for b in rep2["broken"]) or rep2["suggest"],
+          "%d broken, %d suggested" % (len(rep2["broken"]), len(rep2["suggest"])))
+
+
 try:
     run()
+    health(ns["load_toolbox"]())
 except Exception:
     traceback.print_exc()
     RESULTS.append(("exception", False, ""))
