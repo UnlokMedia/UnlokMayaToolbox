@@ -86,9 +86,10 @@ def run():
     cmds.undo()  # Ctrl+Z of the reparent
     with tb["NoUndo"]():
         asset.follow_links(changed={other})
-    check("Ctrl+Z of the move puts it back in its old group", sets_of(other) == before,
-          "%s vs %s" % (sets_of(other), before))
-    check("...and forgets where it came from", not cmds.attributeQuery(tb["FOLLOW_ATTR"], node=other, exists=True))
+    check("Ctrl+Z of the move: it follows the group it's back under, sorted by its own name again",
+          sets_of(other) == before, "%s vs %s" % (sets_of(other), before))
+    check("...and carries no 'where it came from' tag", not cmds.attributeQuery(tb["FOLLOW_ATTR"], node=other,
+                                                                              exists=True))
 
     # --- pinned: assigned by hand somewhere else, links leave it
     secB = [s for s in asset.sections() if "shackB" in s][0]
@@ -210,9 +211,62 @@ def health(tb):
           "%d broken, %d suggested" % (len(rep2["broken"]), len(rep2["suggest"])))
 
 
+def outliner_moves(tb):
+    """The user's report: Check & Fix always found meshes to move and Fix
+    didn't fix them; a mesh dragged in the Outliner stayed in its old group."""
+    cmds.file(new=True, force=True)
+    root = cmds.group(empty=True, name="village_GRP")
+    grp = {}
+    for name in ("shackA", "shackB"):
+        grp[name] = cmds.group(empty=True, name=name + "_GRP", parent=root)
+        for i, mat in enumerate(("woodBrown", "metalGrey")):
+            c = cmds.polyCube(name="%s_C_%s%04d_GEP" % (mat, name, i + 1))[0]
+            cmds.parent(c, grp[name])
+    asset = tb["SmartUdimAsset"].for_group(root)
+    asset.scan(sections_from_groups=True)
+    long = lambda n: cmds.ls(n, long=True)[0]  # noqa: E731
+
+    def section_of(mesh):
+        sec_of = dict((m, s) for s in asset.sections() for m in asset.materials(s))
+        return sorted(set(tb["parse_group_name"](sec_of[s])["key"] for s, _ in asset.assignments().get(long(mesh), [])))
+
+    # an old scene's "where it came from" tag no longer shows up as a move
+    tagged = long("woodBrown_C_shackB0001_GEP")
+    cmds.addAttr(tagged, longName=tb["FOLLOW_ATTR"], dataType="string")
+    cmds.setAttr(tagged + "." + tb["FOLLOW_ATTR"], '{"to": "x", "via": "y", "from": []}', type="string")
+    # an Outliner move, followed live
+    m = long(cmds.parent(long("woodBrown_C_shackA0001_GEP"), grp["shackB"])[0])
+    with tb["NoUndo"]():
+        asset.follow_links(changed={m})
+    first = asset.group_health()["moves"]
+    asset.fix_groups([])
+    after = asset.group_health()["moves"]
+    check("an Outliner move follows the new group, and Check & Fix then finds nothing to move (old tags too)",
+          section_of(m) == ["shackB"] and not first and not after and
+          not cmds.attributeQuery(tb["FOLLOW_ATTR"], node=tagged, exists=True),
+          "now in %s, check %s, after fix %s" % (section_of(m), first, after))
+    # emptying a followed section keeps it (and its link): a mesh dragged back is followed
+    last = long("metalGrey_C_shackA0002_GEP")
+    asset.move_to_section({last: None}, [s for s in asset.sections() if "shackB" in s][0])
+    asset.pin_overrides([last])
+    kept = [s for s in asset.sections() if "shackA" in s]
+    check("emptying a followed section keeps the section and its group link", kept and
+          tb["_linked_group"](kept[0]) == long(grp["shackA"]), str(asset.sections()))
+    # a mesh placed by hand (pinned), then dragged to another group, follows it
+    moved = long(cmds.parent(last, grp["shackB"])[0])
+    with tb["NoUndo"]():
+        asset.follow_links(changed={moved})
+    back = long(cmds.parent(moved, grp["shackA"])[0])
+    with tb["NoUndo"]():
+        asset.follow_links(changed={back})
+    check("a mesh placed by hand, then dragged to other groups in the Outliner, follows them",
+          section_of(back) == ["shackA"] and not asset.group_health()["moves"], str(section_of(back)))
+
+
 try:
     run()
     health(ns["load_toolbox"]())
+    outliner_moves(ns["load_toolbox"]())
 except Exception:
     traceback.print_exc()
     RESULTS.append(("exception", False, ""))

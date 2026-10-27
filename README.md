@@ -431,13 +431,22 @@ density. The actual layout is still being built; see
        and its tooltip names the groups.
      - **The closest followed group wins**, so a sub-group can follow a
        different set.
+     - **The Outliner decides.** Every mesh under a followed group belongs
+       where its closest followed group says, always: drag a mesh to
+       another group in the Outliner and its sets follow. Check & Fix
+       Groups uses the same rule, so after a Fix it finds nothing left to
+       move.
      - **Followed sections** (Section from Group, or the top-level groups
        of the first Scan) sort new meshes in by name or shader. A mesh you
-       move into their group goes along, keeping its material.
-     - **Moving a mesh out** of a followed group (or Ctrl+Z of the move)
-       puts it back in the set it came from.
-     - **A mesh you assign elsewhere by hand stays there**: it's pinned.
-       Following another group explicitly takes it back.
+       move into their group goes along, keeping its material. One that
+       leaves a followed material group is sorted by its own name or
+       shader again.
+     - **A mesh you assign elsewhere by hand stays there** while it stays in
+       its Maya group: it's pinned. Drag it to another group in the
+       Outliner and the pin is dropped, so it follows. Following another
+       group explicitly also takes it back.
+     - **A section that runs empty stays**, still following its group, so
+       meshes you drag back into the group join it again.
      - **Renaming or moving** the group keeps the link. **Stop Following**
        ends it; the meshes stay where they are.
      - **Speed:** the check only runs after something was reparented or
@@ -452,7 +461,7 @@ density. The actual layout is still being built; see
          were made from a Maya group (all its meshes, nearly nothing else).
          It suggests following that group, so meshes added there later join.
        - **Meshes not where their followed groups say:** moved, unless you
-         pinned them there by hand.
+         pinned them there by hand (and haven't moved them since).
        - **Meshes in no group:** sorted in by name or shader.
        - **Empty material groups:** removed.
 

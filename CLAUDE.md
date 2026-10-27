@@ -484,25 +484,40 @@
       counts too. Message connections survive renames and reparenting.
       The closest linked parent decides (`_link_for`); a material link on
       the same group beats a section link.
-    - **Material links are authoritative:** the whole mesh goes in.
-    - **Section links** only sort unassigned meshes, plus meshes under paths
-      that were just reparented or created (`changed`). Meshes placed by
-      hand before links existed are never yanked.
+    - **The hierarchy decides** (simplified 2026-10-27 after the user
+      found Check & Fix always reported moves that Fix never made, and
+      Outliner moves that didn't follow): `follow_links` puts every mesh
+      under a followed group where its closest followed group says, every
+      time. Live, Check (`dry=True`) and Fix all call it, so a Check after a
+      Fix finds nothing. (`changed` / `everything` are kept for callers.)
+      - Material link: the whole mesh goes in.
+      - Section link: into that section keeping its material; new meshes,
+        and meshes that have left a followed material group (they only had
+        that material because of the group), are sorted in by name /
+        shader. Which material group inside the section is the user's call.
+      - Under no followed group: left alone.
     - **Pins:** `unlokUdimPins` on a material set holds meshes put there
-      by hand against a link. `assign`, the panel's New Group / New Section
-      / Move to Section call `pin_overrides`. `link_groups` unpins what's
-      under the groups (explicit wins).
-    - **Leaving a group:** a link-moved mesh gets `unlokUdimFollowed` JSON
-      (from sets by uuid, to, via group). When it's no longer under `via`
-      (moved out, or Ctrl+Z of the reparent) and still where the link put
-      it, `_restore_follow` puts it back. This runs before the section
-      rule, which would otherwise grab it first.
+      by hand against a link (`assign`, the panel's New Group / New Section
+      / Move to Section call `pin_overrides`). Each pin remembers the
+      followed group the mesh was under (`unlokUdimPinVia`, uuid); dragged
+      under another followed group, the pin is dropped and it follows. An
+      old pin without it adopts the group it's under now. `link_groups`
+      unpins what's under the groups (explicit wins).
+    - **Retired:** the `unlokUdimFollowed` "where it came from" tag and its
+      restore. Check listed every tagged mesh as a move while Fix left the
+      tag alone (the stuck count), and a tagged mesh dragged to another
+      group was sent back to its old set. Old tags are deleted on the next
+      follow. After Ctrl+Z of a reparent a mesh follows whatever group it's
+      back under.
+    - **Sections survive emptying:** Maya deletes a set whose last member
+      is deleted, so `prune_empty_groups` takes each material set out of
+      its section before deleting it. Otherwise emptying a section deleted
+      it and its group link, and meshes dragged back into that group were
+      followed nowhere.
     - **Live:** `MDagMessage.addParentAddedCallback` notes the child path
       (`_reparented`, `_links_dirty`) and starts the refresh timer.
       `refresh` then runs `_follow_groups` in **NoUndo**. An undoable sync
-      step would be redone the moment Ctrl+Z undid it. Membership is
-      derived from the hierarchy, and Ctrl+Z of the reparent is handled by
-      the restore above.
+      step would be redone the moment Ctrl+Z undid it.
     - Scan runs `follow_links` first.
     - **Check & Fix Groups** (`group_health`, `fix_groups`,
       `GroupHealthDialog`, panel `check_groups(confirm=)`):
@@ -515,7 +530,7 @@
         a material set's whole-mesh members, if 80%+ of the meshes under it
         are in the set and neither the set's section nor another set
         follows it.
-      - The moves come from `follow_links(everything=True, dry=True)`.
+      - The moves come from `follow_links(dry=True)`, the same rules Fix applies.
       - `fix_groups` does relinks, then follow (everything), then `scan`
         (unsorted), then `prune_empty_groups`, all in one chunk.
       - **Gotchas:** `cmds.ls([])` lists every node in the scene: guard

@@ -3445,7 +3445,8 @@ UDIM_GROUP = "unlokUdimGroup"
 UDIM_LINKS = "unlokUdimLinks"  # multi message on a section / material set: Maya groups it follows
 UDIM_PINS = "unlokUdimPins"  # multi message on a material set: meshes you put there by hand (links leave them)
 LINK_INFO = "unlokUdimLinkInfo"  # JSON {group uuid: name} of what a set was linked to (spots broken links)
-FOLLOW_ATTR = "unlokUdimFollowed"  # JSON on a mesh a link moved: where it came from (to go back if it leaves)
+FOLLOW_ATTR = "unlokUdimFollowed"  # old scenes only: a link-moved mesh's origin (now just cleaned up)
+PIN_VIA_ATTR = "unlokUdimPinVia"  # on a pinned mesh: uuid of the followed group it was under when pinned
 UDIM_ORIENT = "unlokUdimOrient"
 ORIENT_TOKENS = ("up", "keep", "axis")  # per-group orientation override in set names
 
@@ -3590,6 +3591,26 @@ def _linked_group(node):
         return None
     conns = cmds.listConnections(node + "." + UDIM_GROUP, source=True, destination=False) or []
     return long_name(conns[0]) if conns else None
+
+
+def _pin_via(mesh):
+    """uuid of the followed group a pinned mesh was under when pinned, or None."""
+    if cmds.attributeQuery(PIN_VIA_ATTR, node=mesh, exists=True):
+        return cmds.getAttr(mesh + "." + PIN_VIA_ATTR) or None
+    return None
+
+
+def _set_pin_via(mesh, group):
+    """Remember the followed group a mesh was pinned under (None forgets)."""
+    if not cmds.objExists(mesh):
+        return
+    if group is None:
+        if cmds.attributeQuery(PIN_VIA_ATTR, node=mesh, exists=True):
+            cmds.deleteAttr(mesh + "." + PIN_VIA_ATTR)
+        return
+    if not cmds.attributeQuery(PIN_VIA_ATTR, node=mesh, exists=True):
+        cmds.addAttr(mesh, longName=PIN_VIA_ATTR, dataType="string")
+    cmds.setAttr(mesh + "." + PIN_VIA_ATTR, cmds.ls(group, uuid=True)[0], type="string")
 
 
 def _msg_inputs(node, attr):
@@ -4197,11 +4218,16 @@ class SmartUdimAsset(object):
         return len(items)
 
     def prune_empty_groups(self):
-        """Delete material groups left with no members."""
+        """Delete material groups left with no members. Each is taken out of
+        its section first: Maya deletes a set whose last member is deleted,
+        so emptying a section this way deleted the section too, and with it
+        its link to a Maya group (meshes dragged back into that group were
+        then followed nowhere). A section stays, empty, until you delete it."""
         gone = 0
         for sec in self.sections():
             for mat in self.materials(sec):
                 if not (cmds.sets(mat, q=True) or []):
+                    cmds.sets(mat, remove=sec)
                     cmds.delete(mat)
                     gone += 1
         return gone
@@ -4456,6 +4482,8 @@ class SmartUdimAsset(object):
             for m in _msg_inputs(mat, UDIM_PINS):
                 if m in meshes:
                     _msg_disconnect(mat, UDIM_PINS, m)
+        for m in meshes:
+            _set_pin_via(m, None)
 
     def pin_overrides(self, meshes):
         """After a manual move: a mesh under a followed group that now sits
@@ -4468,74 +4496,91 @@ class SmartUdimAsset(object):
         sec_of = dict((mat, sec) for sec in self.sections() for mat in self.materials(sec))
         self._unpin(meshes)
         for m in meshes:
-            target, kind, _ = self._link_for(m, mat_links, sec_links)
+            target, kind, via = self._link_for(m, mat_links, sec_links)
             cur = assigned.get(m, [])
             if not target or not cur:
                 continue
-            if kind == "material" and not (len(cur) == 1 and cur[0][0] == target and cur[0][1] is None):
+            if (kind == "material" and not (len(cur) == 1 and cur[0][0] == target and cur[0][1] is None)) or (
+                    kind == "section" and any(sec_of.get(s) != target for s, _ in cur)):
                 _msg_connect(m, cur[0][0], UDIM_PINS)
-            elif kind == "section" and any(sec_of.get(s) != target for s, _ in cur):
-                _msg_connect(m, cur[0][0], UDIM_PINS)
+                _set_pin_via(m, via)
 
     def follow_links(self, material_source="Name, then shader", changed=None, everything=False, dry=False):
-        """Put meshes where their followed groups say (see group_links).
+        """Put meshes where their followed groups say (see group_links). The
+        hierarchy decides, for every mesh, every time (live, Check and Fix
+        all ask this one function, so a Check after a Fix finds nothing):
         - Under a followed material group: the whole mesh goes into it.
-        - Under a followed section: new (unsorted) meshes are sorted into it
-          by name / shader, and so are meshes under changed (paths that were
-          just reparented or created), keeping their material.
-        - A mesh a link moved that has left that group goes back where it
-          was before (e.g. after Ctrl+Z of the reparent).
-        Pinned meshes never move. Cheap when nothing needs moving. Runs in
-        the caller's undo state. Returns [(mesh, set or section)].
-        everything: the section rule applies to every mesh, not just changed
-        ones (Check & Fix Groups). dry: only say what would move."""
+        - Under a followed section: it goes into that section, keeping its
+          material (a new mesh is sorted in by name / shader, and so is one
+          that has just left a followed material group). Which material
+          group it's in inside the section is up to you.
+        - Not under any followed group: left alone.
+        A pinned mesh (put somewhere by hand) stays put only while it's
+        under the same followed group it was pinned under; dragged to
+        another group in the Outliner, the pin is dropped and it follows.
+        Runs in the caller's undo state. Returns [(mesh, set or section)].
+        changed / everything: kept for old callers (every mesh counts now).
+        dry: only say what would move."""
         mat_links, sec_links, pins = self.group_links()
-        tagged = set()
-        for node in cmds.ls("*." + FOLLOW_ATTR, objectsOnly=True, long=True) or []:
-            tagged.add(long_name(node))
-        if not mat_links and not sec_links and not tagged:
+        tagged = set(long_name(n) for n in cmds.ls("*." + FOLLOW_ATTR, objectsOnly=True, long=True) or [])
+        if not dry:
+            for node in tagged:  # the old "go back where it came from" tags: retired, they kept Fix stuck
+                if cmds.attributeQuery(FOLLOW_ATTR, node=node, exists=True):
+                    cmds.deleteAttr(node + "." + FOLLOW_ATTR)
+        if not mat_links and not sec_links:
             return []
-        changed = [long_name(c) for c in (changed or ()) if cmds.objExists(c)]
         meshes, instanced = self.meshes()
-        skip = set(instanced) | set(pins)
         assigned = self.assignments()
         sec_of = dict((mat, sec) for sec in self.sections() for mat in self.materials(sec))
-        to_mat, to_sec, new_sort, back = {}, {}, {}, []
+        to_mat, to_sec, new_sort, stale = {}, {}, {}, []
+        resort = set()  # left a followed material group: its own material again, by name / shader
+        followed_mats = set(mat_links.values())
+        inst = set(instanced)
         for x in meshes:
-            if x in skip:
+            if x in inst:
                 continue
             target, kind, via = self._link_for(x, mat_links, sec_links)
+            if kind is None:
+                continue
+            if x in pins:
+                pinned_via = _pin_via(x)
+                via_id = cmds.ls(via, uuid=True)[0]
+                if pinned_via is None and not dry:
+                    _set_pin_via(x, via)  # an old pin: it holds for the group it's under now
+                    continue
+                if pinned_via in (None, via_id):
+                    continue  # put there by hand, and still under the same group
+                stale.append(x)  # pinned under another group, then moved: the pin goes, it follows
             cur = assigned.get(x, [])
             if kind == "material":
                 if not (len(cur) == 1 and cur[0][0] == target and cur[0][1] is None):
-                    to_mat.setdefault(target, []).append((x, cur, via))
-                continue
-            if x in tagged:  # a link moved it before and it has left that group: back home first
-                back.append(x)
-                continue
-            if kind == "section":
-                if not cur:
-                    new_sort.setdefault(target, []).append(x)
-                    continue
-                if any(sec_of.get(s) != target for s, _ in cur) and (everything or any(
-                        _under(x, c) or _under(c, x) for c in changed)):
-                    to_sec.setdefault(target, []).append((x, cur, via))
+                    to_mat.setdefault(target, []).append(x)
+            elif not cur:
+                new_sort.setdefault(target, []).append(x)
+            elif any(s in followed_mats for s, _ in cur):
+                # it was in a material group only because it sat under that
+                # group's Maya group; it has left: sorted in afresh by its
+                # own name / shader (else a plank dragged out of a followed
+                # "glass" group stayed glass)
+                new_sort.setdefault(target, []).append(x)
+                resort.add(x)
+            elif any(sec_of.get(s) != target for s, _ in cur):
+                to_sec.setdefault(target, []).append((x, cur))
         if dry:
-            return ([(x, mat) for mat, rows in to_mat.items() for x, _, _ in rows] +
-                    [(x, sec) for sec, rows in to_sec.items() for x, _, _ in rows] +
-                    [(x, sec) for sec, xs in new_sort.items() for x in xs] + [(x, None) for x in back])
+            return ([(x, mat) for mat, xs in to_mat.items() for x in xs] +
+                    [(x, sec) for sec, rows in to_sec.items() for x, _ in rows] +
+                    [(x, sec) for sec, xs in new_sort.items() for x in xs])
+        if stale:
+            self._unpin(stale)
         moved = []
-        for mat, rows in to_mat.items():
-            for x, cur, via in rows:
-                self._record_follow(x, cur, mat, via)
-            items = dict((x, None) for x, _, _ in rows)
+        for mat, xs in to_mat.items():
+            items = dict((x, None) for x in xs)
             self._remove_items(items)
             self._add_items(items, mat)
             moved += [(x, mat) for x in items]
         for sec, rows in to_sec.items():
             items = {}
-            for x, cur, via in rows:
-                self._record_follow(x, cur, sec, via)
+            for x, cur in rows:
                 faces = set()
                 for _, fs in cur:
                     if fs is None:
@@ -4545,6 +4590,8 @@ class SmartUdimAsset(object):
                 items[x] = faces
             self.move_to_section(items, sec, material_source, prune=False)
             moved += [(x, sec) for x in items]
+        if resort:
+            self._remove_items(dict((x, None) for x in resort))
         for sec, xs in new_sort.items():
             batches = {}
             for x in xs:
@@ -4553,52 +4600,9 @@ class SmartUdimAsset(object):
             for mat, items in batches.items():
                 self._add_items(items, mat)
             moved += [(x, sec) for x in xs]
-        for x in back:
-            got = self._restore_follow(x, assigned.get(x, []), sec_of)
-            if got:
-                moved.append((x, got))
         if moved:
             self.sync_names()
         return moved
-
-    @staticmethod
-    def _record_follow(xform, cur, target, via):
-        """Remember where a link moved a mesh from (only its first move)."""
-        if not cur or cmds.attributeQuery(FOLLOW_ATTR, node=xform, exists=True):
-            if cmds.attributeQuery(FOLLOW_ATTR, node=xform, exists=True):
-                data = json.loads(cmds.getAttr(xform + "." + FOLLOW_ATTR) or "{}")
-                data["to"], data["via"] = cmds.ls(target, uuid=True)[0], cmds.ls(via, uuid=True)[0]
-                cmds.setAttr(xform + "." + FOLLOW_ATTR, json.dumps(data), type="string")
-            return
-        data = {"to": cmds.ls(target, uuid=True)[0], "via": cmds.ls(via, uuid=True)[0],
-                "from": [[cmds.ls(s, uuid=True)[0], None if fs is None else sorted(fs)] for s, fs in cur]}
-        cmds.addAttr(xform, longName=FOLLOW_ATTR, dataType="string")
-        cmds.setAttr(xform + "." + FOLLOW_ATTR, json.dumps(data), type="string")
-
-    def _restore_follow(self, xform, cur, sec_of):
-        """A mesh a link moved that is no longer under that group goes back
-        to where it was, if it's still where the link put it. Returns the
-        set it went back to, or None."""
-        try:
-            data = json.loads(cmds.getAttr(xform + "." + FOLLOW_ATTR) or "{}")
-        except (ValueError, RuntimeError):
-            data = {}
-        via = cmds.ls(data.get("via", ""), long=True) if data.get("via") else []
-        if via and _under(xform, long_name(via[0])):
-            return None  # still in the group (a closer link decided otherwise)
-        to = cmds.ls(data.get("to", ""), long=True) if data.get("to") else []
-        out = None
-        still = to and cur and all(s == to[0] or sec_of.get(s) == to[0] for s, _ in cur)
-        if still:
-            homes = [(cmds.ls(u, long=True), fs) for u, fs in data.get("from", [])]
-            homes = [(h[0], fs) for h, fs in homes if h and set_role(h[0]) == "material"]
-            if homes:
-                self._remove_items({xform: None})
-                for home, fs in homes:
-                    self._add_items({xform: None if fs is None else set(fs)}, home)
-                out = homes[0][0]
-        cmds.deleteAttr(xform + "." + FOLLOW_ATTR)
-        return out
 
     @staticmethod
     def _add_items(items, material_set):
@@ -12800,8 +12804,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
     def _follow_groups(self, asset):
         """Keep followed groups' meshes in their sets. Outside the undo queue:
         it's bookkeeping derived from the hierarchy, and an undoable step
-        would just be redone the moment Ctrl+Z undid it. Ctrl+Z of the
-        reparent itself puts the mesh back (follow_links restores it)."""
+        would just be redone the moment Ctrl+Z undid it. After Ctrl+Z of a
+        reparent the mesh follows whatever group it's back under."""
         self._links_dirty = False
         changed, self._reparented = self._reparented, set()
         try:
