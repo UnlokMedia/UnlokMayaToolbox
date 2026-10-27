@@ -743,7 +743,23 @@ def main():
             others_tiles |= t
     check("Auto UV + Lay Out Selected puts the selection together in a UDIM of its own",
           quick and all(ns["mesh_tiles"]([m])[m] == {quick} for m in pick) and quick not in others_tiles and
-          "quick look" in udim.status.text(), "%s | %s" % (quick, udim.status.text()[:160]))
+          "Auto UV, then laid out" in udim.status.text(), "%s | %s" % (quick, udim.status.text()[:160]))
+    # spot-fix loop: a hand edit (one UV dragged off), then Lay Out Selected re-lays it in the same UDIM
+    cmds.polyEditUV(pick[0] + ".map[0]", u=3.7, v=2.2)
+    cmds.select(pick, replace=True)
+    again = udim.lay_out_selected()
+    pump()
+    check("Lay Out Selected (no unwrap) re-lays the selection in its own UDIM after a hand edit",
+          again == quick and all(ns["mesh_tiles"]([m])[m] == {quick} for m in pick) and
+          "Laid out" in udim.status.text(), "%s | %s" % (again, udim.status.text()[:160]))
+    loose = cmds.polyCube(w=50, h=50, d=50, name="looseCrate")[0]
+    cmds.select(loose, replace=True)
+    out_tile = udim.lay_out_selected()
+    pump()
+    check("...and works on a mesh outside the asset, where it is", out_tile == 1001 and
+          ns["mesh_tiles"]([cmds.ls(loose, long=True)[0]])[cmds.ls(loose, long=True)[0]] == {1001},
+          "%s | %s" % (out_tile, udim.status.text()[:120]))
+    cmds.delete(loose)
 
     # --- shells too big for a UDIM: the plan says so, Apply's split cuts them
     # at their 50% line and plans again (its Ctrl+Z: tests/test_squares.py)

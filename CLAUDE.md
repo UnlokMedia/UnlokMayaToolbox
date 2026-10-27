@@ -410,6 +410,11 @@
     one over 16 is ignored. Nothing is
     stored (no sets, tiles, density, laid-out tracking); it drops the
     panel's `_collected` / `_plan`.
+    **Lay Out Selected** (`lay_out_selected`) is the same `_lay_out`
+    without the unwrap, for the user's spot-fix loop (Auto UV + Lay Out,
+    hand clean-up, Lay Out again, Keep UVs, next). Selections outside the
+    asset's root (`_lay_out` checks the root, not just "an asset is
+    loaded") stay in their majority tile (`_uv_tile`), one block.
   - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
     `auto_uv()` -> `apply_layout()` (re-plans itself) -> `validate()`.
     - Each step method returns its result (None when cancelled or failed),

@@ -12233,7 +12233,16 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                       "density, upright. Not the plan: Apply Layout later lays everything out "
                                       "properly. Two Ctrl+Z steps (Auto UV, then the lay-out).")
         quick_look.clicked.connect(lambda *_: self.auto_uv_lay_out_selected())
-        card.add(quick_look)
+        lay_sel = secondary_button("Lay Out Selected",
+                                   "Lay out the selected meshes' UVs as they are now (no unwrap), like "
+                                   "PolyRaven's size-based distribute and layout: identical pieces in neat "
+                                   "grids, rows by size, one block per material, one even density, upright, in "
+                                   "a UDIM of their own (the one they're in if nothing else uses it). For spot "
+                                   "fixes: Auto UV + Lay Out Selected, clean the UVs up by hand, Lay Out "
+                                   "Selected again, then Keep UVs and move on. Works on meshes outside the "
+                                   "asset too (laid out where they are). One Ctrl+Z.")
+        lay_sel.clicked.connect(lambda *_: self.lay_out_selected())
+        card.add(button_row(quick_look, lay_sel))
         self.auto_progress = QtWidgets.QProgressBar()
         self.auto_progress.setRange(0, 1000)
         self.auto_progress.setTextVisible(False)
@@ -14170,32 +14179,58 @@ class SmartUdimPanel(QtWidgets.QWidget):
         result = self.auto_uv(selected=True)
         if result is None or result.get("cancelled"):
             return None
-        status = asset.uv_status()
+        return self._lay_out(meshes, "Auto UV, then laid out")
+
+    @ui_safe
+    def lay_out_selected(self):
+        """Lay out the selection's UVs as they are (no unwrap): spot fixes
+        between hand clean-ups. Meshes outside the asset are laid out in the
+        tile they're in."""
+        items = selection_items()
+        if not items:
+            self.set_status("Select the meshes or groups to lay out first.", level="warn")
+            return None
+        return self._lay_out(sorted(items), "Laid out")
+
+    def _lay_out(self, meshes, verb):
+        """lay_out_together on meshes in their own UDIM (free_tile_for), one
+        block per material. Inside the asset only what the tool placed or the
+        user marked counts as taken; outside it, they stay in their tile."""
+        asset = self._asset()
+        root = asset.root_group() if asset is not None and asset.sections() else None
+        in_asset = bool(root) and any(m == root or m.startswith(root + "|") for m in meshes)
+        status = asset.uv_status() if in_asset else {}
         meshes = [m for m in meshes if cmds.objExists(m) and status.get(m) not in ("handsoff", "keeplayout")]
         if not meshes:
             self.set_status("Nothing to lay out: the selection is all Hands off / Keep Layout.", level="warn")
             return None
         uv_set = self.uv_set.text().strip() or "map1"
         mine = set(meshes)
-        placed = set(asset.tool_members("auto")) | set(asset.tool_members("laidout")) | set(status)
-        others = sorted(m for m in placed if m not in mine and cmds.objExists(m))
-        udim = free_tile_for(meshes, others, uv_set,
-                             handsoff=[m for m, st in status.items() if st == "handsoff"])
+        keys = {}
+        if in_asset:
+            placed = set(asset.tool_members("auto")) | set(asset.tool_members("laidout")) | set(status)
+            others = sorted(m for m in placed if m not in mine and cmds.objExists(m))
+            udim = free_tile_for(meshes, others, uv_set,
+                                 handsoff=[m for m, st in status.items() if st == "handsoff"])
+            assigned = asset.assignments()
+            keys = dict((m, (_get(assigned[m][0][0], UDIM_KEY) or parse_group_name(assigned[m][0][0])["key"]))
+                        for m in meshes if assigned.get(m))
+        else:  # not part of a Smart UDIM asset: where most of them are
+            tiles = [t for t in (_uv_tile(m, uv_set) for m in meshes) if t is not None]
+            udim = max(set(tiles), key=tiles.count) if tiles else 1001
         res = float(self.lay_map.value())
-        assigned = asset.assignments()
-        keys = dict((m, (_get(assigned[m][0][0], UDIM_KEY) or parse_group_name(assigned[m][0][0])["key"]))
-                    for m in meshes if assigned.get(m))
         with UndoChunk("Lay Out Selected"):
             n = lay_out_together(meshes, uv_set, padding=self.lay_padding.value() / res,
                                  orientation=self.lay_orient.value(), udim=udim, keys=keys)
         self._collected, self._plan = None, None  # UVs moved: any plan on show is stale
         self.refresh()
         if not n:
-            self.set_status("Auto UV done, but the selection's shells don't fit one UDIM even small (too many for "
-                            "the padding): lay them out with Plan / Apply Layout.", level="warn")
+            self.set_status("The selection's shells don't fit one UDIM even small (too many for the padding), "
+                            "or have no usable UVs: lay them out with Plan / Apply Layout.", level="warn")
             return None
-        self.set_status("Auto UV, then laid out %d shell(s) from %d mesh(es) together in UDIM %d: a quick look. "
-                        "Apply Layout lays everything out properly." % (n, len(meshes), udim))
+        self.set_status("%s %d shell(s) from %d mesh(es) together in UDIM %d. Clean up by hand and Lay Out "
+                        "Selected again, or Keep UVs and move on; Apply Layout lays everything out properly." % (
+                            verb, n, len(meshes), udim))
         return udim
 
     def _chain_banner(self, step, total, text):

@@ -574,7 +574,18 @@ density. The actual layout is still being built; see
      grids at one even density, upright. It isn't the plan: nothing is
      stored, and Apply Layout later lays everything out properly. Hands off
      and Keep Layout meshes aren't moved. Two Ctrl+Z steps (Auto UV, then
-     the lay-out).
+     the lay-out). It lands in the first UDIM the tool hasn't filled
+     (meshes nobody has unwrapped yet don't count).
+   - **Lay Out Selected:** the same lay-out on the selection's UVs as they
+     are, with no unwrap, like PolyRaven's size-based distribute and
+     layout. It's for spot fixes:
+     1. Auto UV + Lay Out Selected.
+     2. Clean the UVs up by hand.
+     3. Lay Out Selected again (it re-lays them in their own UDIM).
+     4. Keep UVs, and move on to the next piece.
+
+     Meshes outside the asset are laid out in the UDIM they're in. One
+     Ctrl+Z.
    - **Speed on big assets:**
      - Meshes whose projection is already clean (every edge's UV length
        the same multiple of its 3D length: walls, planks, boxes) skip
