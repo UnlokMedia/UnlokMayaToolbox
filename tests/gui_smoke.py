@@ -551,6 +551,41 @@ def main():
     pump()
     check("UV Viewer colours by texel density", viewer.colour_of(viewer.items[0]).name() != "#6a6a6a")
     viewer.grab().save(os.path.join(OUT, "11c_uv_viewer_density.png"))
+    # --- drag a group onto another tile: it's pinned there and re-planned
+    QtCore, QtGui = ns["QtCore"], ns["QtGui"]
+    viewer.canvas.frame()
+    pump()
+    item = viewer.items[0]
+    group = item["group"]
+    target_tile = max(viewer.tiles) + 1 if (max(viewer.tiles) - 1001) % 10 < 9 else max(viewer.tiles) + 10
+    cx = sum(a for a, _ in item["hull"]) / len(item["hull"])
+    cy = sum(b for _, b in item["hull"]) / len(item["hull"])
+    start = viewer.canvas.to_px(cx, cy).toPoint()
+    tu, tv = (target_tile - 1001) % 10, (target_tile - 1001) // 10
+    end = viewer.canvas.to_px(tu + 0.5, tv + 0.5).toPoint()
+
+    def mouse(kind, pos, buttons):
+        return QtGui.QMouseEvent(kind, QtCore.QPointF(pos), QtCore.Qt.LeftButton, buttons, QtCore.Qt.NoModifier)
+
+    viewer.canvas.mousePressEvent(mouse(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton))
+    mid = QtCore.QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2)
+    viewer.canvas.mouseMoveEvent(mouse(QtCore.QEvent.MouseMove, mid, QtCore.Qt.LeftButton))
+    viewer.canvas.mouseMoveEvent(mouse(QtCore.QEvent.MouseMove, end, QtCore.Qt.LeftButton))
+    viewer.grab().save(os.path.join(OUT, "11e_uv_viewer_drag.png"))
+    viewer.canvas.mouseReleaseEvent(mouse(QtCore.QEvent.MouseButtonRelease, end, QtCore.Qt.NoButton))
+    deadline = time.time() + 30.0
+    while udim._worker is not None and time.time() < deadline:
+        pump(1)
+    pump()
+    pinned = ns["group_pin"](cmds.ls(cmds.ls(group, uuid=True)[0])[0]) if cmds.objExists(group) else []
+    st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if k == group or v.get("uuid") ==
+          (cmds.ls(group, uuid=True) or [None])[0]]
+    check("dragging a group onto a tile in the UV Viewer pins it there and re-plans",
+          pinned == [target_tile] and st and target_tile in st[0]["tiles"],
+          "pin %s, tiles %s, target %d" % (pinned, st and st[0]["tiles"], target_tile))
+    viewer.grab().save(os.path.join(OUT, "11f_uv_viewer_dropped.png"))
+    udim.pin_groups([group], [])
+
     viewer.show_scene()
     pump()
     check("UV Viewer reads the scene's UVs", viewer.source == "scene" and len(viewer.items) > 0,
@@ -580,6 +615,13 @@ def main():
     check("Apply Layout writes it and the step completes", udim.step_layout.state == "done" and
           "Laid out" in udim.status.text(), udim.status.text())
     check("Apply leaves the hands-off rafter's UVs alone", cmds.polyEditUV(rafter + ".map[*]", q=True) == rafter_uvs)
+    first_mat = udim.tree.topLevelItem(0).child(1) or udim.tree.topLevelItem(0).child(0)
+    udim.tree.clearSelection()
+    first_mat.setSelected(True)
+    udim.relayout_selected()
+    pump()
+    check("Re-layout Selected lays out just the highlighted group", "Re-laid out 1 group" in udim.status.text(),
+          udim.status.text()[:200])
     check("locked group shows as locked in the map", bool(udim.udim_map.locked_tiles),
           str(sorted(udim.udim_map.locked_tiles)))
     scroll = udim.step_layout.parentWidget().parentWidget().parentWidget()

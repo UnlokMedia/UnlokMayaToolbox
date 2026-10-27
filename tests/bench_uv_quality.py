@@ -218,7 +218,7 @@ def run():
     report(tb, meshes, "after Auto UV")
     col = tb["collect_shells"](asset)
     settings = dict(tb["LAYOUT_DEFAULTS"], texel_density=256.0, map_size="2048",
-                    orientation=tb["ORIENTATIONS"][0], group_similar=True)
+                    orientation=tb["ORIENTATIONS"][0], group_similar=True, keep_meshes=True)
     plan = tb["make_plan"](col, settings)
     tb["apply_layout"](asset, col, plan)
     img = tb["render_handoff_sheet"](asset, px_per_tile=512)

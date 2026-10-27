@@ -4478,6 +4478,7 @@ class SmartUdimAsset(object):
                 mats.append({
                     "set": mat,
                     "follows": _msg_inputs(mat, UDIM_LINKS),
+                    "pin": group_pin(mat),
                     "key": _get(mat, UDIM_KEY) or parse_group_name(mat)["key"],
                     "td": _get(mat, UDIM_TD, parse_group_name(mat)["td"] or 100.0),
                     "cov": _get(mat, UDIM_COV, -1.0),
@@ -7737,7 +7738,8 @@ def auto_uv_targets(asset, meshes, uv_set="map1", planned=None):
     want = set(meshes)
     stored = {}
     for mat in asset.all_material_sets():
-        tiles = [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip().isdigit()]
+        tiles = group_pin(mat)[:1] or [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",")
+                                       if t.strip().isdigit()]
         if not tiles:
             continue
         for m in expand_members(mat)[0]:
@@ -8019,6 +8021,7 @@ def _run_auto_uv(asset, uv_set, backup, backup_set, keep_score, hard_angle, clea
 # undoable copy, so the whole layout is one Ctrl+Z.
 
 LAYOUT_LOCK = "unlokUdimLock"
+LAYOUT_PIN = "unlokUdimPin"  # tiles a material group is pinned to: "1012" or "1012,1013"
 LAYOUT_TILES = "unlokUdimTiles"
 LAYOUT_PRINT = "unlokUdimPrint"
 FIT_ROWS = "Fit sections to rows"
@@ -8040,6 +8043,7 @@ LAYOUT_DEFAULTS = {
     "padding_px": 8,
     "orientation": "Main axis",
     "group_similar": False,  # pack near-identical pieces as grid blocks (the panel turns it on)
+    "keep_meshes": False,  # keep each mesh's shells together (the panel turns it on)
     "new_row_per_section": True,
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
@@ -8228,7 +8232,7 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
 
 
 def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None, ready_only=True,
-                   keep_score=AUTO_UV_KEEP_SCORE):  # rotate: kept for old callers
+                   keep_score=AUTO_UV_KEEP_SCORE, only=None):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
@@ -8240,8 +8244,14 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     still need UVs are left out and listed in not_ready, and so is any mesh
     with junk / over-split UVs (see oversplit), which would otherwise mean
     reading and packing thousands of tiny shells.
+
+    only: re-lay out just these material groups. Every other group stays as
+    it is: listed as locked (its tiles taken from its last layout, else from
+    where its UVs are), and its shells become obstacles, so the chosen
+    groups can still fill the gaps in tiles they shared (prefer).
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    only = set(only) if only is not None else None
     exclude = set(exclude)
     not_ready = {}
     checked = set()
@@ -8267,6 +8277,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     caches = {}
     claimed = set()
     groups, locked, skipped = [], [], set()
+    kept_fixed = []  # shells of groups kept as they are (re-layout of some groups): obstacles
     conflicts = 0
     for si, sec in enumerate(asset.sections()):
         sec_td = _get(sec, UDIM_TD, 100.0)
@@ -8279,7 +8290,22 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                     "print": _group_print(members), "old_print": _get(mat, LAYOUT_PRINT, "") or "",
                     "stack": bool(_get(mat, UDIM_STACK, False)), "orient": _get(mat, UDIM_ORIENT, "") or None,
                     "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()],
-                    "fixed": []}
+                    "fixed": [], "pin": group_pin(mat)}
+            if only is not None and mat not in only:  # kept as it is this time
+                where = set()
+                for xform, faces in members.items():
+                    if xform in exclude:
+                        continue
+                    for udim, box, area in uv_footprints(xform, uv_set, faces):
+                        where.add(udim)
+                        kept_fixed.append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
+                                           "area": area})
+                info["tiles"] = sorted(set(info["tiles"]) | where)
+                info["kept"] = True
+                locked.append(info)
+                continue
+            if only is not None:
+                info["prefer"] = list(info["tiles"])  # its old tiles, shared ones included
             if _get(mat, LAYOUT_LOCK, False):
                 locked.append(info)
                 continue
@@ -8304,7 +8330,8 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             groups.append(info)
             fixed.extend(info["fixed"])
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
-            "fixed": fixed, "handsoff": sorted(handsoff), "not_ready": not_ready}
+            "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
+            "only": sorted(only) if only is not None else None}
 
 
 LAYOUT_SHELL_CAP = 4000  # more UV shells than this on one mesh = junk / over-split: layout skips it
@@ -8450,15 +8477,84 @@ class _TilePacker(object):
         self.segs = merged
 
 
+class _Compound(object):
+    """Pieces laid out together and packed as one rectangle: a mesh's
+    shells (a bundle) or a grid of similar pieces (a block). children are
+    (item, x, y) with item a piece (shell, k, angle, w, h) or another
+    compound; sizes include each cell's padding."""
+    __slots__ = ("mesh", "uv_ids", "children")
+
+    def __init__(self, children):
+        first = children[0][0][0]
+        self.mesh, self.uv_ids = first.mesh, first.uv_ids
+        self.children = children
+
+    def leaves(self, ox=0.0, oy=0.0):
+        for item, x, y in self.children:
+            if isinstance(item[0], _Compound):
+                for leaf in item[0].leaves(ox + x, oy + y):
+                    yield leaf
+            else:
+                yield item, ox + x, oy + y
+
+
+def _cell(item, growth, pad):
+    """The room a piece takes in a compound (padding included)."""
+    if isinstance(item[0], _Compound):
+        return item[3], item[4]
+    return item[3] * (1.0 + growth) + pad, item[4] * (1.0 + growth) + pad
+
+
+def _sort_pieces(items):
+    items.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh, t[0].uv_ids[0]))
+    return items
+
+
+def _mesh_bundles(items, growth, pad, usable):
+    """Each mesh's shells packed close together (rows, tallest first, about
+    square), so shells that sit near each other in UV belong to the same
+    mesh: a rope binding's strands, a lamp's parts. Meshes too big to
+    bundle inside a tile keep their shells free."""
+    by_mesh = {}
+    for it in items:
+        by_mesh.setdefault(it[0].mesh, []).append(it)
+    out = []
+    for mesh in sorted(by_mesh):
+        its = by_mesh[mesh]
+        if len(its) < 2:
+            out += its
+            continue
+        cells = [(it,) + _cell(it, growth, pad) for it in its]
+        total = sum(cw * ch for _, cw, ch in cells)
+        widest = max(cw for _, cw, _ in cells)
+        width = min(max(widest, math.sqrt(total) * 1.15), max(widest, usable + pad))
+        cells.sort(key=lambda c: (-c[2], -c[1], c[0][0].uv_ids[0]))
+        x = y = row_h = used = 0.0
+        children = []
+        for it, cw, ch in cells:
+            if x > 0 and x + cw > width + 1e-12:
+                x, y, row_h = 0.0, y + row_h, 0.0
+            children.append((it, x, y))
+            x += cw
+            row_h = max(row_h, ch)
+            used = max(used, x)
+        height = y + row_h
+        if used > usable + pad + 1e-9 or height > usable + pad + 1e-9:
+            out += its  # too big to keep together in one tile
+            continue
+        out.append((_Compound(children), 1.0, 0.0, used, height))
+    return _sort_pieces(out)
+
+
 def _similar_blocks(items, growth, pad, usable, tol=0.04):
     """Group pieces of nearly the same size (within tol on both sides: the
-    planks, the bolts, the brackets) into blocks laid out as a neat grid,
-    each block packed as one rectangle, like PolyRaven's size-based
-    distribute. Returns (items with each block as one item, {id(first
-    member): (members, cols, cell w, cell h)})."""
+    planks, the bolts, the rope bindings) into blocks laid out as a neat
+    grid, each block packed as one rectangle, like PolyRaven's size-based
+    distribute. Pieces may be mesh bundles. Returns the pieces with each
+    block as one compound piece."""
     items = sorted(items, key=lambda t: (-t[3], -t[4], t[0].mesh, t[0].uv_ids[0]))
     used = set()
-    out, blocks = [], {}
+    out = []
     for i, it in enumerate(items):
         if i in used:
             continue
@@ -8476,8 +8572,9 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
         if len(group) < 2:
             out.append(it)
             continue
-        cw = max(g[3] for g in group) * (1.0 + growth) + pad
-        chh = max(g[4] for g in group) * (1.0 + growth) + pad
+        cells = [_cell(g, growth, pad) for g in group]
+        cw = max(c[0] for c in cells)
+        chh = max(c[1] for c in cells)
         max_cols = max(1, int((usable + pad) / cw)) if cw <= usable + pad else 1
         max_rows = max(1, int((usable + pad) / chh)) if chh <= usable + pad else 1
         per = max_cols * max_rows
@@ -8492,11 +8589,9 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
             if rows > max_rows:
                 rows = max_rows
                 cols = int(math.ceil(n / float(rows)))
-            first = chunk[0]
-            blocks[id(first[0])] = (chunk, cols, cw, chh)
-            out.append((first[0], first[1], first[2], cols * cw, rows * chh))
-    out.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh, t[0].uv_ids[0]))
-    return out, blocks
+            children = [(m, (k % cols) * cw, (k // cols) * chh) for k, m in enumerate(chunk)]
+            out.append((_Compound(children), 1.0, 0.0, cols * cw, rows * chh))
+    return _sort_pieces(out)
 
 
 def plan_layout(collected, settings, density_scale=1.0):
@@ -8511,7 +8606,12 @@ def plan_layout(collected, settings, density_scale=1.0):
     growth = max(0.0, float(s["growth"]))
     reserved = set()
     for g in collected["locked"]:
-        reserved.update(g["tiles"])
+        if not g.get("kept"):  # kept groups' tiles stay open for the gaps around them (fixed)
+            reserved.update(g["tiles"])
+    pinned_tiles = set(t for g in collected["groups"] for t in g.get("pin") or ())
+    reserved.update(pinned_tiles)  # only their own groups go there
+    prefer_tiles = set(t for g in collected["groups"] for t in g.get("prefer") or ()) - pinned_tiles
+    reserved.update(prefer_tiles)  # re-layout of some groups: their old tiles are offered to them first
     # hands-off shells: their tiles are never handed out as fresh tiles. In
     # "Pack around them" mode each such tile becomes a packer whose free space
     # is what's left around them (offered first to the groups those shells
@@ -8553,6 +8653,15 @@ def plan_layout(collected, settings, density_scale=1.0):
         t = next(tile_iter)
         tiles_used.add(1001 + t[0] + 10 * t[1])
         return _TilePacker(t, pad)
+
+    pin_packers = {}
+
+    def pin_packer(udim):
+        if udim not in pin_packers:
+            pin_packers[udim] = fixed_packers.get(udim) or _TilePacker(((udim - 1001) % 10, (udim - 1001) // 10),
+                                                                       pad)
+        tiles_used.add(udim)
+        return pin_packers[udim]
 
     for g in groups:
         if g["section_index"] != current_section:
@@ -8600,18 +8709,25 @@ def plan_layout(collected, settings, density_scale=1.0):
         # pieces 90 degrees when that sits lower.
         unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
                                    t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
-        blocks = {}  # id(first member) -> (members, cols, cell w, cell h)
-        if s.get("group_similar") and not g.get("stack"):
-            unique, blocks = _similar_blocks(unique, growth, pad, usable)
+        if not g.get("stack"):  # compounds: shells of a mesh together, similar pieces in blocks
+            if s.get("keep_meshes"):
+                unique = _mesh_bundles(unique, growth, pad, usable)
+            if s.get("group_similar"):
+                unique = _similar_blocks(unique, growth, pad, usable)
         can_turn = mode == "axis"
         own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
-        packers = [fixed_packers[t] for t in own_fixed if t in fixed_packers]
-        packers += [q for q in carry if q not in packers]
+        if g.get("pin"):  # pinned: its own tiles first (then fresh ones if it doesn't fit)
+            packers = [pin_packer(t) for t in g["pin"]]
+        else:
+            packers = [pin_packer(t) for t in sorted(set(g.get("prefer") or ()) - pinned_tiles)]
+            packers += [fixed_packers[t] for t in own_fixed if t in fixed_packers and fixed_packers[t] not in packers]
+            packers += [q for q in carry if q not in packers]
+        pin_overflow = False
         g_tiles = set(own_fixed)
         area = sum(fx["area"] for fx in g.get("fixed", []))
         for item in unique:
             sh, k, a, w, h = item
-            block = blocks.get(id(sh))
+            block = sh if isinstance(sh, _Compound) else None
             w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
             if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
                 w_res, h_res = min(w_res, usable), min(h_res, usable)
@@ -8630,6 +8746,7 @@ def plan_layout(collected, settings, density_scale=1.0):
             if found is None:
                 pk = next_tile()
                 packers.append(pk)
+                pin_overflow = pin_overflow or bool(g.get("pin"))
                 spot = pk.find(rw, rh)
                 turned = False
                 if spot is None and can_turn and block is None:
@@ -8647,10 +8764,9 @@ def plan_layout(collected, settings, density_scale=1.0):
             x, y = spot[3], spot[4]
             tu, tv = pk.tile
             g_tiles.add(1001 + tu + 10 * tv)
-            if block is not None:  # a block of similar shells: each in its own cell
-                members, cols, cw, chh = block
-                for idx, (msh, mk, ma, mw, mh) in enumerate(members):
-                    placements[id(msh)] = (tu, tv, x + (idx % cols) * cw, y + (idx // cols) * chh, mk, ma, mw, mh)
+            if block is not None:  # a bundle / block: each shell at its spot inside it
+                for (msh, mk, ma, mw, mh), ox, oy in block.leaves():
+                    placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
                     area += mw * mh
                 continue
             placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
@@ -8661,13 +8777,16 @@ def plan_layout(collected, settings, density_scale=1.0):
                     if turned:
                         da, dw, dh = da + math.pi / 2.0, dh, dw
                     placements[id(dsh)] = (tu, tv, x, y, dk, da, dw, dh)
-        if packers:
+        if pin_overflow:
+            warnings.append("%s doesn't fit in its pinned tile(s) %s at this density: the rest went to the next "
+                            "free tile." % (g["key"], ", ".join(str(t) for t in g["pin"])))
+        if packers and not g.get("pin"):  # a pinned group doesn't hand its tiles on
             last = max(packers, key=lambda q: (q.tile[1], q.tile[0]))
             carry = [q for q in packers if 1001 + q.tile[0] + 10 * q.tile[1] in g_tiles] or [last]
         n_stacked = sum(len(v[1]) for v in stacked.values())
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
                            "density": density * compensate, "shells": len(g["shells"]), "stacked": n_stacked,
-                           "orientation": mode, "handsoff": len(g.get("fixed", [])),
+                           "orientation": mode, "handsoff": len(g.get("fixed", [])), "pin": g.get("pin") or [],
                            "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
     for g in collected["locked"]:
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": g["tiles"], "coverage": None,
@@ -8727,10 +8846,13 @@ def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
 
 
 def section_rows(collected, plan):
-    """{section index: set of UDIM rows its laid-out shells landed on}."""
+    """{section index: set of UDIM rows its laid-out shells landed on}.
+    Pinned groups are left out: they sit where they were pinned."""
     rows = {}
     for g in collected["groups"]:
         got = rows.setdefault(g["section_index"], set())
+        if g.get("pin"):
+            continue
         for sh in g["shells"]:
             pl = plan["placements"].get(id(sh))
             if pl:
@@ -9069,6 +9191,35 @@ def _apply_layout(asset, collected, plan, uv_set, backup, backup_set, progress):
         store_layout_settings(asset, plan)
         asset.sync_names()
     return {"meshes": len(by_mesh), "shells": len(plan["placements"])}
+
+
+def parse_tiles(text):
+    """'1012', '1012-1014, 1021' -> [1012, 1013, 1014, 1021] (valid UDIMs only)."""
+    out = []
+    for part in re.split(r"[,\s]+", (text or "").strip()):
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        try:
+            lo, hi = int(a), int(b or a)
+        except ValueError:
+            continue
+        for t in range(min(lo, hi), max(lo, hi) + 1):
+            if 1001 <= t <= 1999 and (t - 1001) % 10 <= 9 and t not in out:
+                out.append(t)
+    return out
+
+
+def group_pin(node):
+    return parse_tiles(_get(node, LAYOUT_PIN, "") or "")
+
+
+def set_group_pin(node, tiles):
+    """Pin a material group to UDIM tiles (empty: unpin). One Ctrl+Z."""
+    with UndoChunk("Smart UDIM pin group"):
+        if not cmds.attributeQuery(LAYOUT_PIN, node=node, exists=True):
+            cmds.addAttr(node, longName=LAYOUT_PIN, dataType="string")
+        cmds.setAttr(node + "." + LAYOUT_PIN, ",".join(str(t) for t in tiles), type="string")
 
 
 def set_group_lock(node, locked):
@@ -9772,6 +9923,7 @@ class UVCanvas(QtWidgets.QWidget):
         self.scale = 160.0  # pixels per UV unit
         self.origin = QtCore.QPointF(40.0, 40.0)  # screen position of UV (0, top row)
         self._drag = None
+        self._moving = None  # left-press on a shell: a click selects its mesh, a drag moves its group
 
     # coordinates: u right, v up
     def to_px(self, u, v):
@@ -9842,6 +9994,24 @@ class UVCanvas(QtWidgets.QWidget):
                 p.fillRect(band, QtGui.QColor(60, 60, 60, 160))
                 p.drawText(band.adjusted(4, 0, -2, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft | QtCore.Qt.TextWordWrap,
                            name)
+        if self._moving and self._moving.get("active"):  # dragging a group: ghost + target tile
+            mv = self._moving
+            t = mv.get("tile")
+            if t:
+                tu, tv = (t - 1001) % 10, (t - 1001) // 10
+                r = QtCore.QRectF(self.to_px(tu, tv + 1), self.to_px(tu + 1, tv))
+                p.setPen(QtGui.QPen(QtGui.QColor("#7fd6c9"), 2, QtCore.Qt.DashLine))
+                p.setBrush(QtGui.QColor(47, 143, 131, 40))
+                p.drawRect(r)
+                p.setPen(QtGui.QColor("#a6eadf"))
+                p.drawText(r.adjusted(4, 2, -2, -2), QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight,
+                           "pin %s here" % (parse_group_name(mv["group"])["key"] or mv["group"]))
+            du, dv = mv.get("delta", (0.0, 0.0))
+            p.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1, QtCore.Qt.DashLine))
+            p.setBrush(QtCore.Qt.NoBrush)
+            for item in v.items:
+                if item.get("group") == mv["group"]:
+                    p.drawPolygon(QtGui.QPolygonF([self.to_px(a + du, b + dv) for a, b in item["hull"]]))
         if v.banner:
             p.setPen(QtGui.QColor("#f0c870"))
             p.drawText(QtCore.QRectF(8, 4, self.width() - 16, 18), QtCore.Qt.AlignLeft, v.banner)
@@ -9874,8 +10044,14 @@ class UVCanvas(QtWidgets.QWidget):
             return
         if event.button() == QtCore.Qt.LeftButton:
             item = self._item_at(event.pos())
-            if item and cmds.objExists(item["mesh"]):
-                cmds.select(item["mesh"], replace=True)
+            self._moving = {"item": item, "start": event.pos(), "group": item and item.get("group"),
+                            "active": False} if item else None
+
+    def tile_at(self, pos):
+        u, w = self.to_uv(pos)
+        if 0.0 <= u < 10.0 and w >= 0.0:
+            return 1001 + int(u) + 10 * int(w)
+        return None
 
     def mouseMoveEvent(self, event):
         if self._drag:
@@ -9884,11 +10060,31 @@ class UVCanvas(QtWidgets.QWidget):
             self.origin = QtCore.QPointF(origin.x() + d.x(), origin.y() - d.y())
             self.update()
             return
+        mv = self._moving
+        if mv and mv["group"] and (event.buttons() & QtCore.Qt.LeftButton):
+            d = event.pos() - mv["start"]
+            if mv["active"] or abs(d.x()) + abs(d.y()) > 6:
+                mv["active"] = True
+                mv["tile"] = self.tile_at(event.pos())
+                mv["delta"] = (d.x() / self.scale, -d.y() / self.scale)
+                self.update()
+                return
         item = self._item_at(event.pos())
         self.viewer.hover(item)
 
     def mouseReleaseEvent(self, event):
         self._drag = None
+        mv, self._moving = self._moving, None
+        if not mv:
+            return
+        if mv["active"]:  # dropped: pin the group to that tile
+            self.update()
+            if mv.get("tile"):
+                self.viewer.drop_group(mv["group"], mv["tile"])
+            return
+        item = mv["item"]  # a plain click selects the mesh
+        if item and cmds.objExists(item["mesh"]):
+            cmds.select(item["mesh"], replace=True)
 
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_F:
@@ -9946,7 +10142,7 @@ class UVViewer(QtWidgets.QWidget):
         self.canvas = UVCanvas(self)
         lay.addWidget(self.canvas, 1)
         self.info = hint_label("Wheel zooms, middle-drag (or Alt+drag) pans, F frames. Click a shell to select its "
-                               "mesh.")
+                               "mesh; drag it to pin its whole group to another tile.")
         lay.addWidget(self.info)
 
     def _toggle(self, name, value):
@@ -10068,6 +10264,18 @@ class UVViewer(QtWidgets.QWidget):
         self.banner = "Scene UVs (%d shells on %d mesh(es))" % (len(items), len(meshes))
         self.canvas.frame()
 
+    def drop_group(self, group, tile):
+        """A group was dragged onto a tile: pin it there, then re-plan (plan
+        view) or re-lay out just that group (scene view)."""
+        if not group or not cmds.objExists(group):
+            return
+        self.panel.pin_groups([group], [tile])
+        if self.source == "scene":
+            self.panel.relayout_groups([group])
+            self.show_scene()
+        elif self.panel._plan is None:  # pin_groups re-plans when a plan was on show
+            self.panel.plan_live()
+
     def hover(self, item):
         if not item:
             self.info.setText("Wheel zooms, middle-drag (or Alt+drag) pans, F frames. Click a shell to select its "
@@ -10083,7 +10291,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
     TOOL_NAME = "Smart UDIM"
     TOOL_TIP = "Organise geometry into UDIM sections and material groups, clean it and check its UVs."
 
-    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK, COL_LOCK, COL_ORIENT = range(7)
+    COL_NAME, COL_TD, COL_COV, COL_ITEMS, COL_STACK, COL_LOCK, COL_ORIENT, COL_PIN = range(8)
 
     def __init__(self, parent=None):
         super(SmartUdimPanel, self).__init__(parent)
@@ -10253,8 +10461,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                            "section, material groups hold the meshes that share a material. "
                                            "Double-click a name or TD % to edit it; right-click for actions.")
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setColumnCount(7)
-        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock", "Orient"])
+        self.tree.setColumnCount(8)
+        self.tree.setHeaderLabels(["Group", "TD %", "Cover", "Items", "Stack", "Lock", "Orient", "Pin"])
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tree.setMinimumHeight(220)
         self.tree.setRootIsDecorated(True)
@@ -10262,7 +10470,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(self.COL_NAME, QtWidgets.QHeaderView.Stretch)
-        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK, self.COL_LOCK, self.COL_ORIENT):
+        for c in (self.COL_TD, self.COL_COV, self.COL_ITEMS, self.COL_STACK, self.COL_LOCK, self.COL_ORIENT,
+                  self.COL_PIN):
             header.setSectionResizeMode(c, QtWidgets.QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.itemDoubleClicked.connect(self._item_double_clicked)
@@ -10290,6 +10499,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                                 "selected meshes / faces (or groups). Selected Maya groups are "
                                                 "followed: meshes added to them later join automatically.",
                           self.new_group),
+            "pin": ("Pin to Tiles...", "Pin the highlighted material groups to UDIM tiles (e.g. 1012 or "
+                                       "1012-1014): every layout puts them there and keeps other groups out. "
+                                       "Dragging a group onto a tile in the UV Viewer does the same.",
+                    self.pin_dialog),
+            "unpin": ("Unpin", "The highlighted material groups go back to being placed by the layout.",
+                      lambda: self.pin_groups(self._selected_role("material"), [])),
             "follow": ("Follow Selected Groups", "The highlighted section or material group follows the Maya "
                                                  "groups selected in the Outliner: every mesh inside them, now "
                                                  "and added later, belongs to it automatically.",
@@ -10298,7 +10513,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                            "groups (its meshes stay where they are).", self.stop_following),
         }
         for title, keys in (("Sections", ("from_group", "to_section", "del_section", "up", "down")),
-                            ("Material groups", ("select", "to_group", "new_group")),
+                            ("Material groups", ("select", "to_group", "new_group", "pin", "unpin")),
                             ("Follow Maya groups (new meshes join automatically)", ("follow", "unfollow"))):
             label = QtWidgets.QLabel(title)
             label.setProperty("unlokHint", True)
@@ -10553,6 +10768,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_similar.setToolTip("Shells of nearly the same size (planks, bolts, brackets) are laid out next to "
                                     "each other in a neat grid, like PolyRaven's size-based distribute.")
         more.add_full(self.lay_similar)
+        self.lay_keep = CheckField("Keep each mesh's shells together")
+        self.lay_keep.setValue(True)
+        self.lay_keep.setToolTip("A mesh's shells are packed close together (a rope binding's strands, a lamp's "
+                                 "parts), so shells near each other in UV belong to the same mesh. Identical "
+                                 "meshes then line up as blocks.")
+        more.add_full(self.lay_keep)
         self.lay_comp = CheckField("Auto-compensate pieces bigger than a tile")
         self.lay_comp.setValue(True)
         more.add_full(self.lay_comp)
@@ -10577,6 +10798,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                   "backup is ticked). One Ctrl+Z undoes it.")
         self.apply_btn.clicked.connect(lambda *_: self.apply_layout())
         card.add(button_row(plan_btn, viewer_btn, self.apply_btn))
+        relayout = secondary_button("Re-layout Selected", "Lay out again just the material groups highlighted in "
+                                                          "step 3, or the groups of the meshes selected in the "
+                                                          "scene, at the last layout's density. Everything else "
+                                                          "stays exactly where it is (its shells are worked "
+                                                          "around). One Ctrl+Z.")
+        relayout.clicked.connect(lambda *_: self.relayout_selected())
+        card.add(relayout)
         card.add(self.labels_btn)
         self.udim_map = UdimMapWidget()
         self.udim_map.groupClicked.connect(self._map_clicked)
@@ -10585,7 +10813,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
-                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp, self.lay_similar):
+                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp, self.lay_similar,
+                  self.lay_keep):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -10817,7 +11046,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
                 "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
-                "lay_similar": self.lay_similar,
+                "lay_similar": self.lay_similar, "lay_keep": self.lay_keep,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -11017,6 +11246,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     mitem.setCheckState(self.COL_LOCK, QtCore.Qt.Checked if mat["locked"] else QtCore.Qt.Unchecked)
                     mitem.setToolTip(self.COL_LOCK, "Locked groups keep their UVs and tiles when you lay out again.")
                     mitem.setText(self.COL_ORIENT, mat["orient"] or "auto")
+                    mitem.setText(self.COL_PIN, ",".join(str(t) for t in mat["pin"]) if mat["pin"] else "-")
+                    mitem.setToolTip(self.COL_PIN, "Tiles this group is pinned to (layouts put it there). "
+                                                   "Double-click to change; empty unpins. You can also drag "
+                                                   "the group onto a tile in the UV Viewer.")
                     mitem.setToolTip(self.COL_ORIENT, "Double-click to cycle: auto (the layout setting), up "
                                                       "(upright), keep (never rotate), axis (main axis).")
                     if mat["odd"]:
@@ -11125,6 +11358,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.tree.editItem(item, column)
         elif column == self.COL_ORIENT:
             self._cycle_orient(item)
+        elif column == self.COL_PIN:
+            self.pin_dialog()
 
     @ui_safe
     def _cycle_orient(self, item):
@@ -11337,7 +11572,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 self.tree.clearSelection()
                 item.setSelected(True)
             keys = {"section": ("to_section", "del_section", "up", "down", "select", "follow", "unfollow"),
-                    "material": ("to_group", "select", "follow", "unfollow")}.get(role, ())
+                    "material": ("to_group", "select", "pin", "unpin", "follow", "unfollow")}.get(role, ())
             keys = keys + ("from_group",) if "from_group" not in keys else keys
             menu = QtWidgets.QMenu(self)
             for key in keys:
@@ -11466,6 +11701,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
                 "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
                 "handsoff_tiles": self.lay_handsoff.value(), "group_similar": self.lay_similar.value(),
+                "keep_meshes": self.lay_keep.value(),
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
@@ -11526,7 +11762,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _plan_attempted(self, plan):
         try:
-            if self._worker is not None and self.viewer is not None and self.viewer.isVisible():
+            if (self._worker is not None and self.viewer is not None and self.viewer.isVisible() and
+                    self.viewer.source == "plan"):  # never pull a scene view back to the plan
                 self.viewer.show_plan(self._worker.collected, plan, searching=True)
         except Exception:
             traceback.print_exc()
@@ -11542,7 +11779,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return
         self._plan = plan
         self.udim_map.set_plan(self._collected, plan)
-        if self.viewer is not None and self.viewer.isVisible():
+        if self.viewer is not None and self.viewer.isVisible() and self.viewer.source == "plan":
             self.viewer.show_plan(self._collected, plan)
         self._summarise_plan(time.time() - self._plan_t0)
         self._refresh_uv_labels()
@@ -11601,6 +11838,94 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if self._uv_labels and cmds.objExists(self._uv_labels):
             tiles, rows = self._label_data()
             self._uv_labels = build_uv_label_mesh(tiles, rows)
+
+    # ------------------------------------------------------------ managing the layout
+    def _groups_of_selection(self):
+        """Material groups highlighted in the list, else the groups of the
+        meshes selected in the scene."""
+        mats = self._selected_role("material")
+        if mats:
+            return mats
+        asset = self._asset()
+        meshes = set(self._items_in_root(selection_items())) if asset else set()
+        if not meshes:
+            return []
+        return [mat for mat in asset.all_material_sets() if meshes & set(expand_members(mat)[0])]
+
+    @ui_safe
+    def pin_dialog(self):
+        mats = self._selected_role("material")
+        if not mats:
+            self.set_status("Highlight the material group(s) to pin in the list first.", level="warn")
+            return
+        cur = ",".join(str(t) for t in group_pin(mats[0]))
+        text, ok = QtWidgets.QInputDialog.getText(self, "Pin to tiles", "UDIM tile(s), e.g. 1012 or 1012-1014 "
+                                                                        "(empty unpins):", text=cur)
+        if ok:
+            tiles = parse_tiles(text)
+            if text.strip() and not tiles:
+                self.set_status("'%s' isn't a UDIM tile (1001-1999)." % text, level="warn")
+                return
+            self.pin_groups(mats, tiles)
+
+    def pin_groups(self, mats, tiles):
+        mats = [m for m in mats if cmds.objExists(m)]
+        if not mats:
+            return
+        with UndoChunk("Smart UDIM pin group"):
+            for m in mats:
+                set_group_pin(m, tiles)
+        had_plan = self._plan is not None
+        self._collected = None  # pins are read when shells are collected
+        self.refresh()
+        if had_plan:  # keep the plan on show up to date
+            self.plan_live()
+        names = ", ".join(parse_group_name(m)["key"] or m for m in mats[:4])
+        self.set_status(("%s pinned to %s: Plan / Apply (or Re-layout Selected) puts it there." % (
+            names, ", ".join(str(t) for t in tiles))) if tiles else ("%s unpinned." % names))
+
+    @ui_safe
+    def relayout_selected(self):
+        groups = self._groups_of_selection()
+        if not groups:
+            self.set_status("Highlight material groups in step 3, or select meshes, to re-lay out.", level="warn")
+            return
+        self.relayout_groups(groups)
+
+    def relayout_groups(self, groups):
+        """Lay out only these material groups again (one Ctrl+Z), at the last
+        layout's density, around everything else."""
+        asset = self._asset()
+        if asset is None:
+            return None
+        self._stop_worker()
+        uv_set = self.uv_set.text().strip() or "map1"
+        settings = self._layout_settings()
+        stored = layout_settings_of(asset)
+        if stored.get("density"):
+            settings["mode"] = "Fixed density"
+            settings["texel_density"] = float(stored["density"])
+        try:
+            with Progress("Re-layout", [("read", 1), ("write", 1)], status_progress(self.status)) as pr:
+                pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
+                col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(), only=groups)
+                plan = make_plan(col, settings)
+                result = apply_layout(asset, col, plan, uv_set=uv_set, backup=self.auto_backup.value(),
+                                      backup_set=self.auto_backup_name.text().strip() or "map1_backup",
+                                      progress=pr)
+        except Cancelled:
+            self.set_status("Re-layout cancelled: nothing changed.", level="warn")
+            return None
+        self._collected = None
+        self._plan = None
+        self.refresh()
+        moved = sum(1 for g in col["groups"] for sh in g["shells"] if id(sh) in plan["placements"])
+        tiles = sorted(set(t for g in col["groups"] for t in plan["stats"].get(g["set"], {}).get("tiles", [])))
+        warn = (" " + " ".join(plan["warnings"][:2])) if plan["warnings"] else ""
+        self.set_status("Re-laid out %d group(s) (%d shells) into tile(s) %s; everything else stayed put. "
+                        "One Ctrl+Z undoes it.%s" % (len(col["groups"]), moved, ", ".join(str(t) for t in tiles),
+                                                    warn), level="warn" if warn else "info")
+        return result
 
     @ui_safe
     def open_viewer(self):

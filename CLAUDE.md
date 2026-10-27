@@ -525,6 +525,38 @@
         `_similar_blocks` groups pieces within 4% on both sides into
         near-square grids packed as one rectangle (never turned).
         Placements are per cell.
+      - **Compounds** (`_Compound`): pieces packed as one rectangle,
+        children `(item, x, y)`, padding inside each cell; nest freely;
+        `leaves()` flattens. The placement loop expands them; they never
+        turn.
+        - `_mesh_bundles` (`keep_meshes`, panel only) shelf-packs a mesh's
+          shells (rows, tallest first, ~square). Meshes too big for a tile
+          stay loose.
+        - `_similar_blocks` then makes grids of near-identical pieces;
+          bundles included, so identical rope binds line up.
+        - `_stack` groups skip both.
+      - **Pins** (`unlokUdimPin`, `parse_tiles`, `group_pin`,
+        `set_group_pin`):
+        - `collect_shells` reads them. `plan_layout` reserves every pinned
+          tile and packs a pinned group into `pin_packer`s for its tiles.
+          Overflow takes the next fresh tile and warns. A pinned group
+          doesn't hand its tiles on (`carry`).
+        - `section_rows` skips pinned groups, and `auto_uv_targets` uses a
+          pin's first tile.
+      - **Re-layout of some groups** (`collect_shells(only=...)`, panel
+        `relayout_groups`):
+        - Other groups go in `locked` with `kept=True`. Their tiles come
+          from the stored layout plus their UV footprints, and their
+          shells join `collected["fixed"]` as obstacles.
+        - Kept tiles aren't reserved outright: the fixed packers leave gaps.
+        - Chosen groups get `prefer` = their old tiles, reserved and
+          offered to them first through the shared `pin_packer`.
+        - The panel forces Fixed density at the stored density.
+      - **UV Viewer drag:** `UVCanvas` keeps `_moving`; a press-and-move
+        over 6 px drags the item's group (ghost outlines plus a target tile
+        while dragging). Release calls `UVViewer.drop_group` ->
+        `pin_groups` (re-plans if a plan was on show) or, on scene UVs,
+        `relayout_groups` + `show_scene`.
       - Each `LayoutShell` stores `dims[mode] = (angle, w0, h0)` for 'axis',
         'up' and 'keep', so switching modes is a re-plan with no scene read.
       - 'up' comes from `_shell_up_direction`: world height gradient in UV,

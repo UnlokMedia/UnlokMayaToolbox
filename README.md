@@ -745,6 +745,39 @@ density. The actual layout is still being built; see
      default): shells of nearly the same size (planks, bolts, brackets) are
      laid out side by side in a grid and packed as one block. It's like
      PolyRaven's size-based distribute, rewritten from scratch.
+   - **Keep each mesh's shells together** (More options, on by default): a
+     mesh's shells are packed close together, so shells near each other in
+     UV belong to the same mesh (a rope binding's strands, a lamp's parts).
+     Identical meshes then line up as blocks.
+   - **Managing a finished layout:**
+     - **Fix one mesh:** click it; the inspector says what's wrong. **Fix**
+       or **Auto UV Selected** re-unwraps just it. If you've edited it by
+       hand in the UV Editor, mark it **Keep UVs** so Auto UV leaves it
+       (the layout still scales and packs it), or **Hands off** if it's
+       final where it is.
+     - **Re-layout Selected** (step 7): lays out again just the material
+       groups highlighted in step 3, or the groups of the meshes selected
+       in the scene, at the last layout's density.
+       - Everything else stays exactly where it is, and its shells are
+         worked around.
+       - The re-laid groups go back into their own tiles first, filling the
+         gaps left around other groups.
+       - One Ctrl+Z.
+     - **Pin to Tiles** (step 3: a button, the right-click menu, or
+       double-click the *Pin* column): a group always goes to those tiles
+       (e.g. `1012` or `1012-1014`), and no other group goes there. If it
+       doesn't fit at that density, the rest spills into the next free tile,
+       with a warning. Auto UV fits the group's meshes into its pinned tile.
+       *Unpin* gives the group back to the layout.
+     - **Drag in the UV Viewer:** drag any shell onto another tile, and its
+       whole group is pinned there.
+       - **On a plan:** it re-plans straight away.
+       - **On the scene's UVs:** that group is re-laid out on the spot
+         (Re-layout Selected).
+       - A plain click still selects the mesh.
+     - **Lock** (step 3) still keeps a finished group's UVs and tiles
+       through every re-layout. Fit sections to rows leaves pinned groups
+       out of its row check.
    - **Orientation modes:**
      - *Main axis*: the longest direction along U, lying flat. Packs
        tightest.
@@ -872,6 +905,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/bench_uv_quality.py [OUT] [-v]`: builds a messy shack and runs
   Auto UV and a layout on it. It saves pictures of every mesh's UVs and the
   sheet, and scores tiny shells, stars, straight and upright shells.
+- `tests/test_manage_layout.py`: tile parsing, pins (own tile, others kept
+  out, spill-over warning, Fit to rows), Re-layout Selected (others
+  untouched, own tiles, no overlaps), Auto UV honouring a pin, mesh shells
+  kept together.
 - `tests/test_live_view.py`: shell outlines match their placements, the
   live-view hook, the background planner (same result, stops promptly),
   scene outlines and their density, the UV Editor label mesh.
