@@ -156,7 +156,7 @@ def run():
     # --- Quick Plan: from the set names only
     def no_meshes(*a, **k):
         raise RuntimeError("Quick Plan touched a mesh")
-    saved = dict((n, tb[n]) for n in ("expand_members", "_mesh_fn", "_group_print", "uv_footprints"))
+    saved = dict((n, tb[n]) for n in ("_mesh_fn", "_group_print", "uv_footprints"))  # set reads are fine
     tb.update(dict((n, no_meshes) for n in saved))
     try:
         t = time.time()
@@ -197,6 +197,25 @@ def run():
         moved = [g["section"] for g in q2["groups"] if g["section_index"] == top]
         check("moving a section to the end puts its row on top", moved and moved[0] == secs_before[0],
               "%s vs %s" % (moved[:1], secs_before[0]))
+        cmds.undo()
+
+        # hands off: the piece stays where it is, squares go around it, its area isn't in its square
+        g = max(q["groups"], key=lambda g: g["area"] or 0)
+        mesh = sorted(tb["expand_members"](g["set"])[0])[0]
+        before = g["area"]
+        asset.set_uv_status([mesh], "handsoff")
+        q3 = tb["quick_groups"](asset)
+        qp3 = tb["plan_layout"](q3, dict(base, mode="Fixed density"))
+        g3 = [x for x in q3["groups"] if x["set"] == g["set"]][0]
+        boxes = [(fx["udim"], fx["box"]) for fx in q3["fixed"]]
+        hit = []
+        for udim, x, y, side, node, key in qp3["blocks"]:
+            for u, b in boxes:
+                if u == udim and b[0] < x + side and x < b[2] and b[1] < y + side and y < b[3]:
+                    hit.append((key, udim))
+        check("Quick Plan: hands-off pieces stay put and squares pack around them",
+              boxes and not hit and g3["area"] < before and set(u for u, _ in boxes) <= set(qp3["tiles"]),
+              "%d fixed boxes, overlaps %s, area %.2f -> %.2f" % (len(boxes), hit[:3], before, g3["area"] or 0))
         cmds.undo()
 
 try:

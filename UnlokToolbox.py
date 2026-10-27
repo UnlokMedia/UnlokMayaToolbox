@@ -8537,13 +8537,16 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
 QUICK_AREA_BUDGET = 2.0  # seconds Quick Plan may spend measuring sets; groups after that get no square
 
 
-def _set_area(node, unit_scale):
+def _set_area(node, unit_scale, skip=()):
     """World area (m^2) of a set's members in at most two C++ calls, never
     a Python loop over meshes: polyEvaluate on the whole meshes, plus the
     face areas of face members (polyEvaluate -worldArea counts a face
-    member's whole mesh). None when Maya can't tell."""
+    member's whole mesh). skip: mesh transforms (long names) left out, e.g.
+    Hands off ones, which keep their own UVs. None when Maya can't tell."""
     try:
-        members = cmds.sets(node, q=True) or []
+        members = cmds.ls(cmds.sets(node, q=True) or [], long=True) or []
+        if skip:
+            members = [m for m in members if m.partition(".")[0] not in skip]
         whole = [m for m in members if "." not in m]
         faces = [m for m in members if ".f[" in m]
         total = 0.0
@@ -8559,16 +8562,23 @@ def _set_area(node, unit_scale):
         return None
 
 
-def quick_groups(asset, budget=QUICK_AREA_BUDGET):
+def quick_groups(asset, budget=QUICK_AREA_BUDGET, uv_set="map1"):
     """Quick Plan's input, from the sets: every section in order and its
     material groups (name, TD %, pin, lock and stored tiles), plus each
     group's 3D area from _set_area (two C++ calls per set at most, so a
     big scene can't stall in Python). Measuring stops after `budget`
     seconds; later groups get no area (listed, not drawn). plan_layout then
-    gives each section a row and each measured group an estimated square."""
+    gives each section a row and each measured group an estimated square.
+
+    Hands off meshes are the one exception to "no mesh is read": like the
+    real Plan, their UV footprints (uv_footprints, remembered per mesh until
+    it changes) become fixed pieces the squares pack around, and their area
+    is left out of their group's square. They're always read, budget or
+    not, since squares landing on top of them would be wrong."""
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     t0 = time.time()
-    groups, locked = [], []
+    handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
+    groups, locked, fixed = [], [], []
     for si, sec in enumerate(asset.sections()):
         sec_td = _get(sec, UDIM_TD, 100.0)
         for mat in asset.materials(sec):
@@ -8581,11 +8591,19 @@ def quick_groups(asset, budget=QUICK_AREA_BUDGET):
             if _get(mat, LAYOUT_LOCK, False):
                 locked.append(info)
                 continue
+            mine = {}
+            if handsoff:  # only sets can hold them: read the members just then
+                mine = dict((x, fs) for x, fs in expand_members(mat)[0].items() if x in handsoff)
+            for xform, faces in sorted(mine.items()):
+                for udim, box, area in uv_footprints(xform, uv_set, faces):
+                    info["fixed"].append({"set": mat, "key": info["key"], "mesh": xform, "udim": udim, "box": box,
+                                          "area": area})
             if time.time() - t0 < budget:
-                info["area"] = _set_area(mat, unit_scale)
+                info["area"] = _set_area(mat, unit_scale, skip=set(mine))
             groups.append(info)
-    return {"groups": groups, "locked": locked, "skipped": [], "conflicts": 0, "fixed": [], "handsoff": [],
-            "not_ready": {}, "keep_layout": [], "only": None, "quick": True}
+            fixed.extend(info["fixed"])
+    return {"groups": groups, "locked": locked, "skipped": [], "conflicts": 0, "fixed": fixed,
+            "handsoff": sorted(handsoff), "not_ready": {}, "keep_layout": [], "only": None, "quick": True}
 
 
 LAYOUT_SHELL_CAP = 4000  # more UV shells than this on one mesh = junk / over-split: layout skips it
@@ -12727,7 +12745,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return None
         t0 = time.time()
         self._stop_worker()
-        col = quick_groups(asset)
+        col = quick_groups(asset, uv_set=self.uv_set.text().strip() or "map1")
         plan = make_plan(col, dict(self._layout_settings(), squares=True, new_row_per_section=True))
         self._collected, self._plan = col, plan
         self.udim_map.set_plan(col, plan)

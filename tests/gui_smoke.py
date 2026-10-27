@@ -621,6 +621,12 @@ def main():
     viewer.canvas.frame()
     pump()
     viewer.grab().save(os.path.join(OUT, "11g_quick_plan.png"))
+    fixed = [it for it in viewer.items if it.get("fixed")]
+    clash = [(it["key"], f["key"]) for it in blocks for f in fixed
+             if it["box"][0] < f["box"][2] and f["box"][0] < it["box"][2] and
+             it["box"][1] < f["box"][3] and f["box"][1] < it["box"][3]]
+    check("Quick Plan shows hands-off pieces where they are, squares around them", fixed and not clash,
+          "%d hands-off, overlaps %s" % (len(fixed), clash[:3]))
     # click a tile: its group's meshes are selected
     b = blocks[0]["box"]
     at = viewer.canvas.to_px((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0).toPoint()

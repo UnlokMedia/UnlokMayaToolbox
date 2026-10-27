@@ -566,6 +566,10 @@
       `_estimate_squares` / `SQUARE_FILL` (0.45: 145 vs 146 px/m on the test
       building) and gives every Quick Plan section its row even with no
       squares. The viewer lists each row's materials in its name band.
+      Hands off meshes are the one thing it reads per mesh: their
+      `uv_footprints` (cached) become `fixed` pieces the squares pack
+      around (the user caught squares landing on them), and `_set_area`
+      skips them. `expand_members` runs only when the asset has any.
       It's for arranging and debugging: in the viewer a section's name
       band drags to another row (`UVCanvas` row drag ->
       `UVViewer.drop_section` -> `move_section_to`, one Ctrl+Z), a click on

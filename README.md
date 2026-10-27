@@ -736,6 +736,10 @@ density. The actual layout is still being built; see
        measured by then is still listed on its row (marked `?`), just
        without a square. The estimate lands close to the real Plan (145 vs
        146 px/m on the test building).
+       - Hands off pieces show where they sit (hatched), like in Plan, and
+         the squares pack around them; their area isn't counted in their
+         group's square. They're the only meshes Quick Plan reads (their
+         UV footprints, remembered until they change).
        - Drag a section's name up or down to reorder sections (one Ctrl+Z).
        - Click a square to select that group's meshes.
        - Drag a square onto a tile to pin the group there.
