@@ -369,6 +369,32 @@ def run():
           "udim %d, %d shells, inside %s, %d box overlaps, density spread %.3f" % (
               udim, n, inside, len(clash), max(ratios) / min(ratios)))
 
+    # --- just some shells: a picked face takes its whole shell; the rest stays put
+    halves = cmds.polyPlane(w=100, h=50, sx=4, sy=2, name="twoHalves")[0]
+    cmds.polyMapCut(["%s.e[%d]" % (halves, e) for e in range(cmds.polyEvaluate(halves, edge=True))
+                     if abs(cmds.xform("%s.e[%d]" % (halves, e), q=True, bb=True, ws=True)[0]) < 1e-6 and
+                     abs(cmds.xform("%s.e[%d]" % (halves, e), q=True, bb=True, ws=True)[3]) < 1e-6],
+                    constructionHistory=False)
+    halves = cmds.ls(halves, long=True)[0]
+    left = [f for f in range(cmds.polyEvaluate(halves, face=True))
+            if cmds.xform("%s.f[%d]" % (halves, f), q=True, bb=True, ws=True)[3] <= 1e-6]
+    grown = tb["shell_faces"](halves, [left[0]])
+    right_uvs = cmds.polyEditUV(cmds.polyListComponentConversion(
+        ["%s.f[%d]" % (halves, f) for f in range(cmds.polyEvaluate(halves, face=True)) if f not in left],
+        toUV=True), q=True)
+    with tb["UndoChunk"]("Lay Out Selected"):
+        n2 = tb["lay_out_together"]({halves: grown}, udim=1007)
+    left_tiles = tb["face_tiles"](halves, grown)
+    right_after = cmds.polyEditUV(cmds.polyListComponentConversion(
+        ["%s.f[%d]" % (halves, f) for f in range(cmds.polyEvaluate(halves, face=True)) if f not in left],
+        toUV=True), q=True)
+    cmds.undo()
+    cmds.delete(halves)
+    check("Lay Out Selected on part of a mesh: a picked face takes its whole shell, the rest stays put",
+          grown == set(left) and n2 == 1 and left_tiles == {1007} and right_after == right_uvs,
+          "grown %s vs half %s, %d shell(s), tiles %s, rest unchanged %s" % (
+              sorted(grown or []), sorted(left), n2, sorted(left_tiles), right_after == right_uvs))
+
     # --- a Hands off mesh with broken (infinite) UVs never stops anything
     # ('cannot convert float infinity to integer' in Lay Out Selected,
     # Auto UV's packing and the sheet)

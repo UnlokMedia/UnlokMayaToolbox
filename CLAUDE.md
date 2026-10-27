@@ -415,6 +415,11 @@
     hand clean-up, Lay Out again, Keep UVs, next). Selections outside the
     asset's root (`_lay_out` checks the root, not just "an asset is
     loaded") stay in their majority tile (`_uv_tile`), one block.
+    Component picks: `selection_items` gives faces, `shell_faces` grows
+    them to whole UV shells (moving part of a shell would tear it), and
+    `lay_out_together` takes {mesh: faces or None}. The tile comes from
+    `face_tiles` of the picked shells (`free_tile_for(mine=)`), and the
+    mesh's other shells' tiles count as taken (`also_used=`).
   - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
     `auto_uv()` -> `apply_layout()` (re-plans itself) -> `validate()`.
     - Each step method returns its result (None when cancelled or failed),

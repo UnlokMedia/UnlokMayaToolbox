@@ -8308,7 +8308,49 @@ def mesh_tiles(meshes, uv_set="map1"):
     return out
 
 
-def free_tile_for(meshes, others, uv_set="map1", handsoff=()):
+def shell_faces(mesh, faces, uv_set="map1"):
+    """`faces` grown to the whole UV shells they touch (moving part of a
+    shell alone would tear it), like PolyRaven's convert-to-shell. None
+    when that's the whole mesh."""
+    fn = _mesh_fn(mesh)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return None
+    counts, ids = fn.getAssignedUVs(uv_set)
+    _, shell_of = fn.getUvShellsIds(uv_set)
+    face_shell = []
+    k = 0
+    for c in counts:
+        face_shell.append(shell_of[ids[k]] if c else None)
+        k += c
+    wanted = set(face_shell[f] for f in faces if 0 <= f < len(face_shell) and face_shell[f] is not None)
+    grown = set(f for f, s in enumerate(face_shell) if s is not None and s in wanted)
+    return None if len(grown) >= sum(1 for s in face_shell if s is not None) else grown
+
+
+def face_tiles(mesh, faces, uv_set="map1"):
+    """The UDIMs the UVs of these faces (None: all) sit in, read UV by UV
+    (finite ones only)."""
+    fn = _mesh_fn(mesh)
+    if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
+        return set()
+    counts, ids = fn.getAssignedUVs(uv_set)
+    us, vs = fn.getUVs(uv_set)
+    want = None if faces is None else set(faces)
+    seen = set()
+    k = 0
+    for face, c in enumerate(counts):
+        if want is None or face in want:
+            seen.update(ids[k:k + c])
+        k += c
+    out = set()
+    for u in seen:
+        x, y = us[u], vs[u]
+        if _finite(x, y) and 0.0 <= x < 10.0 and 0.0 <= y < 1000.0:
+            out.add(1001 + int(x) + 10 * int(y))
+    return out
+
+
+def free_tile_for(meshes, others, uv_set="map1", handsoff=(), mine=None, also_used=()):
     """Where a quick look lays `meshes` out: the one UDIM they already share
     if no other mesh uses it (pressing again re-lays them in place), else
     the first UDIM nothing in `others` touches. `others` should be what the
@@ -8318,7 +8360,7 @@ def free_tile_for(meshes, others, uv_set="map1", handsoff=()):
     or broken) only counts the tile most of its UVs are in; a Hands off one
     (never read) that spreads over more than 16 is ignored. Spreads like
     those sent quick looks to UDIMs far up the grid."""
-    used = set()
+    used = set(also_used)  # e.g. the selected meshes' shells that aren't being laid out
     handsoff = set(handsoff)
     for m, tiles in mesh_tiles(others, uv_set).items():
         if len(tiles) <= 4:
@@ -8330,9 +8372,10 @@ def free_tile_for(meshes, others, uv_set="map1", handsoff=()):
             t = _uv_tile(m, uv_set)
             if t is not None:
                 used.add(t)
-    mine = set()
-    for tiles in mesh_tiles(meshes, uv_set).values():
-        mine |= tiles
+    if mine is None:
+        mine = set()
+        for tiles in mesh_tiles(meshes, uv_set).values():
+            mine |= tiles
     if len(mine) == 1 and not mine & used:
         return next(iter(mine))
     udim = 1001
@@ -8344,7 +8387,8 @@ def free_tile_for(meshes, others, uv_set="map1", handsoff=()):
 
 
 def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upright", udim=1001, keys=None):
-    """A quick look: every UV shell of `meshes` laid out together in one
+    """A quick look: every UV shell of `meshes` (a list, or {mesh: faces of
+    whole shells or None} to lay out just some shells) laid out together in one
     UDIM, at the highest even texel density that fits, the neat way Smart
     Layout does it: each material (keys: {mesh: material key}; one block
     without) in its own square (mesh bundles, grids of similar pieces, rows
@@ -8356,8 +8400,9 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     caches, claimed = {}, set()
     shells = []
-    for m in meshes:
-        got, _ = _read_shells(m, None, uv_set, unit_scale, caches, claimed)
+    items = meshes if isinstance(meshes, dict) else dict.fromkeys(meshes)  # {mesh: faces (whole shells) or None}
+    for m in sorted(items):
+        got, _ = _read_shells(m, items[m], uv_set, unit_scale, caches, claimed)
         shells += [sh for sh in got if sh.area_uv > 0 and sh.area3d > 0]
     if not shells:
         return 0
@@ -12234,7 +12279,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                       "properly. Two Ctrl+Z steps (Auto UV, then the lay-out).")
         quick_look.clicked.connect(lambda *_: self.auto_uv_lay_out_selected())
         lay_sel = secondary_button("Lay Out Selected",
-                                   "Lay out the selected meshes' UVs as they are now (no unwrap), like "
+                                   "Lay out the selected meshes' UVs, or just the selected UV shells (pick "
+                                   "UVs, faces or edges: each takes its whole shell), as they are now (no "
+                                   "unwrap), like "
                                    "PolyRaven's size-based distribute and layout: identical pieces in neat "
                                    "grids, rows by size, one block per material, one even density, upright, in "
                                    "a UDIM of their own (the one they're in if nothing else uses it). For spot "
@@ -14179,7 +14226,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         result = self.auto_uv(selected=True)
         if result is None or result.get("cancelled"):
             return None
-        return self._lay_out(meshes, "Auto UV, then laid out")
+        return self._lay_out(dict.fromkeys(meshes), "Auto UV, then laid out")
 
     @ui_safe
     def lay_out_selected(self):
@@ -14188,14 +14235,21 @@ class SmartUdimPanel(QtWidgets.QWidget):
         tile they're in."""
         items = selection_items()
         if not items:
-            self.set_status("Select the meshes or groups to lay out first.", level="warn")
+            self.set_status("Select the meshes, groups, UV shells or faces to lay out first.", level="warn")
             return None
-        return self._lay_out(sorted(items), "Laid out")
+        uv_set = self.uv_set.text().strip() or "map1"
+        for m, faces in list(items.items()):  # a picked UV / face / edge takes its whole shell
+            if faces is not None:
+                items[m] = shell_faces(m, faces, uv_set)
+        return self._lay_out(items, "Laid out")
 
-    def _lay_out(self, meshes, verb):
-        """lay_out_together on meshes in their own UDIM (free_tile_for), one
-        block per material. Inside the asset only what the tool placed or the
-        user marked counts as taken; outside it, they stay in their tile."""
+    def _lay_out(self, items, verb):
+        """lay_out_together on items ({mesh: faces of whole shells or None})
+        in their own UDIM (free_tile_for), one block per material. Inside the
+        asset only what the tool placed or the user marked counts as taken;
+        outside it, they stay in their tile. A mesh's shells that aren't
+        being laid out keep their place and their tiles count as taken."""
+        meshes = sorted(items)
         asset = self._asset()
         root = asset.root_group() if asset is not None and asset.sections() else None
         in_asset = bool(root) and any(m == root or m.startswith(root + "|") for m in meshes)
@@ -14205,22 +14259,35 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("Nothing to lay out: the selection is all Hands off / Keep Layout.", level="warn")
             return None
         uv_set = self.uv_set.text().strip() or "map1"
+        items = dict((m, items[m]) for m in meshes)
         mine = set(meshes)
+        partial = dict((m, f) for m, f in items.items() if f is not None)
+        mine_tiles, rest_tiles = None, set()
+        if partial:  # just some shells: where they are; the rest of those meshes stays put
+            mine_tiles = set()
+            for m in meshes:
+                mine_tiles |= face_tiles(m, items[m], uv_set)
+                if m in partial:
+                    nf = cmds.polyEvaluate(m, face=True)
+                    rest_tiles |= face_tiles(m, set(range(nf)) - partial[m], uv_set)
         keys = {}
         if in_asset:
             placed = set(asset.tool_members("auto")) | set(asset.tool_members("laidout")) | set(status)
             others = sorted(m for m in placed if m not in mine and cmds.objExists(m))
             udim = free_tile_for(meshes, others, uv_set,
-                                 handsoff=[m for m, st in status.items() if st == "handsoff"])
+                                 handsoff=[m for m, st in status.items() if st == "handsoff"],
+                                 mine=mine_tiles, also_used=rest_tiles)
             assigned = asset.assignments()
             keys = dict((m, (_get(assigned[m][0][0], UDIM_KEY) or parse_group_name(assigned[m][0][0])["key"]))
                         for m in meshes if assigned.get(m))
+        elif partial:  # not part of a Smart UDIM asset: their own tile if the rest isn't there, else a free one
+            udim = free_tile_for(meshes, [], uv_set, mine=mine_tiles, also_used=rest_tiles)
         else:  # not part of a Smart UDIM asset: where most of them are
             tiles = [t for t in (_uv_tile(m, uv_set) for m in meshes) if t is not None]
             udim = max(set(tiles), key=tiles.count) if tiles else 1001
         res = float(self.lay_map.value())
         with UndoChunk("Lay Out Selected"):
-            n = lay_out_together(meshes, uv_set, padding=self.lay_padding.value() / res,
+            n = lay_out_together(items, uv_set, padding=self.lay_padding.value() / res,
                                  orientation=self.lay_orient.value(), udim=udim, keys=keys)
         self._collected, self._plan = None, None  # UVs moved: any plan on show is stale
         self.refresh()
@@ -14228,9 +14295,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.set_status("The selection's shells don't fit one UDIM even small (too many for the padding), "
                             "or have no usable UVs: lay them out with Plan / Apply Layout.", level="warn")
             return None
-        self.set_status("%s %d shell(s) from %d mesh(es) together in UDIM %d. Clean up by hand and Lay Out "
+        self.set_status("%s %d shell(s) from %d mesh(es) together in UDIM %d%s. Clean up by hand and Lay Out "
                         "Selected again, or Keep UVs and move on; Apply Layout lays everything out properly." % (
-                            verb, n, len(meshes), udim))
+                            verb, n, len(meshes), udim, " (just the picked shells)" if partial else ""))
         return udim
 
     def _chain_banner(self, step, total, text):

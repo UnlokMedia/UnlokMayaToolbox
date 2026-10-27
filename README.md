@@ -584,8 +584,12 @@ density. The actual layout is still being built; see
      3. Lay Out Selected again (it re-lays them in their own UDIM).
      4. Keep UVs, and move on to the next piece.
 
-     Meshes outside the asset are laid out in the UDIM they're in. One
-     Ctrl+Z.
+     It also works on parts of meshes: pick UVs, faces or edges (in the
+     viewport or the UV Editor) and each takes its whole UV shell, like
+     PolyRaven's convert-to-shell. Just those shells are laid out; the
+     mesh's other shells stay where they are, and the laid-out ones never
+     land on their tile. Meshes outside the asset are laid out in the UDIM
+     they're in. One Ctrl+Z.
    - **Speed on big assets:**
      - Meshes whose projection is already clean (every edge's UV length
        the same multiple of its 3D length: walls, planks, boxes) skip

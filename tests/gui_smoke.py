@@ -760,6 +760,29 @@ def main():
           ns["mesh_tiles"]([cmds.ls(loose, long=True)[0]])[cmds.ls(loose, long=True)[0]] == {1001},
           "%s | %s" % (out_tile, udim.status.text()[:120]))
     cmds.delete(loose)
+    # ...and on picked UVs: one shell of a multi-shell mesh, the mesh's other shells stay put
+    multi = None
+    for m in udim._asset().meshes()[0]:
+        if status_now.get(m) is None and ns["_mesh_fn"](m).getUvShellsIds("map1")[0] >= 2:
+            multi = m
+            break
+    if multi:
+        fn_m = ns["_mesh_fn"](multi)
+        _, shell_ids = fn_m.getUvShellsIds("map1")
+        first_shell = [i for i, s in enumerate(shell_ids) if s == shell_ids[0]]
+        rest = [i for i, s in enumerate(shell_ids) if s != shell_ids[0]]
+        rest_before = [cmds.polyEditUV("%s.map[%d]" % (multi, i), q=True) for i in rest]
+        cmds.select("%s.map[%d]" % (multi, first_shell[0]), replace=True)
+        part = udim.lay_out_selected()
+        pump()
+        rest_after = [cmds.polyEditUV("%s.map[%d]" % (multi, i), q=True) for i in rest]
+        moved = ns["face_tiles"](multi, ns["shell_faces"](multi, set(
+            int(f.split("[")[-1].rstrip("]")) for f in cmds.ls(cmds.polyListComponentConversion(
+                "%s.map[%d]" % (multi, first_shell[0]), toFace=True), flatten=True))))
+        check("Lay Out Selected on picked UVs lays out just their shell; the mesh's other shells stay put",
+              part and moved == {part} and rest_after == rest_before and "picked shells" in udim.status.text(),
+              "%s, shell in %s, rest unchanged %s | %s" % (part, sorted(moved), rest_after == rest_before,
+                                                          udim.status.text()[:120]))
 
     # --- shells too big for a UDIM: the plan says so, Apply's split cuts them
     # at their 50% line and plans again (its Ctrl+Z: tests/test_squares.py)
