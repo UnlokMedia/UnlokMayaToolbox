@@ -5308,8 +5308,8 @@ def handsoff_box(xform, uv_set="map1"):
         (u0, u1), (v0, v1) = cmds.polyEvaluate(xform, boundingBox2d=True, uvSetName=uv_set)
     except Exception:
         return None
-    if u1 - u0 <= 0.0 and v1 - v0 <= 0.0:
-        return None
+    if not _finite(u0, v0, u1, v1) or (u1 - u0 <= 0.0 and v1 - v0 <= 0.0):
+        return None  # no UVs, or broken ones (inf / NaN): nothing to work around
     return float(u0), float(v0), float(u1), float(v1)
 
 
@@ -6768,6 +6768,8 @@ def _uw_segments_cross(sa, sb):
     both = sa + sb
     if len(both) < 2:
         return False
+    if not all(_finite(p[0], p[1], q[0], q[1]) for p, q, _, _ in both):
+        return True  # broken (inf / NaN) UVs: never join them
     total = 0.0
     for p, q, _, _ in both:
         total += abs(q[0] - p[0]) + abs(q[1] - p[1])
@@ -7427,6 +7429,8 @@ def _uw_tris_overlap(ta, tb):
     def test(xs, ys):
         if not xs or not ys:
             return False
+        if not all(_finite(q[0], q[1]) for t in xs + ys for q in t):
+            return True  # broken (inf / NaN) UVs: treat as overlapping
         span = max(max(abs(q[0]), abs(q[1])) for t in xs for q in t) or 1.0
         cell = max(span / 16.0, 1e-9)
         grid = {}
@@ -8076,6 +8080,9 @@ def unlok_unwrap(meshes, uv_set="map1", opts=None, progress=None, on_unfolded=No
         res = results[xform]
         for k, v in res["stats"].items():
             stats[k] = stats.get(k, 0) + v
+        if not all(q is not None and _finite(q[0], q[1]) for q in res["uv"]):
+            failed[xform] = "the unwrap came out broken (infinite UVs): left as it was"
+            continue
         try:
             if not _uw_write(xform, d, res, uv_set):
                 failed[xform] = "UV borders didn't come out as planned"
@@ -8200,6 +8207,13 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
     return placed
 
 
+def _finite(*xs):
+    """All finite numbers (no inf / NaN): a broken import's UVs, or a
+    division gone wrong, must never reach int() (it raises 'cannot convert
+    float infinity to integer' and stops a whole run)."""
+    return all(isinstance(x, (int, float)) and math.isfinite(x) for x in xs)
+
+
 def _uv_tile(xform, uv_set="map1"):
     """The UDIM most of a mesh's UVs are in, or None without UVs."""
     fn = _mesh_fn(xform)
@@ -8208,7 +8222,7 @@ def _uv_tile(xform, uv_set="map1"):
     us, vs = fn.getUVs(uv_set)
     count = {}
     for u, v in zip(us, vs):
-        if 0.0 <= u < 10.0 and v >= 0.0:
+        if 0.0 <= u < 10.0 and 0.0 <= v < 1000.0:  # (an infinite v used to get through to int())
             t = 1001 + int(u) + 10 * int(v)
             count[t] = count.get(t, 0) + 1
     return max(count.items(), key=lambda kv: (kv[1], -kv[0]))[0] if count else None
@@ -8255,10 +8269,12 @@ def fit_meshes_to_tiles(meshes, tiles, uv_set="map1", padding=8.0 / 2048, progre
     for m in meshes:
         if progress:
             progress.item(short_name(m))
-        shells, _ = _read_shells(m, None, uv_set, unit_scale, caches, claimed)
-        if not shells:
-            continue
-        spots, _ = _pack_one_tile(shells, padding)
+        try:
+            shells, _ = _read_shells(m, None, uv_set, unit_scale, caches, claimed)
+            spots = _pack_one_tile(shells, padding)[0] if shells else None
+        except (ValueError, OverflowError, ZeroDivisionError):
+            traceback.print_exc()
+            continue  # left where the unwrap put it; the after-check flags it
         if spots is None:
             continue
         udim = tiles.get(m) or 1001
@@ -8282,7 +8298,7 @@ def mesh_tiles(meshes, uv_set="map1"):
         box = handsoff_box(m, uv_set)
         if not box:
             continue
-        u0, v0, u1, v1 = box
+        u0, v0, u1, v1 = (max(-1.0, min(1000.0, x)) for x in box)
         tiles = set()
         for tv in range(int(math.floor(v0 + 1e-6)), int(math.floor(v1 - 1e-6)) + 1):
             for tu in range(int(math.floor(u0 + 1e-6)), int(math.floor(u1 - 1e-6)) + 1):
@@ -8365,6 +8381,12 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
             out.append((sq, spot[3], spot[4]))
         return out
 
+    for key in list(base):
+        base[key] = [b for b in base[key] if _finite(b[1], b[3], b[4]) and max(b[3], b[4]) > 0]
+        if not base[key]:
+            del base[key]
+    if not base:
+        return 0
     hi = usable / max(max(w, h) for its in base.values() for _, _, _, w, h in its)  # the biggest piece fills a tile
     best = pack(hi)
     if best is None:  # bisect down to the highest density that fits
@@ -8882,10 +8904,11 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
                 uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
                 a3 = sum(cache["a3"][f] for f in fs)
                 auv = sum(cache["auv"][f] for f in fs)
-                if a3 <= 1e-12 or auv <= 1e-14:
+                pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
+                if a3 <= 1e-12 or auv <= 1e-14 or not _finite(a3, auv) or \
+                        not all(_finite(u, v) for u, v in pts):  # collapsed, or broken (inf / NaN) UVs
                     entries.append((shell, None))
                     continue
-                pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
                 entries.append((shell, LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs))))
         if len(_SHELL_CACHE) > 20000:
             _SHELL_CACHE.clear()
@@ -9538,7 +9561,7 @@ def _smallest_square(cells, limit, can_turn, hints, key):
     low = max(math.sqrt(area), max(max(rw, rh) for _, rw, rh in cells))
     if low > limit + 1e-9:
         return None
-    top = max(0, int(math.ceil(math.log(limit / low) / math.log(1.02)))) if low > 0 else 0
+    top = max(0, int(math.ceil(math.log(limit / low) / math.log(1.02)))) if low > 0 and _finite(limit / low) else 0
 
     def side(i):
         return min(low * 1.02 ** i, limit)
@@ -10108,6 +10131,8 @@ def oversize_shells(collected, plan, status=None):
                 continue
             k = math.sqrt(sh.area3d * (density / res) ** 2 / sh.area_uv)
             w, h = w0 * k, h0 * k
+            if not _finite(w, h) or max(w, h) > usable * 64:
+                continue  # broken, or absurd: the plan lowers its group instead
             if max(w, h) > usable * 1.0001:
                 out.append({"mesh": sh.mesh, "uv_ids": sh.uv_ids, "angle": angle, "key": g["key"],
                             "cols": max(1, int(math.ceil(w / usable))), "rows": max(1, int(math.ceil(h / usable)))})
@@ -10516,7 +10541,8 @@ def set_group_lock(node, locked):
             for xform in members:
                 uvs = cmds.polyEditUV(cmds.polyListComponentConversion(xform, toUV=True), q=True) or []
                 for i in range(0, len(uvs), 2):
-                    tiles.add(1001 + int(math.floor(uvs[i])) + 10 * int(math.floor(uvs[i + 1])))
+                    if _finite(uvs[i], uvs[i + 1]) and 0.0 <= uvs[i] < 10.0 and 0.0 <= uvs[i + 1] < 1000.0:
+                        tiles.add(1001 + int(math.floor(uvs[i])) + 10 * int(math.floor(uvs[i + 1])))
             if not cmds.attributeQuery(LAYOUT_TILES, node=node, exists=True):
                 cmds.addAttr(node, longName=LAYOUT_TILES, dataType="string")
             cmds.setAttr(node + "." + LAYOUT_TILES, ",".join(str(t) for t in sorted(tiles)), type="string")

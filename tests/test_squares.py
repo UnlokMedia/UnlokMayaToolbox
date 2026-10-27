@@ -362,6 +362,35 @@ def run():
           "udim %d, %d shells, inside %s, %d box overlaps, density spread %.3f" % (
               udim, n, inside, len(clash), max(ratios) / min(ratios)))
 
+    # --- a Hands off mesh with broken (infinite) UVs never stops anything
+    # ('cannot convert float infinity to integer' in Lay Out Selected,
+    # Auto UV's packing and the sheet)
+    import maya.api.OpenMaya as om2
+    junk = cmds.polyCube(w=100, h=100, d=100, name="metalGrey_C_junk0001_GEP")[0]
+    junk = cmds.ls(cmds.parent(junk, cmds.listRelatives(picked[0], parent=True, fullPath=True)[0])[0], long=True)[0]
+    sel_ = om2.MSelectionList()
+    sel_.add(cmds.listRelatives(junk, shapes=True, fullPath=True)[0])
+    fn_ = om2.MFnMesh(sel_.getDagPath(0))
+    us_, vs_ = fn_.getUVs()
+    us_, vs_ = list(us_), list(vs_)
+    vs_[2] = float("inf")
+    fn_.setUVs(us_, vs_)
+    asset.scan(sections_from_groups=True)
+    asset.set_uv_status([junk], "handsoff")
+    errors = []
+    for label, fn in (("free tile", lambda: tb["free_tile_for"](picked, [junk] + others)),
+                      ("plan", lambda: tb["oversize_shells"](tb["collect_shells"](asset), tb["make_plan"](
+                          tb["collect_shells"](asset), dict(base, mode=tb["FIT_ROWS"])), asset.uv_status())),
+                      ("quick plan", lambda: tb["make_plan"](tb["quick_groups"](asset), dict(base, mode=tb["FIT_ROWS"]))),
+                      ("sheet", lambda: tb["render_handoff_sheet"](asset, px_per_tile=32))):
+        try:
+            fn()
+        except Exception as e:
+            errors.append("%s: %s" % (label, e))
+    check("a Hands off mesh with infinite UVs doesn't stop the free-tile pick, Plan, Quick Plan or the sheet",
+          not errors and tb["handsoff_box"](junk) is None, "; ".join(errors))
+    cmds.delete(junk)
+
     # --- a floor too big for a UDIM: split at its thirds (40 m at 128 px/m on
     # 2048 maps: a tile holds 16 m), one Ctrl+Z, and then it fits whole parts
     yard = cmds.group(empty=True, name="yard_GRP", parent=root)

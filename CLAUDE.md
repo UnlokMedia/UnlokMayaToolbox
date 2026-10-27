@@ -1026,6 +1026,18 @@
   some faces have no UVs.
 
 ## Maya API gotchas found so far
+- **Maya keeps infinite and NaN UVs** (an import's junk, or anything written
+  past float32's 3.4e38). `polyEvaluate -boundingBox2d` then returns inf,
+  and `int(math.floor(inf))` raises "cannot convert float infinity to
+  integer", which stopped Auto UV's packing, Lay Out Selected and the
+  sheet on a Hands off mesh (2026-10-27). Everything that turns UV
+  positions or sizes into tiles goes through `_finite` first:
+  `handsoff_box` returns None for a broken box, `_read_shells` drops broken
+  shells, `_uv_tile` and the lock path skip broken UVs, the unwrapper
+  never writes non-finite UVs (that mesh fails instead), the per-mesh fit
+  skips a mesh that throws, and the segment / overlap grids treat broken
+  points as "crossing" rather than crash. `tests/test_squares.py` keeps a
+  Hands off mesh with an infinite UV in the scene.
 - OM2 `M3dView.viewToWorld(x, y, MPoint, MVector)` fills output args. It
   does not return a tuple.
 - OM2 `MFnMesh.closestIntersection`: pass accel params by keyword
