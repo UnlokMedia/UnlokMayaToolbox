@@ -8528,13 +8528,40 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             "only": sorted(only) if only is not None else None}
 
 
-def quick_groups(asset):
-    """Quick Plan's input, from the sets alone: every section in order and
-    its material groups (name, TD %, pin, lock and stored tiles). No mesh is
-    touched (no members, areas or UVs), so it's instant on any scene.
-    plan_layout gives each group one whole tile, a row per section: an
-    overview to reorder sections, pin groups and spot a material in the
-    wrong section before anything is read."""
+QUICK_AREA_BUDGET = 2.0  # seconds Quick Plan may spend measuring sets; groups after that get no square
+
+
+def _set_area(node, unit_scale):
+    """World area (m^2) of a set's members in at most two C++ calls, never
+    a Python loop over meshes: polyEvaluate on the whole meshes, plus the
+    face areas of face members (polyEvaluate -worldArea counts a face
+    member's whole mesh). None when Maya can't tell."""
+    try:
+        members = cmds.sets(node, q=True) or []
+        whole = [m for m in members if "." not in m]
+        faces = [m for m in members if ".f[" in m]
+        total = 0.0
+        if whole:
+            got = cmds.polyEvaluate(whole, worldArea=True)
+            if not isinstance(got, (int, float)):  # a message string: nothing polygonal
+                return None
+            total += got
+        if faces:
+            total += sum(cmds.polyEvaluate(faces, worldFaceArea=True) or [])
+        return total * unit_scale
+    except Exception:
+        return None
+
+
+def quick_groups(asset, budget=QUICK_AREA_BUDGET):
+    """Quick Plan's input, from the sets: every section in order and its
+    material groups (name, TD %, pin, lock and stored tiles), plus each
+    group's 3D area from _set_area (two C++ calls per set at most, so a
+    big scene can't stall in Python). Measuring stops after `budget`
+    seconds; later groups get no area (listed, not drawn). plan_layout then
+    gives each section a row and each measured group an estimated square."""
+    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    t0 = time.time()
     groups, locked = [], []
     for si, sec in enumerate(asset.sections()):
         sec_td = _get(sec, UDIM_TD, 100.0)
@@ -8544,8 +8571,13 @@ def quick_groups(asset):
                     "section_index": si, "td": _get(mat, UDIM_TD, 100.0) * sec_td / 100.0, "shells": [],
                     "print": "", "old_print": "", "stack": False, "orient": None,
                     "tiles": [int(t) for t in (_get(mat, LAYOUT_TILES, "") or "").split(",") if t.strip()],
-                    "fixed": [], "pin": group_pin(mat), "quick": True}
-            (locked if _get(mat, LAYOUT_LOCK, False) else groups).append(info)
+                    "fixed": [], "pin": group_pin(mat), "quick": True, "area": None}
+            if _get(mat, LAYOUT_LOCK, False):
+                locked.append(info)
+                continue
+            if time.time() - t0 < budget:
+                info["area"] = _set_area(mat, unit_scale)
+            groups.append(info)
     return {"groups": groups, "locked": locked, "skipped": [], "conflicts": 0, "fixed": [], "handsoff": [],
             "not_ready": {}, "keep_layout": [], "only": None, "quick": True}
 
@@ -8835,6 +8867,22 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
     return _sort_pieces(out)
 
 
+SQUARE_FILL = 0.45  # Quick Plan: share of a material's square its shells fill (measured: padding, gaps, upright)
+
+
+def _estimate_squares(area_uv, limit):
+    """Quick Plan: the square sides for a group known only by its UV area
+    (tiles, slack included): whole tiles, then one square for the rest."""
+    full = limit * limit
+    out = []
+    while area_uv > full + 1e-12:
+        out.append(limit)
+        area_uv -= full
+    if area_uv > 1e-10:
+        out.append(math.sqrt(area_uv))
+    return out
+
+
 def _piece_cell(item, growth, pad, limit):
     """(rw, rh): the room a piece takes in a square, padding included (a
     compound's size already has it). Oversize pieces are clamped to a tile."""
@@ -8954,7 +9002,9 @@ def plan_layout(collected, settings, density_scale=1.0):
     (a group bigger than a tile: whole-tile squares plus one for the rest).
     Squares never overlap, so no material ends up in another's gaps; a tile
     may hold several squares. plan['blocks'] lists them. Groups from a
-    Quick Plan (quick_groups) have no shells: each gets one whole tile."""
+    Quick Plan (quick_groups) have no shells: their squares are estimated
+    from their 3D area (SQUARE_FILL); a group with no area gets none. A
+    Quick Plan section always takes its row, squares or not."""
     s = dict(LAYOUT_DEFAULTS)
     s.update(settings or {})
     res = float(s["map_size"])
@@ -9116,8 +9166,11 @@ def plan_layout(collected, settings, density_scale=1.0):
                         "own_fixed": own_fixed, "n_stacked": sum(len(v[1]) for v in stacked.values()),
                         "dups": dict((id(rep[0]), (rep[2], dups)) for rep, dups in stacked.values() if dups)}
                 infos.append(info)
-                if unique is None:  # Quick Plan: one whole tile per material group
-                    sqs = [(None, limit)]
+                if unique is None:  # Quick Plan: squares estimated from the group's 3D area
+                    info["rows"].add(row)  # its section has this row, squares or not
+                    area = g.get("area") or 0.0
+                    area_uv = area * (density / res) ** 2 * (1.0 + growth) / SQUARE_FILL
+                    sqs = [(None, side) for side in _estimate_squares(area_uv, limit)]
                 else:
                     sqs = [(sq, sq[3]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis", hints,
                                                                 g["set"])]
@@ -9152,6 +9205,7 @@ def plan_layout(collected, settings, density_scale=1.0):
                 info["rows"].add(tv)
                 blocks.append((udim, x, y, side, g["set"], g["key"]))
                 if sq is None:
+                    info["area"] += side * side * SQUARE_FILL
                     continue
                 for (msh, mk, ma, mw, mh), ox, oy in sq[0].leaves():
                     placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
@@ -9163,6 +9217,8 @@ def plan_layout(collected, settings, density_scale=1.0):
                             if turned:
                                 da, dw, dh = da + math.pi / 2.0, dh, dw
                             placements[id(dsh)] = (tu, tv, x + ox, y + oy, dk, da, dw, dh)
+            if collected.get("quick") and not any(1001 + 10 * row <= t < 1011 + 10 * row for t in tiles_used):
+                tiles_used.add(1001 + 10 * row)  # an empty section still takes its row
             for info in infos:
                 g = info["g"]
                 if info["overflow"]:
@@ -10531,7 +10587,7 @@ class UVCanvas(QtWidgets.QWidget):
     def band_width(self):
         """Width of the section-name band: fits the longest name."""
         fm = QtGui.QFontMetrics(self.font())
-        names = list(self.viewer.rows.values()) or [""]
+        names = [line for n in self.viewer.rows.values() for line in n.split("\n")] or [""]
         return float(max(60, min(240, max(fm.horizontalAdvance(n) for n in names) + 16)))
 
     def paintEvent(self, event):
@@ -10856,8 +10912,16 @@ class UVViewer(QtWidgets.QWidget):
             for r in rows:
                 self.row_sections[r] = sec_of.get(si)
         if plan.get("quick"):
-            self.banner = ("Quick Plan: a row per section, a tile per material. Drag a section's name up or "
-                           "down to reorder; click a tile to select its meshes; drag a tile to pin it.")
+            mats = {}
+            for g in collected["groups"]:
+                mats.setdefault(g["section_index"], []).append(g["key"] + ("" if g.get("area") is not None else "?"))
+            for r, sec in self.row_sections.items():
+                si = [g["section_index"] for g in collected["groups"] if g["section"] == sec][:1]
+                if si:
+                    self.rows[r] = "%s\n%s" % (self.rows.get(r, ""), ", ".join(sorted(mats.get(si[0], []))))
+            self.banner = ("Quick Plan (about %d px/m): a row per section, its materials listed by its name, "
+                           "squares estimated. Drag a section's name to reorder; click a square to select its "
+                           "meshes; drag one to pin it." % round(plan.get("density", 0)))
             self.canvas.update()
             return
         self.banner = ("Planning... %d px/m" % round(plan.get("density", 0))) if searching else \
@@ -10943,8 +11007,8 @@ class UVViewer(QtWidgets.QWidget):
             return
         if item.get("block"):
             sec = parse_group_name(item.get("section") or "")["key"] or item.get("section") or ""
-            self.info.setText("%s in %s  |  click to select its meshes; drag onto a tile to pin it there" % (
-                item.get("key"), sec))
+            self.info.setText("%s in %s  |  estimated square  |  click to select its meshes; drag onto a tile to "
+                              "pin it there" % (item.get("key"), sec))
             return
         d = ("%d px/m" % round(item["density"])) if item.get("density") else "density n/a"
         self.info.setText("%s  |  %s%s  |  %s%s" % (
@@ -12650,11 +12714,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     @ui_safe
     def quick_plan(self):
-        """Stage 1, from the set names only (quick_groups): a row per section,
-        a tile per material group. No mesh is read. Opens the UV Viewer to
-        reorder sections (drag a row's name), check what's in each (click a
-        tile to select its meshes) and pin groups (drag a tile); Plan then
-        packs the real shells."""
+        """Stage 1 (quick_groups): a row per section, its materials listed by
+        the row's name, and an estimated square per material from its 3D area
+        (two C++ calls per set, capped at QUICK_AREA_BUDGET s; no shells, no
+        Python loop over meshes). Opens the UV Viewer to reorder sections
+        (drag a row's name), check what's in each (click a square to select
+        its meshes) and pin groups (drag a square); Plan then packs the
+        real shells."""
         asset = self._asset()
         if asset is None or not asset.sections():
             self.set_status("Pick a root and Scan first.", level="warn")
@@ -12662,7 +12728,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         t0 = time.time()
         self._stop_worker()
         col = quick_groups(asset)
-        plan = plan_layout(col, dict(self._layout_settings(), squares=True, new_row_per_section=True))
+        plan = make_plan(col, dict(self._layout_settings(), squares=True, new_row_per_section=True))
         self._collected, self._plan = col, plan
         self.udim_map.set_plan(col, plan)
         self.open_viewer()
@@ -12745,10 +12811,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         plan, col = self._plan, self._collected
         if plan.get("quick"):
             n_secs = len(set(g["section_index"] for g in col["groups"]))
-            lines = ["Quick Plan: %d section(s), %d material group(s), a tile each (from the set names; no mesh "
-                     "read, %.2fs)." % (n_secs, len(col["groups"]), seconds),
-                     "In the UV Viewer: drag a section's name up or down to reorder, click a tile to select its "
-                     "meshes, drag a tile to pin it. Then Plan packs the real shells."]
+            unsized = [g["key"] for g in col["groups"] if g.get("area") is None]
+            lines = ["Quick Plan: %d section(s), %d material group(s) at about %d px/m, %d tile(s) (squares "
+                     "estimated from 3D area in %.2fs; no UVs read)." % (
+                         n_secs, len(col["groups"]), round(plan["density"]), len(plan["new_tiles"]), seconds),
+                     "In the UV Viewer: drag a section's name up or down to reorder, click a square to select its "
+                     "meshes, drag a square to pin it. Then Plan packs the real shells."]
+            if unsized:
+                lines.append("Not measured (time limit), listed on their row only: %s." % ", ".join(unsized[:8]))
             lines.extend(plan["warnings"][:3])
             self.layout_summary.setText("\n".join(lines))
             return

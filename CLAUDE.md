@@ -554,14 +554,22 @@
       each other's gaps (the user asked for this after freeform plans mixed
       colours in tiles).
     - **Quick Plan** (`quick_groups`, panel `quick_plan`): from the sets
-      alone (names, TD %, pins, locks): **no mesh is touched**, not even
-      members (the user: it should only care about the group naming; a
-      first version measured mesh areas and got stuck on big scenes).
-      Groups carry `quick`; `plan_layout` gives each one whole tile, a row
-      per section. It's for arranging and debugging: in the viewer a
-      section's name band drags to another row (`UVCanvas` row drag ->
+      (names, TD %, pins, locks) plus one area per set from `_set_area`:
+      `polyEvaluate -worldArea` on the whole-mesh members and summed
+      `-worldFaceArea` on face members (`-worldArea` counts a face member's
+      whole mesh). That's C++ only, at most two calls per set, never a
+      Python loop over meshes. The user's rule: Quick Plan must not run over
+      meshes. A first version looped per mesh (members, `_group_print`,
+      areas) and stalled on big scenes. Measuring stops after
+      `QUICK_AREA_BUDGET` (2 s); unmeasured groups have `area` None, no
+      square, and are listed with `?`. `plan_layout` sizes squares with
+      `_estimate_squares` / `SQUARE_FILL` (0.45: 145 vs 146 px/m on the test
+      building) and gives every Quick Plan section its row even with no
+      squares. The viewer lists each row's materials in its name band.
+      It's for arranging and debugging: in the viewer a section's name
+      band drags to another row (`UVCanvas` row drag ->
       `UVViewer.drop_section` -> `move_section_to`, one Ctrl+Z), a click on
-      a tile selects the group's set (its meshes), a tile drag pins.
+      a square selects the group's set (its meshes), a square drag pins.
       `pin_groups` / `_replan` / `move_section_to` re-run the quick plan
       while one is on show; `plan_layout` / `plan_live` in the panel
       re-collect when `_collected["quick"]`, so it's never applied.

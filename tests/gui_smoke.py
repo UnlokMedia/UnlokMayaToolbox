@@ -617,9 +617,9 @@ def main():
     pump()
     secs = time.time() - t0
     blocks = [it for it in viewer.items if it.get("block")]
-    check("Quick Plan opens the UV Viewer with a tile per material group, instantly",
-          viewer.isVisible() and len(blocks) == len(udim._collected["groups"]) and
-          (udim._plan or {}).get("quick") and secs < 1.0,
+    check("Quick Plan opens the UV Viewer: a row per section, materials listed, estimated squares",
+          viewer.isVisible() and blocks and (udim._plan or {}).get("quick") and secs < 3.0 and
+          all(chr(10) in t for t in viewer.rows.values()),
           "%d squares, %.2fs | %s" % (len(blocks), secs, udim.layout_summary.text()[:120]))
     viewer.canvas.frame()
     pump()
@@ -631,7 +631,7 @@ def main():
     viewer.canvas.mouseReleaseEvent(mouse(QtCore.QEvent.MouseButtonRelease, at, QtCore.Qt.NoButton))
     want = set(ns["expand_members"](blocks[0]["group"])[0])
     got = set(cmds.ls(selection=True, long=True, objectsOnly=True) or [])
-    check("clicking a Quick Plan tile selects its group's meshes", want and want <= got,
+    check("clicking a Quick Plan square selects its group's meshes", want and want <= got,
           "%d of %d selected" % (len(want & got), len(want)))
     # drag the bottom section's name to the top row: the sections reorder
     rows = sorted(viewer.row_sections)
@@ -671,8 +671,8 @@ def main():
     uid = (cmds.ls(group, uuid=True) or [None])[0]
     node = cmds.ls(uid)[0] if uid else group
     st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if v.get("uuid") == uid]
-    check("dragging a Quick Plan tile pins its group there and stays a Quick Plan",
-          ns["group_pin"](node) == [target_tile] and (udim._plan or {}).get("quick") and st and
+    check("dragging a Quick Plan square pins its group there and stays a Quick Plan",
+          ns["group_pin"](node)[:1] == [target_tile] and (udim._plan or {}).get("quick") and st and
           target_tile in st[0]["tiles"], "pin %s, tiles %s" % (ns["group_pin"](node), st and st[0]["tiles"]))
     viewer.grab().save(os.path.join(OUT, "11h_quick_plan_dragged.png"))
     udim.plan_live()

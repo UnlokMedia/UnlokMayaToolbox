@@ -722,14 +722,18 @@ density. The actual layout is still being built; see
      hold several squares. Turn it off for the old freeform packing (tighter,
      harder to read).
    - **Two stages:**
-     - **Quick Plan** (instant): an overview from the set names alone, no
-       mesh is read. The UV Viewer opens with a row per section and a tile
-       per material group. Use it to arrange and check before anything
-       heavy runs:
-       - drag a section's name up or down to reorder sections (one Ctrl+Z);
-       - click a tile to select that group's meshes (why is there glass in
-         shackD?);
-       - drag a tile onto another tile to pin the group there.
+     - **Quick Plan** (a second or less): an overview to arrange and check
+       before anything heavy runs. Each section gets a row, with its
+       materials listed under its name (why is there glass in shackD?).
+       Each material gets an estimated square, sized from its 3D area. Maya
+       measures each set in one call, so no UVs are read and nothing loops
+       over meshes. Measuring stops after 2 seconds; any material not
+       measured by then is still listed on its row (marked `?`), just
+       without a square. The estimate lands close to the real Plan (145 vs
+       146 px/m on the test building).
+       - Drag a section's name up or down to reorder sections (one Ctrl+Z).
+       - Click a square to select that group's meshes.
+       - Drag a square onto a tile to pin the group there.
      - **Plan**: packs the real shells into each group's square(s),
        honouring pins. Changing a setting re-plans. **Apply Layout** writes
        it.
@@ -961,8 +965,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   sheet, and scores tiny shells, stars, straight and upright shells.
 - `tests/test_squares.py`: one square per material group (shells inside
   their own squares, no overlaps, big groups split, pins, stacks, Fit
-  rows), Quick Plan (no mesh read, a tile per group, rows in section
-  order), and the shell cache. `tests/bench_plan.py` times
+  rows), Quick Plan (one area call per set, estimated squares, rows in
+  section order even when out of time), and the shell cache. `tests/bench_plan.py` times
   Plan on a bigger asset.
 - `tests/test_manage_layout.py`: tile parsing, pins (own tile, others kept
   out, spill-over warning, Fit to rows), Re-layout Selected (others

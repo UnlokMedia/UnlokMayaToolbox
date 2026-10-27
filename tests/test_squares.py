@@ -8,7 +8,8 @@ cache (mayapy).
   than a tile is split into several squares
 - Fit sections to rows still gives each section one row
 - stacked groups and pins work in squares mode
-- Quick Plan reads no mesh, a tile per group, a row per section in order
+- Quick Plan: one area call per set (no mesh loops), estimated squares, a
+  row per section in order, rows even when out of time
 - planning again re-uses the shells read before; a changed mesh is re-read
 """
 
@@ -166,15 +167,23 @@ def run():
     except RuntimeError as e:
         ok, secs, q, qp = str(e), 0.0, None, None
     tb.update(saved)
-    check("Quick Plan reads no mesh at all (set names only), instantly", ok is True and secs < 0.5,
+    check("Quick Plan never loops over meshes (one C++ area call per set), quickly", ok is True and secs < 1.0,
           "%s, %.3fs" % (ok, secs))
     if q:
-        per = {}
-        for b in qp["blocks"]:
-            per[b[4]] = per.get(b[4], []) + [b]
-        check("Quick Plan: every material group gets exactly one whole tile",
-              set(per) == set(g["set"] for g in q["groups"]) and all(len(v) == 1 and v[0][3] > 0.98
-                                                                       for v in per.values()))
+        have = set(b[4] for b in qp["blocks"])
+        sized = set(g["set"] for g in q["groups"] if g["area"])
+        check("Quick Plan: every measured group gets an estimated square", sized and sized <= have and
+              not square_problems(tb, q, qp), "%d of %d" % (len(have & sized), len(q["groups"])))
+        fit = tb["make_plan"](q, dict(base, mode=tb["FIT_ROWS"]))
+        ratio = fit["density"] / rows["density"]
+        check("Quick Plan's Fit rows density is in the ballpark of the real one", 0.6 < ratio < 1.6,
+              "%d vs %d px/m (%.2f)" % (fit["density"], rows["density"], ratio))
+        none = tb["quick_groups"](asset, budget=0.0)
+        np_ = tb["plan_layout"](none, dict(base, mode="Fixed density"))
+        sr = tb["section_rows"](none, np_)
+        check("out of time: no squares, but every section still gets its own row", not np_["blocks"] and
+              len(sr) == len(set(g["section_index"] for g in none["groups"])) and
+              len(set(min(r) for r in sr.values())) == len(sr), str(sr))
         sr = tb["section_rows"](q, qp)
         order = [min(sr[si]) for si in sorted(sr)]
         check("Quick Plan: a row per section, in section order",
