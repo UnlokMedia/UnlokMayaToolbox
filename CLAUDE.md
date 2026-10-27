@@ -400,9 +400,14 @@
     - `confirm=False` skips the question (used by the GUI test).
   - **UV states and colours** (`uv_states`, `show_uv_colours`,
     `hide_uv_colours`):
-    - States, in order of precedence: handsoff > laidout > keep > problem >
-      auto > good / needs (by score) > unknown. Instanced meshes are
-      problems unless Hands off.
+    - States, in order of precedence: handsoff > keep / keeplayout >
+      laidout > problem > auto > good / needs (by score) > unknown.
+      Instanced meshes are problems unless Hands off.
+    - The user's marks outrank "laidout" (since 2026-10-27), so after a
+      layout the colours still separate their UVs from the tool's. Laid-out
+      progress shows in the Status column (`_status_text`) and the
+      inspector. Only Scan (`_mark_tool_uvs`, for tool-tagged meshes) and
+      the mark buttons ever set a mark; nothing clears one.
     - Marking Keep UVs / Hands off (`set_uv_status`) also removes the mesh
       from the problem set. The flag used to outrank the mark, so marked
       meshes stayed red.

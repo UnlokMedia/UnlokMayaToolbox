@@ -103,8 +103,15 @@ def run():
     tb["apply_layout"](asset, col, plan)
     laid = asset.tool_members("laidout")
     states = tb["uv_states"](asset, {})
-    check("Smart Layout puts what it placed in the Laid out set", laid and states[keep] == "laidout" and
-          states[off] == "handsoff", "%d laid out" % len(laid))
+    tool_made = [m for m in laid if asset.uv_status().get(m) is None]
+    check("Smart Layout puts what it placed in the Laid out set", laid and keep in laid and tool_made and
+          all(states[m] == "laidout" for m in tool_made), "%d laid out" % len(laid))
+    check("...but a mesh you marked keeps its own colour when laid out (yours vs the tool's)",
+          states[keep] == "keep" and states[off] == "handsoff", "%s / %s" % (states[keep], states[off]))
+    asset.set_uv_status([keep], "keeplayout")
+    check("...Keep Layout too", tb["uv_states"](asset, {})[keep] == "keeplayout" and keep in
+          asset.tool_members("laidout"))
+    asset.set_uv_status([keep], "keep")
 
     # --- save / reopen with colours on, then colours off restores real shading
     tb["show_uv_colours"](asset, states)

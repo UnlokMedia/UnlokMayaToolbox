@@ -516,7 +516,14 @@ density. The actual layout is still being built; see
      - **Red:** a problem, for example Auto UV failed, or the mesh is
        instanced.
      - **Greens:** Good UVs, Keep UVs (your marks) and Auto UV'd.
-     - **Light blue:** laid out by Smart Layout.
+     - **Light blue:** UVs the tool made (Auto UV'd or found good) that
+       Smart Layout has placed.
+     - **Your marks always keep their own colour**, laid out or not, so
+       after a full run you can still tell your own UVs from the tool's.
+       The Auto UV list's Status column adds "laid out" (e.g. "Keep UVs
+       · laid out"), and the inspector says both who made a mesh's
+       UVs and whether it's laid out. Nothing the tool does ever removes
+       your marks.
      - **Blue:** Hands off.
 
      Meshes change colour live as Auto UV works through them. Each legend

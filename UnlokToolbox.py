@@ -5318,12 +5318,15 @@ UV_STATE_INFO = {  # state: (label, colour, what it means)
                                       "instanced). See the reason in step 6."),
     "unknown": ("Not checked", "#8a8a8a", "Not scored yet: press Check UVs."),
     "good": ("Good UVs", "#57c785", "Already laid out well enough, so Auto UV keeps them."),
-    "keep": ("Keep UVs", "#2fa84f", "You marked these Keep UVs: never re-unwrapped."),
+    "keep": ("Keep UVs", "#2fa84f", "You marked these Keep UVs: never re-unwrapped. They keep this colour "
+                                     "after a layout (the Status column says whether they're laid out)."),
     "keeplayout": ("Keep Layout", "#1f8a6e", "You marked these Keep Layout: never re-unwrapped, and the layout "
                                              "moves and scales each as one block (its shells stay where they "
-                                             "are relative to each other)."),
+                                             "are relative to each other). They keep this colour after a "
+                                             "layout."),
     "auto": ("Auto UV'd", "#a4d65e", "Unwrapped by Auto UV."),
-    "laidout": ("Laid out", "#5aa9e6", "Placed by Smart Layout."),
+    "laidout": ("Laid out", "#5aa9e6", "UVs the tool made (Auto UV'd, or found good), placed by Smart "
+                                       "Layout. Meshes you marked keep their own colour when laid out."),
     "handsoff": ("Hands off", "#3c5fd0", "You marked these Hands off: never touched."),
 }
 UV_COLOURS_ATTR = "unlokUVColours"   # bool on the root set: colours are on
@@ -5341,12 +5344,15 @@ def uv_states(asset, scores=None, keep_score=AUTO_UV_KEEP_SCORE, meshes=None, in
     auto, laid, prob = asset.tool_members("auto"), asset.tool_members("laidout"), asset.tool_members("problem")
     out = {}
     for m in meshes:
+        # Your marks always show (laid out or not), so after a layout you can
+        # still tell your own UVs from the ones the tool made: "laidout" is
+        # the tool's (Auto UV'd or found good, then placed by Smart Layout).
         if status.get(m) == "handsoff":
             out[m] = "handsoff"
+        elif status.get(m) in ("keep", "keeplayout"):  # also beats an old problem flag
+            out[m] = status[m]
         elif m in laid:
             out[m] = "laidout"
-        elif status.get(m) in ("keep", "keeplayout"):  # your mark beats an old problem flag
-            out[m] = status[m]
         elif m in prob:
             out[m] = "problem"
         elif m in auto:
@@ -12786,13 +12792,26 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.set_status("Restored %s from %s on %d mesh(es)." % (opts["uv_set"], opts["backup_set"], n),
                         level="info" if n else "warn")
 
+    def _status_text(self, mesh, status, laid):
+        """'Keep UVs', 'Keep UVs \u00b7 laid out', 'Auto \u00b7 laid out'..."""
+        return UV_STATUS_LABELS[status] + (u" \u00b7 laid out" if mesh in laid else "")
+
+    def _laid_set(self):
+        asset = self._asset()
+        try:
+            return asset.tool_members("laidout") if asset else set()
+        except Exception:
+            return set()
+
     def _fill_auto(self):
         self.auto_tree.clear()
         self._auto_items = {}
+        laid = self._laid_set()
         if not self.auto_result:  # nothing analysed yet: still show the marks, read from the sets
             status = ((self.snapshot or {}).get("status")) or {}
             for mesh, st in sorted(status.items()):
-                item = QtWidgets.QTreeWidgetItem([short_name(mesh), "-", "-", "not analysed", UV_STATUS_LABELS[st]])
+                item = QtWidgets.QTreeWidgetItem([short_name(mesh), "-", "-", "not analysed",
+                                                  self._status_text(mesh, st, laid)])
                 item.setData(0, QtCore.Qt.UserRole, mesh)
                 item.setToolTip(0, mesh)
                 item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
@@ -12808,7 +12827,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         fmt = lambda v: "-" if v is None else "%.2f" % v  # noqa: E731
         for r in self.auto_result["rows"]:
             item = QtWidgets.QTreeWidgetItem([short_name(r["mesh"]), fmt(r["before"]), fmt(r["after"]),
-                                              r["action"], UV_STATUS_LABELS[status.get(r["mesh"], "auto")]])
+                                              r["action"], self._status_text(r["mesh"], status.get(r["mesh"],
+                                                                                                   "auto"), laid)])
             self._auto_items[r["mesh"]] = (item, r)
             item.setToolTip(4, "Double-click to cycle: Auto, Keep UVs, Hands off.")
             item.setData(0, QtCore.Qt.UserRole, r["mesh"])
@@ -12852,10 +12872,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     r["action"] = "will unwrap" if r["before"] < keep else "keep"
         self.refresh()  # sets, legend and colours (only meshes whose state changed get recoloured)
         rows = [self._auto_items.get(m) for m in meshes]
+        laid = self._laid_set()
         if self.auto_result and all(rows):  # just these rows (rebuilding thousands is slow)
             for item, r in rows:
                 item.setText(3, r["action"])
-                item.setText(4, UV_STATUS_LABELS[status])
+                item.setText(4, self._status_text(r["mesh"], status, laid))
         else:
             self._fill_auto()
         if self._plan is not None:
@@ -12998,6 +13019,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if diag is not None:
             lines.append("UV score now: <b>%.2f</b>%s%s" % (diag[0], (" - %s" % diag[1]) if diag[1] else "",
                                                             ", %d shell(s)" % diag[2].get("shells", 0)))
+        mark = ((self.snapshot or {}).get("status") or {}).get(m, "auto")
+        lines.append("UVs: %s  |  %s" % (
+            {"keep": "yours (Keep UVs)", "keeplayout": "yours (Keep Layout)", "handsoff": "yours (Hands off)"}.get(
+                mark, "the tool's / not marked"),
+            "laid out by Smart Layout" if m in self._laid_set() else "not laid out yet"))
         if row:
             lines.append("Last Auto UV: %s%s" % (row["action"], (" - %s" % row["reason"]) if row.get("reason")
                                                  else ""))
