@@ -396,7 +396,7 @@
     `lay_out_together(meshes, udim=free_tile_for(...), keys=)` in its own
     "Lay Out Selected" chunk. One square per material key (from
     `asset.assignments()`, mesh level), the same neat machinery as the
-    squares layout (`_mesh_bundles`, `_similar_blocks`, `_smallest_square`,
+    squares layout (`_mesh_bundles`, `_similar_blocks`, `_smallest_rect`,
     `_group_dims`), squares placed biggest first with a `_TilePacker`;
     the density scale starts where the biggest piece fills a tile and is
     bisected down until everything fits. `free_tile_for` uses
@@ -583,18 +583,27 @@
       the world matrix, since 'up' depends on it): the panel drops
       `_collected` on every refresh, and building LayoutShells is most of a
       read (4,800 shells: 1.3 s first, 0.2 s again).
-    - **Squares** (`squares`, the panel's default; engine default off):
+    - **Squares, now rectangles** (`squares`, the panel's default; engine
+      default off). The user's correction (2026-10-27): "squared" meant
+      tidy axis-aligned blocks, not squares; forced squares left long
+      strips at the bottom of empty squares. `_group_squares` now returns
+      rectangles via `_smallest_rect` (row widths from the widest piece /
+      area bound up to a tile, `RECT_STEP` 1.08 apart, smallest area wins;
+      `hints[key]` keeps the winning width as a multiple of sqrt(area) and
+      later Fit attempts only try 7 widths near it). Blocks are
+      `(udim, x, y, w, h, set, key)`; `_rect_of` replaces `_square_of`
+      (`_smallest_square` / `_pack_square` are gone). Test building:
+      Fixed density 18 -> 15 tiles, Fit rows 152 -> 160 px/m, wall blocks
+      66% -> 88% full; Plan 0.36 s on 1,800 shells.
       `plan_layout` turns each group's pieces (after bundles / similar
-      blocks / Keep Layout units) into square compounds with
-      `_group_squares`: the smallest square they pack into in rows
+      blocks / Keep Layout units) into compounds with
+      `_group_squares`: the smallest block they pack into in rows
       (`_Shelves`: first fit by height over `_by_height`-sorted cells,
       PolyRaven-style; it replaced the skyline-with-gaps packer inside
       squares on 2026-10-27, same density and tiles on the test building,
       much tidier)
-      (`_smallest_square`: 2% steps up from the area bound, starting from
-      the step that fitted last time, `collected["_square_hints"]`, so each
-      Fit attempt costs a pack or two), or whole-tile squares filled
-      first-fit plus a smallest square for the rest. A section's squares are
+      (hints in `collected["_square_hints"]`), or whole-tile blocks filled
+      first-fit plus a smallest block for the rest. A section's blocks are
       then placed biggest first into tiles (`_TilePacker` takes any `size`),
       shared by the whole section; pinned groups only use their pins.
       **Neat over tight** (the user's rule, 2026-10-27): rows only. A

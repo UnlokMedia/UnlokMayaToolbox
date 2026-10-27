@@ -8431,17 +8431,17 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
             items = _sort_pieces([(sh, k * s, a, w * s, h * s) for sh, k, a, w, h in base[key]])
             items = _similar_blocks(_mesh_bundles(items, 0.0, pad, usable, hints), 0.0, pad, usable)
             cells = _by_height([(it,) + _piece_cell(it, 0.0, pad, limit) for it in items])
-            sq = _smallest_square(cells, limit, mode == "axis", hints, "together:" + key)
+            sq = _smallest_rect(cells, limit, mode == "axis", hints, "together:" + key)
             if sq is None:
                 return None
             squares.append(sq)
         pk = _TilePacker((0, 0), pad)
         out = []
-        for sq in sorted(squares, key=lambda q: -q[3]):  # biggest first
-            spot = pk.find(sq[3], sq[3])
+        for sq in sorted(squares, key=lambda q: (-max(q[3], q[4]), -q[3] * q[4])):  # biggest first
+            spot = pk.find(sq[3], sq[4])
             if spot is None:
                 return None
-            pk.place(spot, sq[3], sq[3])
+            pk.place(spot, sq[3], sq[4])
             out.append((sq, spot[3], spot[4]))
         return out
 
@@ -9593,73 +9593,80 @@ def _bin_add(b, cell, can_turn):
     return True
 
 
-def _pack_square(cells, side, can_turn):
-    """Pack cells (sorted by _by_height) into a side x side square in rows:
-    the placed list, or None."""
-    b = [_Shelves(side), [], []]
-    for c in cells:
-        if not _bin_add(b, c, can_turn):
-            return None
-    return b[1]
-
-
-def _square_of(placed):
-    """A packed bin as one square compound piece (side = its larger extent)."""
+def _rect_of(placed):
+    """A packed bin as one rectangular compound piece (its own extent)."""
     children = []
-    side = 0.0
+    w = h = 0.0
     for it, x, y, turned, rw, rh in placed:
         if turned:
-            sh, k, a, w, h = it
-            it = (sh, k, a + math.pi / 2.0, h, w)
+            sh, k, a, iw, ih = it
+            it = (sh, k, a + math.pi / 2.0, ih, iw)
         children.append((it, x, y))
-        side = max(side, x + rw, y + rh)
-    return (_Compound(children), 1.0, 0.0, side, side)
+        w, h = max(w, x + rw), max(h, y + rh)
+    return (_Compound(children), 1.0, 0.0, w, h)
 
 
-def _smallest_square(cells, limit, can_turn, hints, key):
-    """The smallest square (2% steps up from the area bound, at most limit)
-    that the cells pack into, as a square piece; None if not even a whole
-    tile holds them. hints[key] remembers the step that fitted, so each of
-    the Fit searches' densities costs a pack or two, not a full search."""
+RECT_STEP = 1.08  # row widths tried for a material's rectangle: 8% apart
+
+
+def _smallest_rect(cells, limit, can_turn, hints, key):
+    """The smallest-area rectangle (both sides at most limit) the cells pack
+    into in rows (_Shelves, cells sorted by _by_height): row widths from the
+    widest piece (or the width its area needs at full height) up to a whole
+    tile, RECT_STEP apart. Long flat pieces make a wide, low strip instead
+    of sitting at the bottom of an empty square (the user's correction:
+    "squared" meant tidy blocks, rectangles count). hints[key] remembers
+    the winning width (as a multiple of the area's square root), and the
+    Fit searches' later densities only try widths near it. None if not
+    even a whole tile holds them."""
     area = sum(rw * rh for _, rw, rh in cells)
-    low = max(math.sqrt(area), max(max(rw, rh) for _, rw, rh in cells))
-    if low > limit + 1e-9:
+    widest = max(rw for _, rw, _ in cells)
+    if widest > limit + 1e-9 or max(rh for _, _, rh in cells) > limit + 1e-9 or area <= 0:
         return None
-    top = max(0, int(math.ceil(math.log(limit / low) / math.log(1.02)))) if low > 0 and _finite(limit / low) else 0
-
-    def side(i):
-        return min(low * 1.02 ** i, limit)
-
-    i = min(hints.get(key, 4), top)
-    got = _pack_square(cells, side(i), can_turn)
-    if got is not None:
-        while i > 0:
-            t = _pack_square(cells, side(i - 1), can_turn)
-            if t is None:
+    lo = max(widest, area / limit)
+    if lo > limit + 1e-9:
+        return None
+    root = math.sqrt(area)
+    n = max(0, int(math.ceil(math.log(limit / lo) / math.log(RECT_STEP)))) if _finite(limit / lo) else 0
+    widths = [min(lo * RECT_STEP ** i, limit) for i in range(n + 1)]
+    hint = hints.get(key)
+    if hint is not None:  # near last time's winner first
+        want = hint * root
+        near = sorted(widths, key=lambda w: abs(math.log(w / want)))[:7]
+        widths = sorted(set(near))
+    best = None
+    for width in widths:
+        b = [_Shelves(width, limit), [], []]
+        for c in cells:
+            if not _bin_add(b, c, can_turn):
                 break
-            i, got = i - 1, t
-    else:
-        while got is None and i < top:
-            i += 1
-            got = _pack_square(cells, side(i), can_turn)
-    if got is None:
+        else:
+            got = _rect_of(b[1])
+            score = (round(got[3] * got[4], 12), round(max(got[3], got[4]), 9))
+            if best is None or score < best[0]:
+                best = (score, got, width)
+    if best is None and hint is not None:  # the hint's neighbourhood failed: full search
+        hints.pop(key, None)
+        return _smallest_rect(cells, limit, can_turn, hints, key)
+    if best is None:
         return None
-    hints[key] = i
-    return _square_of(got)
+    hints[key] = best[2] / root if root > 0 else 1.0
+    return best[1]
 
 
 def _group_squares(items, growth, pad, limit, can_turn, hints, key):
-    """A material group's pieces as squares: the smallest one that holds
-    them all, or, for a group too big for one tile, whole-tile squares
-    filled first-fit (biggest pieces first) with the last one shrunk to the
-    smallest square its pieces fit. Never a freeform shape. Inside a square
+    """A material group's pieces as rectangles: the smallest one that holds
+    them all (_smallest_rect), or, for a group too big for one tile,
+    whole-tile blocks filled first-fit (biggest pieces first) with the last
+    one shrunk to the smallest rectangle its pieces fit. Never a freeform
+    shape. Inside a block
     the pieces sit in rows by height (_Shelves): neat over tight, the
     user's rule (a tight free-rectangles packer filled squares ~10% better
     and was taken out for it)."""
     cells = _by_height([(it,) + _piece_cell(it, growth, pad, limit) for it in items])
     if not cells:
         return []
-    one = _smallest_square(cells, limit, can_turn, hints, key)
+    one = _smallest_rect(cells, limit, can_turn, hints, key)
     if one is not None:
         return [one]
     bins = []
@@ -9671,9 +9678,9 @@ def _group_squares(items, growth, pad, limit, can_turn, hints, key):
             b[1].append((c[0], 0.0, 0.0, False, c[1], c[2]))
             b[2].append(c)
         bins.append(b)
-    out = [_square_of(b[1]) for b in bins[:-1]]
-    rest = _smallest_square(bins[-1][2], limit, can_turn, hints, key + "#rest")
-    out.append(rest if rest is not None else _square_of(bins[-1][1]))
+    out = [_rect_of(b[1]) for b in bins[:-1]]
+    rest = _smallest_rect(bins[-1][2], limit, can_turn, hints, key + "#rest")
+    out.append(rest if rest is not None else _rect_of(bins[-1][1]))
     return out
 
 
@@ -9736,7 +9743,7 @@ def plan_layout(collected, settings, density_scale=1.0):
     stats = {}
     warnings = []
     tiles_used = set()
-    blocks = []  # squares: (udim, x, y, side, set, key)
+    blocks = []  # material blocks: (udim, x, y, w, h, set, key)
     row = 0
     tile_iter = [None]
     orientation = s.get("orientation") or ("Main axis" if s.get("rotate", True) else "Keep")
@@ -9853,14 +9860,14 @@ def plan_layout(collected, settings, density_scale=1.0):
                     info["rows"].add(row)  # its section has this row, squares or not
                     area = g.get("area") or 0.0
                     area_uv = area * (density / res) ** 2 * (1.0 + growth) / SQUARE_FILL
-                    sqs = [(None, side) for side in _estimate_squares(area_uv, limit)]
+                    sqs = [(None, side, side) for side in _estimate_squares(area_uv, limit)]
                 else:
-                    sqs = [(sq, sq[3]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis", hints,
-                                                                g["set"])]
-                for n, (sq, side) in enumerate(sqs):
-                    jobs.append((-round(side, 6), rank[g["key"]], n, sq, side, info))
-            jobs.sort(key=lambda j: j[:3])  # biggest squares first: tighter tiles
-            for _, _, _, sq, side, info in jobs:
+                    sqs = [(sq, sq[3], sq[4]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis",
+                                                                       hints, g["set"])]
+                for n, (sq, bw, bh) in enumerate(sqs):
+                    jobs.append((-round(max(bw, bh), 6), -round(bw * bh, 9), rank[g["key"]], n, sq, bw, bh, info))
+            jobs.sort(key=lambda j: j[:4])  # biggest blocks first: tighter tiles
+            for _, _, _, _, sq, bw, bh, info in jobs:
                 g = info["g"]
                 if g.get("pin"):
                     cands = [pin_packer(t) for t in g["pin"]]
@@ -9870,7 +9877,7 @@ def plan_layout(collected, settings, density_scale=1.0):
                     cands += [q for q in open_packers if q not in cands]
                 spot = pk = None
                 for q in cands:
-                    spot = q.find(side, side)
+                    spot = q.find(bw, bh)
                     if spot is not None:
                         pk = q
                         break
@@ -9878,17 +9885,17 @@ def plan_layout(collected, settings, density_scale=1.0):
                     pk = next_tile()
                     open_packers.append(pk)
                     info["overflow"] = info["overflow"] or bool(g.get("pin"))
-                    spot = pk.find(side, side) or (None, 0, 0, pad, pad)
+                    spot = pk.find(bw, bh) or (None, 0, 0, pad, pad)
                 if spot[0] is not None:
-                    pk.place(spot, side, side)
+                    pk.place(spot, bw, bh)
                 x, y = spot[3], spot[4]
                 tu, tv = pk.tile
                 udim = 1001 + tu + 10 * tv
                 info["tiles"].add(udim)
                 info["rows"].add(tv)
-                blocks.append((udim, x, y, side, g["set"], g["key"]))
+                blocks.append((udim, x, y, bw, bh, g["set"], g["key"]))
                 if sq is None:
-                    info["area"] += side * side * SQUARE_FILL
+                    info["area"] += bw * bh * SQUARE_FILL
                     continue
                 for (msh, mk, ma, mw, mh), ox, oy in sq[0].leaves():
                     placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
@@ -11750,9 +11757,9 @@ class UVViewer(QtWidgets.QWidget):
                           "key": fx["key"], "group": fx["set"], "section": "", "density": None, "fixed": True})
         est = dict((g["set"], g) for g in collected["groups"] if g.get("quick"))
         self.blocks = []
-        for udim, x, y, side, node, key in plan.get("blocks") or []:
+        for udim, x, y, bw, bh, node, key in plan.get("blocks") or []:
             tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
-            box = (tu + x, tv + y, tu + x + side, tv + y + side)
+            box = (tu + x, tv + y, tu + x + bw, tv + y + bh)
             self.blocks.append((box, key))
             if node in est or squares_only:  # Quick Plan / mid-search: the square is all there is
                 items.append({"hull": [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])],
@@ -11860,7 +11867,7 @@ class UVViewer(QtWidgets.QWidget):
         tiles = [tile]
         plan = self.panel._plan
         if self.source == "plan" and plan and plan.get("blocks"):  # a group of n squares gets n tiles from here
-            n = len(set(b[0] for b in plan["blocks"] if b[4] == group))
+            n = len(set(b[0] for b in plan["blocks"] if b[5] == group))
             tiles = [tile + i for i in range(max(1, min(n, 10 - (tile - 1001) % 10)))]
         self.panel.pin_groups([group], tiles)
         if self.source == "scene":

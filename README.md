@@ -766,12 +766,17 @@ density. The actual layout is still being built; see
      The whole run is one Ctrl+Z.
 
 7. **Smart layout**: the even-density UDIM layout.
-   - **One square per material group.** Each material group gets its own
-     square: the smallest square its shells fit at the texel density. A
-     group bigger than a tile gets whole-tile squares plus one smaller
-     square for the rest. Squares never overlap, so no material lands in
-     another's gaps or corners. A tile can hold several squares.
-   - **Rows by size inside each square**, like PolyRaven's size-based
+   - **One block per material group.** Each material group gets its own
+     rectangle: the smallest-area one its shells fit at the texel density
+     (row widths are tried from the widest piece up to a whole tile). Long,
+     flat pieces make a wide, low strip, so other blocks can use the rest
+     of the tile. A group bigger than a tile gets whole-tile blocks plus
+     one smaller block for the rest. Blocks never overlap, so no material
+     lands in another's gaps or corners. A tile can hold several blocks.
+     (They used to be squares, which left long strips sitting at the
+     bottom of mostly empty squares: on the test building the blocks went
+     from 66% to 88% full for walls, and 18 tiles to 15.)
+   - **Rows by size inside each block**, like PolyRaven's size-based
      distribution. Pieces go in tallest first, left to right, on one
      baseline per row; each piece takes the first row tall enough with
      room. Rows hold pieces of about one height, similar shapes sit side by

@@ -3,8 +3,8 @@ cache (mayapy).
 
     mayapy tests/test_squares.py
 
-- squares: every material group's shells sit inside its own square(s);
-  squares are square, inside their tile and never overlap; a group bigger
+- blocks: every material group's shells sit inside its own rectangle(s);
+  blocks are inside their tile and never overlap; a group bigger
   than a tile is split into several squares
 - Fit sections to rows still gives each section one row
 - stacked groups and pins work in squares mode
@@ -36,13 +36,13 @@ def check(name, cond, detail=""):
 
 
 def square_problems(tb, col, plan):
-    """Shells outside their group's squares, squares overlapping, off-tile."""
+    """Shells outside their group's blocks, blocks overlapping, off-tile."""
     out = []
     by_set = {}
-    for udim, x, y, side, node, key in plan["blocks"]:
-        by_set.setdefault(node, []).append((udim, x, y, side))
-        if x < -1e-9 or y < -1e-9 or x + side > 1.0 + 1e-9 or y + side > 1.0 + 1e-9:
-            out.append("square of %s off tile %d" % (key, udim))
+    for udim, x, y, bw, bh, node, key in plan["blocks"]:
+        by_set.setdefault(node, []).append((udim, x, y, bw, bh))
+        if x < -1e-9 or y < -1e-9 or x + bw > 1.0 + 1e-9 or y + bh > 1.0 + 1e-9:
+            out.append("block of %s off tile %d" % (key, udim))
     bl = plan["blocks"]
     for i in range(len(bl)):
         for j in range(i + 1, len(bl)):
@@ -50,8 +50,8 @@ def square_problems(tb, col, plan):
             if a[0] != b[0]:
                 continue
             if a[1] < b[1] + b[3] - 1e-9 and b[1] < a[1] + a[3] - 1e-9 and \
-                    a[2] < b[2] + b[3] - 1e-9 and b[2] < a[2] + a[3] - 1e-9:
-                out.append("squares of %s and %s overlap in %d" % (a[5], b[5], a[0]))
+                    a[2] < b[2] + b[4] - 1e-9 and b[2] < a[2] + a[4] - 1e-9:
+                out.append("blocks of %s and %s overlap in %d" % (a[6], b[6], a[0]))
     for g in col["groups"]:
         sq = by_set.get(g["set"], [])
         for sh in g["shells"]:
@@ -60,9 +60,9 @@ def square_problems(tb, col, plan):
                 continue
             udim = 1001 + pl[0] + 10 * pl[1]
             x0, y0, x1, y1 = pl[2], pl[3], pl[2] + pl[6], pl[3] + pl[7]
-            if not any(u == udim and x0 >= x - 1e-6 and y0 >= y - 1e-6 and x1 <= x + s + 1e-6 and y1 <= y + s + 1e-6
-                       for u, x, y, s in sq):
-                out.append("a shell of %s outside its squares" % g["key"])
+            if not any(u == udim and x0 >= x - 1e-6 and y0 >= y - 1e-6 and x1 <= x + bw + 1e-6 and
+                       y1 <= y + bh + 1e-6 for u, x, y, bw, bh in sq):
+                out.append("a shell of %s outside its blocks" % g["key"])
                 break
     return out
 
@@ -109,13 +109,13 @@ def run():
     check("...every shell placed", placed == n, "%d of %d" % (placed, n))
     per = {}
     for b in plan["blocks"]:
-        per[b[4]] = per.get(b[4], 0) + 1
+        per[b[5]] = per.get(b[5], 0) + 1
     check("a small group is one square", min(per.values()) == 1, str(sorted(per.values())[:6]))
     fills = {}
     for g in col["groups"]:
         if g["key"].startswith("glassClear"):
             area = sum(sh.area_uv * plan["placements"][id(sh)][4] ** 2 for sh in g["shells"])
-            fills[g["set"]] = area / sum(b[3] ** 2 for b in plan["blocks"] if b[4] == g["set"])
+            fills[g["set"]] = area / sum(b[3] * b[4] for b in plan["blocks"] if b[5] == g["set"])
     check("identical pieces grid into a square block (two 2:1 panes stack, they don't make a strip)",
           tb["_square_grid"](2, 0.29, 0.15, 10, 10) == (1, 2) and fills and min(fills.values()) > 0.85,
           "grid %s, glass fill %s" % (tb["_square_grid"](2, 0.29, 0.15, 10, 10),
@@ -144,7 +144,7 @@ def run():
     big = tb["make_plan"](col, dict(base, mode="Fixed density", texel_density=900.0))
     per = {}
     for b in big["blocks"]:
-        per[b[4]] = per.get(b[4], 0) + 1
+        per[b[5]] = per.get(b[5], 0) + 1
     probs = square_problems(tb, col, big)
     check("a group bigger than a tile is split into several squares", max(per.values()) > 1 and not probs,
           "most squares for one group: %d; %s" % (max(per.values()), "; ".join(probs[:3])))
@@ -165,7 +165,7 @@ def run():
           not free["blocks"])
 
     # --- pins
-    one = [b[4] for b in plan["blocks"] if sum(1 for c in plan["blocks"] if c[4] == b[4]) == 1]
+    one = [b[5] for b in plan["blocks"] if sum(1 for c in plan["blocks"] if c[5] == b[5]) == 1]
     g0 = [g for g in col["groups"] if g["set"] in one][0]
     g0["pin"] = [1095]
     pinned = tb["make_plan"](col, dict(base, mode="Fixed density"))
@@ -235,7 +235,7 @@ def run():
     check("Quick Plan never loops over meshes (one C++ area call per set), quickly", ok is True and secs < 1.0,
           "%s, %.3fs" % (ok, secs))
     if q:
-        have = set(b[4] for b in qp["blocks"])
+        have = set(b[5] for b in qp["blocks"])
         sized = set(g["set"] for g in q["groups"] if g["area"])
         check("Quick Plan: every measured group gets an estimated square", sized and sized <= have and
               not square_problems(tb, q, qp), "%d of %d" % (len(have & sized), len(q["groups"])))
@@ -274,9 +274,9 @@ def run():
         g3 = [x for x in q3["groups"] if x["set"] == g["set"]][0]
         boxes = [(fx["udim"], fx["box"]) for fx in q3["fixed"]]
         hit = []
-        for udim, x, y, side, node, key in qp3["blocks"]:
+        for udim, x, y, bw, bh, node, key in qp3["blocks"]:
             for u, b in boxes:
-                if u == udim and b[0] < x + side and x < b[2] and b[1] < y + side and y < b[3]:
+                if u == udim and b[0] < x + bw and x < b[2] and b[1] < y + bh and y < b[3]:
                     hit.append((key, udim))
         check("Quick Plan: hands-off pieces stay put and squares pack around them",
               boxes and not hit and g3["area"] < before and set(u for u, _ in boxes) <= set(qp3["tiles"]),
@@ -325,8 +325,8 @@ def run():
         landed = [b for b in plan_late["blocks"] if b[0] in (1005, 1006)]
         check("past the time limit, its group's tiles are blocked whole and nothing else lands there",
               late["handsoff_late"] == [mesh] and q_late["handsoff_late"] == [mesh] and whole == [1005, 1006] and
-              not [b for b in landed if b[4] != g["set"]], "late %s, blocked %s, landed %s" % (
-                  late["handsoff_late"], whole, [(b[0], b[5]) for b in landed][:3]))
+              not [b for b in landed if b[5] != g["set"]], "late %s, blocked %s, landed %s" % (
+                  late["handsoff_late"], whole, [(b[0], b[6]) for b in landed][:3]))
         cmds.undo()
 
     # --- quick look: a selection laid out together in a free UDIM of its own
