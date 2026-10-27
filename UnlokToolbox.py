@@ -8998,30 +8998,60 @@ def _piece_cell(item, growth, pad, limit):
     return min(item[3] * (1.0 + growth), usable) + pad, min(item[4] * (1.0 + growth), usable) + pad
 
 
+class _Shelves(object):
+    """Rows, like PolyRaven's size-based distribution: each piece goes left
+    to right into the first row that's tall enough and has room, else into a
+    new row on top. With the pieces sorted tallest first (_by_height), each
+    row holds pieces of about one height, lined up on one baseline, so
+    similar shapes sit side by side and the big ones lead. Pieces are never
+    tucked into the gaps of others (the old skyline packer did that: tighter
+    by a few %, much harder to read)."""
+    __slots__ = ("side", "rows", "top")
+
+    def __init__(self, side):
+        self.side = side
+        self.rows = []  # [y, height, x used]
+        self.top = 0.0
+
+    def put(self, w, h):
+        eps = 1e-9
+        for r in self.rows:
+            if h <= r[1] + eps and r[2] + w <= self.side + eps:
+                x = r[2]
+                r[2] += w
+                return x, r[0]
+        if w > self.side + eps or self.top + h > self.side + eps:
+            return None
+        y = self.top
+        self.rows.append([y, h, w])
+        self.top += h
+        return 0.0, y
+
+
+def _by_height(cells):
+    """Cells tallest first, then widest; mesh / first UV id break ties, so
+    the same input always gives the same rows."""
+    return sorted(cells, key=lambda c: (-round(c[2], 6), -round(c[1], 6), c[0][0].mesh, c[0][0].uv_ids[0]))
+
+
 def _bin_add(b, cell, can_turn):
-    """Put one (item, rw, rh) into bin b = [packer, placed, cells]; placed
-    gets (item, x, y, turned, rw, rh). False when it doesn't fit."""
-    pk = b[0]
+    """Put one (item, rw, rh) into bin b = [_Shelves, placed, cells]; placed
+    gets (item, x, y, turned, rw, rh). False when it doesn't fit. Pieces
+    are already turned the way their orientation wants (can_turn: kept for
+    callers)."""
     it, rw, rh = cell
-    spot = pk.find(rw, rh)
-    turned = False
-    if can_turn and not isinstance(it[0], _Compound) and abs(rw - rh) > 1e-9:
-        alt = pk.find(rh, rw)
-        if alt is not None and (spot is None or alt[0] < spot[0]):
-            spot, turned = alt, True
+    spot = b[0].put(rw, rh)
     if spot is None:
         return False
-    if turned:
-        rw, rh = rh, rw
-    pk.place(spot, rw, rh)
-    b[1].append((it, spot[3], spot[4], turned, rw, rh))
+    b[1].append((it, spot[0], spot[1], False, rw, rh))
     b[2].append(cell)
     return True
 
 
 def _pack_square(cells, side, can_turn):
-    """Pack cells into a side x side square: the placed list, or None."""
-    b = [_TilePacker(None, 0.0, side), [], []]
+    """Pack cells (sorted by _by_height) into a side x side square in rows:
+    the placed list, or None."""
+    b = [_Shelves(side), [], []]
     for c in cells:
         if not _bin_add(b, c, can_turn):
             return None
@@ -9077,8 +9107,9 @@ def _group_squares(items, growth, pad, limit, can_turn, hints, key):
     """A material group's pieces as squares: the smallest one that holds
     them all, or, for a group too big for one tile, whole-tile squares
     filled first-fit (biggest pieces first) with the last one shrunk to the
-    smallest square its pieces fit. Never a freeform shape."""
-    cells = [(it,) + _piece_cell(it, growth, pad, limit) for it in items]
+    smallest square its pieces fit. Never a freeform shape. Inside a square
+    the pieces sit in rows by height (_Shelves)."""
+    cells = _by_height([(it,) + _piece_cell(it, growth, pad, limit) for it in items])
     if not cells:
         return []
     one = _smallest_square(cells, limit, can_turn, hints, key)
@@ -9088,7 +9119,7 @@ def _group_squares(items, growth, pad, limit, can_turn, hints, key):
     for c in cells:
         if any(_bin_add(b, c, can_turn) for b in bins):
             continue
-        b = [_TilePacker(None, 0.0, limit), [], []]
+        b = [_Shelves(limit), [], []]
         if not _bin_add(b, c, can_turn):  # can't happen: cells are clamped to a tile
             b[1].append((c[0], 0.0, 0.0, False, c[1], c[2]))
             b[2].append(c)

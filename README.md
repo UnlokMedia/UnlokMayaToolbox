@@ -728,6 +728,11 @@ density. The actual layout is still being built; see
      group bigger than a tile gets whole-tile squares plus one smaller
      square for the rest. Squares never overlap, so no material lands in
      another's gaps or corners. A tile can hold several squares.
+   - **Rows by size inside each square**, like PolyRaven's size-based
+     distribution. Pieces go in tallest first, left to right, on one
+     baseline per row; each piece takes the first row tall enough with
+     room. Rows hold pieces of about one height, similar shapes sit side by
+     side, and nothing is wedged into another piece's gap.
    - **Options:** Density, Map size and Mode up front; More options has
      Padding, Orientation and Tidy blocks. Each section always starts a
      new row, a piece bigger than a tile always lowers just its own group

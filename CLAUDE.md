@@ -542,7 +542,11 @@
     - **Squares** (`squares`, the panel's default; engine default off):
       `plan_layout` turns each group's pieces (after bundles / similar
       blocks / Keep Layout units) into square compounds with
-      `_group_squares`: the smallest square they pack into
+      `_group_squares`: the smallest square they pack into in rows
+      (`_Shelves`: first fit by height over `_by_height`-sorted cells,
+      PolyRaven-style; it replaced the skyline-with-gaps packer inside
+      squares on 2026-10-27, same density and tiles on the test building,
+      much tidier)
       (`_smallest_square`: 2% steps up from the area bound, starting from
       the step that fitted last time, `collected["_square_hints"]`, so each
       Fit attempt costs a pack or two), or whole-tile squares filled
