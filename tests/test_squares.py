@@ -111,6 +111,35 @@ def run():
     for b in plan["blocks"]:
         per[b[4]] = per.get(b[4], 0) + 1
     check("a small group is one square", min(per.values()) == 1, str(sorted(per.values())[:6]))
+    fills = {}
+    for g in col["groups"]:
+        if g["key"].startswith("glassClear"):
+            area = sum(sh.area_uv * plan["placements"][id(sh)][4] ** 2 for sh in g["shells"])
+            fills[g["set"]] = area / sum(b[3] ** 2 for b in plan["blocks"] if b[4] == g["set"])
+    check("identical pieces grid into a square block (two 2:1 panes stack, they don't make a strip)",
+          tb["_square_grid"](2, 0.29, 0.15, 10, 10) == (1, 2) and fills and min(fills.values()) > 0.85,
+          "grid %s, glass fill %s" % (tb["_square_grid"](2, 0.29, 0.15, 10, 10),
+                                      ["%.2f" % v for v in fills.values()]))
+    LS = tb["LayoutShell"]
+    rect = [(0, 0), (1, 0), (1, 4), (0, 4)]  # a 1 x 4 plank in UV
+    logs = [LS("|log%d" % i, [i], 4.0, 4.0, rect, up_dir=d)
+            for i, d in enumerate([(0, 1), (0, 1), (0.6, 0.8), (1, 0)])]  # the last one's slope tipped it
+    dims = tb["_group_dims"](logs, "up")
+    own = [sh.dims["up"] for sh in logs]
+    check("long pieces of one material all lie the same way (the majority's), whatever their slope",
+          all(h > w for _, w, h in dims) and not all(h > w for _, w, h in own),
+          "own %s -> %s" % (["up" if h > w else "across" for _, w, h in own],
+                            ["up" if h > w else "across" for _, w, h in dims]))
+    mixed = []
+    for g in col["groups"]:
+        ways = set()
+        for sh in g["shells"]:
+            pl = plan["placements"].get(id(sh))
+            if pl and min(pl[6], pl[7]) > 0 and max(pl[6], pl[7]) >= 1.5 * min(pl[6], pl[7]):
+                ways.add(pl[7] > pl[6])
+        if len(ways) > 1:
+            mixed.append(g["key"])
+    check("...and in a real Upright plan no material mixes up and across long pieces", not mixed, str(mixed))
 
     big = tb["make_plan"](col, dict(base, mode="Fixed density", texel_density=900.0))
     per = {}

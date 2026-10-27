@@ -62,7 +62,7 @@ def run():
     settings = dict(tb["LAYOUT_DEFAULTS"], texel_density=128.0, map_size="2048", orientation="Upright",
                     group_similar=True, keep_meshes=True, squares="--freeform" not in sys.argv)
     t = time.time()
-    q = tb["collect_shells"](asset, estimate=True)
+    q = tb["quick_groups"](asset)
     qp = tb["make_plan"](q, dict(settings, mode=tb["FIT_ROWS"], squares=True))
     print("Quick Plan: %.2fs, %d px/m, %d tiles" % (time.time() - t, qp["density"], len(qp["new_tiles"])))
     prof = cProfile.Profile() if "--profile" in sys.argv else None

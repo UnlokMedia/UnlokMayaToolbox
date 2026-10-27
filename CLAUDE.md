@@ -553,6 +553,33 @@
       first-fit plus a smallest square for the rest. A section's squares are
       then placed biggest first into tiles (`_TilePacker` takes any `size`),
       shared by the whole section; pinned groups only use their pins.
+      **Neat over tight** (the user's rule, 2026-10-27): rows only. A
+      MaxRects packer (best short side fit) was tried inside squares and
+      bundles: about 10% fuller squares, but tucked pieces into gaps, and
+      the user prefers grids and rows. Don't bring it back.
+      - Compared with PolyRaven itself (installed on the user's AM_Custom
+        shelf, Maya 2024 prefs; MEL in the shelf button): its *Size Based
+        D'n'L* groups items (objects, or shells with one mesh selected)
+        whose bounding boxes match within 0.001 UV, distributes each group
+        as a near-square grid ("force square"), then packs the groups'
+        bounding-box proxy planes with `u3dLayout -ls 1` into 0..1
+        (UDIM-aware). Its gap is 2 px at 4096. Most of its edge over ours
+        was our grid bug: `_similar_blocks` used `ceil(sqrt(...))`, and with
+        padding two 2:1 panes became a 4:1 strip (24% full squares, now
+        95%). `_square_grid` now picks the grid with the smallest larger
+        side.
+      - `_similar_blocks` uses `SIMILAR_SMALL_TOL` (15%) for pieces under
+        `SIMILAR_SMALL` (8% of a tile): lots of small bits read best as a
+        grid.
+      - `_neat_bundle` (a mesh's shells, `keep_meshes`) tries rows at five
+        widths and keeps the smallest box; `hints[("bundle", mesh)]`
+        remembers the winner, since the Fit searches re-plan at ~20
+        densities (without it Plan went 0.13 s -> 1.7 s on 945 shells).
+      - **One direction per material** (`_group_dims`, used by
+        `plan_layout` and `largest_shells`): in 'up' mode, long pieces
+        (`LONG_ASPECT` 1.4) vote by 3D area for lying across or up; the
+        losers turn a quarter. The user's rule: every woodBrown log the same
+        way, so one texture wraps along them all.
       `plan["blocks"]` lists them; stats get `placed_rows`, which
       `section_rows` prefers. Squares never overlap, so materials never fill
       each other's gaps (the user asked for this after freeform plans mixed

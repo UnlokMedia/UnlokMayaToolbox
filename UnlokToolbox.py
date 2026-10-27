@@ -8364,6 +8364,37 @@ class LayoutShell(object):
         self.group = None
 
 
+LONG_ASPECT = 1.4  # a piece this much longer than wide counts as long (beams, logs, planks, strips)
+
+
+def _group_dims(shells, mode):
+    """(angle, w0, h0) per shell for one material group. In 'up' mode the
+    long pieces all run the same way: each shell's own upright turn votes
+    (by 3D area) for its long side lying across (U) or up (V), and the
+    pieces that disagree turn a quarter, so every woodBrown log or beam lies
+    the same way and one texture wraps along them all (the user's rule; a
+    diagonal beam would otherwise go whichever way its slope tipped it).
+    Pure maths on numbers already read: no lag."""
+    out = [sh.dims.get(mode, sh.dims["axis"]) for sh in shells]
+    if mode != "up":
+        return out
+    across = up = 0.0
+    longs = []
+    for i, (a, w0, h0) in enumerate(out):
+        if min(w0, h0) > 0 and max(w0, h0) >= LONG_ASPECT * min(w0, h0):
+            longs.append(i)
+            if w0 >= h0:
+                across += shells[i].area3d
+            else:
+                up += shells[i].area3d
+    want_up = up > across
+    for i in longs:
+        a, w0, h0 = out[i]
+        if (h0 > w0) != want_up:
+            out[i] = (a + math.pi / 2.0, h0, w0)
+    return out
+
+
 def _mesh_cache(xform, uv_set, unit_scale):
     fn = _mesh_fn(xform)
     if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
@@ -8889,7 +8920,49 @@ def _sort_pieces(items):
     return items
 
 
-def _mesh_bundles(items, growth, pad, usable):
+def _neat_bundle(cells, room, hints=None, key=None):
+    """cells (item, cw, ch) as one compound piece in rows (tallest first,
+    left to right; never tucked into gaps: the user wants neat over tight),
+    trying a few row widths around the square root of their area and
+    keeping the smallest bounding box (then the squarest). None when
+    nothing fits in room x room. hints[key] remembers the width that won,
+    which is tried alone next time (the Fit searches re-plan at many
+    densities and the winner hardly changes with scale)."""
+    ways = (1.0, 1.08, 1.15, 1.3, 1.5)
+    total = sum(cw * ch for _, cw, ch in cells)
+    widest = max(cw for _, cw, _ in cells)
+    rows = sorted(cells, key=lambda c: (-c[2], -c[1], c[0][0].uv_ids[0]))
+
+    def pack(f):
+        width = min(max(widest, math.sqrt(total) * f), max(widest, room))
+        pk = _Shelves(width, room)
+        children = []
+        used = height = 0.0
+        for it, cw, ch in rows:
+            spot = pk.put(cw, ch)
+            if spot is None:
+                return None
+            children.append((it, spot[0], spot[1]))
+            used, height = max(used, spot[0] + cw), max(height, spot[1] + ch)
+        if used > room + 1e-9 or height > room + 1e-9:
+            return None
+        return (round(used * height, 9), round(max(used, height), 9)), children, used, height
+
+    hinted = hints.get(key) if hints is not None else None
+    best = pack(ways[hinted]) if hinted is not None else None
+    if best is None:
+        for n, way in enumerate(ways):
+            got = pack(way)
+            if got is not None and (best is None or got[0] < best[0]):
+                best, hinted = got, n
+        if best is None:
+            return None
+        if hints is not None:
+            hints[key] = hinted
+    return (_Compound(best[1]), 1.0, 0.0, best[2], best[3])
+
+
+def _mesh_bundles(items, growth, pad, usable, hints=None):
     """Each mesh's shells packed close together (rows, tallest first, about
     square), so shells that sit near each other in UV belong to the same
     mesh: a rope binding's strands, a lamp's parts. Meshes too big to
@@ -8903,34 +8976,46 @@ def _mesh_bundles(items, growth, pad, usable):
         if len(its) < 2:
             out += its
             continue
-        cells = [(it,) + _cell(it, growth, pad) for it in its]
-        total = sum(cw * ch for _, cw, ch in cells)
-        widest = max(cw for _, cw, _ in cells)
-        width = min(max(widest, math.sqrt(total) * 1.15), max(widest, usable + pad))
-        cells.sort(key=lambda c: (-c[2], -c[1], c[0][0].uv_ids[0]))
-        x = y = row_h = used = 0.0
-        children = []
-        for it, cw, ch in cells:
-            if x > 0 and x + cw > width + 1e-12:
-                x, y, row_h = 0.0, y + row_h, 0.0
-            children.append((it, x, y))
-            x += cw
-            row_h = max(row_h, ch)
-            used = max(used, x)
-        height = y + row_h
-        if used > usable + pad + 1e-9 or height > usable + pad + 1e-9:
+        bundle = _neat_bundle([(it,) + _cell(it, growth, pad) for it in its], usable + pad, hints,
+                               ("bundle", mesh))
+        if bundle is None:
             out += its  # too big to keep together in one tile
             continue
-        out.append((_Compound(children), 1.0, 0.0, used, height))
+        out.append(bundle)
     return _sort_pieces(out)
 
 
-def _similar_blocks(items, growth, pad, usable, tol=0.04):
+def _square_grid(n, cw, ch, max_cols, max_rows):
+    """(cols, rows) for n cells of cw x ch: the grid with the smallest
+    larger side (the most square block), then the fewest empty cells, like
+    PolyRaven's 'force square' distribute. Two 2:1 panes stack into a
+    square instead of making a 4:1 strip (ceil(sqrt(...)) did that when
+    padding nudged the ratio just past 1)."""
+    best = None
+    for cols in range(1, min(max_cols, n) + 1):
+        rows = int(math.ceil(n / float(cols)))
+        if rows > max_rows:
+            continue
+        key = (round(max(cols * cw, rows * ch), 9), cols * rows - n, -cols)
+        if best is None or key < best[0]:
+            best = (key, cols, rows)
+    if best is None:
+        return max_cols, int(math.ceil(n / float(max_cols)))
+    return best[1], best[2]
+
+
+SIMILAR_TOL = 0.04  # pieces within 4% on both sides share a grid
+SIMILAR_SMALL = 0.08  # pieces whose long side is under 8% of a tile ...
+SIMILAR_SMALL_TOL = 0.15  # ... grid up within 15%: lots of small bits read best as a grid (the user's rule)
+
+
+def _similar_blocks(items, growth, pad, usable, tol=SIMILAR_TOL):
     """Group pieces of nearly the same size (within tol on both sides: the
-    planks, the bolts, the rope bindings) into blocks laid out as a neat
-    grid, each block packed as one rectangle, like PolyRaven's size-based
-    distribute. Pieces may be mesh bundles. Returns the pieces with each
-    block as one compound piece."""
+    planks, the bolts, the rope bindings; SIMILAR_SMALL_TOL for small
+    pieces) into blocks laid out as a neat grid of equal cells, each block
+    packed as one rectangle, like PolyRaven's size-based distribute. Pieces
+    may be mesh bundles. Returns the pieces with each block as one compound
+    piece."""
     items = sorted(items, key=lambda t: (-t[3], -t[4], t[0].mesh, t[0].uv_ids[0]))
     used = set()
     out = []
@@ -8939,13 +9024,14 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
             continue
         group = [it]
         used.add(i)
+        t = SIMILAR_SMALL_TOL if max(it[3], it[4]) < SIMILAR_SMALL else tol
         for j in range(i + 1, len(items)):
             if j in used:
                 continue
             o = items[j]
-            if o[3] < it[3] * (1.0 - tol) - 1e-12:
+            if o[3] < it[3] * (1.0 - t) - 1e-12:
                 break  # sorted by width: nothing further is close
-            if abs(o[4] - it[4]) <= tol * max(it[4], 1e-12):
+            if abs(o[4] - it[4]) <= t * max(it[4], 1e-12):
                 group.append(o)
                 used.add(j)
         if len(group) < 2:
@@ -8963,11 +9049,7 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
             if n == 1:
                 out.append(chunk[0])
                 continue
-            cols = min(max_cols, max(1, int(math.ceil(math.sqrt(n * chh / cw)))))
-            rows = int(math.ceil(n / float(cols)))
-            if rows > max_rows:
-                rows = max_rows
-                cols = int(math.ceil(n / float(rows)))
+            cols, rows = _square_grid(n, cw, chh, max_cols, max_rows)
             children = [(m, (k % cols) * cw, (k // cols) * chh) for k, m in enumerate(chunk)]
             out.append((_Compound(children), 1.0, 0.0, cols * cw, rows * chh))
     return _sort_pieces(out)
@@ -9006,10 +9088,11 @@ class _Shelves(object):
     similar shapes sit side by side and the big ones lead. Pieces are never
     tucked into the gaps of others (the old skyline packer did that: tighter
     by a few %, much harder to read)."""
-    __slots__ = ("side", "rows", "top")
+    __slots__ = ("side", "height", "rows", "top")
 
-    def __init__(self, side):
-        self.side = side
+    def __init__(self, side, height=None):
+        self.side = side  # row width
+        self.height = side if height is None else height
         self.rows = []  # [y, height, x used]
         self.top = 0.0
 
@@ -9020,7 +9103,7 @@ class _Shelves(object):
                 x = r[2]
                 r[2] += w
                 return x, r[0]
-        if w > self.side + eps or self.top + h > self.side + eps:
+        if w > self.side + eps or self.top + h > self.height + eps:
             return None
         y = self.top
         self.rows.append([y, h, w])
@@ -9108,7 +9191,9 @@ def _group_squares(items, growth, pad, limit, can_turn, hints, key):
     them all, or, for a group too big for one tile, whole-tile squares
     filled first-fit (biggest pieces first) with the last one shrunk to the
     smallest square its pieces fit. Never a freeform shape. Inside a square
-    the pieces sit in rows by height (_Shelves)."""
+    the pieces sit in rows by height (_Shelves): neat over tight, the
+    user's rule (a tight free-rectangles packer filled squares ~10% better
+    and was taken out for it)."""
     cells = _by_height([(it,) + _piece_cell(it, growth, pad, limit) for it in items])
     if not cells:
         return []
@@ -9222,8 +9307,7 @@ def plan_layout(collected, settings, density_scale=1.0):
             return mode, density, 1.0, None, {}
         compensate = 1.0
         sizes = []
-        for sh in g["shells"]:
-            angle, w0, h0 = sh.dims.get(mode, sh.dims["axis"])
+        for sh, (angle, w0, h0) in zip(g["shells"], _group_dims(g["shells"], mode)):
             target = sh.area3d * (density / res) ** 2  # UV area in tiles
             k = math.sqrt(target / sh.area_uv)
             sizes.append((sh, k, angle, w0 * k, h0 * k))
@@ -9267,7 +9351,7 @@ def plan_layout(collected, settings, density_scale=1.0):
             _sort_pieces(unique)
         if not g.get("stack"):  # compounds: shells of a mesh together, similar pieces in blocks
             if s.get("keep_meshes"):
-                unique = _mesh_bundles(unique, growth, pad, usable)
+                unique = _mesh_bundles(unique, growth, pad, usable, hints)
             if s.get("group_similar"):
                 unique = _similar_blocks(unique, growth, pad, usable)
         return mode, density, compensate, unique, stacked
@@ -9600,11 +9684,10 @@ def largest_shells(collected, settings, count=5):
         tdp = g["td"] / 100.0
         mode = g.get("orient") or default_mode
         blocks = {}
-        for sh in g["shells"]:
+        for sh, (_, w0, h0) in zip(g["shells"], _group_dims(g["shells"], mode)):
             if sh.mesh in keep_layout:  # one block: the whole mesh's arrangement
                 blocks.setdefault(sh.mesh, []).append(sh)
                 continue
-            _, w0, h0 = sh.dims.get(mode, sh.dims["axis"])
             size = max(w0, h0) * math.sqrt(sh.area3d / sh.area_uv) * tdp  # tiles per (px/m / res)
             if size > 0:
                 out.append({"mesh": sh.mesh, "uv_ids": sh.uv_ids, "set": g["set"], "key": g["key"],

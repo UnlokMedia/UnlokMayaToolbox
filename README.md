@@ -732,7 +732,9 @@ density. The actual layout is still being built; see
      distribution. Pieces go in tallest first, left to right, on one
      baseline per row; each piece takes the first row tall enough with
      room. Rows hold pieces of about one height, similar shapes sit side by
-     side, and nothing is wedged into another piece's gap.
+     side, and nothing is wedged into another piece's gap. Neat beats
+     tight: a free-form packer that tucked pieces into gaps filled squares
+     about 10% better and was left out on purpose.
    - **Options:** Density, Map size and Mode up front; More options has
      Padding, Orientation and Tidy blocks. Each section always starts a
      new row, a piece bigger than a tile always lowers just its own group
@@ -834,11 +836,19 @@ density. The actual layout is still being built; see
      then picks the quarter turn that points world Y up the tile, so planks,
      posts and pipes read the right way up for texturing. (Auto UV's
      per-mesh fit does the same.)
+   - **One direction per material:** in Upright, a material's long pieces
+     (beams, logs, planks: 1.4x longer than wide) all lie the same way,
+     either across or up, whichever most of them (by area) already do. A
+     diagonal beam no longer goes whichever way its slope tipped it, so one
+     texture wraps along every woodBrown log. It's maths on numbers Plan
+     already has, so it costs nothing.
    - **Tidy blocks** (More options, on by default): a mesh's shells are
      packed close together, so shells near each other in UV belong to the
-     same mesh (a rope binding's strands, a lamp's parts). Shells of nearly
-     the same size (planks, bolts, brackets) are laid out side by side in a
-     grid and packed as one block, like PolyRaven's size-based distribute.
+     same mesh (a rope binding's strands, a lamp's parts), in rows. Shells
+     of nearly the same size (planks, bolts, brackets: within 4%, or 15% for
+     small pieces under 8% of a tile) are laid out in a grid of equal cells
+     and packed as one block, like PolyRaven's size-based distribute. The
+     grid is as close to a square as it can be (two 2:1 panes stack).
    - **Managing a finished layout:**
      - **Fix one mesh:** click it; the inspector says what's wrong. **Fix**
        or **Auto UV Selected** re-unwraps just it. If you've edited it by
