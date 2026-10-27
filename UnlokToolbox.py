@@ -5324,14 +5324,17 @@ def uv_colours_on(asset):
 _OUTLINES = {}  # (mesh, uv set) -> (fingerprint, outlines): the viewer reads each mesh once
 
 
-def scene_shell_outlines(xform, uv_set="map1", unit_scale=1e-4, density=True):
+def scene_shell_outlines(xform, uv_set="map1", unit_scale=1e-4, density=False):
     """[{"hull": [(u, v)], "box": (u0, v0, u1, v1), "density": UV/3D ratio
     or None}] per UV shell, for the UV viewer. Remembered until the mesh
-    changes (fingerprint), so a big asset is read once. density needs the
-    per-face areas (the current UV set must be uv_set)."""
+    changes (fingerprint), so a big asset is read once. density (only for
+    the density colours: it needs every face's area, the slow part) needs
+    the current UV set to be uv_set. Kept cheap on heavy meshes: a shell's
+    outline comes from at most ~400 of its UVs, and a mesh with hundreds of
+    shells (junk UVs) is drawn as one box per shell."""
     fp = mesh_fingerprint(xform, uv_set)
     hit = _OUTLINES.get((xform, uv_set))
-    if hit and hit[0] == fp:
+    if hit and hit[0] == fp and (hit[2] or not density):
         return hit[1]
     fn = _mesh_fn(xform)
     if fn is None or uv_set not in fn.getUVSetNames() or fn.numUVs(uv_set) == 0:
@@ -5357,15 +5360,24 @@ def scene_shell_outlines(xform, uv_set="map1", unit_scale=1e-4, density=True):
                     d[1] += auv[face]
                 k += c
     out = []
+    boxes_only = len(pts) > 300
     for sid, q in pts.items():
-        hull = convex_hull(q)
+        _tick()
+        if boxes_only:
+            u0, u1 = min(a for a, _ in q), max(a for a, _ in q)
+            v0, v1 = min(b for _, b in q), max(b for _, b in q)
+            hull = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+        else:
+            if len(q) > 400:
+                q = q[::len(q) // 400 + 1]
+            hull = convex_hull(q)
         if not hull:
             continue
         us_, vs_ = [h[0] for h in hull], [h[1] for h in hull]
         d = dens.get(sid)
         out.append({"hull": hull, "box": (min(us_), min(vs_), max(us_), max(vs_)),
                     "density": math.sqrt(d[1] / d[0]) if d and d[0] > 1e-12 and d[1] > 0 else None})
-    _OUTLINES[(xform, uv_set)] = (fp, out)
+    _OUTLINES[(xform, uv_set)] = (fp, out, bool(density))
     return out
 
 
@@ -5826,6 +5838,15 @@ def _uw_kind(m, pf, opts):
     flat_cos = math.cos(math.radians(2.0))
     sharp_cos = math.cos(math.radians(opts["hard_angle"]))
     smooth = total = 0.0
+    keys = set()
+    for f in pf:
+        fv = faces[f]
+        for i in range(len(fv)):
+            a, b = fv[i], fv[(i + 1) % len(fv)]
+            keys.add((a, b) if a < b else (b, a))
+    n_hard = len(keys & hard)
+    if not n_hard or n_hard >= 0.5 * len(keys):
+        hard = set()  # all hard (or all soft) says nothing about the shape
     seen = set()
     for f in pf:
         fv = faces[f]
@@ -5873,8 +5894,13 @@ def _uw_seams(m, pf, kind, opts):
                     n_hard += 1
                 else:
                     n_soft += 1
-        if n_hard and n_soft:
+        # Hardness only means something when it's mixed: a bevel (or an import)
+        # often hardens every edge, and cutting them all shreds the piece.
+        use_hard = bool(n_hard and n_soft) and n_hard < 0.5 * (n_hard + n_soft)
+        if use_hard:
             limit = math.cos(math.radians(max(opts["hard_angle"], opts["organic_angle"])))
+    else:
+        use_hard = False
     cut, sewable = set(), set()
     for f in pf:
         fv = faces[f]
@@ -5885,10 +5911,192 @@ def _uw_seams(m, pf, kind, opts):
             d = dcos.get(key)
             if d is None:
                 cut.add(key)
-            elif (kind == "hard" and key in hard) or d < limit:
+            elif (use_hard and key in hard) or d < limit:
                 cut.add(key)
                 sewable.add(key)
     return cut, sewable
+
+
+def _uw_sym_eigen(a):
+    """Eigen-decomposition of a symmetric 3x3 (Jacobi). Returns
+    (values, vectors as rows), smallest value first."""
+    a = [list(r) for r in a]
+    v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    for _ in range(24):
+        off = abs(a[0][1]) + abs(a[0][2]) + abs(a[1][2])
+        if off < 1e-15:
+            break
+        for p_, q_ in ((0, 1), (0, 2), (1, 2)):
+            if abs(a[p_][q_]) < 1e-18:
+                continue
+            th = 0.5 * math.atan2(2.0 * a[p_][q_], a[q_][q_] - a[p_][p_])
+            c, s = math.cos(th), math.sin(th)
+            for k in range(3):
+                akp, akq = a[k][p_], a[k][q_]
+                a[k][p_], a[k][q_] = c * akp - s * akq, s * akp + c * akq
+            for k in range(3):
+                apk, aqk = a[p_][k], a[q_][k]
+                a[p_][k], a[q_][k] = c * apk - s * aqk, s * apk + c * aqk
+            for k in range(3):
+                vkp, vkq = v[k][p_], v[k][q_]
+                v[k][p_], v[k][q_] = c * vkp - s * vkq, s * vkp + c * vkq
+    vals = [a[0][0], a[1][1], a[2][2]]
+    order = sorted(range(3), key=lambda i: vals[i])
+    return [vals[i] for i in order], [[v[0][i], v[1][i], v[2][i]] for i in order]
+
+
+def _uw_poly_caps(m, fids):
+    """Caps found by topology, so it works however a pipe bends: n-gon faces
+    (a plain cylinder's caps) and fans round a many-edged pole (a subdivided
+    cap) seed them, and each grows over the flat cap (normals within 15
+    degrees of the seed's). Returns the cut edges between caps and the
+    rest, or an empty set when there are none or they'd take most of it."""
+    faces, edges, nrm, area = m["faces"], m["edges"], m["nrm"], m["area"]
+    fset = set(fids)
+    valence = {}
+    for f in fids:
+        for v in faces[f]:
+            valence[v] = valence.get(v, 0) + 1
+    seeds = [f for f in fids if len(faces[f]) >= 5 or any(valence[v] >= 6 for v in faces[f])]
+    if not seeds:
+        return set()
+    cos_lim = math.cos(math.radians(15.0))
+    cap = {}
+    for s in seeds:
+        if s in cap:
+            continue
+        n0 = nrm[s]
+        stack = [s]
+        cap[s] = s
+        while stack:
+            f = stack.pop()
+            fv = faces[f]
+            for i in range(len(fv)):
+                a, b = fv[i], fv[(i + 1) % len(fv)]
+                for g, _ in edges[(a, b) if a < b else (b, a)]:
+                    if g in fset and g not in cap:
+                        n = nrm[g]
+                        if n[0] * n0[0] + n[1] * n0[1] + n[2] * n0[2] >= cos_lim:
+                            cap[g] = s
+                            stack.append(g)
+    total = sum(area[f] for f in fids)
+    by_seed = {}
+    for f, s in cap.items():
+        by_seed[s] = by_seed.get(s, 0.0) + area[f]
+    # bevel corners leave small 5-sided faces: those aren't caps (a real cap is a
+    # 6+ sided n-gon, or a cluster big enough to matter)
+    cap = dict((f, s) for f, s in cap.items() if len(faces[s]) >= 6 or by_seed[s] >= 0.01 * total)
+    if not cap or sum(area[f] for f in cap) > 0.4 * total:
+        return set()  # none, or mostly flat n-gons (a panel, a box side): not caps on a tube
+    out = set()
+    for f in fids:
+        fv = faces[f]
+        for i in range(len(fv)):
+            a, b = fv[i], fv[(i + 1) % len(fv)]
+            key = (a, b) if a < b else (b, a)
+            for g, _ in edges[key]:
+                if g != f and g in fset and (f in cap) != (g in cap):
+                    out.add(key)
+    return out
+
+
+def _uw_absorb_small(m, regions, cut, sewable, frac=0.015):
+    """Merge tiny regions (bevel strips, bevel corners, slivers) into the
+    neighbour they share the longest sewable cut with, smallest first, so
+    they become part of a face instead of shells of their own. Returns the
+    merged regions; the cuts between merged regions are dropped."""
+    area, edges, pts = m["area"], m["edges"], m["pts"]
+    rid = {}
+    for i, r in enumerate(regions):
+        for f in r:
+            rid[f] = i
+    r_area = [sum(area[f] for f in r) for r in regions]
+    total = sum(r_area) or 1.0
+    shared = {}  # (small region, other) -> [length, [edge keys]]
+    for key in sewable & cut:
+        ent = edges.get(key)
+        if not ent or len(ent) != 2:
+            continue
+        a, b = rid.get(ent[0][0]), rid.get(ent[1][0])
+        if a is None or b is None or a == b:
+            continue
+        p0, p1 = pts[key[0]], pts[key[1]]
+        ln = math.sqrt((p0[0] - p1[0]) ** 2 + (p0[1] - p1[1]) ** 2 + (p0[2] - p1[2]) ** 2)
+        for x, y in ((a, b), (b, a)):
+            e = shared.setdefault((x, y), [0.0, []])
+            e[0] += ln
+            e[1].append(key)
+    uf = _UF()
+    merged_area = list(r_area)
+    for i in sorted(range(len(regions)), key=lambda k: r_area[k]):
+        root = uf.find(i)
+        if merged_area[root] >= frac * total:
+            continue
+        best = None
+        for (x, y), (ln, keys) in shared.items():
+            if uf.find(x) == root and uf.find(y) != root and (best is None or ln > best[0]):
+                best = (ln, y, keys)
+        if best is None:
+            continue
+        other = uf.find(best[1])
+        uf.union(root, other)
+        new_root = uf.find(root)
+        merged_area[new_root] = merged_area[root] + merged_area[other] if new_root != root else \
+            merged_area[root] + merged_area[other]
+        for (x, y), (ln, keys) in shared.items():
+            if uf.find(x) == uf.find(y):
+                cut.difference_update(keys)
+    out = {}
+    for i, r in enumerate(regions):
+        out.setdefault(uf.find(i), []).extend(r)
+    return list(out.values())
+
+
+def _uw_tube_caps(m, fids):
+    """For a tube-like region (most of its area faces sideways around one
+    axis: pipes, posts, bolts, bent pipes up to ~90 degrees), the edges
+    between its caps (faces looking along the axis) and its side. Bevels
+    and soft shading often merge a cap into the side; cut there, the side
+    becomes a ring that unrolls straight and the cap a flat disc. Returns
+    the cut edges, or an empty set when it isn't a tube."""
+    faces, edges, nrm, area = m["faces"], m["edges"], m["nrm"], m["area"]
+    if len(fids) < 8:
+        return set()
+    cov = [[0.0] * 3 for _ in range(3)]
+    total = 0.0
+    for f in fids:
+        n, a = nrm[f], area[f]
+        total += a
+        for i in range(3):
+            for j in range(3):
+                cov[i][j] += a * n[i] * n[j]
+    if total <= 0:
+        return set()
+    vals, vecs = _uw_sym_eigen(cov)
+    ax = vecs[0]  # the direction the side's normals avoid
+    side = cap = 0.0
+    is_cap = {}
+    for f in fids:
+        d = abs(nrm[f][0] * ax[0] + nrm[f][1] * ax[1] + nrm[f][2] * ax[2])
+        is_cap[f] = d > 0.7071
+        if d < 0.5:
+            side += area[f]
+        elif is_cap[f]:
+            cap += area[f]
+    if side < 0.6 * total or cap <= 0.0 or vals[1] < 0.15 * total:
+        return set()  # not a tube (or a flat sheet: no spread of normals around the axis)
+    fset = set(fids)
+    out = set()
+    for f in fids:
+        fv = faces[f]
+        c = len(fv)
+        for i in range(c):
+            a, b = fv[i], fv[(i + 1) % c]
+            key = (a, b) if a < b else (b, a)
+            for g, _ in edges[key]:
+                if g != f and g in fset and is_cap[g] != is_cap[f]:
+                    out.add(key)
+    return out
 
 
 def _uw_regions(m, fids, cut):
@@ -6483,7 +6691,7 @@ def _uw_arap(P, T, UV, iters, ctl, cg_iters=12):
     return list(zip(u, v))
 
 
-def _uw_tutte(P, T, loop, bpos=None):
+def _uw_tutte(P, T, loop, bpos=None, chord=False):
     """Tutte embedding: the boundary on a circle (by length) or at bpos
     ({vertex: (u, v)}, a convex shape), the inside averaged; always
     fold-free. The start for relaxing curved charts."""
@@ -6507,8 +6715,15 @@ def _uw_tutte(P, T, loop, bpos=None):
         nbr[a].update((b, c))
         nbr[b].update((a, c))
         nbr[c].update((a, b))
-    rows = [(list(s), [1.0] * len(s)) for s in nbr]
-    diag = [float(len(s)) or 1.0 for s in nbr]
+    if chord:  # weights 1 / length: rows keep their real spacing (bevel rings stay narrow)
+        rows = []
+        for i, s in enumerate(nbr):
+            js = list(s)
+            rows.append((js, [1.0 / max(_uw_len(P, i, j), 1e-9) for j in js]))
+        diag = [sum(w) or 1.0 for _, w in rows]
+    else:
+        rows = [(list(s), [1.0] * len(s)) for s in nbr]
+        diag = [float(len(s)) or 1.0 for s in nbr]
     fixed = set(loop)
     zero = [0.0] * nv
     bu = list(zero)
@@ -6790,6 +7005,14 @@ def _uw_flatten(ch, opts, ctl):
     if flips == 0 and worst < 1.02 and not _uw_overlap(uv, loops):
         return uv, "unfolded"  # developable: exact
     bpos = _uw_shape_start(ch)
+    if bpos and ch["hint"] and ch["hint"][0] == "ring":
+        # a tube (bent, tapered, wobbly): unrolled straight onto its rectangle,
+        # rows at their real spacing. Texture artists want pipes straight; a
+        # relaxed bent pipe comes out as a banana.
+        straight = _uw_tutte(P, T, loops[0], bpos, chord=True)
+        flips, good, worst = _uw_stretch(P, T, straight)
+        if flips == 0 and good >= 0.8 and not _uw_overlap(straight, loops):
+            return straight, "unrolled"
     if len(T) > opts["multilevel_from"]:  # big and curved: relax a coarse version, then refine
         res = _uw_multilevel(P, T, loops, opts, ctl, bpos)
         if res is not None:
@@ -6820,7 +7043,15 @@ def _uw_piece(m, pf, kind, opts, ctl):
     """Charts for one piece. Returns (corner -> (chart, local UV), chart
     list, cut edges, sewable edges, faces for Unfold3D)."""
     cut, sewable = _uw_seams(m, pf, kind, opts)
-    work = [(r, 0, None) for r in _uw_regions(m, pf, cut)]
+    if kind == "hard":
+        # A tube-shaped hard piece (plank, beam, post, crate, bolt, bevelled or
+        # not) unwraps best as its side, unrolled in one straight strip, plus
+        # its two caps: so only the caps are cut, not every bevel step.
+        caps = _uw_poly_caps(m, pf) or _uw_tube_caps(m, pf)
+        if caps:
+            cut = set(k for k in cut if m["dcos"].get(k) is None) | caps
+            sewable = set(caps)
+    work = [(r, 0, None) for r in _uw_absorb_small(m, _uw_regions(m, pf, cut), cut, sewable)]
     charts = []
     heavy = []
     while work:
@@ -6830,6 +7061,20 @@ def _uw_piece(m, pf, kind, opts, ctl):
         ch = _uw_build(m, fids, cut)
         ch["hint"] = hint
         loops, chi, ok = _uw_topology(ch["T"], len(ch["P"]))
+        if depth == 0 and hint is None and not (ok and chi == 0 and len(loops) == 2):
+            # Caps merged into a tube's side (soft or bevelled): cut them off.
+            # Never on an open tube (it's already a ring), and the one-axis
+            # test only on closed pieces: on a U-bend's or a wobbly tube's
+            # side it takes bits of the side for caps.
+            caps = _uw_poly_caps(m, fids)
+            if not caps and ok and chi == 2 and not loops:
+                caps = _uw_tube_caps(m, fids)
+            caps -= cut
+            if caps:
+                cut.update(caps)
+                sewable.update(caps)
+                work.extend((r, 1, None) for r in _uw_regions(m, fids, cut))
+                continue
         if ok and chi == 2 and not loops:  # closed: pelt cut between the far ends
             a, b = _uw_far_pair(ch)
             path = _uw_path_cut(ch, [a], [b])
@@ -6938,7 +7183,7 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
                     segs.append((world(ci, ch["uv"][a]), world(ci, ch["uv"][b]), (ci, a), (ci, b)))
         return segs
 
-    for (a, b), keys in order:
+    for (a, b), keys in (order if opts["sew"] in ("max", "compact") else ()):
         if ctl.get("cancel"):
             raise Cancelled("sew")
         ga, gb = group[a], group[b]
@@ -6977,13 +7222,13 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
             xf[ci] = (c * c0 - s * s0, s * c0 + c * s0, c * x0 - s * y0 + tx, s * x0 + c * y0 + ty)
         sa, sb = boundary(ga), boundary(gb)
         bad = _uw_segments_cross(sa, sb)
-        if not bad and opts["sew"] == "compact":
+        if not bad:  # never a spoky star; "compact" asks for a tidier shell still
             allp = [p for seg in sa + sb for p in (seg[0],)]
             area = sum(abs(_uw_area([world(ci, q) for q in charts[ci]["uv"]], charts[ci]["T"]))
                        for ci in members[ga] + members[gb])
             box = (max(p[0] for p in allp) - min(p[0] for p in allp)) * (max(p[1] for p in allp) -
                                                                          min(p[1] for p in allp))
-            bad = box > 0 and area / box < opts["sew_fill"]
+            bad = box > 0 and area / box < (opts["sew_fill"] if opts["sew"] == "compact" else 0.12)
         if bad:
             for ci, t in old.items():
                 xf[ci] = t
@@ -6992,6 +7237,75 @@ def _uw_sew(m, charts, cut, sewable, opts, ctl):
             group[ci] = ga
         members[ga] += members.pop(gb)
         sewn.update(keys)
+    # Small shells left over (caps, bevel corners, end faces) are sewn on as a
+    # flap along one shared edge, the longest that fits without overlapping:
+    # a whole seam rarely lines up for them (a round cap on a straight rim).
+    area_of = {}
+    for ci, ch in enumerate(charts):
+        area_of[ci] = abs(_uw_area(ch["uv"], ch["T"]))
+
+    def g_area(gi):
+        return sum(area_of[ci] for ci in members[gi])
+
+    def g_aspect(gi):
+        pts_ = [world(ci, q) for ci in members[gi] for q in charts[ci]["uv"]]
+        hull = convex_hull(pts_)
+        if len(hull) < 3:
+            return 1e9
+        best = 1e9
+        for i in range(len(hull)):
+            q0, q1 = hull[i], hull[(i + 1) % len(hull)]
+            ang = math.atan2(q1[1] - q0[1], q1[0] - q0[0])
+            c_, s_ = math.cos(-ang), math.sin(-ang)
+            xs = [q[0] * c_ - q[1] * s_ for q in hull]
+            ys = [q[0] * s_ + q[1] * c_ for q in hull]
+            w_, h_ = max(xs) - min(xs), max(ys) - min(ys)
+            if min(w_, h_) > 0:
+                best = min(best, max(w_, h_) / min(w_, h_))
+        return best
+
+    biggest = max(g_area(gi) for gi in members)
+    small = sorted((gi for gi in members if g_area(gi) < opts.get("flap_below", 0.2) * biggest and
+                    g_aspect(gi) <= 6.0), key=g_area)
+    for gb in small:
+        if gb not in members:
+            continue
+        options = []
+        for (a, b), keys in pairs.items():
+            for x, y in ((a, b), (b, a)):  # y is in the small shell
+                if group[y] == gb and group[x] != gb:
+                    options += [(elen(k), x, y, k) for k in keys]
+        for _, a, b, key in sorted(options, key=lambda t: (-t[0], t[3])):
+            ga = group[a]
+            if ga == gb:
+                continue
+            (f, i), (g, j) = edges[key]
+            if chart_of[f] != a:
+                (f, i), (g, j) = (g, j), (f, i)
+            fc, gc = len(faces[f]), len(faces[g])
+            p0, p1 = corner_uv(a, f, i), corner_uv(a, f, (i + 1) % fc)
+            q0, q1 = corner_uv(b, g, (j + 1) % gc), corner_uv(b, g, j)
+            la, lb = math.hypot(p1[0] - p0[0], p1[1] - p0[1]), math.hypot(q1[0] - q0[0], q1[1] - q0[1])
+            if la <= 0 or lb <= 0 or abs(la - lb) > 0.02 * max(la, lb):
+                continue
+            th = math.atan2(p1[1] - p0[1], p1[0] - p0[0]) - math.atan2(q1[1] - q0[1], q1[0] - q0[0])
+            c, s = math.cos(th), math.sin(th)
+            mx, my = (q0[0] + q1[0]) / 2.0, (q0[1] + q1[1]) / 2.0
+            tx = (p0[0] + p1[0]) / 2.0 - (c * mx - s * my)
+            ty = (p0[1] + p1[1]) / 2.0 - (s * mx + c * my)
+            old = dict((ci, xf[ci]) for ci in members[gb])
+            for ci in members[gb]:
+                c0, s0, x0, y0 = xf[ci]
+                xf[ci] = (c * c0 - s * s0, s * c0 + c * s0, c * x0 - s * y0 + tx, s * x0 + c * y0 + ty)
+            if _uw_segments_cross(boundary(ga), boundary(gb)):
+                for ci, t in old.items():
+                    xf[ci] = t
+                continue
+            for ci in members[gb]:
+                group[ci] = ga
+            members[ga] += members.pop(gb)
+            sewn.add(key)
+            break
     return xf, sewn
 
 
@@ -7084,7 +7398,7 @@ def _uw_mesh(m, opts, ctl, shared):
     corner_uv = [None] * (m["base"][-1] + len(m["faces"][-1]))
     cut_all, heavy = set(), []
     stats = {"pieces": 0, "copies": 0, "charts": 0, "hard": 0, "organic": 0, "flat": 0, "unfolded": 0,
-             "relaxed": 0, "heavy": 0, "rough": 0, "sewn": 0}
+             "relaxed": 0, "unrolled": 0, "heavy": 0, "rough": 0, "sewn": 0}
     faces, base = m["faces"], m["base"]
     for pf in _uw_pieces(m):
         if ctl.get("cancel"):
@@ -7122,8 +7436,8 @@ def _uw_mesh(m, opts, ctl, shared):
         stats[kind] += 1
         charts, cut, sewable, hv = _uw_piece(m, pf, kind, opts, ctl)
         o = dict(opts)
-        if kind == "organic":
-            o["sew"] = "off"  # pelts are already as joined as they get
+        if kind == "organic" and o["sew"] != "off":
+            o["sew"] = "flaps"  # pelts are already as joined as they get; small bits still go on as flaps
         xf, sewn = _uw_sew(m, charts, cut, sewable, o, ctl)
         stats["charts"] += len(charts)
         stats["sewn"] += len(sewn)
@@ -7301,7 +7615,7 @@ def _pack_one_tile(shells, pad):
         return {}, 0.0
     base = []
     for sh in shells:
-        angle, w0, h0 = sh.dims["axis"]
+        angle, w0, h0 = sh.dims["up"]  # straight, world Y up the tile
         k = math.sqrt(sh.area3d / sh.area_uv)
         base.append((sh, k, angle, w0 * k, h0 * k))
     base.sort(key=lambda t: (-round(max(t[3], t[4]), 9), -t[3] * t[4], t[0].mesh, t[0].uv_ids[0]))
@@ -7316,7 +7630,7 @@ def _pack_one_tile(shells, pad):
         for sh, k, angle, w, h in base:
             rw, rh = w * scale + pad, h * scale + pad
             spot, turned = pk.find(rw, rh), False
-            if abs(rw - rh) > 1e-12:
+            if abs(rw - rh) > 1e-12 and not sh.has_up:
                 alt = pk.find(rh, rw)
                 if alt is not None and (spot is None or alt[0] < spot[0]):
                     spot, turned = alt, True
@@ -7712,7 +8026,7 @@ LAYOUT_MODES = (FIT_ROWS, "Fixed density", "Fit to tiles")
 MAP_SIZES = ("1024", "2048", "4096", "8192")
 # Main axis: longest direction along U (lying flat). Upright: world up along +V
 # (brick courses stay horizontal, walls read upright). Keep: never rotate.
-ORIENTATIONS = ("Main axis", "Upright", "Keep")
+ORIENTATIONS = ("Upright", "Main axis", "Keep")  # the panel defaults to the first
 HANDSOFF_MODES = ("Pack around them", "Reserve their tiles")
 _ORIENT_MODE = {"Main axis": "axis", "Upright": "up", "Keep": "keep"}
 _UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
@@ -7725,6 +8039,7 @@ LAYOUT_DEFAULTS = {
     "max_tiles": 10,
     "padding_px": 8,
     "orientation": "Main axis",
+    "group_similar": False,  # pack near-identical pieces as grid blocks (the panel turns it on)
     "new_row_per_section": True,
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
@@ -7759,7 +8074,7 @@ class LayoutShell(object):
     dims[mode] = (angle, w0, h0) for each orientation mode ('axis', 'up',
     'keep'), so switching orientation is just a re-plan.
     """
-    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "dims", "group", "hull")
+    __slots__ = ("mesh", "uv_ids", "area3d", "area_uv", "cx", "cy", "dims", "group", "hull", "has_up")
 
     def __init__(self, mesh, uv_ids, area3d, area_uv, pts, up_dir=None):
         self.mesh = mesh
@@ -7778,19 +8093,35 @@ class LayoutShell(object):
             ys = [(p[0] - cx) * sa + (p[1] - cy) * ca for p in pts]
             return max(xs) - min(xs), max(ys) - min(ys)
 
-        axis = 0.0
-        if len(pts) > 2:
-            sxx = sum((p[0] - cx) ** 2 for p in pts)
-            syy = sum((p[1] - cy) ** 2 for p in pts)
-            sxy = sum((p[0] - cx) * (p[1] - cy) for p in pts)
-            axis = -0.5 * math.atan2(2.0 * sxy, sxx - syy)  # main axis onto U
+        # Straighten: the angle whose bounding box is tightest (smallest
+        # perimeter) has one of the hull's edges lying along it (rotating
+        # calipers), so planks, strips and unrolled pipes come out square.
+        hull = self.hull
+
+        def hbox(angle):
+            ca, sa = math.cos(angle), math.sin(angle)
+            xs = [q[0] * ca - q[1] * sa for q in hull]
+            ys = [q[0] * sa + q[1] * ca for q in hull]
+            return max(xs) - min(xs), max(ys) - min(ys)
+
+        straight = 0.0
+        if len(hull) > 2:
+            bw, bh = hbox(0.0)
+            best = bw + bh
+            for i in range(len(hull)):
+                q0, q1 = hull[i], hull[(i + 1) % len(hull)]
+                ang = -math.atan2(q1[1] - q0[1], q1[0] - q0[0])
+                ang = (ang + math.pi / 4.0) % (math.pi / 2.0) - math.pi / 4.0
+                bw, bh = hbox(ang)
+                if bw + bh < best * 0.999:
+                    best, straight = bw + bh, ang
+        quarter = [straight + k * math.pi / 2.0 for k in range(4)]
+        axis = min(quarter[:2], key=lambda a: (hbox(a)[1] > hbox(a)[0], abs(a)))  # long side along U
         w, h = box(axis)
-        if h > w:  # lie flat: shelves pack wide shells best
-            axis += math.pi / 2.0
-            w, h = h, w
         self.dims = {"axis": (axis, w, h), "keep": (0.0,) + box(0.0)}
-        if up_dir is not None:
-            up = math.pi / 2.0 - math.atan2(up_dir[1], up_dir[0])  # world up -> +V
+        self.has_up = up_dir is not None
+        if up_dir is not None:  # of the four square turns, the one that puts world +Y up the tile
+            up = max(quarter, key=lambda a: up_dir[0] * math.sin(a) + up_dir[1] * math.cos(a))
             self.dims["up"] = (up,) + box(up)
         else:  # flat (floor / roof) pieces have no up: fall back to the main axis
             self.dims["up"] = self.dims["axis"]
@@ -8119,6 +8450,55 @@ class _TilePacker(object):
         self.segs = merged
 
 
+def _similar_blocks(items, growth, pad, usable, tol=0.04):
+    """Group pieces of nearly the same size (within tol on both sides: the
+    planks, the bolts, the brackets) into blocks laid out as a neat grid,
+    each block packed as one rectangle, like PolyRaven's size-based
+    distribute. Returns (items with each block as one item, {id(first
+    member): (members, cols, cell w, cell h)})."""
+    items = sorted(items, key=lambda t: (-t[3], -t[4], t[0].mesh, t[0].uv_ids[0]))
+    used = set()
+    out, blocks = [], {}
+    for i, it in enumerate(items):
+        if i in used:
+            continue
+        group = [it]
+        used.add(i)
+        for j in range(i + 1, len(items)):
+            if j in used:
+                continue
+            o = items[j]
+            if o[3] < it[3] * (1.0 - tol) - 1e-12:
+                break  # sorted by width: nothing further is close
+            if abs(o[4] - it[4]) <= tol * max(it[4], 1e-12):
+                group.append(o)
+                used.add(j)
+        if len(group) < 2:
+            out.append(it)
+            continue
+        cw = max(g[3] for g in group) * (1.0 + growth) + pad
+        chh = max(g[4] for g in group) * (1.0 + growth) + pad
+        max_cols = max(1, int((usable + pad) / cw)) if cw <= usable + pad else 1
+        max_rows = max(1, int((usable + pad) / chh)) if chh <= usable + pad else 1
+        per = max_cols * max_rows
+        for start in range(0, len(group), per):
+            chunk = group[start:start + per]
+            n = len(chunk)
+            if n == 1:
+                out.append(chunk[0])
+                continue
+            cols = min(max_cols, max(1, int(math.ceil(math.sqrt(n * chh / cw)))))
+            rows = int(math.ceil(n / float(cols)))
+            if rows > max_rows:
+                rows = max_rows
+                cols = int(math.ceil(n / float(rows)))
+            first = chunk[0]
+            blocks[id(first[0])] = (chunk, cols, cw, chh)
+            out.append((first[0], first[1], first[2], cols * cw, rows * chh))
+    out.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh, t[0].uv_ids[0]))
+    return out, blocks
+
+
 def plan_layout(collected, settings, density_scale=1.0):
     """Pure-math layout plan. Returns a dict with per-shell placements, group
     stats, tiles used and warnings. Nothing in the scene changes."""
@@ -8220,6 +8600,9 @@ def plan_layout(collected, settings, density_scale=1.0):
         # pieces 90 degrees when that sits lower.
         unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
                                    t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
+        blocks = {}  # id(first member) -> (members, cols, cell w, cell h)
+        if s.get("group_similar") and not g.get("stack"):
+            unique, blocks = _similar_blocks(unique, growth, pad, usable)
         can_turn = mode == "axis"
         own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
         packers = [fixed_packers[t] for t in own_fixed if t in fixed_packers]
@@ -8228,15 +8611,16 @@ def plan_layout(collected, settings, density_scale=1.0):
         area = sum(fx["area"] for fx in g.get("fixed", []))
         for item in unique:
             sh, k, a, w, h = item
+            block = blocks.get(id(sh))
             w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
             if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
                 w_res, h_res = min(w_res, usable), min(h_res, usable)
-            rw, rh = w_res + pad, h_res + pad
+            rw, rh = (w_res + pad, h_res + pad) if block is None else (w, h)
             found = None
             for pk in packers:
                 spot = pk.find(rw, rh)
                 turned = False
-                if can_turn and abs(rw - rh) > 1e-9:
+                if can_turn and block is None and abs(rw - rh) > 1e-9:
                     alt = pk.find(rh, rw)
                     if alt is not None and (spot is None or alt[0] < spot[0]):
                         spot, turned = alt, True
@@ -8248,7 +8632,7 @@ def plan_layout(collected, settings, density_scale=1.0):
                 packers.append(pk)
                 spot = pk.find(rw, rh)
                 turned = False
-                if spot is None and can_turn:
+                if spot is None and can_turn and block is None:
                     spot, turned = pk.find(rh, rw), True
                 if spot is None:  # can only happen for clamped oversize pieces
                     spot, turned = (None, 0, 0, pad, pad), False
@@ -8262,8 +8646,14 @@ def plan_layout(collected, settings, density_scale=1.0):
                 pk.place(spot, rw, rh)
             x, y = spot[3], spot[4]
             tu, tv = pk.tile
-            placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
             g_tiles.add(1001 + tu + 10 * tv)
+            if block is not None:  # a block of similar shells: each in its own cell
+                members, cols, cw, chh = block
+                for idx, (msh, mk, ma, mw, mh) in enumerate(members):
+                    placements[id(msh)] = (tu, tv, x + (idx % cols) * cw, y + (idx // cols) * chh, mk, ma, mw, mh)
+                    area += mw * mh
+                continue
+            placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
             area += w * h
             if g.get("stack"):
                 for dup in stacked[(len(sh.uv_ids), round(item[3], 3), round(item[4], 3))][1]:
@@ -9528,7 +9918,7 @@ class UVViewer(QtWidgets.QWidget):
         self.mode = ComboField(VIEW_COLOURS)
         self.mode.setToolTip("Colour shells by material group, UV status (the panel's colours) or texel density "
                              "(blue = under target, green = on target, red = over).")
-        self.mode.changed.connect(self.canvas_update)
+        self.mode.changed.connect(self._mode_changed)
         bar.addWidget(QtWidgets.QLabel("Colour by"))
         bar.addWidget(self.mode)
         for name, label, tip in (("show_rows", "Section rows", "Section names down the side of their rows."),
@@ -9564,6 +9954,14 @@ class UVViewer(QtWidgets.QWidget):
         self.canvas.update()
 
     def canvas_update(self):
+        self.canvas.update()
+
+    def _mode_changed(self):
+        # scene UVs are read without densities (the slow part): fetch them the
+        # first time the density colours are asked for
+        if (self.source == "scene" and self.items and self.mode.value() == "Texel density" and
+                not any(it.get("density") for it in self.items)):
+            self.show_scene(density=True)
         self.canvas.update()
 
     # ---------------------------------------------------------------- data
@@ -9623,10 +10021,12 @@ class UVViewer(QtWidgets.QWidget):
                                                                         len(plan.get("new_tiles", []))))
         self.canvas.update()
 
-    def show_scene(self):
+    def show_scene(self, density=None):
         asset = self.panel._asset()
         if asset is None:
             return
+        if density is None:
+            density = self.mode.value() == "Texel density"
         uv_set = self.panel.uv_set.text().strip() or "map1"
         unit = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
         res = float(self.panel.lay_map.value() or 2048)
@@ -9646,7 +10046,7 @@ class UVViewer(QtWidgets.QWidget):
                 for m in meshes:
                     pr.item(short_name(m))
                     key, mat, sec = owner.get(m, ("default", "", ""))
-                    for o in scene_shell_outlines(m, uv_set, unit):
+                    for o in scene_shell_outlines(m, uv_set, unit, density):
                         b = o["box"]
                         if b[0] < 0 or b[1] < 0 or b[0] >= 10:
                             continue
@@ -10148,6 +10548,11 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_rows = CheckField("Each section starts a new row")
         self.lay_rows.setValue(True)
         more.add_full(self.lay_rows)
+        self.lay_similar = CheckField("Group similar shells into tidy blocks")
+        self.lay_similar.setValue(True)
+        self.lay_similar.setToolTip("Shells of nearly the same size (planks, bolts, brackets) are laid out next to "
+                                    "each other in a neat grid, like PolyRaven's size-based distribute.")
+        more.add_full(self.lay_similar)
         self.lay_comp = CheckField("Auto-compensate pieces bigger than a tile")
         self.lay_comp.setValue(True)
         more.add_full(self.lay_comp)
@@ -10180,7 +10585,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
-                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp):
+                  self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp, self.lay_similar):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -10412,6 +10817,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
                 "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
+                "lay_similar": self.lay_similar,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -11059,7 +11465,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
                 "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
                 "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
-                "handsoff_tiles": self.lay_handsoff.value(),
+                "handsoff_tiles": self.lay_handsoff.value(), "group_similar": self.lay_similar.value(),
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
@@ -11205,8 +11611,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if self._plan is not None and self._collected is not None:
             self.viewer.show_plan(self._collected, self._plan)
             self.viewer.canvas.frame()
-        else:
-            self.viewer.show_scene()
+        elif not self.viewer.items:  # opens straight away; reading a big scene waits for the button
+            self.viewer.banner = "Press Read Scene UVs to see the scene's UVs, or Plan to see a layout."
+            self.viewer.canvas.update()
 
     @ui_safe
     def plan_layout(self, quiet=False):

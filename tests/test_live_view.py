@@ -101,15 +101,15 @@ def run():
     fn = tb["_mesh_fn"](wall)
     n_shells = fn.getUvShellsIds("map1")[0]
     unit = tb["_UNIT_TO_M"][cmds.currentUnit(q=True, linear=True)] ** 2
-    outs = tb["scene_shell_outlines"](wall, "map1", unit)
+    outs = tb["scene_shell_outlines"](wall, "map1", unit, density=True)
     check("scene outlines: one per UV shell", len(outs) == n_shells, "%d / %d" % (len(outs), n_shells))
     dens = [o["density"] * 2048 for o in outs if o["density"]]
     check("scene outline density matches the layout target",
           dens and all(abs(d / 128.0 - 1.0) < 0.1 for d in dens), "%s px/m" % [round(d) for d in dens[:4]])
     check("scene outlines are remembered until the mesh changes",
-          tb["scene_shell_outlines"](wall, "map1", unit) is outs)
+          tb["scene_shell_outlines"](wall, "map1", unit, density=True) is outs)
     cmds.polyEditUV(wall + ".map[0]", u=0.01)
-    check("...and re-read after a UV edit", tb["scene_shell_outlines"](wall, "map1", unit) is not outs)
+    check("...and re-read after a UV edit", tb["scene_shell_outlines"](wall, "map1", unit, density=True) is not outs)
 
     # --- UV Editor labels
     tiles = set(plan["tiles"])

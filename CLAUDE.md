@@ -512,6 +512,19 @@
       tiles, a fingerprint and coverage on each set.
     - Locks live in `unlokUdimLock`; tiles in `unlokUdimTiles`.
     - Orientation:
+      - **Straightening:** `LayoutShell` takes the tightest-box angle from
+        its hull's edges (rotating calipers, smallest perimeter). 'axis'
+        is the quarter turn with the long side along U; 'up' is the
+        quarter turn that best points `_shell_up_direction` at +V (the
+        PolyRaven world-orientation idea). `has_up` tells flat pieces
+        apart. `_pack_one_tile` (Auto UV fit) uses 'up' and only turns
+        shells without an up.
+      - `ORIENTATIONS` puts "Upright" first (the panel default);
+        LAYOUT_DEFAULTS keeps "Main axis" for scripts and tests.
+      - **Similar blocks** (`group_similar`, panel only):
+        `_similar_blocks` groups pieces within 4% on both sides into
+        near-square grids packed as one rectangle (never turned).
+        Placements are per cell.
       - Each `LayoutShell` stores `dims[mode] = (angle, w0, h0)` for 'axis',
         'up' and 'keep', so switching modes is a re-plan with no scene read.
       - 'up' comes from `_shell_up_direction`: world height gradient in UV,
@@ -631,6 +644,13 @@
     gives the plan outlines, using the same maths as `_place_shell`.
   - `scene_shell_outlines` reads the scene; it's cached in `_OUTLINES` by
     fingerprint.
+    - Density is only computed when asked for (the density colours). It
+      needs every face's area, which made opening the viewer on a big
+      scene crawl.
+    - A shell's outline uses at most ~400 of its UVs.
+    - Meshes with 300+ shells are drawn as boxes.
+    - The viewer opens without reading the scene; that waits for *Read
+      Scene UVs*.
 - **UV Editor labels** (`build_uv_label_mesh`):
   - A helper mesh whose UVs spell out tile borders, numbers (3x5 pixel
     font, `_GLYPHS`) and section names in negative U. Its 3D size is 1e-4
@@ -691,9 +711,34 @@
       `_uw_tutte(bpos=)` fills it, then ARAP relaxes it. A circle start
       never converged for long bent tubes.
     - `_uw_multilevel(bpos=)` uses the same start on its coarse level.
-  - **Soft edges:** `_uw_seams` trusts mixed hard/soft smoothing. Hard
-    pieces with both cut only hard edges plus anything over
-    `organic_angle`.
+  - **Soft edges:** `_uw_seams` and `_uw_kind` trust hardness only when
+    hard edges are under half of a piece's edges (soft sides, hard caps).
+    Then only hard edges plus anything over `organic_angle` are cut.
+    `polyBevel3` hardens about 86% of edges; cutting them all shredded
+    posts into strips that sewed into stars.
+  - **Caps** (layout quality, 2026-10-27; `tests/bench_uv_quality.py`
+    scores it):
+    - `_uw_poly_caps`: n-gon or pole-fan seeds grown over the flat cap.
+      A seed counts if it has 6+ sides or covers 1% of the area; bevel
+      corners leave 5-sided faces that aren't caps.
+    - `_uw_tube_caps`: the smallest eigenvector of the normals' covariance
+      (`_uw_sym_eigen`) is the axis, and faces within 45 degrees of it are
+      caps. It's only used on closed regions: on a U-bend's or a wobbly
+      tube's side it took bits of the side for caps.
+    - Neither runs on a region that's already a ring.
+    - Hard pieces try caps on the whole piece first. If found, only borders
+      and caps are cut (not every bevel step), so planks, crates and posts
+      become ring + caps.
+  - **Straight tubes:** a ring chart is first tried as `_uw_tutte(bpos=
+    rectangle, chord=True)` (weights 1 / length, no ARAP). It's kept if
+    nothing flips and `good` >= 0.8. Relaxing bent pipes made bananas.
+  - **Small bits:** `_uw_absorb_small` merges regions under 1.5% of the
+    piece into the neighbour with the longest shared sewable cut.
+  - **Flaps:** after the seam sewing, `_uw_sew` attaches compact small
+    groups (under 20% of the biggest, aspect <= 6) along one edge.
+    Organic pieces sew flaps only (`sew="flaps"`).
+  - **No stars:** joins leaving the shell under 12% of its box are refused,
+    even in "max".
   - **Defaults:** the engine still defaults to Unfold3D
     (`run_auto_uv(unwrapper=None)`), so old tests keep their behaviour.
 - **Per-shell unfold:** `distorted_faces()` lists the faces of shells whose

@@ -623,6 +623,20 @@ density. The actual layout is still being built; see
          tube comes out as one shell.
        - A part that would fold over or stretch badly is split and tried
          again.
+     - **Tubes, planks and boxes** (posts, pipes, beams, planks, crates,
+       bolts, bevelled or not) come out as one straight strip plus their
+       caps.
+       - The caps are found by shape: n-gon caps, or faces looking along
+         the piece's axis. So a bevel or soft shading can't merge a cap into
+         the side, which used to bend the side into a banana or a star.
+       - The side unrolls straight onto a rectangle, even when the pipe
+         bends, and the caps are sewn on at the ends.
+     - **Hard edges** count only when they're the minority (soft sides,
+       hard caps). A bevel often hardens every edge, and cutting them all
+       shredded posts into strips.
+     - **Tiny bits** (bevel corners, slivers) are merged into a neighbour
+       before flattening. Small leftover shells (caps, end faces) are sewn
+       on along one edge as a flap.
      - **Join shells:**
        - *As few shells as possible* (default): sew everything that fits.
        - *Compact shells*: sew only while the shell stays compact, which
@@ -722,7 +736,16 @@ density. The actual layout is still being built; see
    - **Density:** every shell is scaled to exactly the target texel density,
      times its group's and section's TD %. A group renamed `td150_...` gets
      1.5x.
-   - **Orientation:**
+   - **Orientation:** every shell is first straightened to its tightest
+     bounding box (edges square to U and V). *Upright*, the panel's default,
+     then picks the quarter turn that points world Y up the tile, so planks,
+     posts and pipes read the right way up for texturing. (Auto UV's
+     per-mesh fit does the same.)
+   - **Group similar shells into tidy blocks** (More options, on by
+     default): shells of nearly the same size (planks, bolts, brackets) are
+     laid out side by side in a grid and packed as one block. It's like
+     PolyRaven's size-based distribute, rewritten from scratch.
+   - **Orientation modes:**
      - *Main axis*: the longest direction along U, lying flat. Packs
        tightest.
      - *Upright*: world up along +V, so brick courses stay level and walls
@@ -846,6 +869,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   plank (one shell, no stretch), a cylinder, a sphere pelt, a torus, a
   combined grid of copies, cancel, undo, and Unlok vs Unfold3D on the test
   building. `tests/bench_unwrap.py [--profile]` times it per mesh.
+- `tests/bench_uv_quality.py [OUT] [-v]`: builds a messy shack and runs
+  Auto UV and a layout on it. It saves pictures of every mesh's UVs and the
+  sheet, and scores tiny shells, stars, straight and upright shells.
 - `tests/test_live_view.py`: shell outlines match their placements, the
   live-view hook, the background planner (same result, stops promptly),
   scene outlines and their density, the UV Editor label mesh.
