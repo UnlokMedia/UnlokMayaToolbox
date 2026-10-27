@@ -534,7 +534,36 @@
       - Group stats include their tiles, coverage and a `handsoff` count.
   - **Smart layout** (`collect_shells` -> `make_plan` -> `apply_layout`):
     - `collect_shells` reads every shell once (3D/UV area, points, PCA
-      angle).
+      angle). `_read_shells` keeps them in `_SHELL_CACHE` per (mesh, UV set,
+      unit, faces), checked by `_shell_signature` (`mesh_fingerprint` plus
+      the world matrix, since 'up' depends on it): the panel drops
+      `_collected` on every refresh, and building LayoutShells is most of a
+      read (4,800 shells: 1.3 s first, 0.2 s again).
+    - **Squares** (`squares`, the panel's default; engine default off):
+      `plan_layout` turns each group's pieces (after bundles / similar
+      blocks / Keep Layout units) into square compounds with
+      `_group_squares`: the smallest square they pack into
+      (`_smallest_square`: 2% steps up from the area bound, starting from
+      the step that fitted last time, `collected["_square_hints"]`, so each
+      Fit attempt costs a pack or two), or whole-tile squares filled
+      first-fit plus a smallest square for the rest. A section's squares are
+      then placed biggest first into tiles (`_TilePacker` takes any `size`),
+      shared by the whole section; pinned groups only use their pins.
+      `plan["blocks"]` lists them; stats get `placed_rows`, which
+      `section_rows` prefers. Squares never overlap, so materials never fill
+      each other's gaps (the user asked for this after freeform plans mixed
+      colours in tiles).
+    - **Quick Plan** (`collect_shells(estimate=True)`, panel `quick_plan`):
+      no shells read and no scoring; each group gets `estimate` (3D area,
+      m^2) and `members`. `plan_layout` sizes its squares from the area
+      (`_estimate_squares`, `SQUARE_FILL` = 0.45, measured against real
+      packing). The viewer shows them as draggable items (`block`); drag
+      pins, and `pin_groups` / `_replan` re-run the quick plan while one is
+      on show. `plan_layout` / `plan_live` in the panel re-collect when
+      `_collected["estimate"]`, so a Quick Plan is never applied.
+    - The in-panel `UdimMapWidget` is hidden (it lagged on big plans: a
+      rect per shell, hit-tested on every mouse move); the UV Viewer button
+      shows the layout.
     - `plan_layout` is pure math: exact density per shell, a 2D packer
       tile by tile, sections on new rows, locked tiles reserved.
       `plan_fit_to_tiles` binary-searches the density.
@@ -615,7 +644,8 @@
       - A group may use the tiles the previous group in its section ended
         on, then opens new ones.
       - Packing isn't monotonic in density, so `plan_fit_to_tiles` probes
-        upward in 2% steps after its binary search.
+        upward in 2% steps after its binary search (12 halvings, 8 probes;
+        it was 18 and 12).
       - About 50 ms for 1,200 shells.
     - The plan keys stats by set name *and* uuid: names change when
       coverage is written.

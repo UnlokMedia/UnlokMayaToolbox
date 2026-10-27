@@ -714,17 +714,37 @@ density. The actual layout is still being built; see
      The whole run is one Ctrl+Z.
 
 7. **Smart layout**: the even-density UDIM layout.
-   - Set *Density px/m* and *Map size*, then press **Plan**. The UDIM Map
-     previews every shell coloured by material: hover for density, coverage
-     and tiles, click to select a group, and locked tiles show hatched.
-     Changing a setting re-plans instantly. **Apply Layout** writes it.
+   - **One square per material group** (More options, on by default).
+     Each material group gets its own square: the smallest square its
+     shells fit at the texel density. A group bigger than a tile gets
+     whole-tile squares plus one smaller square for the rest. Squares never
+     overlap, so no material lands in another's gaps or corners. A tile can
+     hold several squares. Turn it off for the old freeform packing (tighter,
+     harder to read).
+   - **Two stages:**
+     - **Quick Plan** (instant): a square per group sized from its meshes'
+       3D area and the density. It reads no UVs, so it works before Auto
+       UV. It opens the UV Viewer with the squares; drag one onto a tile to
+       pin its group there. Its density is an estimate.
+     - **Plan**: packs the real shells into each group's square(s),
+       honouring pins. Changing a setting re-plans. **Apply Layout** writes
+       it.
+   - **What Plan does, and why the first one takes a moment.** Groups and
+     names only say which shells go together and at what density. To pack
+     them, Plan needs every shell's 3D area, UV area and outline, so the
+     first Plan reads every mesh's UV shells. That reading is remembered per
+     mesh, so later Plans only re-read meshes that changed (0.2 s instead
+     of 1.3 s for 4,800 shells). *Fit sections to rows* and *Fit to tiles*
+     then try about 20 densities, each a full packing (about 0.6 s for
+     4,800 shells).
    - **Plan runs in the background.** Once the shells are read, the search
      runs on its own thread: Maya stays usable, and changing a setting
      starts a fresh search (the old one stops). Apply and Do It All still
      plan on the spot.
    - **UV Viewer** (button next to Plan): a big window with the layout on
-     the UDIM grid. While Plan searches it animates through the densities
-     it tries. *Read Scene UVs* shows the UVs as they are in the scene now
+     the UDIM grid, each material's square framed and named. It only opens
+     when you press the button (or Quick Plan). While Plan searches it
+     animates through the densities it tries. *Read Scene UVs* shows the UVs as they are in the scene now
      (each mesh is read once, then remembered until it changes).
      - Colour by material group, UV status (the panel's colours) or texel
        density (blue under target, green on it, red over).
@@ -797,9 +817,10 @@ density. The actual layout is still being built; see
        doesn't fit at that density, the rest spills into the next free tile,
        with a warning. Auto UV fits the group's meshes into its pinned tile.
        *Unpin* gives the group back to the layout.
-     - **Drag in the UV Viewer:** drag any shell onto another tile, and its
-       whole group is pinned there.
-       - **On a plan:** it re-plans straight away.
+     - **Drag in the UV Viewer:** drag any shell (or a Quick Plan square)
+       onto another tile, and its whole group is pinned there.
+       - **On a plan:** it re-plans straight away (a Quick Plan stays
+         quick).
        - **On the scene's UVs:** that group is re-laid out on the spot
          (Re-layout Selected).
        - A plain click still selects the mesh.
@@ -933,6 +954,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/bench_uv_quality.py [OUT] [-v]`: builds a messy shack and runs
   Auto UV and a layout on it. It saves pictures of every mesh's UVs and the
   sheet, and scores tiny shells, stars, straight and upright shells.
+- `tests/test_squares.py`: one square per material group (shells inside
+  their own squares, no overlaps, big groups split, pins, stacks, Fit
+  rows), Quick Plan, and the shell cache. `tests/bench_plan.py` times
+  Plan on a bigger asset.
 - `tests/test_manage_layout.py`: tile parsing, pins (own tile, others kept
   out, spill-over warning, Fit to rows), Re-layout Selected (others
   untouched, own tiles, no overlaps), Auto UV honouring a pin, mesh shells

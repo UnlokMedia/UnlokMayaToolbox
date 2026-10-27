@@ -8203,6 +8203,7 @@ LAYOUT_DEFAULTS = {
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
     "handsoff_tiles": "Pack around them",
+    "squares": False,  # one square per material group (the panel turns it on)
 }
 
 
@@ -8356,38 +8357,74 @@ def _group_print(members):
     return "%d:%.4g" % (total_faces, area)
 
 
+_SHELL_CACHE = {}  # (mesh, uv set, unit, faces) -> (signature, [(shell id, LayoutShell or None)])
+
+
+def _shell_signature(xform, uv_set):
+    """mesh_fingerprint plus the world matrix (a shell's 'up' depends on how
+    its mesh is turned): unchanged means its LayoutShells can be reused."""
+    fp = mesh_fingerprint(xform, uv_set)
+    if fp is None:
+        return None
+    try:
+        m = cmds.xform(xform, q=True, matrix=True, worldSpace=True) or ()
+    except Exception:
+        m = ()
+    return fp + "|" + ",".join("%.5g" % x for x in m)
+
+
 def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
     """LayoutShells of one set member (whole mesh or some faces). Returns
     (shells, conflicts), or (None, 0) when the mesh has no usable UVs. A
-    shell already claimed by an earlier group is skipped and counted."""
-    if xform not in caches:
-        caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
-    cache = caches[xform]
-    if cache is None:
+    shell already claimed by an earlier group is skipped and counted.
+
+    Shells are remembered per mesh (_SHELL_CACHE) while the mesh's
+    signature holds, so planning again after a scene change only re-reads
+    the meshes that changed (building a LayoutShell is most of a read)."""
+    key = (xform, uv_set, unit_scale, None if faces is None else tuple(sorted(faces)))
+    sig = _shell_signature(xform, uv_set)
+    hit = _SHELL_CACHE.get(key)
+    if sig is None or hit is None or hit[0] != sig:
+        if xform not in caches:
+            caches[xform] = _mesh_cache(xform, uv_set, unit_scale)
+        cache = caches[xform]
+        entries = None
+        if cache is not None:
+            by_shell = {}
+            for f in (range(cache["nf"]) if faces is None else sorted(faces)):
+                if f < cache["nf"] and cache["face_uvs"][f]:
+                    by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
+            entries = []
+            for shell, fs in sorted(by_shell.items()):
+                _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
+                uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
+                a3 = sum(cache["a3"][f] for f in fs)
+                auv = sum(cache["auv"][f] for f in fs)
+                if a3 <= 1e-12 or auv <= 1e-14:
+                    entries.append((shell, None))
+                    continue
+                pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
+                entries.append((shell, LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs))))
+        if len(_SHELL_CACHE) > 20000:
+            _SHELL_CACHE.clear()
+        if sig is not None:
+            _SHELL_CACHE[key] = (sig, entries)
+        hit = (sig, entries)
+    if hit[1] is None:
         return None, 0
-    by_shell = {}
-    for f in (range(cache["nf"]) if faces is None else sorted(faces)):
-        if f < cache["nf"] and cache["face_uvs"][f]:
-            by_shell.setdefault(cache["uv_shell"][cache["face_uvs"][f][0]], []).append(f)
     shells, conflicts = [], 0
-    for shell, fs in by_shell.items():
-        _tick()  # lets Cancel / Esc in mid-loop and keeps Maya responsive
+    for shell, obj in hit[1]:
         if (xform, shell) in claimed:
             conflicts += 1
             continue
         claimed.add((xform, shell))
-        uv_ids = sorted(set(u for f in fs for u in cache["face_uvs"][f]))
-        a3 = sum(cache["a3"][f] for f in fs)
-        auv = sum(cache["auv"][f] for f in fs)
-        if a3 <= 1e-12 or auv <= 1e-14:
-            continue
-        pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
-        shells.append(LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs)))
+        if obj is not None:
+            shells.append(obj)
     return shells, conflicts
 
 
 def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None, ready_only=True,
-                   keep_score=AUTO_UV_KEEP_SCORE, only=None):  # rotate: kept for old callers
+                   keep_score=AUTO_UV_KEEP_SCORE, only=None, estimate=False):  # rotate: kept for old callers
     """Read every UV shell of every material group.
 
     Returns {"groups": [group dict...], "locked": [...], "skipped": [meshes],
@@ -8404,6 +8441,11 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     it is: listed as locked (its tiles taken from its last layout, else from
     where its UVs are), and its shells become obstacles, so the chosen
     groups can still fill the gaps in tiles they shared (prefer).
+
+    estimate: Quick Plan. No shells are read and nothing is scored: each
+    group gets "estimate" (its meshes' 3D area, m^2) and "members" (its
+    meshes), whatever state their UVs are in, so a plan can be made (and
+    groups pinned) before Auto UV. plan_layout turns the area into squares.
     """
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     only = set(only) if only is not None else None
@@ -8472,6 +8514,18 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                         info["fixed"].append({"set": mat, "key": key, "mesh": xform, "udim": udim, "box": box,
                                               "area": area})
                     continue
+                if estimate:
+                    try:
+                        if faces is None:
+                            got = cmds.polyEvaluate(xform, worldArea=True) or 0.0
+                        else:
+                            fa = cmds.polyEvaluate(xform, worldFaceArea=True) or []
+                            got = sum(fa[i] for i in faces if i < len(fa))
+                    except Exception:
+                        got = 0.0
+                    info["estimate"] = info.get("estimate", 0.0) + got * unit_scale
+                    info.setdefault("members", []).append(xform)
+                    continue
                 if not ready(xform):
                     continue
                 shells, clash = _read_shells(xform, faces, uv_set, unit_scale, caches, claimed)
@@ -8483,11 +8537,13 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
                     shell_obj.group = mat
                 info["shells"].extend(shells)
             groups.append(info)
+            if estimate and "estimate" not in info:
+                info["estimate"] = 0.0
             fixed.extend(info["fixed"])
     keep_layout = sorted(m for m, st in asset.uv_status().items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
-            "keep_layout": keep_layout,
+            "keep_layout": keep_layout, "estimate": bool(estimate),
             "only": sorted(only) if only is not None else None}
 
 
@@ -8527,12 +8583,13 @@ class _TilePacker(object):
     right and top, inside [pad, 1] on both axes, so neighbours and the tile
     border all get `pad` of clearance.
     """
-    __slots__ = ("tile", "lo", "segs", "gaps")
+    __slots__ = ("tile", "lo", "segs", "gaps", "top")
 
-    def __init__(self, tile, pad):
+    def __init__(self, tile, pad, size=1.0):
         self.tile = tile
         self.lo = pad
-        self.segs = [[pad, pad, 1.0 - pad]]  # [x, top y, width], left to right
+        self.top = size  # a tile is 1 x 1; a material's square is smaller
+        self.segs = [[pad, pad, size - pad]]  # [x, top y, width], left to right
         self.gaps = []  # [x, y, w, h] free rects below the skyline
 
     @staticmethod
@@ -8582,7 +8639,7 @@ class _TilePacker(object):
         n = len(segs)
         for i in range(n):
             x = segs[i][0]
-            if x + w > 1.0 + eps:
+            if x + w > self.top + eps:
                 break
             y = 0.0
             j = i
@@ -8591,7 +8648,7 @@ class _TilePacker(object):
                 if segs[j][1] > y:
                     y = segs[j][1]
                 j += 1
-            if y + h > 1.0 + eps:
+            if y + h > self.top + eps:
                 continue
             score = (y + h, x, 0.0)
             if best is None or score < best[0]:
@@ -8775,16 +8832,152 @@ def _similar_blocks(items, growth, pad, usable, tol=0.04):
     return _sort_pieces(out)
 
 
+SQUARE_FILL = 0.45  # Quick Plan: share of a material's square its shells fill (measured: padding, gaps, upright pieces)
+
+
+def _piece_cell(item, growth, pad, limit):
+    """(rw, rh): the room a piece takes in a square, padding included (a
+    compound's size already has it). Oversize pieces are clamped to a tile."""
+    if isinstance(item[0], _Compound):
+        return item[3], item[4]
+    usable = limit - pad
+    return min(item[3] * (1.0 + growth), usable) + pad, min(item[4] * (1.0 + growth), usable) + pad
+
+
+def _bin_add(b, cell, can_turn):
+    """Put one (item, rw, rh) into bin b = [packer, placed, cells]; placed
+    gets (item, x, y, turned, rw, rh). False when it doesn't fit."""
+    pk = b[0]
+    it, rw, rh = cell
+    spot = pk.find(rw, rh)
+    turned = False
+    if can_turn and not isinstance(it[0], _Compound) and abs(rw - rh) > 1e-9:
+        alt = pk.find(rh, rw)
+        if alt is not None and (spot is None or alt[0] < spot[0]):
+            spot, turned = alt, True
+    if spot is None:
+        return False
+    if turned:
+        rw, rh = rh, rw
+    pk.place(spot, rw, rh)
+    b[1].append((it, spot[3], spot[4], turned, rw, rh))
+    b[2].append(cell)
+    return True
+
+
+def _pack_square(cells, side, can_turn):
+    """Pack cells into a side x side square: the placed list, or None."""
+    b = [_TilePacker(None, 0.0, side), [], []]
+    for c in cells:
+        if not _bin_add(b, c, can_turn):
+            return None
+    return b[1]
+
+
+def _square_of(placed):
+    """A packed bin as one square compound piece (side = its larger extent)."""
+    children = []
+    side = 0.0
+    for it, x, y, turned, rw, rh in placed:
+        if turned:
+            sh, k, a, w, h = it
+            it = (sh, k, a + math.pi / 2.0, h, w)
+        children.append((it, x, y))
+        side = max(side, x + rw, y + rh)
+    return (_Compound(children), 1.0, 0.0, side, side)
+
+
+def _smallest_square(cells, limit, can_turn, hints, key):
+    """The smallest square (2% steps up from the area bound, at most limit)
+    that the cells pack into, as a square piece; None if not even a whole
+    tile holds them. hints[key] remembers the step that fitted, so each of
+    the Fit searches' densities costs a pack or two, not a full search."""
+    area = sum(rw * rh for _, rw, rh in cells)
+    low = max(math.sqrt(area), max(max(rw, rh) for _, rw, rh in cells))
+    if low > limit + 1e-9:
+        return None
+    top = max(0, int(math.ceil(math.log(limit / low) / math.log(1.02)))) if low > 0 else 0
+
+    def side(i):
+        return min(low * 1.02 ** i, limit)
+
+    i = min(hints.get(key, 4), top)
+    got = _pack_square(cells, side(i), can_turn)
+    if got is not None:
+        while i > 0:
+            t = _pack_square(cells, side(i - 1), can_turn)
+            if t is None:
+                break
+            i, got = i - 1, t
+    else:
+        while got is None and i < top:
+            i += 1
+            got = _pack_square(cells, side(i), can_turn)
+    if got is None:
+        return None
+    hints[key] = i
+    return _square_of(got)
+
+
+def _group_squares(items, growth, pad, limit, can_turn, hints, key):
+    """A material group's pieces as squares: the smallest one that holds
+    them all, or, for a group too big for one tile, whole-tile squares
+    filled first-fit (biggest pieces first) with the last one shrunk to the
+    smallest square its pieces fit. Never a freeform shape."""
+    cells = [(it,) + _piece_cell(it, growth, pad, limit) for it in items]
+    if not cells:
+        return []
+    one = _smallest_square(cells, limit, can_turn, hints, key)
+    if one is not None:
+        return [one]
+    bins = []
+    for c in cells:
+        if any(_bin_add(b, c, can_turn) for b in bins):
+            continue
+        b = [_TilePacker(None, 0.0, limit), [], []]
+        if not _bin_add(b, c, can_turn):  # can't happen: cells are clamped to a tile
+            b[1].append((c[0], 0.0, 0.0, False, c[1], c[2]))
+            b[2].append(c)
+        bins.append(b)
+    out = [_square_of(b[1]) for b in bins[:-1]]
+    rest = _smallest_square(bins[-1][2], limit, can_turn, hints, key + "#rest")
+    out.append(rest if rest is not None else _square_of(bins[-1][1]))
+    return out
+
+
+def _estimate_squares(area_uv, limit):
+    """Quick Plan: the square sides for a group known only by its UV area
+    (tiles, slack included): whole tiles, then one square for the rest."""
+    full = limit * limit
+    out = []
+    while area_uv > full + 1e-12:
+        out.append(limit)
+        area_uv -= full
+    if area_uv > 1e-10:
+        out.append(math.sqrt(area_uv))
+    return out
+
+
 def plan_layout(collected, settings, density_scale=1.0):
     """Pure-math layout plan. Returns a dict with per-shell placements, group
-    stats, tiles used and warnings. Nothing in the scene changes."""
+    stats, tiles used and warnings. Nothing in the scene changes.
+
+    settings['squares'] (the panel's default): every material group gets its
+    own square(s): the smallest square its shells fit at the target density
+    (a group bigger than a tile: whole-tile squares plus one for the rest).
+    Squares never overlap, so no material ends up in another's gaps; a tile
+    may hold several squares. plan['blocks'] lists them. Groups from a
+    Quick Plan (collect_shells(estimate=True)) have no shells, only an area:
+    their squares are estimated (SQUARE_FILL)."""
     s = dict(LAYOUT_DEFAULTS)
     s.update(settings or {})
     res = float(s["map_size"])
     td = float(s["texel_density"]) * density_scale
     pad = float(s["padding_px"]) / res
     usable = 1.0 - 2.0 * pad
+    limit = 1.0 - pad  # the biggest square a tile holds (inside its border padding)
     growth = max(0.0, float(s["growth"]))
+    squares = bool(s.get("squares"))
     reserved = set()
     for g in collected["locked"]:
         if not g.get("kept"):  # kept groups' tiles stay open for the gaps around them (fixed)
@@ -8823,17 +9016,20 @@ def plan_layout(collected, settings, density_scale=1.0):
     stats = {}
     warnings = []
     tiles_used = set()
+    blocks = []  # squares: (udim, x, y, side, set, key)
     row = 0
-    current_section = None
-    tile_iter = None
-    carry = []  # packers the previous group of this section ended on
+    tile_iter = [None]
     orientation = s.get("orientation") or ("Main axis" if s.get("rotate", True) else "Keep")
     default_mode = _ORIENT_MODE.get(orientation, "axis")
+    hints = collected.setdefault("_square_hints", {})
 
     def next_tile():
-        t = next(tile_iter)
-        tiles_used.add(1001 + t[0] + 10 * t[1])
-        return _TilePacker(t, pad)
+        while True:
+            t = next(tile_iter[0])
+            udim = 1001 + t[0] + 10 * t[1]
+            if udim not in tiles_used:  # without a new row per section, earlier sections' tiles are taken
+                tiles_used.add(udim)
+                return _TilePacker(t, pad)
 
     pin_packers = {}
 
@@ -8844,15 +9040,13 @@ def plan_layout(collected, settings, density_scale=1.0):
         tiles_used.add(udim)
         return pin_packers[udim]
 
-    for g in groups:
-        if g["section_index"] != current_section:
-            if current_section is not None and s["new_row_per_section"]:
-                row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
-                carry = []
-            current_section = g["section_index"]
-            tile_iter = _udim_tiles(row, 0, reserved)
+    def pieces(g):
+        """(mode, density, compensate, pieces, stacked) for one group;
+        pieces is None for a Quick Plan estimate (no shells read)."""
         mode = g.get("orient") or default_mode
         density = td * g["td"] / 100.0
+        if g.get("estimate") is not None:
+            return mode, density, 1.0, None, {}
         compensate = 1.0
         sizes = []
         for sh in g["shells"]:
@@ -8892,11 +9086,6 @@ def plan_layout(collected, settings, density_scale=1.0):
                     continue
                 stacked[sig] = (item, [])
             unique.append(item)
-        # 2D packing: biggest first, each piece goes to the lowest spot on the
-        # skyline of the first tile it fits (gaps under overhangs first). The
-        # group may top up the tiles the previous group ended on, then opens
-        # new ones, so groups stay in neighbouring tiles. Main axis may turn
-        # pieces 90 degrees when that sits lower.
         unique.sort(key=lambda t: (-round(max(t[3], t[4]), 4), -round(t[3] * t[4], 8), t[0].mesh,
                                    t[0].uv_ids[0]))  # mesh/uv tie-break: same input, same layout
         for mesh in sorted(units):
@@ -8908,80 +9097,184 @@ def plan_layout(collected, settings, density_scale=1.0):
                 unique = _mesh_bundles(unique, growth, pad, usable)
             if s.get("group_similar"):
                 unique = _similar_blocks(unique, growth, pad, usable)
-        can_turn = mode == "axis"
-        own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
-        if g.get("pin"):  # pinned: its own tiles first (then fresh ones if it doesn't fit)
-            packers = [pin_packer(t) for t in g["pin"]]
-        else:
-            packers = [pin_packer(t) for t in sorted(set(g.get("prefer") or ()) - pinned_tiles)]
-            packers += [fixed_packers[t] for t in own_fixed if t in fixed_packers and fixed_packers[t] not in packers]
-            packers += [q for q in carry if q not in packers]
-        pin_overflow = False
-        g_tiles = set(own_fixed)
-        area = sum(fx["area"] for fx in g.get("fixed", []))
-        for item in unique:
-            sh, k, a, w, h = item
-            block = sh if isinstance(sh, _Compound) else None
-            w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
-            if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
-                w_res, h_res = min(w_res, usable), min(h_res, usable)
-            rw, rh = (w_res + pad, h_res + pad) if block is None else (w, h)
-            found = None
-            for pk in packers:
-                spot = pk.find(rw, rh)
-                turned = False
-                if can_turn and block is None and abs(rw - rh) > 1e-9:
-                    alt = pk.find(rh, rw)
-                    if alt is not None and (spot is None or alt[0] < spot[0]):
-                        spot, turned = alt, True
-                if spot is not None:
-                    found = (pk, spot, turned)
-                    break
-            if found is None:
-                pk = next_tile()
-                packers.append(pk)
-                pin_overflow = pin_overflow or bool(g.get("pin"))
-                spot = pk.find(rw, rh)
-                turned = False
-                if spot is None and can_turn and block is None:
-                    spot, turned = pk.find(rh, rw), True
-                if spot is None:  # can only happen for clamped oversize pieces
-                    spot, turned = (None, 0, 0, pad, pad), False
-                found = (pk, spot, turned)
-            pk, spot, turned = found
-            if turned:
-                a += math.pi / 2.0
-                w, h = h, w
-                rw, rh = rh, rw
-            if spot[0] is not None:
-                pk.place(spot, rw, rh)
-            x, y = spot[3], spot[4]
-            tu, tv = pk.tile
-            g_tiles.add(1001 + tu + 10 * tv)
-            if block is not None:  # a bundle / block: each shell at its spot inside it
-                for (msh, mk, ma, mw, mh), ox, oy in block.leaves():
+        return mode, density, compensate, unique, stacked
+
+    def group_stats(g, g_tiles, area, density, n_stacked, mode, rows=None):
+        st = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
+              "density": density, "shells": len(g["shells"]), "stacked": n_stacked,
+              "orientation": mode, "handsoff": len(g.get("fixed", [])), "pin": g.get("pin") or [],
+              "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
+        if rows is not None:
+            st["placed_rows"] = sorted(rows)
+        stats[g["set"]] = st
+
+    if squares:
+        sections = []
+        for g in groups:
+            if not sections or sections[-1][0] != g["section_index"]:
+                sections.append((g["section_index"], []))
+            sections[-1][1].append(g)
+        open_packers = []  # tiles this section's squares share
+        for si, sec_groups in sections:
+            if sections[0][0] != si and s["new_row_per_section"]:
+                row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
+                open_packers = []
+            tile_iter[0] = _udim_tiles(row, 0, reserved)
+            jobs = []
+            infos = []
+            for g in sec_groups:
+                mode, density, compensate, unique, stacked = pieces(g)
+                own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
+                info = {"g": g, "mode": mode, "density": density * compensate, "tiles": set(own_fixed),
+                        "rows": set(), "area": sum(fx["area"] for fx in g.get("fixed", [])), "overflow": False,
+                        "own_fixed": own_fixed, "n_stacked": sum(len(v[1]) for v in stacked.values()),
+                        "dups": dict((id(rep[0]), (rep[2], dups)) for rep, dups in stacked.values() if dups)}
+                infos.append(info)
+                if unique is None:  # Quick Plan: only the group's 3D area is known
+                    area_uv = g["estimate"] * (density / res) ** 2 * (1.0 + growth) / SQUARE_FILL
+                    sqs = [(None, side) for side in _estimate_squares(area_uv, limit)]
+                else:
+                    sqs = [(sq, sq[3]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis", hints,
+                                                                g["set"])]
+                for n, (sq, side) in enumerate(sqs):
+                    jobs.append((-round(side, 6), rank[g["key"]], n, sq, side, info))
+            jobs.sort(key=lambda j: j[:3])  # biggest squares first: tighter tiles
+            for _, _, _, sq, side, info in jobs:
+                g = info["g"]
+                if g.get("pin"):
+                    cands = [pin_packer(t) for t in g["pin"]]
+                else:
+                    cands = [pin_packer(t) for t in sorted(set(g.get("prefer") or ()) - pinned_tiles)]
+                    cands += [fixed_packers[t] for t in info["own_fixed"] if t in fixed_packers]
+                    cands += [q for q in open_packers if q not in cands]
+                spot = pk = None
+                for q in cands:
+                    spot = q.find(side, side)
+                    if spot is not None:
+                        pk = q
+                        break
+                if spot is None:
+                    pk = next_tile()
+                    open_packers.append(pk)
+                    info["overflow"] = info["overflow"] or bool(g.get("pin"))
+                    spot = pk.find(side, side) or (None, 0, 0, pad, pad)
+                if spot[0] is not None:
+                    pk.place(spot, side, side)
+                x, y = spot[3], spot[4]
+                tu, tv = pk.tile
+                udim = 1001 + tu + 10 * tv
+                info["tiles"].add(udim)
+                info["rows"].add(tv)
+                blocks.append((udim, x, y, side, g["set"], g["key"]))
+                if sq is None:
+                    info["area"] += side * side * SQUARE_FILL
+                    continue
+                for (msh, mk, ma, mw, mh), ox, oy in sq[0].leaves():
                     placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
-                    area += mw * mh
-                continue
-            placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
-            area += w * h
-            if g.get("stack"):
-                for dup in stacked[(len(sh.uv_ids), round(item[3], 3), round(item[4], 3))][1]:
-                    dsh, dk, da, dw, dh = dup
-                    if turned:
-                        da, dw, dh = da + math.pi / 2.0, dh, dw
-                    placements[id(dsh)] = (tu, tv, x, y, dk, da, dw, dh)
-        if pin_overflow:
-            warnings.append("%s doesn't fit in its pinned tile(s) %s at this density: the rest went to the next "
-                            "free tile." % (g["key"], ", ".join(str(t) for t in g["pin"])))
-        if packers and not g.get("pin"):  # a pinned group doesn't hand its tiles on
-            last = max(packers, key=lambda q: (q.tile[1], q.tile[0]))
-            carry = [q for q in packers if 1001 + q.tile[0] + 10 * q.tile[1] in g_tiles] or [last]
-        n_stacked = sum(len(v[1]) for v in stacked.values())
-        stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": sorted(g_tiles), "coverage": area * 100.0,
-                           "density": density * compensate, "shells": len(g["shells"]), "stacked": n_stacked,
-                           "orientation": mode, "handsoff": len(g.get("fixed", [])), "pin": g.get("pin") or [],
-                           "changed": bool(g["old_print"]) and g["old_print"] != g["print"]}
+                    info["area"] += mw * mh
+                    rep = info["dups"].get(id(msh))
+                    if rep:  # stacked copies share the spot
+                        turned = abs(ma - rep[0]) > 1e-9
+                        for dsh, dk, da, dw, dh in rep[1]:
+                            if turned:
+                                da, dw, dh = da + math.pi / 2.0, dh, dw
+                            placements[id(dsh)] = (tu, tv, x + ox, y + oy, dk, da, dw, dh)
+            for info in infos:
+                g = info["g"]
+                if info["overflow"]:
+                    warnings.append("%s doesn't fit in its pinned tile(s) %s at this density: the rest went to "
+                                    "the next free tile." % (g["key"], ", ".join(str(t) for t in g["pin"])))
+                group_stats(g, info["tiles"], info["area"], info["density"], info["n_stacked"], info["mode"],
+                            info["rows"])
+    else:
+        current_section = None
+        carry = []  # packers the previous group of this section ended on
+        for g in groups:
+            if g["section_index"] != current_section:
+                if current_section is not None and s["new_row_per_section"]:
+                    row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
+                    carry = []
+                current_section = g["section_index"]
+                tile_iter[0] = _udim_tiles(row, 0, reserved)
+            mode, density, compensate, unique, stacked = pieces(g)
+            if unique is None:
+                unique = []
+            # 2D packing: biggest first, each piece goes to the lowest spot on the
+            # skyline of the first tile it fits (gaps under overhangs first). The
+            # group may top up the tiles the previous group ended on, then opens
+            # new ones, so groups stay in neighbouring tiles. Main axis may turn
+            # pieces 90 degrees when that sits lower.
+            can_turn = mode == "axis"
+            own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
+            if g.get("pin"):  # pinned: its own tiles first (then fresh ones if it doesn't fit)
+                packers = [pin_packer(t) for t in g["pin"]]
+            else:
+                packers = [pin_packer(t) for t in sorted(set(g.get("prefer") or ()) - pinned_tiles)]
+                packers += [fixed_packers[t] for t in own_fixed if t in fixed_packers and
+                            fixed_packers[t] not in packers]
+                packers += [q for q in carry if q not in packers]
+            pin_overflow = False
+            g_tiles = set(own_fixed)
+            area = sum(fx["area"] for fx in g.get("fixed", []))
+            for item in unique:
+                sh, k, a, w, h = item
+                block = sh if isinstance(sh, _Compound) else None
+                w_res, h_res = w * (1.0 + growth), h * (1.0 + growth)
+                if w_res > usable or h_res > usable:  # still too big: place alone, may overhang
+                    w_res, h_res = min(w_res, usable), min(h_res, usable)
+                rw, rh = (w_res + pad, h_res + pad) if block is None else (w, h)
+                found = None
+                for pk in packers:
+                    spot = pk.find(rw, rh)
+                    turned = False
+                    if can_turn and block is None and abs(rw - rh) > 1e-9:
+                        alt = pk.find(rh, rw)
+                        if alt is not None and (spot is None or alt[0] < spot[0]):
+                            spot, turned = alt, True
+                    if spot is not None:
+                        found = (pk, spot, turned)
+                        break
+                if found is None:
+                    pk = next_tile()
+                    packers.append(pk)
+                    pin_overflow = pin_overflow or bool(g.get("pin"))
+                    spot = pk.find(rw, rh)
+                    turned = False
+                    if spot is None and can_turn and block is None:
+                        spot, turned = pk.find(rh, rw), True
+                    if spot is None:  # can only happen for clamped oversize pieces
+                        spot, turned = (None, 0, 0, pad, pad), False
+                    found = (pk, spot, turned)
+                pk, spot, turned = found
+                if turned:
+                    a += math.pi / 2.0
+                    w, h = h, w
+                    rw, rh = rh, rw
+                if spot[0] is not None:
+                    pk.place(spot, rw, rh)
+                x, y = spot[3], spot[4]
+                tu, tv = pk.tile
+                g_tiles.add(1001 + tu + 10 * tv)
+                if block is not None:  # a bundle / block: each shell at its spot inside it
+                    for (msh, mk, ma, mw, mh), ox, oy in block.leaves():
+                        placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
+                        area += mw * mh
+                    continue
+                placements[id(sh)] = (tu, tv, x, y, k, a, w, h)
+                area += w * h
+                if g.get("stack"):
+                    for dup in stacked[(len(sh.uv_ids), round(item[3], 3), round(item[4], 3))][1]:
+                        dsh, dk, da, dw, dh = dup
+                        if turned:
+                            da, dw, dh = da + math.pi / 2.0, dh, dw
+                        placements[id(dsh)] = (tu, tv, x, y, dk, da, dw, dh)
+            if pin_overflow:
+                warnings.append("%s doesn't fit in its pinned tile(s) %s at this density: the rest went to the "
+                                "next free tile." % (g["key"], ", ".join(str(t) for t in g["pin"])))
+            if packers and not g.get("pin"):  # a pinned group doesn't hand its tiles on
+                last = max(packers, key=lambda q: (q.tile[1], q.tile[0]))
+                carry = [q for q in packers if 1001 + q.tile[0] + 10 * q.tile[1] in g_tiles] or [last]
+            group_stats(g, g_tiles, area, density * compensate, sum(len(v[1]) for v in stacked.values()), mode)
     for g in collected["locked"]:
         stats[g["set"]] = {"key": g["key"], "uuid": g["uuid"], "tiles": g["tiles"], "coverage": None,
                            "density": None,
@@ -8999,7 +9292,8 @@ def plan_layout(collected, settings, density_scale=1.0):
                                     udim, round(used * 100)))
     return {"placements": placements, "stats": stats, "tiles": sorted(tiles_used | reserved),
             "new_tiles": sorted(tiles_used), "warnings": warnings, "density": td, "settings": s,
-            "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around}
+            "fixed_tiles": sorted(fixed_boxes), "pack_around": pack_around, "blocks": blocks,
+            "squares": squares, "estimate": bool(collected.get("estimate"))}
 
 
 def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
@@ -9015,12 +9309,12 @@ def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
         return plan
 
     lo, hi = 0.0, 1.0
+    best = None
     plan = attempt(hi)
     while len(plan["new_tiles"]) <= limit and hi < 1e4:  # find an upper bound
-        lo, hi = hi, hi * 2.0
+        lo, hi, best = hi, hi * 2.0, plan
         plan = attempt(hi)
-    best = attempt(lo) if lo > 0 else None
-    for _ in range(18):
+    for _ in range(12):  # 0.03% of the bracket: finer than anyone can see
         mid = (lo + hi) / 2.0
         p = attempt(mid)
         if len(p["new_tiles"]) <= limit:
@@ -9029,7 +9323,7 @@ def plan_fit_to_tiles(collected, settings, progress=None, on_attempt=None):
             hi = mid
     if best is not None:  # packing isn't monotonic: a bit denser can still fit, so probe upward
         base = lo
-        for i in range(1, 13):
+        for i in range(1, 9):
             p = attempt(base * (1.0 + 0.02 * i))
             if len(p["new_tiles"]) <= limit:
                 best = p
@@ -9046,6 +9340,10 @@ def section_rows(collected, plan):
     for g in collected["groups"]:
         got = rows.setdefault(g["section_index"], set())
         if g.get("pin"):
+            continue
+        st = plan["stats"].get(g["set"]) or {}
+        if "placed_rows" in st:  # squares (and Quick Plan estimates, which have no shells)
+            got.update(st["placed_rows"])
             continue
         for sh in g["shells"]:
             pl = plan["placements"].get(id(sh))
@@ -9074,12 +9372,12 @@ def plan_fit_rows(collected, settings, progress=None, on_attempt=None):
         return all(len(r) <= 1 for r in section_rows(collected, plan).values())
 
     lo, hi = 0.0, 1.0
+    best = None
     plan = attempt(hi)
     while fits(plan) and hi < 1e4:  # find an upper bound
-        lo, hi = hi, hi * 2.0
+        lo, hi, best = hi, hi * 2.0, plan
         plan = attempt(hi)
-    best = attempt(lo) if lo > 0 else None
-    for _ in range(18):
+    for _ in range(12):  # 0.03% of the bracket: finer than anyone can see
         mid = (lo + hi) / 2.0
         p = attempt(mid)
         if fits(p):
@@ -9088,7 +9386,7 @@ def plan_fit_rows(collected, settings, progress=None, on_attempt=None):
             hi = mid
     if best is not None:  # packing isn't monotonic: a bit denser can still fit, so probe upward
         base = lo
-        for i in range(1, 13):
+        for i in range(1, 9):
             p = attempt(base * (1.0 + 0.02 * i))
             if fits(p):
                 best = p
@@ -10281,7 +10579,18 @@ class UVCanvas(QtWidgets.QWidget):
             p.setBrush(fill)
             if item.get("fixed"):
                 p.setBrush(QtGui.QBrush(col, QtCore.Qt.BDiagPattern))
+            if item.get("block"):  # a Quick Plan square: lighter, so the frame and name read
+                fill.setAlpha(90)
+                p.setBrush(fill)
             p.drawPolygon(poly)
+        if v.source == "plan":  # each material's square: frame + name
+            for (u0, v0, u1, v1), key in v.blocks:
+                r = QtCore.QRectF(self.to_px(u0, v1), self.to_px(u1, v0))
+                p.setPen(QtGui.QPen(_key_color(key, 255).lighter(130), 1.5))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRect(r)
+                if r.width() > 46 and r.height() > 16:
+                    p.drawText(r.adjusted(3, 1, -2, -1), QtCore.Qt.AlignBottom | QtCore.Qt.AlignLeft, key)
         if v.show_rows:
             p.setFont(self.font())  # names keep one size, so the band fits them
             p.setPen(QtGui.QColor("#d8d8d8"))
@@ -10381,7 +10690,7 @@ class UVCanvas(QtWidgets.QWidget):
                 self.viewer.drop_group(mv["group"], mv["tile"])
             return
         item = mv["item"]  # a plain click selects the mesh
-        if item and cmds.objExists(item["mesh"]):
+        if item and item.get("mesh") and cmds.objExists(item["mesh"]):
             cmds.select(item["mesh"], replace=True)
 
     def keyPressEvent(self, event):
@@ -10402,6 +10711,7 @@ class UVViewer(QtWidgets.QWidget):
         self.setWindowTitle("Smart UDIM - UV Viewer")
         self.resize(940, 680)
         self.items, self.tiles, self.reserved, self.rows = [], set(), set(), {}
+        self.blocks = []  # material squares of the plan on show: ((u0, v0, u1, v1), key)
         self.source = "plan"
         self.banner = ""
         self.show_rows = self.show_tiles = self.show_reserved = True
@@ -10500,6 +10810,16 @@ class UVViewer(QtWidgets.QWidget):
             hull = [(tu + b[0], tv + b[1]), (tu + b[2], tv + b[1]), (tu + b[2], tv + b[3]), (tu + b[0], tv + b[3])]
             items.append({"hull": hull, "box": (tu + b[0], tv + b[1], tu + b[2], tv + b[3]), "mesh": fx["mesh"],
                           "key": fx["key"], "group": fx["set"], "section": "", "density": None, "fixed": True})
+        est = dict((g["set"], g) for g in collected["groups"] if g.get("estimate") is not None)
+        self.blocks = []
+        for udim, x, y, side, node, key in plan.get("blocks") or []:
+            tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
+            box = (tu + x, tv + y, tu + x + side, tv + y + side)
+            self.blocks.append((box, key))
+            if node in est:  # Quick Plan: the square is all there is (drag it to pin the group)
+                items.append({"hull": [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])],
+                              "box": box, "mesh": "", "key": key, "group": node, "section": est[node]["section"],
+                              "density": (plan["stats"].get(node) or {}).get("density"), "block": True})
         self.items = items
         self.tiles = set(plan.get("tiles", []))
         self.reserved = set(plan.get("tiles", [])) - set(plan.get("new_tiles", []))
@@ -10510,6 +10830,12 @@ class UVViewer(QtWidgets.QWidget):
             for r in rows:
                 self.rows[r] = names.get(si, "")
         self.target = plan.get("density")
+        if plan.get("estimate"):
+            self.banner = ("Quick Plan: about %d px/m, %d tile(s), squares sized from 3D area. Drag a square onto "
+                           "a tile to pin its group, then Plan." % (round(plan.get("density", 0)),
+                                                                    len(plan.get("new_tiles", []))))
+            self.canvas.update()
+            return
         self.banner = ("Planning... %d px/m" % round(plan.get("density", 0))) if searching else \
             ("Planned layout: %d px/m, %d tile(s) (not applied yet)" % (round(plan.get("density", 0)),
                                                                         len(plan.get("new_tiles", []))))
@@ -10567,7 +10893,12 @@ class UVViewer(QtWidgets.QWidget):
         view) or re-lay out just that group (scene view)."""
         if not group or not cmds.objExists(group):
             return
-        self.panel.pin_groups([group], [tile])
+        tiles = [tile]
+        plan = self.panel._plan
+        if self.source == "plan" and plan and plan.get("blocks"):  # a group of n squares gets n tiles from here
+            n = len(set(b[0] for b in plan["blocks"] if b[4] == group))
+            tiles = [tile + i for i in range(max(1, min(n, 10 - (tile - 1001) % 10)))]
+        self.panel.pin_groups([group], tiles)
         if self.source == "scene":
             self.panel.relayout_groups([group])
             self.show_scene()
@@ -10578,6 +10909,10 @@ class UVViewer(QtWidgets.QWidget):
         if not item:
             self.info.setText("Wheel zooms, middle-drag (or Alt+drag) pans, F frames. Click a shell to select its "
                               "mesh.")
+            return
+        if item.get("block"):
+            self.info.setText("%s%s  |  Quick Plan square (from 3D area)  |  drag it onto a tile to pin the group "
+                              "there" % (item.get("key"), (" (%s)" % item["section"]) if item.get("section") else ""))
             return
         d = ("%d px/m" % round(item["density"])) if item.get("density") else "density n/a"
         self.info.setText("%s  |  %s%s  |  %s%s" % (
@@ -11072,6 +11407,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_rows = CheckField("Each section starts a new row")
         self.lay_rows.setValue(True)
         more.add_full(self.lay_rows)
+        self.lay_squares = CheckField("One square per material group")
+        self.lay_squares.setValue(True)
+        self.lay_squares.setToolTip("Each material group is packed into its own square: the smallest square its "
+                                    "shells fit at the texel density. A group bigger than a tile gets whole-tile "
+                                    "squares plus one for the rest. Squares never overlap, so a material never "
+                                    "ends up in another's gaps; a tile can hold several squares.\n"
+                                    "Off: shells of different groups share tiles freeform (tighter, harder to "
+                                    "read).")
+        more.add_full(self.lay_squares)
         self.lay_similar = CheckField("Group similar shells into tidy blocks")
         self.lay_similar.setValue(True)
         self.lay_similar.setToolTip("Shells of nearly the same size (planks, bolts, brackets) are laid out next to "
@@ -11088,9 +11432,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         more.add_full(self.lay_comp)
         card.add(grid)
         card.add(more)
-        plan_btn = secondary_button("Plan", "Preview the layout in the map below without changing anything. The "
-                                            "search runs in the background (Maya stays usable) and shows live in "
-                                            "the UV Viewer.")
+        quick_btn = secondary_button("Quick Plan", "Stage 1, instant: a square per material group sized from its "
+                                                   "meshes' 3D area and the texel density. No UVs are read, so it "
+                                                   "works before Auto UV. It opens the UV Viewer: drag a square "
+                                                   "onto a tile to pin its group there, then Plan.")
+        quick_btn.clicked.connect(lambda *_: self.quick_plan())
+        plan_btn = secondary_button("Plan", "Stage 2: pack the real UV shells, each material group in its own "
+                                            "square(s), without changing anything. Runs in the background (Maya "
+                                            "stays usable); open the UV Viewer to watch it.")
         plan_btn.clicked.connect(lambda *_: self.plan_live())
         viewer_btn = secondary_button("UV Viewer", "A big live view of the layout: the plan (animated while it "
                                                    "searches) or the scene's UVs, with section rows, tile numbers, "
@@ -11106,7 +11455,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.apply_btn.setToolTip("Write the planned layout into the UV set (old UVs backed up if step 6's "
                                   "backup is ticked). One Ctrl+Z undoes it.")
         self.apply_btn.clicked.connect(lambda *_: self.apply_layout())
-        card.add(button_row(plan_btn, viewer_btn, self.apply_btn))
+        card.add(button_row(quick_btn, plan_btn, viewer_btn, self.apply_btn))
         relayout = secondary_button("Re-layout Selected", "Lay out again just the material groups highlighted in "
                                                           "step 3, or the groups of the meshes selected in the "
                                                           "scene, at the last layout's density. Everything else "
@@ -11115,15 +11464,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
         relayout.clicked.connect(lambda *_: self.relayout_selected())
         card.add(relayout)
         card.add(self.labels_btn)
-        self.udim_map = UdimMapWidget()
+        self.udim_map = UdimMapWidget(self)  # kept for scripts; the UV Viewer button shows the layout
         self.udim_map.groupClicked.connect(self._map_clicked)
-        card.add(self.udim_map)
+        self.udim_map.hide()
         self.layout_summary = hint_label("")
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_growth,
                   self.lay_orient, self.lay_handsoff, self.lay_rows, self.lay_comp, self.lay_similar,
-                  self.lay_keep):
+                  self.lay_keep, self.lay_squares):
             w.changed.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
@@ -11355,7 +11704,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_growth": self.lay_growth, "lay_orient": self.lay_orient,
                 "lay_handsoff": self.lay_handsoff, "lay_rows": self.lay_rows, "lay_comp": self.lay_comp,
-                "lay_similar": self.lay_similar, "lay_keep": self.lay_keep,
+                "lay_similar": self.lay_similar, "lay_keep": self.lay_keep, "lay_squares": self.lay_squares,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -12035,7 +12384,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "padding_px": self.lay_padding.value(), "growth": self.lay_growth.value() / 100.0,
                 "orientation": self.lay_orient.value(), "new_row_per_section": self.lay_rows.value(),
                 "handsoff_tiles": self.lay_handsoff.value(), "group_similar": self.lay_similar.value(),
-                "keep_meshes": self.lay_keep.value(),
+                "keep_meshes": self.lay_keep.value(), "squares": self.lay_squares.value(),
                 "auto_compensate": self.lay_comp.value()}
 
     def _update_layout_enabled(self):
@@ -12059,7 +12408,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _replan(self):
         try:
-            if self._plan is not None or self._worker is not None:
+            if self._plan is not None and self._plan.get("estimate") and self._worker is None:
+                self.quick_plan()  # settings changed while a Quick Plan is on show: stay in stage 1
+            elif self._plan is not None or self._worker is not None:
                 self.plan_live()
         except Exception:
             traceback.print_exc()
@@ -12074,7 +12425,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         if asset is None or not asset.sections():
             self.set_status("Pick a root and Scan first.", level="warn")
             return
-        if self._collected is None:
+        if self._collected is None or self._collected.get("estimate"):  # a Quick Plan's groups have no shells
             uv_set = self.uv_set.text().strip() or "map1"
             try:
                 with Progress("Plan", [("read", 1)], status_progress(self.status)) as pr:
@@ -12210,9 +12561,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
             for m in mats:
                 set_group_pin(m, tiles)
         had_plan = self._plan is not None
+        quick = had_plan and self._plan.get("estimate")
         self._collected = None  # pins are read when shells are collected
         self.refresh()
-        if had_plan:  # keep the plan on show up to date
+        if quick:  # dragged a square in a Quick Plan: re-run the quick one
+            self.quick_plan()
+        elif had_plan:  # keep the plan on show up to date
             self.plan_live()
         names = ", ".join(parse_group_name(m)["key"] or m for m in mats[:4])
         self.set_status(("%s pinned to %s: Plan / Apply (or Re-layout Selected) puts it there." % (
@@ -12262,6 +12616,35 @@ class SmartUdimPanel(QtWidgets.QWidget):
         return result
 
     @ui_safe
+    def quick_plan(self):
+        """Stage 1: one square per material group, sized from its meshes' 3D
+        area at the texel density (collect_shells(estimate=True)): no UV
+        shells are read, so it's instant and works before Auto UV. Opens the
+        UV Viewer, where dragging a square onto a tile pins its group; Plan
+        then packs the real shells, honouring the pins."""
+        asset = self._asset()
+        if asset is None or not asset.sections():
+            self.set_status("Pick a root and Scan first.", level="warn")
+            return None
+        t0 = time.time()
+        self._stop_worker()
+        uv_set = self.uv_set.text().strip() or "map1"
+        try:
+            with Progress("Quick Plan", [("read", 1)], status_progress(self.status)) as pr:
+                pr.stage("read", 1, "Measuring the groups")
+                col = collect_shells(asset, uv_set, estimate=True)
+                plan = make_plan(col, dict(self._layout_settings(), squares=True))
+        except Cancelled:
+            self.set_status("Quick Plan cancelled. Nothing changed.", level="warn")
+            return None
+        self._collected, self._plan = col, plan
+        self.udim_map.set_plan(col, plan)
+        self.open_viewer()
+        self._summarise_plan(time.time() - t0)
+        self._update_guidance()
+        return plan
+
+    @ui_safe
     def open_viewer(self):
         if self.viewer is None:
             self.viewer = UVViewer(self)
@@ -12283,7 +12666,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
         t0 = time.time()
         self._stop_worker()
         settings = self._layout_settings()
-        if self._collected is None:  # orientation etc. are re-plans only: no scene read
+        if self._collected is None or self._collected.get("estimate"):  # else a re-plan: no scene read
             uv_set = self.uv_set.text().strip() or "map1"
             pr = Progress("Plan", [("read", 80), ("fit", 20)], status_progress(self.status))
             try:
@@ -12316,6 +12699,15 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     def _summarise_plan(self, seconds):
         plan, col = self._plan, self._collected
+        if plan.get("estimate"):
+            lines = ["Quick Plan: %d material group(s) as squares -> %d tile(s) at %d px/m, estimated from 3D "
+                     "area in %.2fs (no UVs read)." % (len(col["groups"]), len(plan["new_tiles"]),
+                                                       round(plan["density"]), seconds),
+                     "Drag a square onto a tile in the UV Viewer to pin its group there, then Plan to pack the "
+                     "real shells."]
+            lines.extend(plan["warnings"][:3])
+            self.layout_summary.setText("\n".join(lines))
+            return
         n_shells = len(plan["placements"])
         lines = ["%d shells from %d groups -> %d tile(s) at %d px/m (%s map), planned in %.2fs." % (
             n_shells, len(col["groups"]), len(plan["new_tiles"]), round(plan["density"]),
@@ -12499,6 +12891,13 @@ class SmartUdimPanel(QtWidgets.QWidget):
         """{mesh: udim} where the current layout plan puts most of each mesh."""
         if self._plan is None or self._collected is None:
             return {}
+        if self._collected.get("estimate"):  # Quick Plan: each mesh to its group's first tile
+            out = {}
+            for g in self._collected["groups"]:
+                tiles = self._plan["stats"].get(g["set"], {}).get("tiles") or []
+                for m in g.get("members", []) if tiles else ():
+                    out.setdefault(m, tiles[0])
+            return out
         area = {}
         for g in self._collected["groups"]:
             for sh in g["shells"]:

@@ -602,6 +602,63 @@ def main():
           "pin %s, tiles %s, target %d" % (pinned, st and st[0]["tiles"], target_tile))
     viewer.grab().save(os.path.join(OUT, "11f_uv_viewer_dropped.png"))
     udim.pin_groups([group], [])
+    deadline = time.time() + 30.0
+    while udim._worker is not None and time.time() < deadline:
+        pump(1)
+
+    # --- Quick Plan: squares from 3D area, drag one to pin its group, then Plan
+    check("the in-panel UDIM map is hidden (the UV Viewer button shows the layout)", udim.udim_map.isHidden())
+    check("Plan packs each material group into its own square(s)", (udim._plan or {}).get("squares") and
+          viewer.blocks, "%d squares" % len(viewer.blocks))
+    viewer.close()
+    pump()
+    t0 = time.time()
+    udim.quick_plan()
+    pump()
+    secs = time.time() - t0
+    blocks = [it for it in viewer.items if it.get("block")]
+    check("Quick Plan opens the UV Viewer with a square per group, quickly",
+          viewer.isVisible() and blocks and (udim._plan or {}).get("estimate") and secs < 5.0,
+          "%d squares, %.2fs | %s" % (len(blocks), secs, udim.layout_summary.text()[:120]))
+    viewer.canvas.frame()
+    pump()
+    viewer.grab().save(os.path.join(OUT, "11g_quick_plan.png"))
+    item = blocks[0]
+    group = item["group"]
+    target_tile = max(viewer.tiles) + 1 if (max(viewer.tiles) - 1001) % 10 < 9 else max(viewer.tiles) + 10
+    b = item["box"]
+    start = viewer.canvas.to_px((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0).toPoint()
+    tu, tv = (target_tile - 1001) % 10, (target_tile - 1001) // 10
+    end = viewer.canvas.to_px(tu + 0.5, tv + 0.5).toPoint()
+    viewer.canvas.mousePressEvent(mouse(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton))
+    mid = QtCore.QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2)
+    viewer.canvas.mouseMoveEvent(mouse(QtCore.QEvent.MouseMove, mid, QtCore.Qt.LeftButton))
+    viewer.canvas.mouseMoveEvent(mouse(QtCore.QEvent.MouseMove, end, QtCore.Qt.LeftButton))
+    viewer.canvas.mouseReleaseEvent(mouse(QtCore.QEvent.MouseButtonRelease, end, QtCore.Qt.NoButton))
+    pump()
+    uid = (cmds.ls(group, uuid=True) or [None])[0]
+    node = cmds.ls(uid)[0] if uid else group
+    st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if v.get("uuid") == uid]
+    check("dragging a Quick Plan square pins its group and stays a Quick Plan",
+          ns["group_pin"](node)[:1] == [target_tile] and (udim._plan or {}).get("estimate") and st and
+          target_tile in st[0]["tiles"], "pin %s, tiles %s" % (ns["group_pin"](node), st and st[0]["tiles"]))
+    viewer.grab().save(os.path.join(OUT, "11h_quick_plan_dragged.png"))
+    udim.plan_live()
+    deadline = time.time() + 30.0
+    while udim._worker is not None and time.time() < deadline:
+        pump(1)
+    pump()
+    st = [v for k, v in (udim._plan or {}).get("stats", {}).items() if v.get("uuid") == uid]
+    check("Plan after a Quick Plan packs the real shells, keeping the pin",
+          udim._plan and not udim._plan.get("estimate") and udim._plan["placements"] and st and
+          set(st[0]["tiles"]) <= set(ns["group_pin"](node)) and target_tile in st[0]["tiles"],
+          "tiles %s, pin %s | %s" % (st and st[0]["tiles"], ns["group_pin"](node),
+                                                        udim.layout_summary.text()[:120]))
+    viewer.grab().save(os.path.join(OUT, "11i_plan_after_quick.png"))
+    udim.pin_groups([cmds.ls(uid)[0]], [])
+    deadline = time.time() + 30.0
+    while udim._worker is not None and time.time() < deadline:
+        pump(1)
 
     viewer.show_scene()
     pump()
