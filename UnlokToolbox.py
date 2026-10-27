@@ -9962,6 +9962,97 @@ def largest_shells(collected, settings, count=5):
     return out[:count] if count else out
 
 
+def oversize_shells(collected, plan, status=None):
+    """Shells bigger than one UDIM at the plan's density (the plan had to
+    lower their group to fit them): [{"mesh", "uv_ids", "angle", "cols",
+    "rows", "key"}], cols x rows = the parts each needs along its laid-out
+    width and height. Meshes marked Keep UVs / Keep Layout / Hands off
+    (status: asset.uv_status()) are never listed: their UVs are the user's."""
+    if not plan or collected.get("quick"):
+        return []
+    s = plan["settings"]
+    res = float(s["map_size"])
+    pad = float(s["padding_px"]) / res
+    usable = (1.0 - 2.0 * pad) / (1.0 + max(0.0, float(s.get("growth", 0.0))))
+    orientation = s.get("orientation") or "Main axis"
+    default_mode = _ORIENT_MODE.get(orientation, "axis")
+    keep = set(collected.get("keep_layout") or ())
+    keep.update(m for m, st in (status or {}).items() if st in ("keep", "keeplayout", "handsoff"))
+    out = []
+    for g in collected["groups"]:
+        if g.get("quick") or g.get("kept"):
+            continue
+        mode = g.get("orient") or default_mode
+        density = plan["density"] * g["td"] / 100.0
+        for sh, (angle, w0, h0) in zip(g["shells"], _group_dims(g["shells"], mode)):
+            if sh.mesh in keep or sh.area_uv <= 0:
+                continue
+            k = math.sqrt(sh.area3d * (density / res) ** 2 / sh.area_uv)
+            w, h = w0 * k, h0 * k
+            if max(w, h) > usable * 1.0001:
+                out.append({"mesh": sh.mesh, "uv_ids": sh.uv_ids, "angle": angle, "key": g["key"],
+                            "cols": max(1, int(math.ceil(w / usable))), "rows": max(1, int(math.ceil(h / usable)))})
+    return out
+
+
+def split_shells(items, uv_set="map1"):
+    """Cut each oversize shell (oversize_shells) into cols x rows parts along
+    face borders, at its 50% line (thirds, ... when it needs more): faces go
+    to the part their centre falls in, measured along the shell's laid-out
+    width and height, and the edges between parts are cut. Undoable (one
+    polyMapCut per mesh); UVs don't move. A shell that's one big face has
+    nothing to cut along and is left whole. Returns {mesh: shells split}."""
+    by_mesh = {}
+    for it in items:
+        by_mesh.setdefault(it["mesh"], []).append(it)
+    made = {}
+    for mesh, its in sorted(by_mesh.items()):
+        fn = _mesh_fn(mesh)
+        if fn is None or uv_set not in fn.getUVSetNames():
+            continue
+        counts, ids = fn.getAssignedUVs(uv_set)
+        us, vs = fn.getUVs(uv_set)
+        shell_of_uv = {}
+        for n, it in enumerate(its):
+            for u in it["uv_ids"]:
+                shell_of_uv[u] = n
+        corner = 0
+        part = {}  # face -> (shell n, col, row)
+        centres = {}
+        for face, c in enumerate(counts):
+            if c and ids[corner] in shell_of_uv:
+                centres[face] = (shell_of_uv[ids[corner]], sum(us[ids[corner + i]] for i in range(c)) / c,
+                                 sum(vs[ids[corner + i]] for i in range(c)) / c)
+            corner += c
+        for n, it in enumerate(its):
+            ca, sa = math.cos(it["angle"]), math.sin(it["angle"])
+            mine = [(face, cu * ca - cv * sa, cu * sa + cv * ca) for face, (sn, cu, cv) in centres.items() if sn == n]
+            if not mine:
+                continue
+            x0, x1 = min(q[1] for q in mine), max(q[1] for q in mine)
+            y0, y1 = min(q[2] for q in mine), max(q[2] for q in mine)
+            bins = {}
+            for face, x, y in mine:
+                col = min(it["cols"] - 1, int(it["cols"] * (x - x0) / (x1 - x0))) if x1 > x0 else 0
+                row = min(it["rows"] - 1, int(it["rows"] * (y - y0) / (y1 - y0))) if y1 > y0 else 0
+                bins[face] = (n, col, row)
+            if len(set(bins.values())) > 1:  # one big face can't be cut along faces: the plan lowers it instead
+                part.update(bins)
+        cut = []
+        it_e = om.MItMeshEdge(fn.dagPath())
+        while not it_e.isDone():
+            fs = it_e.getConnectedFaces()
+            if len(fs) == 2 and fs[0] in part and fs[1] in part and part[fs[0]] != part[fs[1]] and \
+                    part[fs[0]][0] == part[fs[1]][0]:
+                cut.append(it_e.index())
+            it_e.next()
+        if cut:
+            cmds.polyMapCut(["%s.%s" % (mesh, r.replace("f[", "e[")) for r in face_ranges(cut)],
+                            constructionHistory=False)
+            made[mesh] = len(set(v[0] for v in part.values()))
+    return made  # {mesh: shells split}; {} when nothing could be split
+
+
 def plan_fit_largest(collected, settings, progress=None, on_attempt=None):
     """Every shell at the density at which the largest shell just fills one
     UDIM tile (largest_shells): nothing is shrunk, every group keeps its TD
@@ -12063,6 +12154,14 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.lay_tidy.setToolTip("Each mesh's shells stay together (a rope binding's strands, a lamp's parts), "
                                  "and shells of nearly the same size (planks, bolts) line up in neat grids.")
         more.add_full(self.lay_tidy)
+        self.lay_split = CheckField("Split shells too big for a UDIM")
+        self.lay_split.setValue(True)
+        self.lay_split.setToolTip("A shell bigger than one UDIM at the planned density (a big floor or wall) is "
+                                  "cut along its faces at its 50% line (thirds, ... if it needs more) when you "
+                                  "Apply, then everything is planned again at the higher density it allows. The "
+                                  "split is its own Ctrl+Z. Off: the plan lowers that group's density to fit it "
+                                  "whole. Keep UVs / Keep Layout / Hands off meshes are never cut.")
+        more.add_full(self.lay_split)
         card.add(grid)
         card.add(more)
         quick_btn = secondary_button("Quick Plan", "Stage 1, instant, from the set names only (no mesh is read): "
@@ -12335,6 +12434,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "auto_method": self.auto_method, "auto_join": self.auto_join, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_orient": self.lay_orient, "lay_tidy": self.lay_tidy,
+                "lay_split": self.lay_split,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -13469,6 +13569,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
                              len(col["not_ready"]), len(col["not_ready"]) - junk, junk))
         if col["skipped"]:
             lines.append("%d mesh(es) without usable UVs skipped (run Auto UV)." % len(col["skipped"]))
+        big = oversize_shells(col, plan, self._asset().uv_status()) if self.lay_split.value() else []
+        if big:
+            lines.append("%d shell(s) are bigger than a UDIM at this density (%s): Apply cuts each at its 50%% line "
+                         "first, then plans again at the higher density that allows (a shell that's one big face "
+                         "can't be cut and is fitted whole instead)." % (
+                             len(big), ", ".join(sorted(set(it["key"] for it in big))[:4])))
         lines.extend(plan["warnings"][:4])
         self.layout_summary.setText("\n".join(lines))
 
@@ -13491,6 +13597,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._replan_timer.stop()
         if not self._plan_is_current() and self.plan_layout(quiet=True) is None:  # apply what the settings plan
             return
+        split = self._split_big_shells()
+        if split is None:
+            return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             t0 = time.time()
@@ -13511,10 +13620,38 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.check_tree.clear()
         self.refresh()
         self._save_session()
-        self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs." % (
-            result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds))
+        self.set_status("Laid out %d shells on %d mesh(es) into %d tile(s) at %d px/m in %.1fs.%s" % (
+            result["shells"], result["meshes"], self.layout_applied["tiles"], round(plan["density"]), seconds,
+            (" First split %d shell(s) too big for a UDIM (its own Ctrl+Z)." % split) if split else ""))
         self._update_guidance()
         return result
+
+    def _split_big_shells(self):
+        """Before Apply: cut the shells bigger than one UDIM at the plan's
+        density at their 50% line (split_shells, its own Ctrl+Z), then plan
+        again (they fit now, so the density can rise); up to three rounds.
+        Returns how many were split (0 when none or the option is off), None
+        if re-planning failed."""
+        if not self.lay_split.value() or self._plan is None or self._collected is None:
+            return 0
+        asset = self._asset()
+        status = asset.uv_status()
+        uv_set = self.uv_set.text().strip() or "map1"
+        done = 0
+        for _ in range(3):  # the new plan's higher density can make another shell too big
+            big = oversize_shells(self._collected, self._plan, status)
+            if not big:
+                break
+            with UndoChunk("Split Big Shells"):
+                made = split_shells(big, uv_set)
+            if not made:
+                break  # all single faces: nothing to cut along, the plan lowers their groups instead
+            done += sum(made.values())
+            self._stop_worker()
+            self._collected, self._plan = None, None
+            if self.plan_layout(quiet=True) is None:
+                return None
+        return done
 
     @ui_safe
     def validate(self):

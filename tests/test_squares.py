@@ -329,6 +329,29 @@ def run():
                   late["handsoff_late"], whole, [(b[0], b[5]) for b in landed][:3]))
         cmds.undo()
 
+    # --- a floor too big for a UDIM: split at its thirds (40 m at 128 px/m on
+    # 2048 maps: a tile holds 16 m), one Ctrl+Z, and then it fits whole parts
+    yard = cmds.group(empty=True, name="yard_GRP", parent=root)
+    floor = cmds.polyPlane(w=4000, h=4000, sx=24, sy=24, name="stoneGrey_C_yard0001_GEP")[0]
+    floor = cmds.parent(floor, yard)[0]
+    asset.scan(sections_from_groups=True)
+    col = tb["collect_shells"](asset)
+    plan = tb["plan_layout"](col, dict(base, mode="Fixed density"))
+    status = asset.uv_status()
+    big = [it for it in tb["oversize_shells"](col, plan, status) if it["mesh"].endswith("yard0001_GEP")]
+    with tb["UndoChunk"]("Split Big Shells"):
+        tb["split_shells"](big)
+    parts = tb["_mesh_fn"](cmds.ls(floor, long=True)[0]).getUvShellsIds("map1")[0]
+    col2 = tb["collect_shells"](asset)
+    plan2 = tb["plan_layout"](col2, dict(base, mode="Fixed density"))
+    still = [it for it in tb["oversize_shells"](col2, plan2, status) if it["mesh"].endswith("yard0001_GEP")]
+    cmds.undo()
+    back = tb["_mesh_fn"](cmds.ls(floor, long=True)[0]).getUvShellsIds("map1")[0]
+    check("a floor too big for a UDIM is cut at its thirds, then fits; one Ctrl+Z puts it back",
+          len(big) == 1 and (big[0]["cols"], big[0]["rows"]) == (3, 3) and parts == 9 and not still and back == 1,
+          "found %s, %d parts, still too big %d, after undo %d shell(s)" % (
+              [(it["cols"], it["rows"]) for it in big], parts, len(still), back))
+
 try:
     run()
 except Exception:

@@ -828,6 +828,16 @@ density. The actual layout is still being built; see
      is smaller, so nothing gets shrunk, groups keep their TD %, and the
      layout takes as many tiles as that needs (still a row per section). The
      summary names the shell that set it.
+   - **Split shells too big for a UDIM** (step 7, More options, on by
+     default): when the plan has a shell bigger than one UDIM (a big floor
+     or wall), the summary says so, and Apply first cuts it along its faces
+     at its 50% line along its laid-out length (thirds, or a grid, if it
+     needs more), then plans again at the higher density that allows. Flat
+     planes are otherwise never cut. The split is its own Ctrl+Z, before
+     the layout's. Keep UVs, Keep Layout and Hands off meshes are never
+     cut; a shell that's one big face can't be, and is fitted whole by
+     lowering its group's density as before. Off: every big shell is
+     fitted whole that way.
    - **Find Largest Shell** (step 7): selects the largest shell's faces and
      lists the next few, each with the most density it allows. It changes
      nothing. To raise the density:

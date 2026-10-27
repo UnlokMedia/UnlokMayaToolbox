@@ -709,6 +709,21 @@
       - The per-group override is the `unlokUdimOrient` attribute plus the
         `_up` / `_keep` / `_axis` name token.
     - Placements are `(tile_u, tile_v, x, y, scale, angle, w, h)`.
+    - **Split big shells** (the user: never cut flat planes, "unless ... at
+      a 50% line to split it into two if it's too big for a UDIM"):
+      `oversize_shells(collected, plan, status)` lists shells bigger than
+      the usable tile at the plan's density (`_group_dims` sizes; cols x
+      rows parts) except Keep UVs / Keep Layout / Hands off meshes.
+      `split_shells` bins each shell's faces by their UV centre along its
+      laid-out axes (rotated by the dims angle) and `polyMapCut`s the edges
+      between bins (one call per mesh; UVs don't move; a one-face shell is
+      skipped). The panel's `lay_split` (More options, default on): the
+      summary names them; `apply_layout` calls `_split_big_shells` first
+      ("Split Big Shells" chunk, up to 3 rounds, stops when nothing could
+      be cut), drops `_collected` and re-plans. Planning stays pure maths:
+      Density only exists once a plan does (Fit modes), so the split can't
+      happen in Auto UV. In the scripted GUI session the undo queue is
+      empty there, so its Ctrl+Z is tested in `tests/test_squares.py`.
     - **Fit largest shell** (`FIT_LARGEST`, `plan_fit_largest`):
       `largest_shells` gives each shell the most global density (before TD
       %) at which its larger side, in its orientation, still fits inside

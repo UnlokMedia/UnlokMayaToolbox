@@ -728,7 +728,22 @@ def main():
     for w in QtWidgets.QApplication.topLevelWidgets():  # the UV Editor it opened
         if w.isVisible() and "UV Editor" in (w.windowTitle() or ""):
             w.close()
+    # --- shells too big for a UDIM: the plan says so, Apply's split cuts them
+    # at their 50% line and plans again (its Ctrl+Z: tests/test_squares.py)
     udim.lay_mode.setValue("Fixed density")
+    old_density = udim.lay_density.value()
+    udim.lay_density.setValue(top[0]["density"] * 1.5)
+    udim.plan_layout()
+    said = "bigger than a UDIM" in udim.layout_summary.text()
+    n_before = sum(len(g["shells"]) for g in udim._collected["groups"])
+    n_split = udim._split_big_shells()
+    n_after = sum(len(g["shells"]) for g in udim._collected["groups"])
+    check("a shell too big for a UDIM: the plan says so, and Apply's split cuts it and plans again",
+          said and n_split and n_after - n_before >= n_split,
+          "said %s, split %s, shells %d -> %d | %s" % (said, n_split, n_before, n_after,
+                                                      udim.layout_summary.text()[:160]))
+    udim.lay_density.setValue(old_density)
+    udim._collected, udim._plan = None, None
     udim.plan_layout()
     first = udim.tree.topLevelItem(0).child(0)
     first.setCheckState(udim.COL_LOCK, ns["QtCore"].Qt.Checked)
