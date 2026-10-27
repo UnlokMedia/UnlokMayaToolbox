@@ -8308,13 +8308,28 @@ def mesh_tiles(meshes, uv_set="map1"):
     return out
 
 
-def free_tile_for(meshes, others, uv_set="map1"):
+def free_tile_for(meshes, others, uv_set="map1", handsoff=()):
     """Where a quick look lays `meshes` out: the one UDIM they already share
     if no other mesh uses it (pressing again re-lays them in place), else
-    the first UDIM nothing in `others` touches."""
+    the first UDIM nothing in `others` touches. `others` should be what the
+    tool has placed (unwrapped, laid out, or marked by the user): meshes
+    nobody has touched yet sit in 1001 with junk UVs and mustn't push the
+    quick look up. A mesh whose UVs spread over more than 4 tiles (scattered
+    or broken) only counts the tile most of its UVs are in; a Hands off one
+    (never read) that spreads over more than 16 is ignored. Spreads like
+    those sent quick looks to UDIMs far up the grid."""
     used = set()
-    for tiles in mesh_tiles(others, uv_set).values():
-        used |= tiles
+    handsoff = set(handsoff)
+    for m, tiles in mesh_tiles(others, uv_set).items():
+        if len(tiles) <= 4:
+            used |= tiles
+        elif m in handsoff:
+            if len(tiles) <= 16:
+                used |= tiles
+        else:
+            t = _uv_tile(m, uv_set)
+            if t is not None:
+                used.add(t)
     mine = set()
     for tiles in mesh_tiles(meshes, uv_set).values():
         mine |= tiles
@@ -14162,8 +14177,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
             return None
         uv_set = self.uv_set.text().strip() or "map1"
         mine = set(meshes)
-        others = [m for m in asset.meshes()[0] if m not in mine]
-        udim = free_tile_for(meshes, others, uv_set)
+        placed = set(asset.tool_members("auto")) | set(asset.tool_members("laidout")) | set(status)
+        others = sorted(m for m in placed if m not in mine and cmds.objExists(m))
+        udim = free_tile_for(meshes, others, uv_set,
+                             handsoff=[m for m, st in status.items() if st == "handsoff"])
         res = float(self.lay_map.value())
         assigned = asset.assignments()
         keys = dict((m, (_get(assigned[m][0][0], UDIM_KEY) or parse_group_name(assigned[m][0][0])["key"]))

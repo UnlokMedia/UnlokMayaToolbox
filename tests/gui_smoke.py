@@ -735,9 +735,12 @@ def main():
     cmds.select(pick, replace=True)
     quick = udim.auto_uv_lay_out_selected()
     pump()
+    asset_now = udim._asset()
+    placed_now = set(asset_now.tool_members("auto")) | set(asset_now.tool_members("laidout")) | set(status_now)
     others_tiles = set()
-    for t in ns["mesh_tiles"]([m for m in meshes_now if m not in pick]).values():
-        others_tiles |= t
+    for t in ns["mesh_tiles"]([m for m in placed_now if m not in pick]).values():
+        if len(t) <= 4:
+            others_tiles |= t
     check("Auto UV + Lay Out Selected puts the selection together in a UDIM of its own",
           quick and all(ns["mesh_tiles"]([m])[m] == {quick} for m in pick) and quick not in others_tiles and
           "quick look" in udim.status.text(), "%s | %s" % (quick, udim.status.text()[:160]))

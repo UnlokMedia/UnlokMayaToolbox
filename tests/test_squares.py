@@ -357,6 +357,13 @@ def run():
              if a[0] < b[2] - 1e-6 and b[0] < a[2] - 1e-6 and a[1] < b[3] - 1e-6 and b[1] < a[3] - 1e-6]
     even = max(ratios) / min(ratios) < 1.05
     cmds.undo()
+    # a mesh whose UVs are scattered over 30 tiles doesn't push the pick up the grid
+    spread = cmds.polyPlane(w=10, h=10, sx=4, sy=4, name="spreadUVs")[0]
+    cmds.polyEditUV(spread + ".map[*]", scaleU=30, scaleV=3, pivotU=0, pivotV=0)
+    low = tb["free_tile_for"](picked, others + [cmds.ls(spread, long=True)[0]])
+    cmds.delete(spread)
+    check("a mesh with scattered UVs only counts its main tile when picking the quick look's UDIM",
+          low <= udim + 1, "picked %d (without it %d)" % (low, udim))
     check("Lay Out Selected: the selection together in a UDIM nothing else uses, even density, nothing overlapping",
           n > 0 and udim not in used_by_others and inside and not clash and even,
           "udim %d, %d shells, inside %s, %d box overlaps, density spread %.3f" % (

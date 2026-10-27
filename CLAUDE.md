@@ -402,7 +402,12 @@
     bisected down until everything fits. `free_tile_for` uses
     `mesh_tiles` (one `polyEvaluate -boundingBox2d` per mesh via
     `handsoff_box`, never a UV read): the selection's own single tile if
-    no other mesh touches it, else the first untouched UDIM. Nothing is
+    no other mesh touches it, else the first untouched UDIM. "Other" means
+    what the tool placed (`tool_members("auto")`, `("laidout")`, marked
+    meshes), not every mesh: untouched meshes' junk UVs, and boxes spread
+    over many tiles, sent quick looks far up the grid (the user saw it).
+    A mesh spread over more than 4 tiles counts only `_uv_tile`; a Hands off
+    one over 16 is ignored. Nothing is
     stored (no sets, tiles, density, laid-out tracking); it drops the
     panel's `_collected` / `_plan`.
   - **Do It All** (`SmartUdimPanel.do_it_all`): Scan (only if needed) ->
