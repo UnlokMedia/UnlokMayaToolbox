@@ -776,6 +776,24 @@ density. The actual layout is still being built; see
      (They used to be squares, which left long strips sitting at the
      bottom of mostly empty squares: on the test building the blocks went
      from 66% to 88% full for walls, and 18 tiles to 15.)
+   - **Left to right by material.** Each section gets its own row, and
+     along it the materials go left to right in order (alphabetical, or
+     your own order). Each material's blocks stay together and never fill
+     an earlier material's gaps, so every row reads the same way: woods in
+     one place, concretes in another. Inside a material, each mesh's shells
+     stay together and similar pieces sit side by side.
+   - **Row options** (More options):
+     - *Material order:* names or patterns in the order you want them
+       (`wood*, concrete*`); the rest follow alphabetically.
+     - *Own UDIM first / last:* materials that get their own UDIM(s) at
+       the start or end of every section's row (`glass*` first: all the
+       windows in each row's first UDIM).
+     - *Line up materials in columns:* the section that uses the most UDIMs
+       sets the columns, and every other section starts each material in
+       the same column (wood from 1003 in the big building puts wood at
+       1013 in the next). Smaller sections get gaps, and each column of
+       UDIMs holds the same materials. It needs more room, so *Fit
+       sections to rows* may settle on a lower density.
    - **Rows by size inside each block**, like PolyRaven's size-based
      distribution. Pieces go in tallest first, left to right, on one
      baseline per row; each piece takes the first row tall enough with

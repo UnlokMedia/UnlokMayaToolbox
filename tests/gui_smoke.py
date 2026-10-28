@@ -558,6 +558,21 @@ def main():
           udim._plan and abs(udim._plan["density"] - top[0]["density"]) < 0.01 * top[0]["density"] and
           "Set by the largest shell" in udim.layout_summary.text(), udim.layout_summary.text()[:160])
 
+    # --- row options: own UDIM first, lined-up columns
+    udim.lay_mode.setValue("Fixed density")
+    udim.lay_first.setText("glass*")
+    udim.lay_align.setValue(True)
+    udim.plan_layout()
+    pump()
+    pl = udim._plan or {}
+    glass_tiles = set(b[0] for b in pl.get("blocks", []) if b[6].startswith("glass"))
+    mixed = [b[6] for b in pl.get("blocks", []) if b[0] in glass_tiles and not b[6].startswith("glass")]
+    check("step 7's Own UDIM first and Line up columns reach the plan",
+          pl.get("settings", {}).get("first_materials") == "glass*" and pl["settings"].get("align_columns") and
+          glass_tiles and not mixed, "glass in %s, mixed %s" % (sorted(glass_tiles), mixed))
+    udim.lay_first.setText("")
+    udim.lay_align.setValue(False)
+
     # --- background Plan, the UV Viewer and labels in Maya's UV Editor
     udim.lay_mode.setValue("Fit sections to rows")
     udim.plan_live()

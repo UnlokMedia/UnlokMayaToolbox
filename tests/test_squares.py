@@ -141,6 +141,47 @@ def run():
             mixed.append(g["key"])
     check("...and in a real Upright plan no material mixes up and across long pieces", not mixed, str(mixed))
 
+    # --- left to right by material, and the row options
+    sec_of_set = dict((g["set"], g["section"]) for g in col["groups"])
+
+    def spans(pl):
+        """{section: {key: (first tile, last tile)}} from a plan's blocks."""
+        out = {}
+        for udim, x, y, bw, bh, node, key in pl["blocks"]:
+            lo, hi = out.setdefault(sec_of_set[node], {}).get(key, (udim, udim))
+            out[sec_of_set[node]][key] = (min(lo, udim), max(hi, udim))
+        return out
+
+    order_bad = []
+    for sec, by_key in spans(plan).items():
+        keys = sorted(by_key, key=str.lower)
+        for a, b in zip(keys, keys[1:]):
+            if by_key[a][1] > by_key[b][0]:
+                order_bad.append("%s: %s ends at %d after %s starts at %d" % (sec, a, by_key[a][1], b, by_key[b][0]))
+    check("each row goes left to right by material (A-Z); no material fills an earlier one's gaps", not order_bad,
+          "; ".join(order_bad[:3]))
+    ordered_plan = tb["make_plan"](col, dict(base, mode="Fixed density", material_order="wood*"))
+    wood_first = all(by_key.get("woodBrown", (0, 0))[0] == min(v[0] for v in by_key.values())
+                     for by_key in spans(ordered_plan).values() if "woodBrown" in by_key)
+    check("Material order: 'wood*' puts wood at the start of every row", wood_first,
+          str(dict((k, v.get("woodBrown")) for k, v in spans(ordered_plan).items())))
+    own = tb["make_plan"](col, dict(base, mode="Fixed density", first_materials="glass*"))
+    glass_tiles = set(b[0] for b in own["blocks"] if b[6].startswith("glass"))
+    others_there = [b[6] for b in own["blocks"] if b[0] in glass_tiles and not b[6].startswith("glass")]
+    firsts = [min(v[0] for v in by_key.values()) for by_key in spans(own).values() if any(
+        k.startswith("glass") for k in by_key)]
+    check("Own UDIM first: glass gets the first UDIM of its row, shared with nothing else",
+          glass_tiles and not others_there and all(t in glass_tiles for t in firsts),
+          "glass in %s, others there %s" % (sorted(glass_tiles), others_there))
+    lined = tb["make_plan"](col, dict(base, mode="Fixed density", align_columns=True, first_materials="glass*"))
+    cols = {}
+    for sec, by_key in spans(lined).items():
+        for key, (lo, hi) in by_key.items():
+            cols.setdefault(key, set()).add((lo - 1001) % 10)
+    shared = dict((k, v) for k, v in cols.items() if len([s for s in spans(lined).values() if k in s]) > 1)
+    check("Line up materials in columns: every shared material starts in the same column in each section",
+          shared and all(len(v) == 1 for v in shared.values()), str(shared))
+
     big = tb["make_plan"](col, dict(base, mode="Fixed density", texel_density=900.0))
     per = {}
     for b in big["blocks"]:

@@ -633,6 +633,23 @@
         (`LONG_ASPECT` 1.4) vote by 3D area for lying across or up; the
         losers turn a quarter. The user's rule: every woodBrown log the same
         way, so one texture wraps along them all.
+      **Row order** (the user's first rule, restored 2026-10-28):
+      `run_section` lays a section's blocks with a cursor that only moves
+      right: materials in `_material_rank` order (`first_materials`
+      bucket, then `material_order` patterns, then A-Z, then
+      `last_materials`; fnmatch, comma separated, case-insensitive), each
+      material's blocks biggest first into the open tile, then the next.
+      Never back into an earlier tile (blocks used to go biggest first into
+      any open tile, scattering materials; it costs ~2 tiles of 15 at fixed
+      density). Own-UDIM buckets start a fresh tile at the bucket change.
+      `align_columns`: a dry run (`dry_open` / `dry_place`, plain packers)
+      lays every section; the one using most tiles gives `{key: start
+      index}`, recorded where each material's first block LANDS (the
+      cursor's spot was one off when the block didn't fit), and the real
+      pass skips ahead (`skip_tile`, not counted as used) so each material
+      starts no earlier than that column. Pinned / prefer / Hands-off
+      groups keep their own tiles and don't move the cursor. Groups'
+      blocks are computed once (`prepared`) for both passes.
       `plan["blocks"]` lists them; stats get `placed_rows`, which
       `section_rows` prefers. Squares never overlap, so materials never fill
       each other's gaps (the user asked for this after freeform plans mixed

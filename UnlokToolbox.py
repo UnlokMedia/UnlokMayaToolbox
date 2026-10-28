@@ -30,6 +30,7 @@ UV
 
 import bisect
 import collections
+import fnmatch
 import functools
 import heapq
 import itertools
@@ -8740,8 +8741,50 @@ LAYOUT_DEFAULTS = {
     "auto_compensate": True,
     "growth": 0.0,  # spare room reserved per group (0.1 = 10%)
     "handsoff_tiles": "Pack around them",
-    "squares": False,  # one square per material group (the panel turns it on)
+    "squares": False,  # one block per material group (the panel turns it on)
+    # Material order along a section's row (squares layout): left to right in
+    # this order (patterns like "glass*", comma separated), then alphabetical.
+    "material_order": "",
+    "first_materials": "",  # own UDIM(s) at the start of every section's row ("glass*")
+    "last_materials": "",  # own UDIM(s) at the end of every section's row
+    "align_columns": False,  # each material starts in the column it starts in on the widest section
 }
+
+
+def _patterns(value):
+    """'glass*, wood*' or a list -> lower-case patterns."""
+    if not value:
+        return []
+    items = value if isinstance(value, (list, tuple)) else str(value).replace(";", ",").split(",")
+    return [str(x).strip().lower() for x in items if str(x).strip()]
+
+
+def _material_rank(keys, settings):
+    """{material key: sort key} for a row's left-to-right order: the 'own
+    UDIM first' materials, then the user's order (first pattern a key
+    matches), then the rest alphabetically, then the 'own UDIM last' ones.
+    Sort keys are (bucket, position, name); bucket 0 = first, 2 = last."""
+    order = _patterns(settings.get("material_order"))
+    first = _patterns(settings.get("first_materials"))
+    last = _patterns(settings.get("last_materials"))
+
+    def where(key, pats):
+        k = key.lower()
+        for i, pat in enumerate(pats):
+            if fnmatch.fnmatchcase(k, pat):
+                return i
+        return None
+
+    out = {}
+    for key in keys:
+        f, l, o = where(key, first), where(key, last), where(key, order)
+        if f is not None:
+            out[key] = (0, f, key.lower())
+        elif l is not None:
+            out[key] = (2, l, key.lower())
+        else:
+            out[key] = (1, len(order) if o is None else o, key.lower())
+    return out
 
 
 def convex_hull(points):
@@ -9840,41 +9883,121 @@ def plan_layout(collected, settings, density_scale=1.0):
             if not sections or sections[-1][0] != g["section_index"]:
                 sections.append((g["section_index"], []))
             sections[-1][1].append(g)
-        open_packers = []  # tiles this section's squares share
+        # Every group's blocks, worked out once (the column pre-pass reuses them)
+        prepared = {}
         for si, sec_groups in sections:
-            if sections[0][0] != si and s["new_row_per_section"]:
-                row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
-                open_packers = []
-            tile_iter[0] = _udim_tiles(row, 0, reserved)
-            jobs = []
-            infos = []
             for g in sec_groups:
                 mode, density, compensate, unique, stacked = pieces(g)
                 own_fixed = sorted(set(fx["udim"] for fx in g.get("fixed", [])))
                 info = {"g": g, "mode": mode, "density": density * compensate, "tiles": set(own_fixed),
                         "rows": set(), "area": sum(fx["area"] for fx in g.get("fixed", [])), "overflow": False,
                         "own_fixed": own_fixed, "n_stacked": sum(len(v[1]) for v in stacked.values()),
-                        "dups": dict((id(rep[0]), (rep[2], dups)) for rep, dups in stacked.values() if dups)}
-                infos.append(info)
+                        "dups": dict((id(rep[0]), (rep[2], dups)) for rep, dups in stacked.values() if dups),
+                        "quick": unique is None}
                 if unique is None:  # Quick Plan: squares estimated from the group's 3D area
-                    info["rows"].add(row)  # its section has this row, squares or not
                     area = g.get("area") or 0.0
                     area_uv = area * (density / res) ** 2 * (1.0 + growth) / SQUARE_FILL
                     sqs = [(None, side, side) for side in _estimate_squares(area_uv, limit)]
                 else:
                     sqs = [(sq, sq[3], sq[4]) for sq in _group_squares(unique, growth, pad, limit, mode == "axis",
                                                                        hints, g["set"])]
-                for n, (sq, bw, bh) in enumerate(sqs):
-                    jobs.append((-round(max(bw, bh), 6), -round(bw * bh, 9), rank[g["key"]], n, sq, bw, bh, info))
-            jobs.sort(key=lambda j: j[:4])  # biggest blocks first: tighter tiles
-            for _, _, _, _, sq, bw, bh, info in jobs:
-                g = info["g"]
+                sqs.sort(key=lambda q: (-round(max(q[1], q[2]), 6), -round(q[1] * q[2], 9)))  # biggest first
+                prepared[id(g)] = (info, sqs)
+        mrank = _material_rank(set(g["key"] for g in groups), s)
+
+        def ordered(sec_groups):
+            """A section's groups left to right: material order, then name."""
+            return sorted(sec_groups, key=lambda g: (mrank[g["key"]], rank[g["key"]], g["set"]))
+
+        def run_section(sec_groups, starts, open_tile, skip_tile, on_place):
+            """Lay one section's material blocks along its row with a cursor
+            that only moves right: each material's blocks go into the current
+            tile, then the next one; a material never goes back into an
+            earlier tile's gaps, so the row reads left to right by material.
+            'Own UDIM' materials (first / last) start a fresh tile and keep
+            it. starts: {key: tile index} to begin no earlier than (lined-up
+            columns). Returns {key: tile index it started in}, tile count."""
+            cur = [None, -1]  # packer, its index along the section's row
+            began = {}
+
+            def advance(to=None):
+                to = cur[1] + 1 if to is None else to
+                while cur[1] + 1 < to:  # skipped: an empty column, not counted as used
+                    skip_tile()
+                    cur[1] += 1
+                cur[0] = open_tile()
+                cur[1] += 1
+
+            last_bucket = None
+            for g in ordered(sec_groups):
+                info, sqs = prepared[id(g)]
+                bucket = mrank[g["key"]][0]
+                special = g.get("pin") or g.get("prefer") or info["own_fixed"]
+                if not special:
+                    want = starts.get(g["key"]) if starts else None
+                    if cur[0] is None:
+                        advance(want if want is not None and want > 0 else None)
+                    elif last_bucket is not None and bucket != last_bucket:
+                        advance(max(cur[1] + 1, want or 0))  # own-UDIM materials share only with each other
+                    elif want is not None and want > cur[1]:
+                        advance(want)
+                    last_bucket = bucket
+                for sq, bw, bh in sqs:
+                    on_place(g, info, sq, bw, bh, cur, advance)
+                    if not special:  # where its first block actually landed (it may not fit the open tile)
+                        began.setdefault(g["key"], cur[1])
+            return began, cur[1] + 1
+
+        widest_starts = None
+        if s.get("align_columns") and len(sections) > 1:
+            # dry run, every section on its own: the one using most UDIMs sets the columns
+            best = None
+            for si, sec_groups in sections:
+                packers = []
+
+                def dry_open():
+                    packers.append(_TilePacker((0, 0), pad))
+                    return packers[-1]
+
+                def dry_place(g, info, sq, bw, bh, cur, advance):
+                    if g.get("pin") or g.get("prefer") or info["own_fixed"]:
+                        return
+                    spot = cur[0].find(bw, bh)
+                    if spot is None:
+                        advance()
+                        spot = cur[0].find(bw, bh)
+                    if spot is not None:
+                        cur[0].place(spot, bw, bh)
+
+                began, used = run_section(sec_groups, None, dry_open, lambda: None, dry_place)
+                if best is None or used > best[0]:
+                    best = (used, began)
+            widest_starts = best[1] if best else None
+        for si, sec_groups in sections:
+            if sections[0][0] != si and s["new_row_per_section"]:
+                row = (max((t - 1001) // 10 for t in tiles_used) + 1) if tiles_used else row
+            tile_iter[0] = _udim_tiles(row, 0, reserved)
+            infos = []
+            for g in sec_groups:
+                info = prepared[id(g)][0]
+                if info["quick"]:
+                    info["rows"].add(row)  # its section has this row, squares or not
+                infos.append(info)
+
+            def skip_tile():
+                while True:
+                    t = next(tile_iter[0])
+                    if 1001 + t[0] + 10 * t[1] not in tiles_used:
+                        return
+
+            def place(g, info, sq, bw, bh, cur, advance):
                 if g.get("pin"):
                     cands = [pin_packer(t) for t in g["pin"]]
                 else:
                     cands = [pin_packer(t) for t in sorted(set(g.get("prefer") or ()) - pinned_tiles)]
                     cands += [fixed_packers[t] for t in info["own_fixed"] if t in fixed_packers]
-                    cands += [q for q in open_packers if q not in cands]
+                    if cur[0] is not None and cur[0] not in cands:
+                        cands.append(cur[0])
                 spot = pk = None
                 for q in cands:
                     spot = q.find(bw, bh)
@@ -9882,8 +10005,8 @@ def plan_layout(collected, settings, density_scale=1.0):
                         pk = q
                         break
                 if spot is None:
-                    pk = next_tile()
-                    open_packers.append(pk)
+                    advance()
+                    pk = cur[0]
                     info["overflow"] = info["overflow"] or bool(g.get("pin"))
                     spot = pk.find(bw, bh) or (None, 0, 0, pad, pad)
                 if spot[0] is not None:
@@ -9896,7 +10019,7 @@ def plan_layout(collected, settings, density_scale=1.0):
                 blocks.append((udim, x, y, bw, bh, g["set"], g["key"]))
                 if sq is None:
                     info["area"] += bw * bh * SQUARE_FILL
-                    continue
+                    return
                 for (msh, mk, ma, mw, mh), ox, oy in sq[0].leaves():
                     placements[id(msh)] = (tu, tv, x + ox, y + oy, mk, ma, mw, mh)
                     info["area"] += mw * mh
@@ -9907,6 +10030,8 @@ def plan_layout(collected, settings, density_scale=1.0):
                             if turned:
                                 da, dw, dh = da + math.pi / 2.0, dh, dw
                             placements[id(dsh)] = (tu, tv, x + ox, y + oy, dk, da, dw, dh)
+
+            run_section(sec_groups, widest_starts, next_tile, skip_tile, place)
             if collected.get("quick") and not any(1001 + 10 * row <= t < 1011 + 10 * row for t in tiles_used):
                 tiles_used.add(1001 + 10 * row)  # an empty section still takes its row
             for info in infos:
@@ -12397,6 +12522,28 @@ class SmartUdimPanel(QtWidgets.QWidget):
                                   "split is its own Ctrl+Z. Off: the plan lowers that group's density to fit it "
                                   "whole. Keep UVs / Keep Layout / Hands off meshes are never cut.")
         more.add_full(self.lay_split)
+        self.lay_order = QtWidgets.QLineEdit("")
+        self.lay_order.setPlaceholderText("e.g. wood*, concrete*  (others A-Z after)")
+        more.add_row("Material order", self.lay_order,
+                     "Left to right along each section's row, materials go in this order (names or patterns "
+                     "like wood*, comma separated); the rest follow alphabetically. Each material's blocks stay "
+                     "together and never fill an earlier material's gaps, so every row reads the same way.")
+        self.lay_first = QtWidgets.QLineEdit("")
+        self.lay_first.setPlaceholderText("e.g. glass*")
+        more.add_row("Own UDIM first", self.lay_first,
+                     "These materials get their own UDIM(s) at the start of every section's row (nothing else "
+                     "shares them): all the windows in each row's first UDIM, say.")
+        self.lay_last = QtWidgets.QLineEdit("")
+        self.lay_last.setPlaceholderText("e.g. rope*")
+        more.add_row("Own UDIM last", self.lay_last,
+                     "These materials get their own UDIM(s) at the end of every section's row.")
+        self.lay_align = CheckField("Line up materials in columns")
+        self.lay_align.setToolTip("The section that uses the most UDIMs sets the columns: in every other section "
+                                  "each material starts in the same column it starts in there (wood from 1003 "
+                                  "in the big building puts wood at 1013 in the next one up), leaving gaps "
+                                  "where a section has less. So each column of UDIMs holds the same materials. "
+                                  "Needs more room, so Fit sections to rows may land on a lower density.")
+        more.add_full(self.lay_align)
         card.add(grid)
         card.add(more)
         quick_btn = secondary_button("Quick Plan", "Stage 1, instant, from the set names only (no mesh is read): "
@@ -12445,8 +12592,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
         card.add(self.layout_summary)
         col.addWidget(card)
         for w in (self.lay_density, self.lay_map, self.lay_mode, self.lay_tiles, self.lay_padding, self.lay_orient,
-                  self.lay_tidy):
+                  self.lay_tidy, self.lay_align):
             w.changed.connect(self._layout_settings_changed)
+        for w in (self.lay_order, self.lay_first, self.lay_last):
+            w.editingFinished.connect(self._layout_settings_changed)
 
         # ---- 8. check & hand off
         card = self.step_check = StepCard(8, "Check & hand off", "Validate the finished layout, then give texture "
@@ -12669,7 +12818,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "auto_method": self.auto_method, "auto_join": self.auto_join, "lay_density": self.lay_density,
                 "lay_map": self.lay_map, "lay_mode": self.lay_mode, "lay_tiles": self.lay_tiles,
                 "lay_padding": self.lay_padding, "lay_orient": self.lay_orient, "lay_tidy": self.lay_tidy,
-                "lay_split": self.lay_split,
+                "lay_split": self.lay_split, "lay_order": self.lay_order, "lay_first": self.lay_first,
+                "lay_last": self.lay_last, "lay_align": self.lay_align,
                 "sheet_size": self.sheet_size}
 
     def _save_session(self):
@@ -13370,7 +13520,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
                 "mode": self.lay_mode.value(), "max_tiles": self.lay_tiles.value(),
                 "padding_px": self.lay_padding.value(), "orientation": self.lay_orient.value(),
                 "new_row_per_section": True, "group_similar": self.lay_tidy.value(),
-                "keep_meshes": self.lay_tidy.value(), "squares": True, "auto_compensate": True}
+                "keep_meshes": self.lay_tidy.value(), "squares": True, "auto_compensate": True,
+                "material_order": self.lay_order.text(), "first_materials": self.lay_first.text(),
+                "last_materials": self.lay_last.text(), "align_columns": self.lay_align.value()}
 
     def _update_layout_enabled(self):
         mode = self.lay_mode.value()
