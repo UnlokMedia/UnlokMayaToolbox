@@ -560,6 +560,20 @@
       area, shells at their current offsets (hull boxes about `cx`/`cy`),
       angle 0, shrunk to fit a tile with a warning.
       `sections()` ignores them because they have a role.
+    - **Rigid, strictly** (the user's rule, 2026-10-28: "the only edits
+      ... transforming it as a whole"): `_apply_layout` and
+      `lay_out_together` write a Keep Layout mesh with `_move_whole`: the
+      transform read off its biggest placed shell, applied to every UV of
+      the mesh. Before, only the shells `_read_shells` kept were placed,
+      so a collapsed / zero-area face (skipped as degenerate) stayed at
+      the old UVs, rows away. `_read_shells` now keeps skipped shells as
+      `_Dead(uv_ids)` markers, gathered per mesh in `caches["_dead"]` /
+      `collected["dead_uvs"]`; on other meshes `_take_dead_along` tucks
+      them into the middle of the mesh's biggest placed shell (only those
+      UVs: a locked group's faces on the same mesh are never touched). A
+      Keep Layout mesh split across two material groups takes its biggest
+      group's transform for every UV. Lay Out Selected moves Keep Layout
+      meshes as `_layout_unit` blocks instead of skipping them.
     - Auto UV:
       - Keep UVs meshes are scored but never unwrapped.
       - Hands off meshes aren't scored, backed up, set-switched or packed.

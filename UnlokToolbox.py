@@ -8391,7 +8391,8 @@ def free_tile_for(meshes, others, uv_set="map1", handsoff=(), mine=None, also_us
     return udim
 
 
-def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upright", udim=1001, keys=None):
+def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upright", udim=1001, keys=None,
+                     keep_layout=()):
     """A quick look: every UV shell of `meshes` (a list, or {mesh: faces of
     whole shells or None} to lay out just some shells) laid out together in one
     UDIM, at the highest even texel density that fits, the neat way Smart
@@ -8400,8 +8401,11 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
     by height; long pieces of a material all lying the same way), squares
     placed biggest first and never in each other's gaps. Not a plan: no
     sets, tiles or density are stored, and Apply Layout later lays
-    everything out properly. Undoable (call it inside an UndoChunk).
-    Returns the number of shells placed."""
+    everything out properly. keep_layout: meshes moved as one rigid block
+    (one scale from the whole mesh, all UVs moved together). Shells too
+    small or broken to count go along with their mesh. Undoable (call it
+    inside an UndoChunk). Returns the number of shells placed."""
+    keep_layout = set(keep_layout)
     unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
     caches, claimed = {}, set()
     shells = []
@@ -8419,10 +8423,17 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
     for sh in shells:
         by_key.setdefault((keys or {}).get(sh.mesh, ""), []).append(sh)
     base = {}  # material -> [(shell, k at density 1, angle, w, h)]
+    units = {}  # material -> {Keep Layout mesh: [its shells]}
     for key, group in by_key.items():
-        for sh, (a, w0, h0) in zip(group, _group_dims(group, mode)):
+        loose = [sh for sh in group if sh.mesh not in keep_layout]
+        for sh in group:
+            if sh.mesh in keep_layout:
+                units.setdefault(key, {}).setdefault(sh.mesh, []).append(sh)
+        for sh, (a, w0, h0) in zip(loose, _group_dims(loose, mode)):
             k0 = math.sqrt(sh.area3d / sh.area_uv)
             base.setdefault(key, []).append((sh, k0, a, w0 * k0, h0 * k0))
+    for key in units:
+        base.setdefault(key, [])
     hints = {}
 
     def pack(s):
@@ -8431,6 +8442,10 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
         for key in sorted(base):
             items = _sort_pieces([(sh, k * s, a, w * s, h * s) for sh, k, a, w, h in base[key]])
             items = _similar_blocks(_mesh_bundles(items, 0.0, pad, usable, hints), 0.0, pad, usable)
+            for m in sorted(units.get(key, {})):  # a Keep Layout mesh: one block, its own arrangement
+                items.append(_layout_unit([(sh,) for sh in units[key][m]], s, 1.0, pad, usable, key, []))
+            if not items:
+                continue
             cells = _by_height([(it,) + _piece_cell(it, 0.0, pad, limit) for it in items])
             sq = _smallest_rect(cells, limit, mode == "axis", hints, "together:" + key)
             if sq is None:
@@ -8448,11 +8463,18 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
 
     for key in list(base):
         base[key] = [b for b in base[key] if _finite(b[1], b[3], b[4]) and max(b[3], b[4]) > 0]
-        if not base[key]:
+        if not base[key] and not units.get(key):
             del base[key]
     if not base:
         return 0
-    hi = usable / max(max(w, h) for its in base.values() for _, _, _, w, h in its)  # the biggest piece fills a tile
+    sizes = [max(w, h) for its in base.values() for _, _, _, w, h in its]
+    for ms in units.values():  # a unit's size at density 1: its whole extent
+        for shs in ms.values():
+            k0 = math.sqrt(sum(sh.area3d for sh in shs) / sum(sh.area_uv for sh in shs))
+            xs = [sh.cx + q[0] for sh in shs for q in sh.hull]
+            ys = [sh.cy + q[1] for sh in shs for q in sh.hull]
+            sizes.append(max(max(xs) - min(xs), max(ys) - min(ys)) * k0)
+    hi = usable / max(sizes)  # the biggest piece fills a tile
     best = pack(hi)
     if best is None:  # bisect down to the highest density that fits
         lo = 0.0
@@ -8466,16 +8488,22 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
     if best is None:
         return 0  # too many shells for one UDIM even tiny (their padding alone fills it)
     tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
-    by_mesh = {}
+    by_mesh, spots = {}, {}
     for sq, x, y in best:
         for (sh, k, a, w, h), ox, oy in sq[0].leaves():
-            by_mesh.setdefault(sh.mesh, []).append((sh, x + ox, y + oy, k, a))
+            by_mesh.setdefault(sh.mesh, []).append(sh)
+            spots[id(sh)] = (tu, tv, x + ox, y + oy, k, a, w, h)
+    dead = caches.get("_dead", {})
     for m, placed in sorted(by_mesh.items()):
         fn = _mesh_fn(m)
         us, vs = fn.getUVs(uv_set)
         us, vs = list(us), list(vs)
-        for sh, x, y, k, a in placed:
-            _place_shell(us, vs, sh, tu, tv, x, y, k, a)
+        if m in keep_layout and items[m] is None:
+            _move_whole(us, vs, placed, spots)
+        else:
+            for sh in placed:
+                _place_shell(us, vs, sh, *spots[id(sh)][:6])
+            _take_dead_along(us, vs, placed, dead.get(m))
         write_uvs(m, uv_set, us, vs)
     return sum(len(v) for v in by_mesh.values())
 
@@ -8984,6 +9012,16 @@ def _shell_signature(xform, uv_set):
     return fp + "|" + ",".join("%.5g" % x for x in m)
 
 
+class _Dead(object):
+    """A shell the reader skips (no 3D or UV area, or broken UVs): its UV ids,
+    so the layout can still take it along with its mesh instead of leaving
+    it where it was (a lone face rows away from the rest)."""
+    __slots__ = ("uv_ids",)
+
+    def __init__(self, uv_ids):
+        self.uv_ids = uv_ids
+
+
 def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
     """LayoutShells of one set member (whole mesh or some faces). Returns
     (shells, conflicts), or (None, 0) when the mesh has no usable UVs. A
@@ -9014,7 +9052,7 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
                 pts = [(cache["us"][u], cache["vs"][u]) for u in uv_ids]
                 if a3 <= 1e-12 or auv <= 1e-14 or not _finite(a3, auv) or \
                         not all(_finite(u, v) for u, v in pts):  # collapsed, or broken (inf / NaN) UVs
-                    entries.append((shell, None))
+                    entries.append((shell, _Dead(uv_ids)))
                     continue
                 entries.append((shell, LayoutShell(xform, uv_ids, a3, auv, pts, _shell_up_direction(cache, fs))))
         if len(_SHELL_CACHE) > 20000:
@@ -9030,7 +9068,9 @@ def _read_shells(xform, faces, uv_set, unit_scale, caches, claimed):
             conflicts += 1
             continue
         claimed.add((xform, shell))
-        if obj is not None:
+        if isinstance(obj, _Dead):
+            caches.setdefault("_dead", {}).setdefault(xform, set()).update(obj.uv_ids)
+        elif obj is not None:
             shells.append(obj)
     return shells, conflicts
 
@@ -9146,6 +9186,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
             fixed.extend(info["fixed"])
     keep_layout = sorted(m for m, st in status.items() if st == "keeplayout")
     return {"groups": groups, "locked": locked, "skipped": sorted(skipped), "conflicts": conflicts,
+            "dead_uvs": caches.get("_dead", {}),
             "fixed": fixed + kept_fixed, "handsoff": sorted(handsoff), "not_ready": not_ready,
             "handsoff_late": sorted(finder.late),
             "keep_layout": keep_layout,
@@ -10516,6 +10557,42 @@ def write_uvs(xform, uv_set, us, vs):
         cmds.setAttr("%s.uvTweak[%d:%d]" % (node, a, b - 1), *flat)
 
 
+def _move_whole(us, vs, shells, placements):
+    """A Keep Layout mesh: one rigid move for every UV it has. The plan
+    gives its shells one scale (from the whole mesh's 3D and UV area, like
+    setting texel density on the whole selection) and keeps their offsets,
+    so the transform is read off its biggest shell and applied to all UVs:
+    faces too small or broken to count as shells go along too, and nothing
+    is ever moved, turned or scaled on its own (the user's rule)."""
+    sh = max(shells, key=lambda s: s.area_uv)
+    tu, tv, x, y, k, angle = placements[id(sh)][:6]
+    ca, sa = math.cos(angle), math.sin(angle)
+    rot = [((us[u] - sh.cx) * ca - (vs[u] - sh.cy) * sa, (us[u] - sh.cx) * sa + (vs[u] - sh.cy) * ca)
+           for u in sh.uv_ids]
+    mx, my = min(q[0] for q in rot) * k, min(q[1] for q in rot) * k
+    for i in range(len(us)):
+        du, dv = us[i] - sh.cx, vs[i] - sh.cy
+        if not _finite(du, dv):
+            continue
+        us[i] = tu + x + (du * ca - dv * sa) * k - mx
+        vs[i] = tv + y + (du * sa + dv * ca) * k - my
+
+
+def _take_dead_along(us, vs, shells, dead):
+    """Shells the reader skipped (no area, or broken UVs) used to stay where
+    they were, rows away from their mesh. They have nothing to show, so
+    they're tucked into the middle of the mesh's biggest placed shell."""
+    if not dead or not shells:
+        return
+    sh = max(shells, key=lambda s: s.area_uv)
+    pts = [(us[u], vs[u]) for u in sh.uv_ids]
+    cu = sum(q[0] for q in pts) / len(pts)
+    cv = sum(q[1] for q in pts) / len(pts)
+    for u in dead:
+        if 0 <= u < len(us):
+            us[u], vs[u] = cu, cv
+
+
 def _place_shell(us, vs, sh, tu, tv, x, y, k, angle):
     """Rotate a shell about its centre, scale it by k and put its bounding
     box's corner at (tu + x, tv + y). Edits us / vs in place."""
@@ -10669,14 +10746,20 @@ def _apply_layout(asset, collected, plan, uv_set, backup, backup_set, progress):
             backup_uvs(sorted(by_mesh), uv_set, backup_set)
         if progress:
             progress.stage("write", len(by_mesh), "Writing UVs")
+        keep_layout = set(collected.get("keep_layout") or ())
+        dead = collected.get("dead_uvs") or {}
         for xform, shells in by_mesh.items():
             if progress:
                 progress.item(short_name(xform))
             fn = _mesh_fn(xform)
             us, vs = fn.getUVs(uv_set)
             us, vs = list(us), list(vs)
-            for sh in shells:
-                _place_shell(us, vs, sh, *plan["placements"][id(sh)][:6])
+            if xform in keep_layout:
+                _move_whole(us, vs, shells, plan["placements"])
+            else:
+                for sh in shells:
+                    _place_shell(us, vs, sh, *plan["placements"][id(sh)][:6])
+                _take_dead_along(us, vs, shells, dead.get(xform))
             write_uvs(xform, uv_set, us, vs)
         asset.update_tool_sets(add={"laidout": sorted(by_mesh)})
         for g in collected["groups"]:
@@ -14477,9 +14560,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         root = asset.root_group() if asset is not None and asset.sections() else None
         in_asset = bool(root) and any(m == root or m.startswith(root + "|") for m in meshes)
         status = asset.uv_status() if in_asset else {}
-        meshes = [m for m in meshes if cmds.objExists(m) and status.get(m) not in ("handsoff", "keeplayout")]
+        meshes = [m for m in meshes if cmds.objExists(m) and status.get(m) != "handsoff"]
         if not meshes:
-            self.set_status("Nothing to lay out: the selection is all Hands off / Keep Layout.", level="warn")
+            self.set_status("Nothing to lay out: the selection is all Hands off.", level="warn")
             return None
         uv_set = self.uv_set.text().strip() or "map1"
         items = dict((m, items[m]) for m in meshes)
@@ -14511,7 +14594,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         res = float(self.lay_map.value())
         with UndoChunk("Lay Out Selected"):
             n = lay_out_together(items, uv_set, padding=self.lay_padding.value() / res,
-                                 orientation=self.lay_orient.value(), udim=udim, keys=keys)
+                                 orientation=self.lay_orient.value(), udim=udim, keys=keys,
+                                 keep_layout=[m for m in meshes if status.get(m) == "keeplayout"])
         self._collected, self._plan = None, None  # UVs moved: any plan on show is stale
         self.refresh()
         if not n:

@@ -582,7 +582,8 @@ density. The actual layout is still being built; see
      first free one. Each material gets its own block, with neat rows and
      grids at one even density, upright. It isn't the plan: nothing is
      stored, and Apply Layout later lays everything out properly. Hands off
-     and Keep Layout meshes aren't moved. Two Ctrl+Z steps (Auto UV, then
+     meshes aren't moved; Keep Layout ones move as one rigid block. Two
+     Ctrl+Z steps (Auto UV, then
      the lay-out). It lands in the first UDIM the tool hasn't filled
      (meshes nobody has unwrapped yet don't count).
    - **Lay Out Selected:** the same lay-out on the selection's UVs as they
@@ -750,7 +751,13 @@ density. The actual layout is still being built; see
        whole (one scale for all its shells) and moves it as one block, so
        every shell stays where it is relative to the others. The block is
        never turned, and is shrunk only if it can't fit in a tile (with a
-       warning).
+       warning). Strictly rigid: one scale and one move for every UV the
+       mesh has, in Apply Layout and Lay Out Selected alike, so even a face
+       too small or broken to count as a shell moves with it. No shell is
+       ever moved on its own.
+     - **Tiny or broken faces** (a collapsed face, a zero-area sliver) on
+       other meshes go along with their mesh too. They used to stay where
+       the mesh's UVs had been, sometimes rows away.
      - **Hands off:** finished and already in their UDIM, or too heavy or
        fragile to be checked. Nothing reads them: no unwrap, no score, no
        Pre-process, no backup copy, no moving. Plans, Validate, the sheet

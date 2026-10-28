@@ -13,6 +13,7 @@ cache (mayapy).
 - planning again re-uses the shells read before; a changed mesh is re-read
 """
 
+import math
 import os
 import sys
 import time
@@ -435,6 +436,58 @@ def run():
           grown == set(left) and n2 == 1 and left_tiles == {1007} and right_after == right_uvs,
           "grown %s vs half %s, %d shell(s), tiles %s, rest unchanged %s" % (
               sorted(grown or []), sorted(left), n2, sorted(left_tiles), right_after == right_uvs))
+
+    # --- Keep Layout is one rigid block; faces too small to count go along
+    kit = cmds.group(empty=True, name="kit_GRP")
+    kgrp = cmds.group(empty=True, name="crateA_GRP", parent=kit)
+    kl = cmds.polyCube(w=100, h=60, d=40, name="woodBrown_C_crate0001_GEP")[0]
+    kl = cmds.ls(cmds.parent(kl, kgrp)[0], long=True)[0]
+    cmds.polyAutoProjection(kl, constructionHistory=False)
+    cmds.polyMapCut(cmds.polyListComponentConversion(kl + ".f[2]", toEdge=True), constructionHistory=False)
+    cmds.polyEditUV(cmds.polyListComponentConversion(kl + ".f[2]", toUV=True), scaleU=0, scaleV=0)  # collapsed
+    board = cmds.polyPlane(w=100, h=100, sx=3, sy=3, name="woodBrown_C_board0001_GEP")[0]
+    board = cmds.ls(cmds.parent(board, kgrp)[0], long=True)[0]
+    cmds.polyMapCut(cmds.polyListComponentConversion(board + ".f[4]", toEdge=True), constructionHistory=False)
+    sliver = cmds.ls(cmds.polyListComponentConversion(board + ".f[4]", toVertex=True), flatten=True)
+    for v in sliver[1:]:
+        cmds.xform(v, t=cmds.pointPosition(sliver[0], world=True), ws=True)  # a zero-area face, own shell
+    for m in (kl, board):
+        cmds.polyEditUV(m + ".map[*]", u=5.0, v=0.0)
+    kasset = tb["SmartUdimAsset"].for_group(kit)
+    kasset.scan(sections_from_groups=True)
+    kasset.set_uv_status([kl], "keeplayout")
+
+    def uvs_of(m):
+        q = cmds.polyEditUV(m + ".map[*]", q=True)
+        return list(zip(q[0::2], q[1::2]))
+
+    def rigid(old, new):
+        """new = k * old + offset for every UV (one scale, one move)?"""
+        i = max(range(len(old)), key=lambda j: abs(old[j][0] - old[0][0]) + abs(old[j][1] - old[0][1]))
+        d_old = math.hypot(old[i][0] - old[0][0], old[i][1] - old[0][1])
+        k = math.hypot(new[i][0] - new[0][0], new[i][1] - new[0][1]) / d_old
+        ou, ov = new[0][0] - k * old[0][0], new[0][1] - k * old[0][1]
+        return max(abs(k * a + ou - c) + abs(k * b + ov - d) for (a, b), (c, d) in zip(old, new)) < 1e-4
+
+    def tiles(m):
+        return sorted(set(1001 + int(u) + 10 * int(v) for u, v in uvs_of(m)))
+
+    before = uvs_of(kl)
+    kcol = tb["collect_shells"](kasset)
+    tb["apply_layout"](kasset, kcol, tb["make_plan"](kcol, dict(base, mode="Fixed density")))
+    check("Apply: a Keep Layout mesh moves as one rigid block (one scale, one move, every UV), and a "
+          "collapsed face or a zero-area face goes along with its mesh",
+          rigid(before, uvs_of(kl)) and len(tiles(kl)) == 1 and len(tiles(board)) == 1,
+          "keep layout rigid %s, tiles %s / %s" % (rigid(before, uvs_of(kl)), tiles(kl), tiles(board)))
+    for m in (kl, board):
+        cmds.polyEditUV(m + ".map[*]", u=3.0, v=1.0)
+    before = uvs_of(kl)
+    with tb["UndoChunk"]("Lay Out Selected"):
+        tb["lay_out_together"]([kl, board], udim=1009, keep_layout=[kl])
+    check("Lay Out Selected: the Keep Layout mesh moves as one rigid block too, nothing left behind",
+          rigid(before, uvs_of(kl)) and tiles(kl) == [1009] and tiles(board) == [1009],
+          "rigid %s, tiles %s / %s" % (rigid(before, uvs_of(kl)), tiles(kl), tiles(board)))
+    cmds.delete(kit)
 
     # --- a Hands off mesh with broken (infinite) UVs never stops anything
     # ('cannot convert float infinity to integer' in Lay Out Selected,
