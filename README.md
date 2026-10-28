@@ -784,7 +784,11 @@ density. The actual layout is still being built; see
      stay together and similar pieces sit side by side.
    - **Row options** (More options):
      - *Material order:* names or patterns in the order you want them
-       (`wood*, concrete*`); the rest follow alphabetically.
+       (`wood*, concrete*`); the rest follow alphabetically. Or, in the UV
+       Viewer, drag a material's shells onto another material: dropped on
+       its left half it goes just before it, on the right half just after,
+       in every row. The field fills in with the new order and the plan
+       runs again. Dropping on empty tile space still pins it there.
      - *Own UDIM first / last:* materials that get their own UDIM(s) at
        the start or end of every section's row (`glass*` first: all the
        windows in each row's first UDIM).

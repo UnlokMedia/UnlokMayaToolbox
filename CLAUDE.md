@@ -650,6 +650,12 @@
       starts no earlier than that column. Pinned / prefer / Hands-off
       groups keep their own tiles and don't move the cursor. Groups'
       blocks are computed once (`prepared`) for both passes.
+      Reordering by drag: `UVCanvas._reorder_target` (plan view, over
+      another material's shell: (key, after?) by which half of its box)
+      -> `UVViewer.drop_material` -> panel `reorder_material`, which writes
+      the full current order (`_material_rank`) with the move into
+      `lay_order` and re-plans once (timer stopped, `_replan`). Own-UDIM
+      materials keep their bucket; the status says so.
       `plan["blocks"]` lists them; stats get `placed_rows`, which
       `section_rows` prefers. Squares never overlap, so materials never fill
       each other's gaps (the user asked for this after freeform plans mixed

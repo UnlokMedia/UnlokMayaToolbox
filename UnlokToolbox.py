@@ -11648,7 +11648,18 @@ class UVCanvas(QtWidgets.QWidget):
                 p.drawRect(band)
         elif self._moving and self._moving.get("active"):  # dragging a group: ghost + target tile
             mv = self._moving
-            t = mv.get("tile")
+            t = None if mv.get("reorder") else mv.get("tile")
+            if mv.get("reorder"):  # over another material: outline it and say where this one goes
+                key, after = mv["reorder"]
+                p.setPen(QtGui.QPen(QtGui.QColor("#f0c870"), 2, QtCore.Qt.DashLine))
+                p.setBrush(QtCore.Qt.NoBrush)
+                for item in v.items:
+                    if item.get("key") == key:
+                        p.drawPolygon(QtGui.QPolygonF([self.to_px(a, b) for a, b in item["hull"]]))
+                p.setPen(QtGui.QColor("#f0c870"))
+                p.drawText(QtCore.QRectF(8, self.height() - 24, self.width() - 16, 20), QtCore.Qt.AlignLeft,
+                           "Drop: %s goes %s %s in every row" % (mv["item"]["key"], "after" if after else "before",
+                                                                 key))
             if t:
                 tu, tv = (t - 1001) % 10, (t - 1001) // 10
                 r = QtCore.QRectF(self.to_px(tu, tv + 1), self.to_px(tu + 1, tv))
@@ -11704,6 +11715,25 @@ class UVCanvas(QtWidgets.QWidget):
             self._moving = {"item": item, "start": event.pos(), "group": item and item.get("group"),
                             "active": False} if item else None
 
+    def _reorder_target(self, pos, mv):
+        """Over another material's shells (plan view): (its key, after?) to
+        move the dragged material before / after it; None to pin instead."""
+        mine = (mv.get("item") or {}).get("key")
+        if self.viewer.source != "plan" or not mine:
+            return None
+        under = None
+        u, w = self.to_uv(pos)
+        for item in reversed(self.viewer.items):
+            b = item["box"]
+            if item.get("group") != mv["group"] and item.get("key") and item["key"] != mine and \
+                    b[0] <= u <= b[2] and b[1] <= w <= b[3]:
+                under = item
+                break
+        if under is None:
+            return None
+        b = under["box"]
+        return under["key"], u > (b[0] + b[2]) / 2.0
+
     def tile_at(self, pos):
         u, w = self.to_uv(pos)
         if 0.0 <= u < 10.0 and w >= 0.0:
@@ -11733,6 +11763,7 @@ class UVCanvas(QtWidgets.QWidget):
                 mv["active"] = True
                 mv["tile"] = self.tile_at(event.pos())
                 mv["delta"] = (d.x() / self.scale, -d.y() / self.scale)
+                mv["reorder"] = self._reorder_target(event.pos(), mv)
                 self.update()
                 return
         item = self._item_at(event.pos())
@@ -11748,9 +11779,12 @@ class UVCanvas(QtWidgets.QWidget):
             if mv["active"] and mv.get("target") is not None and mv["target"] != mv["row"]:
                 self.viewer.drop_section(mv["row"], mv["target"])
             return
-        if mv["active"]:  # dropped: pin the group to that tile
+        if mv["active"]:  # dropped on another material: reorder; on a tile: pin the group there
             self.update()
-            if mv.get("tile"):
+            if mv.get("reorder"):
+                key, after = mv["reorder"]
+                self.viewer.drop_material(mv["item"]["key"], key, after)
+            elif mv.get("tile"):
                 self.viewer.drop_group(mv["group"], mv["tile"])
             return
         item = mv["item"]  # a plain click selects the mesh (a Quick Plan tile: the group's meshes)
@@ -11984,6 +12018,11 @@ class UVViewer(QtWidgets.QWidget):
         if sec and target and sec != target:
             self.panel.move_section_to(sec, target)
 
+    def drop_material(self, key, target, after):
+        """A material was dragged onto another one: it goes before (or
+        after) it along every row; the panel re-plans."""
+        self.panel.reorder_material(key, target, after)
+
     def drop_group(self, group, tile):
         """A group was dragged onto a tile: pin it there, then re-plan (plan
         view) or re-lay out just that group (scene view)."""
@@ -12008,8 +12047,9 @@ class UVViewer(QtWidgets.QWidget):
             return
         if item.get("block"):
             sec = parse_group_name(item.get("section") or "")["key"] or item.get("section") or ""
-            self.info.setText("%s in %s  |  estimated square  |  click to select its meshes; drag onto a tile to "
-                              "pin it there" % (item.get("key"), sec))
+            self.info.setText("%s in %s  |  estimated block  |  click to select its meshes; drag onto another "
+                              "material to put it before / after it in every row, or onto empty tile space to pin "
+                              "it there" % (item.get("key"), sec))
             return
         d = ("%d px/m" % round(item["density"])) if item.get("density") else "density n/a"
         self.info.setText("%s  |  %s%s  |  %s%s" % (
@@ -14012,6 +14052,26 @@ class SmartUdimPanel(QtWidgets.QWidget):
             (" First split %d shell(s) too big for a UDIM (its own Ctrl+Z)." % split) if split else ""))
         self._update_guidance()
         return result
+
+    @ui_safe
+    def reorder_material(self, key, target, after=False):
+        """Move material `key` just before (or after) `target` along every
+        row: Material order becomes the full list as it stands now, with
+        that move, and the plan on show is made again."""
+        col = self._collected
+        keys = sorted(set(g["key"] for g in (col or {}).get("groups", [])) | {key, target})
+        settings = self._layout_settings()
+        rank = _material_rank(keys, settings)
+        order = sorted(keys, key=lambda k: rank[k])
+        order.remove(key)
+        order.insert(order.index(target) + (1 if after else 0), key)
+        self.lay_order.setText(", ".join(order))
+        own = [k for k in (key, target) if rank[k][0] != 1]
+        self.set_status("Material order: %s now %s %s in every row.%s" % (
+            key, "after" if after else "before", target,
+            (" (%s keep their own UDIM first / last, set in More options.)" % ", ".join(own)) if own else ""))
+        self._replan_timer.stop()
+        self._replan()  # straight away (the settings-changed timer would only wait)
 
     def _split_big_shells(self):
         """Before Apply: cut the shells bigger than one UDIM at the plan's

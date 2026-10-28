@@ -594,10 +594,53 @@ def main():
     pump()
     check("UV Viewer colours by texel density", viewer.colour_of(viewer.items[0]).name() != "#6a6a6a")
     viewer.grab().save(os.path.join(OUT, "11c_uv_viewer_density.png"))
-    # --- drag a group onto another tile: it's pinned there and re-planned
+    # --- drag a material onto another material: it goes just before it in every row
     QtCore, QtGui = ns["QtCore"], ns["QtGui"]
     viewer.canvas.frame()
     pump()
+
+    def press_drag_release(a, b):
+        ev = lambda kind, pos, buttons: QtGui.QMouseEvent(kind, QtCore.QPointF(pos), QtCore.Qt.LeftButton, buttons,  # noqa
+                                                         QtCore.Qt.NoModifier)
+        viewer.canvas.mousePressEvent(ev(QtCore.QEvent.MouseButtonPress, a, QtCore.Qt.LeftButton))
+        viewer.canvas.mouseMoveEvent(ev(QtCore.QEvent.MouseMove, QtCore.QPoint((a.x() + b.x()) // 2,
+                                                                                (a.y() + b.y()) // 2),
+                                        QtCore.Qt.LeftButton))
+        viewer.canvas.mouseMoveEvent(ev(QtCore.QEvent.MouseMove, b, QtCore.Qt.LeftButton))
+        viewer.canvas.mouseReleaseEvent(ev(QtCore.QEvent.MouseButtonRelease, b, QtCore.Qt.NoButton))
+
+    def centre_of(it):
+        return viewer.canvas.to_px((it["box"][0] + it["box"][2]) / 2.0,
+                                   (it["box"][1] + it["box"][3]) / 2.0).toPoint()
+
+    shells = [it for it in viewer.items if it.get("key") and not it.get("fixed")]
+    keys = sorted(set(it["key"] for it in shells))
+    if len(keys) >= 2:
+        last_key, first_key = keys[-1], keys[0]
+        src = [it for it in shells if it["key"] == last_key][0]
+        dst = [it for it in shells if it["key"] == first_key][0]
+        tgt = centre_of(dst)
+        b = dst["box"]
+        tgt = viewer.canvas.to_px(b[0] + (b[2] - b[0]) * 0.25, (b[1] + b[3]) / 2.0).toPoint()  # left half: before
+        press_drag_release(centre_of(src), tgt)
+        deadline = time.time() + 30.0
+        while udim._worker is not None and time.time() < deadline:
+            pump(1)
+        pump()
+        order = [k.strip() for k in udim.lay_order.text().split(",") if k.strip()]
+        check("dragging a material onto another in the UV Viewer puts it just before it (Material order, re-planned)",
+              order and order.index(last_key) == order.index(first_key) - 1 and
+              (udim._plan or {}).get("settings", {}).get("material_order") == udim.lay_order.text(),
+              "%s | %s" % (order, udim.status.text()[:120]))
+        udim.lay_order.setText("")
+        udim._replan_timer.stop()
+        udim._replan()
+        deadline = time.time() + 30.0
+        while udim._worker is not None and time.time() < deadline:
+            pump(1)
+        pump()
+
+    # --- drag a group onto another tile: it's pinned there and re-planned
     item = viewer.items[0]
     group = item["group"]
     target_tile = max(viewer.tiles) + 1 if (max(viewer.tiles) - 1001) % 10 < 9 else max(viewer.tiles) + 10
