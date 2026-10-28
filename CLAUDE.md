@@ -824,7 +824,20 @@
       works. The panel's *Find Largest Shell* selects the top shell's faces
       (`_id_ranges` -> map components -> faces) and lists the next five.
       The user's loop: cut the largest, find again, until the density is
-      good.
+      good. **Remembered** (`_remember_largest` / `_recall_largest`, at
+      Apply and after every Find; in the session JSON as `largest`): the
+      top 6 with the uv set, `_largest_settings` (map size, padding,
+      growth, orientation, defaults filled in: the plan's settings carry
+      growth, the panel's don't), the material set names (TD % lives in
+      them) and `mesh_fingerprint` of every mesh. A Find whose check
+      passes answers straight away; otherwise it reads shells afresh
+      (never `self._collected`, which a UV edit doesn't invalidate; the
+      shell cache keeps unchanged meshes cheap).
+      **Viewer after Apply:** `refresh` drops `_collected`, so Apply keeps
+      `self._applied = (collected, plan, time)` and `open_viewer` shows it
+      while `_plan` is that plan; with no plan in memory (a reopened
+      scene) and a layout applied, it reads the scene itself up to
+      `VIEWER_AUTO_READ` (400) meshes.
     - **Fit sections to rows** (`FIT_ROWS`, `plan_fit_rows`, the panel's
       default mode):
       - It bisects one density scale (like `plan_fit_to_tiles`) until every

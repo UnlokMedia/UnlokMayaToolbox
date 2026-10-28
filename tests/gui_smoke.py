@@ -867,6 +867,25 @@ def main():
     check("Apply Layout writes it and the step completes", udim.step_layout.state == "done" and
           "Laid out" in udim.status.text(), udim.status.text())
     check("Apply leaves the hands-off rafter's UVs alone", cmds.polyEditUV(rafter + ".map[*]", q=True) == rafter_uvs)
+    # --- after Apply: the viewer shows the applied layout; Find Largest Shell is instant until something changes
+    if udim.viewer is not None:
+        udim.viewer.items = []
+    udim.open_viewer()
+    pump()
+    check("after Apply the UV Viewer opens on the applied layout (not 'Plan a layout first')",
+          udim.viewer.items and "applied" in (udim.viewer.banner or ""), udim.viewer.banner)
+    t0 = time.time()
+    top_now = udim.find_largest_shell(select=False)
+    secs = time.time() - t0
+    check("after Apply, Find Largest Shell answers from what the layout measured, straight away",
+          top_now and "nothing has changed" in udim.status.text() and secs < 1.0,
+          "%.2fs | %s" % (secs, udim.status.text()))
+    big_mesh = top_now[0]["mesh"]
+    cmds.polyEditUV(big_mesh + ".map[0]", u=0.001)  # a UV edit on that mesh
+    udim.find_largest_shell(select=False)
+    check("...and measures again once a mesh has changed", "nothing has changed" not in udim.status.text(),
+          udim.status.text()[:120])
+    cmds.polyEditUV(big_mesh + ".map[0]", u=-0.001)
     first_mat = udim.tree.topLevelItem(0).child(1) or udim.tree.topLevelItem(0).child(0)
     udim.tree.clearSelection()
     first_mat.setSelected(True)

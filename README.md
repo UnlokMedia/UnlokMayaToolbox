@@ -905,6 +905,14 @@ density. The actual layout is still being built; see
      cut; a shell that's one big face can't be, and is fitted whole by
      lowering its group's density as before. Off: every big shell is
      fitted whole that way.
+   - **After Apply Layout:** the UV Viewer opens on the layout you just
+     applied (Read Scene UVs shows edits made since). After reopening the
+     scene it reads the laid-out scene's UVs by itself for assets up to
+     400 meshes; bigger ones wait for Read Scene UVs.
+   - **Find Largest Shell** is instant after a layout (or an earlier Find)
+     while nothing has changed: the answer is kept with a fingerprint of
+     every mesh, saved with the scene. Change a mesh (cut the largest
+     shell, say) and the next press measures again.
    - **Find Largest Shell** (step 7): selects the largest shell's faces and
      lists the next few, each with the most density it allows. It changes
      nothing. To raise the density:

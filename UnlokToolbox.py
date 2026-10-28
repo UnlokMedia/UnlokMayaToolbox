@@ -12156,6 +12156,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._collected = None
         self._plan = None
         self.layout_applied = None
+        self._largest = None
+        self._applied = None
         self.validation = None
         self._replan_timer = QtCore.QTimer(self)
         self._replan_timer.setSingleShot(True)
@@ -12912,6 +12914,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._plan = None
         self._collected = None
         self.layout_applied = None
+        self._largest = None
+        self._applied = None
         self.validation = None
         self.restored = None
         self._applied = {}
@@ -12958,7 +12962,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
                     "report": self.report or {},
                     "auto": self.auto_result, "layout_applied": self.layout_applied,
                     "validation": pack_validation(self.validation), "settings": settings,
-                    "score_cache": self._score_cache}
+                    "score_cache": self._score_cache, "largest": getattr(self, "_largest", None)}
             save_session(asset, data)
             self._refresh_setups()
         except Exception:
@@ -12988,6 +12992,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             auto["tiles"] = [tuple(t) for t in auto.get("tiles", [])]
             self.auto_result = auto
         self.layout_applied = data.get("layout_applied")
+        self._largest = data.get("largest")
         self.validation = unpack_validation(data.get("validation"))
         self._score_cache = dict((m, v) for m, v in (data.get("score_cache") or {}).items() if exists(m))
         self.restored = data
@@ -13888,30 +13893,82 @@ class SmartUdimPanel(QtWidgets.QWidget):
     @ui_safe
     def find_largest_shell(self, select=True):
         """Select the largest UV shell (largest_shells: the one that caps the
-        density) and list the next few. Reads shells like Plan (only meshes
-        that changed since are read again), changes nothing."""
+        density) and list the next few. Instant when nothing has changed
+        since the last layout or Find (remembered with each mesh's
+        fingerprint); else reads shells like Plan (only meshes that changed
+        are read again). Changes nothing."""
         asset = self._asset()
         if asset is None or not asset.sections():
             self.set_status("Pick a root and Scan first.", level="warn")
             return None
-        col = self._collected
-        if col is None or col.get("quick") or col.get("only") is not None:
-            uv_set = self.uv_set.text().strip() or "map1"
-            try:
-                with Progress("Find Largest Shell", [("read", 1)], status_progress(self.status)) as pr:
-                    pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
-                    col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(),
-                                         score_cache=self._score_cache)
-            except Cancelled:
-                self.set_status("Cancelled. Nothing changed.", level="warn")
-                return None
-            self._stop_worker()
-            self._collected, self._plan = col, None
         settings = self._layout_settings()
+        remembered = self._recall_largest(settings)  # every mesh's fingerprint still matches
+        if remembered:
+            return self._show_largest(remembered, settings, select, " (as measured at the last layout or Find: "
+                                                                     "nothing has changed since)")
+        # read afresh: shells already in memory may predate a UV edit (unchanged meshes come from the cache)
+        uv_set = self.uv_set.text().strip() or "map1"
+        try:
+            with Progress("Find Largest Shell", [("read", 1)], status_progress(self.status)) as pr:
+                pr.stage("read", len(asset.meshes()[0]), "Reading UV shells")
+                col = collect_shells(asset, uv_set, progress=pr, keep_score=self.auto_keep.value(),
+                                     score_cache=self._score_cache)
+        except Cancelled:
+            self.set_status("Cancelled. Nothing changed.", level="warn")
+            return None
+        self._stop_worker()
+        self._collected, self._plan = col, None
         top = largest_shells(col, settings, 6)
         if not top:
             self.set_status("No laid-out-ready shells to measure (run Auto UV first).", level="warn")
             return []
+        self._remember_largest(top, settings)
+        return self._show_largest(top, settings, select, "")
+
+    _LARGEST_KEYS = ("map_size", "padding_px", "growth", "orientation")
+
+    def _largest_settings(self, settings):
+        """The settings a largest shell depends on, defaults filled in (the
+        plan's settings carry them all, the panel's don't), as strings."""
+        full = dict(LAYOUT_DEFAULTS)
+        full.update(settings or {})
+        return dict((k, str(full.get(k))) for k in self._LARGEST_KEYS)
+
+    def _largest_state(self):
+        """What a remembered largest shell depends on besides the meshes:
+        the material sets (their names carry TD %) and every mesh."""
+        asset = self._asset()
+        return sorted(asset.all_material_sets()), sorted(asset.meshes()[0])
+
+    def _remember_largest(self, top, settings):
+        """Keep the largest shells with a fingerprint of every mesh, so the
+        next Find Largest Shell is instant while nothing changes."""
+        uv_set = self.uv_set.text().strip() or "map1"
+        sets, meshes = self._largest_state()
+        self._largest = {"top": [dict(r, uv_ids=list(r["uv_ids"])) for r in top], "uv_set": uv_set,
+                         "settings": self._largest_settings(settings),
+                         "sets": sets, "prints": dict((m, mesh_fingerprint(m, uv_set)) for m in meshes)}
+        self._save_session()
+
+    def _recall_largest(self, settings):
+        """The remembered largest shells, if the settings, the sets and every
+        mesh's fingerprint still match; else None (measure again)."""
+        got = getattr(self, "_largest", None)
+        uv_set = self.uv_set.text().strip() or "map1"
+        if not got or not got.get("top") or got.get("uv_set") != uv_set:
+            return None
+        if got.get("settings") != self._largest_settings(settings):
+            return None
+        sets, meshes = self._largest_state()
+        prints = got.get("prints") or {}
+        if sets != got.get("sets") or meshes != sorted(prints):
+            return None
+        for m in meshes:
+            if mesh_fingerprint(m, uv_set) != prints[m]:
+                return None  # e.g. the largest shell was cut since: measure again
+        return got["top"]
+
+    def _show_largest(self, top, settings, select, note):
         first = top[0]
         if select and cmds.objExists(first["mesh"]):
             uvs = ["%s.map[%d:%d]" % (first["mesh"], a, b) for a, b in _id_ranges(first["uv_ids"])]
@@ -13928,7 +13985,7 @@ class SmartUdimPanel(QtWidgets.QWidget):
             lines.append("Next: " + "; ".join("%s %d px/m" % (name(r), round(r["density"])) for r in top[1:]))
         lines.append("Cut it into smaller shells (or lower its group's TD %), then press Find Largest Shell again.")
         self.layout_summary.setText("\n".join(lines))
-        self.set_status("Largest shell: %s, up to %d px/m." % (name(first), round(first["density"])))
+        self.set_status("Largest shell: %s, up to %d px/m%s." % (name(first), round(first["density"]), note))
         return top
 
     @ui_safe
@@ -13973,18 +14030,31 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self.set_status("Moved %s to row %d of %d. One Ctrl+Z undoes it." % (
             parse_group_name(section)["key"] or short_name(section), secs.index(target) + 1, len(secs)))
 
+    VIEWER_AUTO_READ = 400  # meshes: below this the viewer reads the laid-out scene by itself
+
     @ui_safe
     def open_viewer(self):
         if self.viewer is None:
             self.viewer = UVViewer(self)
         self.viewer.show()
         self.viewer.raise_()
+        applied = getattr(self, "_applied", None)
         if self._plan is not None and self._collected is not None:
             self.viewer.show_plan(self._collected, self._plan)
             self.viewer.canvas.frame()
-        elif not self.viewer.items:  # opens straight away; reading a big scene waits for the button
-            self.viewer.banner = "Press Read Scene UVs to see the scene's UVs, or Plan to see a layout."
-            self.viewer.canvas.update()
+        elif applied and self._plan is applied[1]:  # the layout just applied (Apply drops _collected)
+            self.viewer.show_plan(applied[0], applied[1])
+            self.viewer.banner = ("The layout you applied at %s. Read Scene UVs shows any edits made since."
+                                  % applied[2])
+            self.viewer.canvas.frame()
+        elif not self.viewer.items:
+            asset = self._asset()
+            n = len(asset.meshes()[0]) if asset is not None and asset.sections() else 0
+            if self.layout_applied and 0 < n <= self.VIEWER_AUTO_READ:  # small enough: read it now
+                self.viewer.show_scene()
+            else:  # opens straight away; reading a big scene waits for the button
+                self.viewer.banner = "Press Read Scene UVs to see the scene's UVs, or Plan to see a layout."
+                self.viewer.canvas.update()
 
     @ui_safe
     def plan_layout(self, quiet=False):
@@ -14126,6 +14196,12 @@ class SmartUdimPanel(QtWidgets.QWidget):
             QtWidgets.QApplication.restoreOverrideCursor()
         plan = self._plan
         self.layout_applied = {"tiles": len(plan["new_tiles"]), "density": plan["density"]}
+        if self._collected is not None:
+            self._applied = (self._collected, plan, time.strftime("%H:%M"))  # for the UV Viewer
+            try:  # Find Largest Shell, instant while nothing changes
+                self._remember_largest(largest_shells(self._collected, plan["settings"], 6), plan["settings"])
+            except Exception:
+                traceback.print_exc()
         self.validation = None
         self.check_tree.clear()
         self.refresh()
