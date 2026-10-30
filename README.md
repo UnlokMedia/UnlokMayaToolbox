@@ -306,6 +306,23 @@ detail (just its shell, instant), get the shape right, then raise
    roof: the footprint is the wall tops, the bottom is the eave line and
    the top is the ridge. It's a wireframe that never renders. Any mesh works
    as a box (its bounding box).
+   - **Quick roof shape** (**Pick Points**): click the eave corners, then
+     the peak(s): one apex, or points along the ridge. Clicks land on
+     whatever mesh is under the cursor (a blockout, the walls), snapping to
+     a vertex within 14 px (even just outside its outline), or on a level
+     plane in empty space. **Enter** builds the box and the roof in one
+     Ctrl+Z, working out the footprint (the eave corners become the box's
+     bottom corners, so a tapered footprint stays tapered), which way the
+     ridge runs (the way the peaks run), each end (Gable where the ridge
+     reaches it, else Hip, with the hip pitch from where it stops; one apex
+     makes a pyramid), a lean-to (peaks along one edge), a cone (5+ eave
+     points round a circle), and an off-centre or sloping ridge (the box's
+     top moves so the ridge passes through the peaks). Backspace removes
+     the last point, Esc cancels. **From Selected** does the same from
+     selected vertices / edges / faces of a roof shape you already have, or
+     locators: the lowest points are the eaves, the highest the peaks.
+     Half-hips aren't detected (set them after); two hips of different
+     lengths share one pitch (the roof is moved so both fit).
    - **Deform the box** for roofs that aren't rectangular: move its
      vertices and the roof warps with them. Pull one end's corners in for
      a tapered footprint, raise one end's top for a ridge that climbs, slide

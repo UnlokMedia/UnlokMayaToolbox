@@ -22953,14 +22953,7 @@ def create_thatch_box(around=None):
     with UndoChunk("Thatch box"):
         name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
         node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
-        shape = _log_shape(node)
-        cmds.addAttr(node, longName=THATCH_BOX_ATTR, attributeType="bool", defaultValue=True)
-        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
-                     "visibleInRefractions"):
-            if cmds.attributeQuery(attr, node=shape, exists=True):
-                cmds.setAttr(shape + "." + attr, False)
-        cmds.setAttr(node + ".overrideEnabled", True)
-        cmds.setAttr(node + ".overrideShading", False)  # wireframe: the roof shows through
+        _th_style_box(node)
         if around:
             bb = cmds.exactWorldBoundingBox(around)
             sx, sz = max(bb[3] - bb[0], 1e-3), max(bb[5] - bb[2], 1e-3)
@@ -22973,6 +22966,505 @@ def create_thatch_box(around=None):
             cmds.xform(node, translation=(0.0, 4.0 * k, 0.0), scale=(6.0 * k, 3.0 * k, 4.0 * k))
         cmds.select(node, replace=True)
     return node
+
+
+def _th_hull2(pts):
+    """Convex hull of 2D points (monotone chain), counter-clockwise."""
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _th_min_rect(pts):
+    """The smallest-area rectangle round 2D points: (centre, unit long axis,
+    half long, half short)."""
+    hull = _th_hull2(pts)
+    if len(hull) < 2:
+        return (hull[0] if hull else (0.0, 0.0)), (1.0, 0.0), 0.0, 0.0
+    best = None
+    for i in range(len(hull)):
+        a, b = hull[i], hull[(i + 1) % len(hull)]
+        ln = math.hypot(b[0] - a[0], b[1] - a[1])
+        if ln < 1e-12:
+            continue
+        ux, uz = (b[0] - a[0]) / ln, (b[1] - a[1]) / ln
+        xs = [p[0] * ux + p[1] * uz for p in hull]
+        zs = [-p[0] * uz + p[1] * ux for p in hull]
+        area = (max(xs) - min(xs)) * (max(zs) - min(zs))
+        if best is None or area < best[0] - 1e-12:
+            best = (area, ux, uz, min(xs), max(xs), min(zs), max(zs))
+    _, ux, uz, x0, x1, z0, z1 = best
+    cx, cz = 0.5 * (x0 + x1), 0.5 * (z0 + z1)
+    centre = (cx * ux - cz * uz, cx * uz + cz * ux)
+    hx, hz = 0.5 * (x1 - x0), 0.5 * (z1 - z0)
+    if hz > hx:  # the long side first
+        return centre, (-uz, ux), hz, hx
+    return centre, (ux, uz), hx, hz
+
+
+def thatch_shape_from_points(points):
+    """A roof's box and shape settings from points (pure maths): the eave
+    corners (the lowest points) and the peaks (the highest: one apex, or
+    points along the ridge). World up is +Y. Works out the footprint (the
+    eave points as the box's bottom corners, or the smallest rectangle round
+    them), which way the ridge runs, each end (Gable where the ridge reaches
+    it, else Hip, with the hip pitch from where the ridge stops), a lean-to
+    (peaks along one edge), a cone (5+ eave points round a circle), and an
+    off-centre or sloping ridge (the box's top is moved so the ridge passes
+    through the peaks). Returns {"origin", "a", "y", "c" (the box's axes),
+    "corners" (8 local points, index ix + 2 iy + 4 iz), "settings", "base",
+    "peaks", "notes"}. Raises ValueError when the points can't make a roof."""
+    pts = [tuple(float(v) for v in p) for p in points]
+    if len(pts) < 4:
+        raise ValueError("pick at least 3 eave corners and a peak (%d point(s))" % len(pts))
+    ys = [p[1] for p in pts]
+    lo, hi = min(ys), max(ys)
+    if hi - lo < 1e-4:
+        raise ValueError("every point is at the same height: pick a peak above the eaves")
+    tol = 0.2 * (hi - lo)
+    base = [p for p in pts if p[1] <= lo + tol]
+    peaks = [p for p in pts if p[1] >= hi - tol]
+    notes = []
+    if len(base) + len(peaks) < len(pts):
+        notes.append("%d point(s) halfway up were left out" % (len(pts) - len(base) - len(peaks)))
+    if len(base) < 3:
+        raise ValueError("pick at least 3 eave corners (the lowest points); found %d" % len(base))
+    y0 = sum(p[1] for p in base) / len(base)
+    flat = [(p[0], p[2]) for p in base]
+    centre, axis, half_l, half_w = _th_min_rect(flat)
+    if half_w < 1e-4:
+        raise ValueError("the eave points are in a line: pick corners round the footprint")
+    cx, cz = sum(p[0] for p in flat) / len(flat), sum(p[1] for p in flat) / len(flat)
+    radii = [math.hypot(p[0] - cx, p[1] - cz) for p in flat]
+    mean_r = sum(radii) / len(radii)
+    cone = len(base) >= 5 and mean_r > 0 and \
+        math.sqrt(sum((r - mean_r) ** 2 for r in radii) / len(radii)) < 0.12 * mean_r and len(peaks) <= 2
+    a2 = axis  # the ridge along the footprint's long side unless the peaks say otherwise
+    settings = {"ridge": "X"}
+
+    def local(p, org, ax):
+        dx, dz = p[0] - org[0], p[2] - org[1]
+        return dx * ax[0] + dz * ax[1], p[1] - y0, -dx * ax[1] + dz * ax[0]  # c = cross(a, up) = (-az, 0, ax)
+    peak_pts = peaks
+    spread = 0.0
+    if len(peaks) >= 2 and not cone:
+        mx = sum(p[0] for p in peaks) / len(peaks)
+        mz = sum(p[2] for p in peaks) / len(peaks)
+        sxx = sum((p[0] - mx) ** 2 for p in peaks)
+        szz = sum((p[2] - mz) ** 2 for p in peaks)
+        sxz = sum((p[0] - mx) * (p[2] - mz) for p in peaks)
+        ang = 0.5 * math.atan2(2.0 * sxz, sxx - szz)
+        d = (math.cos(ang), math.sin(ang))
+        spread = max(abs((p[0] - mx) * d[0] + (p[2] - mz) * d[1]) for p in peaks)
+        if spread > 0.1 * half_w and abs(d[0] * axis[0] + d[1] * axis[1]) < 0.7071:
+            a2 = (-axis[1], axis[0])  # the peaks run across the footprint: the ridge goes that way
+    if spread <= 0.1 * half_w and len(peaks) >= 2 and not cone:
+        mean = tuple(sum(p[i] for p in peaks) / len(peaks) for i in range(3))
+        peak_pts = [mean]  # peaks close together: one apex
+        notes.append("the peaks are close together: one apex")
+    # the half sizes along the chosen axes
+    lx = [local(p, centre, a2) for p in base]
+    L = 0.5 * (max(q[0] for q in lx) - min(q[0] for q in lx))
+    W = 0.5 * (max(q[2] for q in lx) - min(q[2] for q in lx))
+    mid = (0.5 * (max(q[0] for q in lx) + min(q[0] for q in lx)), 0.5 * (max(q[2] for q in lx) + min(q[2] for q in lx)))
+    centre = (centre[0] + mid[0] * a2[0] - mid[1] * a2[1], centre[1] + mid[0] * a2[1] + mid[1] * a2[0])
+    pk = [local(p, centre, a2) for p in peak_pts]
+    lean = False
+    if not cone and len(pk) >= 2 and all(q[2] > 0.6 * W for q in pk) or \
+            (not cone and len(pk) >= 2 and all(q[2] < -0.6 * W for q in pk)):
+        lean = True
+        if pk[0][2] > 0:  # a lean-to is high along its -z side
+            a2 = (-a2[0], -a2[1])
+            pk = [local(p, centre, a2) for p in peak_pts]
+    lb = [local(p, centre, a2) for p in base]
+    # bottom corners: the eave points themselves when there are 4 (one per corner), else the rectangle
+    corners = [None] * 8
+    if len(base) == 4:
+        for q in lb:
+            k = int(q[0] > 0.0) + 4 * int(q[2] > 0.0)
+            if corners[k] is not None:
+                corners = [None] * 8
+                break
+            corners[k] = (q[0], q[1], q[2])
+    if any(corners[k] is None for k in (0, 1, 4, 5)):
+        for ix in (0, 1):
+            for iz in (0, 1):
+                corners[ix + 4 * iz] = ((2 * ix - 1) * L, 0.0, (2 * iz - 1) * W)
+        if len(base) != 4:
+            notes.append("footprint: the smallest rectangle round the %d eave points" % len(base))
+
+    def end_x(ix):
+        return 0.5 * (corners[ix][0] + corners[ix + 4][0])
+    # the ridge: heights and across-offsets along it (least squares through the peaks)
+    n = len(pk)
+    mxp = sum(q[0] for q in pk) / n
+    sxx = sum((q[0] - mxp) ** 2 for q in pk)
+    ky = sum((q[0] - mxp) * (q[1]) for q in pk) / sxx if sxx > 1e-9 else 0.0
+    kz = sum((q[0] - mxp) * q[2] for q in pk) / sxx if sxx > 1e-9 else 0.0
+    my = sum(q[1] for q in pk) / n
+    mzp = sum(q[2] for q in pk) / n
+    if my <= 1e-4:
+        raise ValueError("the peaks are no higher than the eaves")
+    x_lo, x_hi = min(q[0] for q in pk), max(q[0] for q in pk)
+    if cone:
+        settings["shape"] = "Cone"
+        dx = mxp
+    else:
+        settings["shape"] = "Lean-to" if lean else "Ridge"
+        d_a, d_b = end_x(1) - x_hi, x_lo - end_x(0)
+        tol_end = max(0.08 * L, 1e-4)
+        gab_a, gab_b = d_a < tol_end, d_b < tol_end
+        settings["end_a"] = "Gable" if gab_a else "Hip"
+        settings["end_b"] = "Gable" if gab_b else "Hip"
+        wspan = 2.0 * W if lean else W
+        if gab_a and gab_b:
+            dx = 0.0
+        elif gab_a or gab_b:
+            dx = 0.0
+            settings["hip_pitch"] = wspan / max(1e-4, d_b if gab_a else d_a)
+        else:  # two hips: the roof moves so the ridge's middle is where the peaks' is; the pitch fits both
+            dx = 0.5 * (x_lo + x_hi) - 0.5 * (end_x(0) + end_x(1))
+            settings["hip_pitch"] = wspan / max(1e-4, 0.5 * (d_a + d_b))
+            if abs(d_a - d_b) > 0.15 * max(d_a, d_b):
+                notes.append("the hips differ (%.2f / %.2f): the roof is moved so both fit" % (d_a, d_b))
+        if "hip_pitch" in settings:
+            settings["hip_pitch"] = clamp(settings["hip_pitch"], 0.25, 4.0)
+    # top corners: above the bottom ones, at the ridge's height at each end, shifted so the ridge (or apex)
+    # passes through the peaks
+    for ix in (0, 1):
+        xe = end_x(ix)
+        h = my + ky * (xe - mxp) if n >= 2 and not cone else my
+        if lean:
+            z_off = (mzp + kz * (xe - mxp)) - 0.5 * (corners[ix][2] + corners[ix + 4][2]) + W
+        elif cone or n == 1:
+            z_off = mzp - 0.5 * (corners[ix][2] + corners[ix + 4][2])
+        else:
+            z_off = (mzp + kz * (xe - mxp)) - 0.5 * (corners[ix][2] + corners[ix + 4][2])
+        for iz in (0, 1):
+            b = corners[ix + 4 * iz]
+            corners[ix + 2 + 4 * iz] = (b[0] + dx, max(h, 1e-3), b[2] + z_off)
+    org = (centre[0], y0, centre[1])
+    a3 = (a2[0], 0.0, a2[1])
+    return {"origin": org, "a": a3, "y": (0.0, 1.0, 0.0), "c": (-a2[1], 0.0, a2[0]), "corners": corners,
+            "settings": settings, "base": base, "peaks": peaks, "notes": notes}
+
+
+def _th_style_box(node):
+    """A thatch box's look: tagged, wireframe, never renders."""
+    shape = _log_shape(node)
+    cmds.addAttr(node, longName=THATCH_BOX_ATTR, attributeType="bool", defaultValue=True)
+    for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                 "visibleInRefractions"):
+        if cmds.attributeQuery(attr, node=shape, exists=True):
+            cmds.setAttr(shape + "." + attr, False)
+    cmds.setAttr(node + ".overrideEnabled", True)
+    cmds.setAttr(node + ".overrideShading", False)  # wireframe: the roof shows through
+
+
+def create_thatch_box_from_points(points):
+    """A thatch box fitted to points (undoable: callers wrap it): its 8
+    corners from thatch_shape_from_points, in the box's own frame (so the
+    roof's ridge runs along its X). Returns (box, shape result)."""
+    shape_info = thatch_shape_from_points(points)
+    name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+    node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
+    _th_style_box(node)
+    a, y, c, o = shape_info["a"], shape_info["y"], shape_info["c"], shape_info["origin"]
+    cmds.xform(node, worldSpace=True, matrix=[a[0], a[1], a[2], 0.0, y[0], y[1], y[2], 0.0, c[0], c[1], c[2], 0.0,
+                                              o[0], o[1], o[2], 1.0])
+    for i in range(8):
+        v = "%s.vtx[%d]" % (node, i)
+        q = cmds.xform(v, q=True, objectSpace=True, translation=True)
+        k = int(q[0] > 0.0) + 2 * int(q[1] > 0.0) + 4 * int(q[2] > 0.0)
+        cmds.xform(v, objectSpace=True, translation=shape_info["corners"][k])
+    return node, shape_info
+
+
+def thatch_roof_from_points(points, settings=None, select=True):
+    """Box and roof from points in one Ctrl+Z: the points' shape settings
+    (shape, ends, hip pitch, ridge X) over the given settings. Returns
+    (make_thatch_roof's report, box, shape result)."""
+    with UndoChunk("Thatch from points"):
+        box, info = create_thatch_box_from_points(points)
+        s = dict(THATCH_DEFAULTS)
+        s.update(settings or {})
+        s.update(info["settings"])
+        report = make_thatch_roof(box, s, select=select)
+    return report, box, info
+
+
+def thatch_selected_points():
+    """World points from the selection: vertices (edges / faces as their
+    vertices) and transforms (their pivots: locators, empties)."""
+    out = []
+    comps = cmds.filterExpand(cmds.ls(selection=True, flatten=True) or [], selectionMask=(31, 32, 34)) or []
+    if comps:
+        verts = cmds.ls(cmds.polyListComponentConversion(comps, toVertex=True) or [], flatten=True) or []
+        for v in verts:
+            out.append(tuple(cmds.pointPosition(v, world=True)))
+    for node in cmds.ls(selection=True, transforms=True, long=True) or []:
+        out.append(tuple(cmds.xform(node, q=True, worldSpace=True, rotatePivot=True)))
+    seen, uniq = set(), []
+    for p in out:
+        key = tuple(round(v, 6) for v in p)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
+
+
+THATCH_PICK_CTX = "unlokThatchPickCtx"
+
+
+class ThatchPointPicker(object):
+    """Viewport tool for a quick roof shape: each click adds a point on the
+    mesh under the cursor (snapped to the nearest vertex within 14 px), or
+    on a level plane at the first point's height (the ground at first).
+    Enter builds the box and the roof, Backspace removes the last point,
+    Esc cancels. Little locators (not saved) mark the points."""
+
+    SNAP_PX = 14
+
+    def __init__(self, on_done, on_change=None):
+        self.on_done = on_done
+        self.on_change = on_change
+        self.points = []
+        self.markers = []
+        self._filter = None
+
+    def activate(self):
+        self.points, self.markers = [], []
+        if cmds.draggerContext(THATCH_PICK_CTX, exists=True):
+            cmds.deleteUI(THATCH_PICK_CTX)
+        cmds.draggerContext(THATCH_PICK_CTX, pressCommand=self._press, space="screen", cursor="crossHair",
+                            undoMode="step", finalize=self._finalize)
+        cmds.setToolTo(THATCH_PICK_CTX)
+        self._filter = _ThatchPickKeys(self)
+        QtWidgets.QApplication.instance().installEventFilter(self._filter)
+
+    @staticmethod
+    def is_active():
+        try:
+            return cmds.currentCtx() == THATCH_PICK_CTX
+        except RuntimeError:
+            return False
+
+    def _finalize(self):
+        self._stop_keys()
+
+    def _stop_keys(self):
+        if self._filter is not None:
+            try:
+                QtWidgets.QApplication.instance().removeEventFilter(self._filter)
+            except RuntimeError:
+                pass
+            self._filter = None
+
+    def deactivate(self):
+        self._stop_keys()
+        self.clear_markers()
+        if self.is_active():
+            cmds.setToolTo("selectSuperContext")
+
+    def clear_markers(self):
+        with NoUndo():
+            gone = [m for m in self.markers if cmds.objExists(m)]
+            if gone:
+                cmds.delete(gone)
+        self.markers = []
+
+    def _press(self):
+        try:
+            x, y, _ = cmds.draggerContext(THATCH_PICK_CTX, q=True, anchorPoint=True)
+            p = self.pick(x, y)
+            if p is not None:
+                self.add_point(p)
+        except Exception:
+            traceback.print_exc()
+
+    def pick(self, x, y):
+        """World point under the screen position (snapped to a vertex), or on the level plane."""
+        src, direction = SurfacePathDrawer._ray(x, y)
+        best = None
+        near = []  # meshes the ray passes close to (for a vertex snap when it misses them all)
+        it = om.MItDag(om.MItDag.kDepthFirst, om.MFn.kMesh)
+        roofs = tuple(r + "|" for r in thatch_roofs(baked=True))
+        while not it.isDone():
+            dag = it.getPath()
+            it.next()
+            try:
+                if om.MFnDagNode(dag).isIntermediateObject or not dag.isVisible():
+                    continue
+            except RuntimeError:
+                continue
+            path = dag.fullPathName()
+            if roofs and path.startswith(roofs):
+                continue
+            bb = SurfacePathDrawer._world_box(dag)
+            entry = SurfacePathDrawer._ray_box_entry(src, direction, bb)
+            if entry is None:
+                if bb is not None:
+                    grown = om.MBoundingBox(bb)
+                    pad = 0.15 * max(bb.width, bb.height, bb.depth)
+                    grown.expand(bb.min - om.MVector(pad, pad, pad))
+                    grown.expand(bb.max + om.MVector(pad, pad, pad))
+                    if SurfacePathDrawer._ray_box_entry(src, direction, grown) is not None:
+                        near.append(dag)
+                continue
+            near.append(dag)
+            if best is not None and entry >= best[1]:
+                continue
+            fn = om.MFnMesh(dag)
+            try:
+                hit = fn.closestIntersection(om.MFloatPoint(src), om.MFloatVector(direction), om.MSpace.kWorld,
+                                             1e7, False)
+            except RuntimeError:
+                hit = None
+            if hit and (best is None or hit[1] < best[1]):
+                best = (om.MPoint(hit[0]), hit[1], fn, hit[2])
+        if best is None:
+            snap = self._snap_near(near, src, direction)
+            if snap is not None:
+                return snap
+            h = self.points[0][1] if self.points else 0.0
+            if abs(direction.y) < 1e-9:
+                return None
+            t = (h - src.y) / direction.y
+            if t <= 0:
+                return None
+            q = src + direction * t
+            return (q.x, q.y, q.z)
+        point, _, fn, face = best
+        view = omui.M3dView.active3dView()
+        snap, best_d = None, self.SNAP_PX
+        for vid in fn.getPolygonVertices(face):
+            w = fn.getPoint(vid, om.MSpace.kWorld)
+            res = view.worldToView(w)
+            vx, vy = res[0], res[1]
+            d = math.hypot(vx - x, vy - y)
+            if d < best_d:
+                snap, best_d = w, d
+        q = snap if snap is not None else point
+        return (q.x, q.y, q.z)
+
+    def _snap_near(self, dags, src, direction):
+        """The vertex closest to the ray within SNAP_PX (by the camera's pixel angle) on meshes it passes near,
+        or None: clicking just outside a peak's outline still lands on it. Big meshes (50k+ points) are skipped."""
+        view = omui.M3dView.active3dView()
+        try:
+            fov = om.MFnCamera(view.getCamera()).horizontalFieldOfView()
+        except RuntimeError:
+            return None
+        limit = math.tan(self.SNAP_PX * fov / max(1, view.portWidth()))
+        best, best_k = None, limit
+        for dag in dags:
+            fn = om.MFnMesh(dag)
+            if fn.numVertices > 50000:
+                continue
+            for w in fn.getPoints(om.MSpace.kWorld):
+                d = w - src
+                along = d * direction
+                if along <= 1e-6:
+                    continue
+                k = (d ^ direction).length() / along
+                if k < best_k:
+                    best, best_k = (w.x, w.y, w.z), k
+        return best
+
+    def add_point(self, p):
+        self.points.append(tuple(p))
+        with NoUndo():
+            loc = cmds.spaceLocator(name="thatchPick%02d" % len(self.points))[0]
+            loc = long_name(loc)
+            cmds.xform(loc, worldSpace=True, translation=p)
+            size = 0.02 / scene_m_per_unit()
+            for ax in "XYZ":
+                cmds.setAttr("%s.localScale%s" % (_log_shape(loc) or loc, ax), size * 10.0)
+            cmds.setAttr(loc + ".overrideEnabled", True)
+            cmds.setAttr(loc + ".overrideColor", 17)
+            try:
+                om.MFnDependencyNode(get_dag_path(loc).node()).setDoNotWrite(True)
+            except Exception:
+                pass
+        self.markers.append(loc)
+        if self.on_change:
+            self.on_change(self)
+
+    def remove_last(self):
+        if not self.points:
+            return
+        self.points.pop()
+        loc = self.markers.pop() if self.markers else None
+        if loc and cmds.objExists(loc):
+            with NoUndo():
+                cmds.delete(loc)
+        if self.on_change:
+            self.on_change(self)
+
+    def finish(self):
+        points = list(self.points)
+        self.deactivate()
+        self.on_done(points)
+
+    def cancel(self):
+        self.points = []
+        self.deactivate()
+        if self.on_change:
+            self.on_change(self)
+
+
+class _ThatchPickKeys(QtCore.QObject):
+    """While picking: Enter builds, Backspace removes the last point, Esc
+    cancels (queued on a timer: nothing touches the scene inside the filter).
+    Keys typed into text fields are left alone."""
+
+    def __init__(self, picker):
+        super(_ThatchPickKeys, self).__init__()
+        self.picker = picker
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() != QtCore.QEvent.KeyPress or not self.picker.is_active():
+                return False
+            focus = QtWidgets.QApplication.focusWidget()
+            if isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit,
+                                  QtWidgets.QAbstractSpinBox)):
+                return False
+            key = event.key()
+            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.finish))
+                return True
+            if key == QtCore.Qt.Key_Backspace:
+                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.remove_last))
+                return True
+            if key == QtCore.Qt.Key_Escape:
+                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.cancel))
+                return True
+        except Exception:
+            traceback.print_exc()
+        return False
+
+
+def _guarded_call(fn):
+    def run():
+        try:
+            fn()
+        except Exception:
+            traceback.print_exc()
+    return run
 
 
 def _th_placeholder(frame):
@@ -23272,6 +23764,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self._poll_timer = QtCore.QTimer(self)
         self._poll_timer.setInterval(400)
         self._poll_timer.timeout.connect(_guarded(self._poll_timer, self._poll_box))
+        self.picker = ThatchPointPicker(self._picked_done, self._picked_changed)
         self._build()
         self._install_jobs()
         self._rebuild_stale()
@@ -23321,6 +23814,18 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                 "move, rotate and scale it to the roof's area.")
         self.box_btn.clicked.connect(lambda *_: self.create_box())
         card.add(self.box_btn)
+        self.pick_btn = secondary_button("Pick Points", "Quick roof shape: click the eave corners, then the peak(s) "
+                                                        "(one apex, or points along the ridge), on a blockout or in "
+                                                        "the air (clicks snap to vertices). Enter builds the box "
+                                                        "and the roof: footprint, ridge direction, gable or hip "
+                                                        "ends and the hip pitch worked out for you. Backspace "
+                                                        "removes the last point, Esc cancels.")
+        self.pick_btn.clicked.connect(lambda *_: self.pick_points())
+        from_sel = secondary_button("From Selected", "The same from the selection: vertices (or edges / faces) "
+                                                     "of a roof shape you already have, or locators. The lowest "
+                                                     "points are the eaves, the highest the peak(s).")
+        from_sel.clicked.connect(lambda *_: self.roof_from_selection())
+        card.add(button_row(self.pick_btn, from_sel))
         col.addWidget(card)
 
         # ---- 2. make
@@ -23958,6 +24463,60 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self._rebuild({r: {} for r in roofs}, "Rebuilt")
 
     @ui_safe
+    def pick_points(self):
+        if self.picker.is_active():
+            self.picker.finish()
+            return
+        self.picker.activate()
+        self.pick_btn.setText("Build (Enter)")
+        self.set_status("Click the eave corners, then the peak(s). Enter builds, Backspace undoes a point, Esc "
+                        "cancels.")
+
+    def _picked_changed(self, picker):
+        if not picker.is_active():
+            self.pick_btn.setText("Pick Points")
+            if not picker.points:
+                self.set_status("Picking cancelled.")
+            return
+        n = len(picker.points)
+        self.set_status("%d point(s) picked. Enter builds the roof (eave corners + peaks), Backspace removes the "
+                        "last one, Esc cancels." % n)
+
+    @ui_safe
+    def _picked_done(self, points):
+        self.pick_btn.setText("Pick Points")
+        self._build_from_points(points, "the picked points")
+
+    @ui_safe
+    def roof_from_selection(self):
+        points = thatch_selected_points()
+        if not points:
+            self.set_status("Select vertices (or edges / faces) of a roof shape, or locators: the lowest are the "
+                            "eaves, the highest the peaks.", level="warn")
+            return
+        self._build_from_points(points, "%d selected point(s)" % len(points))
+
+    def _build_from_points(self, points, what):
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report, box, info = thatch_roof_from_points(points, self._settings())
+        except ValueError as exc:
+            self.set_status("Can't build a roof from %s: %s." % (what, exc), level="warn")
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._pin(report["root"])
+        s = info["settings"]
+        kind = s["shape"] if s["shape"] != "Ridge" else "%s / %s" % (s["end_a"], s["end_b"])
+        msg = "Made %s from %s in %.2fs: %s%s." % (short_name(report["root"]), what, time.time() - t0, kind,
+                                                 ", hip pitch %.2f" % s["hip_pitch"] if "hip_pitch" in s else "")
+        if info["notes"]:
+            msg += " (%s)" % "; ".join(info["notes"])
+        self.set_status(msg + " One Ctrl+Z undoes it.", level="fixed")
+        self._sync_from_selection()
+
+    @ui_safe
     def upgrade(self):
         roofs = self._edit_roofs() or thatch_roofs()
         done, report = upgrade_thatch_roofs(roofs)
@@ -24055,6 +24614,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
+        try:
+            self.picker.deactivate()
+        except Exception:
+            pass
         for timer in (self._sel_timer, self._edit_timer, self._box_timer, self._redo_timer, self._poll_timer):
             timer.stop()
         self._kill(self._jobs + self._box_jobs)

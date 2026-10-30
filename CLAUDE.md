@@ -490,6 +490,28 @@
     (`_th_suffix` in `_th_write`; tests must re-fetch the part's name).
     `git rebase` re-checks files out with CRLF here: patch scripts must
     normalise line endings (read, replace CRLF -> LF, write back).
+  - **Quick roof shape** (`thatch_shape_from_points`, pure maths;
+    `create_thatch_box_from_points`, `thatch_roof_from_points` (one
+    UndoChunk), `thatch_selected_points`, `ThatchPointPicker`): points split
+    by height (within 20% of the range of the lowest = eaves, of the
+    highest = peaks). Footprint: `_th_min_rect` (hull + calipers); ridge
+    axis = the peaks' principal direction snapped to the rectangle's axes
+    (one apex: the long side); lean-to when all peaks are past 0.6 W on one
+    side (a is flipped so the high side is -z); cone for 5+ eave points
+    within 12% of a circle. The box is a polyCube with its transform = (a,
+    up, c, origin) and its 8 vertices placed in object space (index ix + 2
+    iy + 4 iz, `_th_box_corners` sorts the same way): bottom = the 4 eave
+    points (else the rectangle), top = above them at the ridge's height at
+    each end, shifted across (and along, for two hips) so the ridge passes
+    through the peaks; ridge "X". Hip pitch = W / d (lean-to 2W / d), d the
+    ridge end's distance from the box end; gable when d < 8% of L. Picker:
+    a draggerContext (press only) + `_ThatchPickKeys`, an app event filter
+    (Enter / Backspace / Esc, queued on a timer, ignored in text fields);
+    `pick` casts against visible non-roof meshes, snaps to the hit face's
+    vertices within 14 px, and on a miss `_snap_near` takes the vertex
+    nearest the ray within 14 px by the camera's pixel angle (a peak
+    clicked from just outside its outline); markers are NoUndo,
+    doNotWrite locators.
   - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
     values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge

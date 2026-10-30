@@ -20,9 +20,9 @@ import traceback
 import maya.cmds as cmds
 
 try:
-    from PySide2 import QtWidgets
+    from PySide2 import QtCore, QtGui, QtWidgets
 except ImportError:
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 
 HERE = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.environ["UNLOK_TEST_DIR"]
 TOOLBOX = os.path.join(os.path.dirname(HERE), "UnlokToolbox.py")
@@ -388,6 +388,47 @@ def main():
     pump()
     check("redo brings it back, rebuilt", cmds.objExists(root2) and
           len(cmds.ls(ns["thatch_parts"](root2)["straw"] + ".f[*]", flatten=True)) == nfaces, panel.status.text())
+
+    # --- quick roof shape: Pick Points on a blockout (vertex snap), Enter builds box and roof
+    v = [(20.0, 3.0, -2.0), (26.0, 3.0, -2.0), (26.0, 3.0, 2.0), (20.0, 3.0, 2.0), (21.5, 5.2, 0.0), (24.5, 5.2, 0.0)]
+    blk = cmds.polyCreateFacet(point=[v[0], v[1], v[5], v[4]], name="pickBlockout", constructionHistory=False)[0]
+    cmds.polyCreateFacet(point=[v[2], v[3], v[4], v[5]], name="pickBlockout2", constructionHistory=False)
+    cmds.select(clear=True)
+    frame_on(["pickBlockout", "pickBlockout2"], direction=(0.6, 0.9, 1.0), dist=1.4)
+    panel.pick_points()
+    pump()
+    picker = panel.picker
+    check("Pick Points starts the picking tool", picker.is_active() and "Build" in panel.pick_btn.text())
+    view = ns["omui"].M3dView.active3dView()
+    target = ns["om"].MPoint(*v[4])
+    sx, sy = view.worldToView(target)[:2]
+    got = picker.pick(sx + 5, sy + 4)  # a few pixels off the ridge corner, outside the blockout
+    check("a click just outside a peak snaps onto its vertex", got is not None and
+          max(abs(got[i] - v[4][i]) for i in range(3)) < 1e-4, str(got))
+    mid = ns["om"].MPoint(23.0, 4.1, 1.0)  # on the slope facing the camera, away from its corners: no snap
+    mx, my = view.worldToView(mid)[:2]
+    got2 = picker.pick(mx, my)
+    check("a click on a face away from corners lands on the face", got2 is not None and
+          abs(got2[0] - 23.0) < 0.3 and abs(got2[1] - 4.1) < 0.3, str(got2))
+    for q in v:
+        picker.add_point(q)
+    pump()
+    check("each picked point is marked, and the status counts them", len(picker.markers) == 6 and
+          "6 point(s)" in panel.status.text(), panel.status.text())
+    before = set(ns["thatch_roofs"]())
+    win = QtWidgets.QApplication.activeWindow() or window
+    QtWidgets.QApplication.sendEvent(win, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return,
+                                                          QtCore.Qt.NoModifier))
+    wait(0.5)
+    made = [r for r in ns["thatch_roofs"]() if r not in before]
+    check("Enter builds the box and the roof (a ridge short of both ends: hipped, pitch 2 / 1.5)", len(made) == 1 and
+          ns["thatch_data"](made[0])["end_a"] == "Hip" and abs(ns["thatch_data"](made[0])["hip_pitch"] - 2.0 / 1.5) < 1e-3
+          and not picker.is_active() and
+          not [m for m in picker.markers if cmds.objExists(m)], panel.status.text())
+    cmds.select(clear=True)
+    frame_on(made + ["pickBlockout"], direction=(0.6, 0.6, 1.0), dist=1.6)
+    snap("27_roof_from_points.png")
+    cmds.delete("pickBlockout", "pickBlockout2")
 
     # --- bake
     cmds.select(root2)

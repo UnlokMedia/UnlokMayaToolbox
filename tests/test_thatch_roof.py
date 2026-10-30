@@ -795,6 +795,72 @@ def run():
     check("a deformed box's lattice is undone exactly for blockers",
           max(abs(a[i] - c_[i]) for a, c_ in zip(pts, back) for i in range(3)) < 1e-6)
 
+    # --- quick roof shape from points: eave corners + peaks -> box, ridge, ends, hip pitch
+    shape = tb["thatch_shape_from_points"]
+    rect = [(-3, 3, -2), (3, 3, -2), (3, 3, 2), (-3, 3, 2)]
+    sh = shape(rect + [(-1.2, 5.5, 0), (1.2, 5.5, 0)])
+    s_ = sh["settings"]
+    check("points: a ridge short of both ends is hipped, the pitch from where it stops",
+          s_["shape"] == "Ridge" and s_["end_a"] == s_["end_b"] == "Hip" and abs(s_["hip_pitch"] - 2.0 / 1.8) < 1e-6,
+          str(s_))
+    s_ = shape(rect + [(-3, 5.5, 0), (3, 5.5, 0)])["settings"]
+    check("points: a ridge reaching both ends is gabled", s_["end_a"] == s_["end_b"] == "Gable", str(s_))
+    s_ = shape(rect + [(3, 5.5, 0), (-1, 5.5, 0)])["settings"]
+    check("points: gable at one end, hip at the other", sorted((s_["end_a"], s_["end_b"])) == ["Gable", "Hip"] and
+          abs(s_["hip_pitch"] - 1.0) < 1e-6, str(s_))
+    s_ = shape(rect + [(0, 5.5, 0)])["settings"]
+    check("points: one apex makes a pyramid (hips meeting)", s_["end_a"] == s_["end_b"] == "Hip" and
+          abs(s_["hip_pitch"] - 2.0 / 3.0) < 1e-6, str(s_))
+    sh = shape(rect + [(-3, 5.5, -2), (3, 5.5, -2)])
+    check("points: peaks along one edge make a lean-to, high on that side", sh["settings"]["shape"] == "Lean-to")
+    ring = [(2.5 * math.cos(a_ * math.pi / 4), 3.0, 2.5 * math.sin(a_ * math.pi / 4)) for a_ in range(8)]
+    check("points: eave points round a circle and an apex make a cone",
+          shape(ring + [(0, 6, 0)])["settings"]["shape"] == "Cone")
+    ang = math.radians(30)
+
+    def rot(p):
+        return (p[0] * math.cos(ang) - p[2] * math.sin(ang), p[1], p[0] * math.sin(ang) + p[2] * math.cos(ang))
+    sh = shape([rot(p) for p in rect] + [rot((0, 5.5, -1.5)), rot((0, 5.5, 1.5))])  # the ridge across the short way
+    a_ = sh["a"]
+    check("points: the ridge runs the way the peaks do (here across the footprint), at any rotation",
+          abs(abs(a_[0] * -math.sin(ang) + a_[2] * math.cos(ang)) - 1.0) < 1e-6 and
+          sh["settings"]["end_a"] == "Hip", "a %s, %s" % (str(a_), sh["settings"]))
+    try:
+        shape([(0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1)])
+        flat_ok = False
+    except ValueError:
+        flat_ok = True
+    check("points: all at one height is refused with a reason", flat_ok)
+    # the scene side: box and roof in one Ctrl+Z, the ridge through the peaks (off-centre too)
+    cmds.file(new=True, force=True)
+    cmds.undoInfo(state=True, infinity=True)
+    t0 = time.time()
+    rep, bx, info = tb["thatch_roof_from_points"](rect + [(-1.0, 5.5, 0.6), (1.0, 5.5, 0.6)],
+                                                  {"style": "Surface", "resolution": 60})
+    dt = time.time() - t0
+    straw = tb["thatch_parts"](rep["root"])["straw"]
+    pts = [(q.x, q.y, q.z) for q in mesh_fn(tb, straw).getPoints(om.MSpace.kWorld)]
+    top = max(p_[1] for p_ in pts)
+    ridge_z = [p_[2] for p_ in pts if p_[1] > top - 0.05]
+    bb = bbox(straw)
+    check("from points: a box and a roof on the footprint, the ridge through the (off-centre) peaks (%.2fs)" % dt,
+          abs(sum(ridge_z) / len(ridge_z) - 0.6) < 0.15 and 5.45 < top < 5.5 + 0.5 and abs(bb[0] + 3.0) < 0.3 and
+          abs(bb[3] - 3.0) < 0.3 and tb["thatch_data"](rep["root"])["end_a"] == "Hip",
+          "ridge z %.2f, top %.2f, x %.2f..%.2f" % (sum(ridge_z) / len(ridge_z), top, bb[0], bb[3]))
+    check("the box is a proper thatch box (wireframe, never renders) that the roof follows",
+          cmds.attributeQuery(tb["THATCH_BOX_ATTR"], node=bx, exists=True) and tb["thatch_box"](rep["root"]) == bx)
+    cmds.undo()
+    check("one Ctrl+Z removes box and roof", not cmds.objExists(bx) and not cmds.objExists(rep["root"]))
+    # from a selection: a gable blockout's vertices
+    v = [(-3, 3, -2), (3, 3, -2), (3, 3, 2), (-3, 3, 2), (-3, 5, 0), (3, 5, 0)]
+    blk = cmds.polyCreateFacet(point=[v[0], v[1], v[5], v[4]], name="blockout", constructionHistory=False)[0]
+    cmds.select("%s.vtx[*]" % blk)
+    pts = tb["thatch_selected_points"]()
+    pts += [(3, 3, 2), (-3, 3, 2)]  # the other slope's eave corners (a one-face blockout)
+    rep2, bx2, info2 = tb["thatch_roof_from_points"](pts, {"resolution": 40, "style": "Surface"})
+    check("from selected vertices: a gable blockout becomes a gabled roof", info2["settings"]["end_a"] == "Gable" and
+          info2["settings"]["end_b"] == "Gable", str(info2["settings"]))
+
     # --- Smart UDIM: surfaces are Keep UVs, stacked planes Hands off
     cmds.file(new=True, force=True)
     grp = cmds.group(empty=True, name="hut_GRP")
