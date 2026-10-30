@@ -27,6 +27,20 @@
   fast-forward.
 
 ## Context
+- **Scale: decimetres** (the user, 2026-10-30: "everything in this toolbox
+  needs to work with decimeters as the default"). 1 unit = 10 cm; Maya has
+  no dm, so their scenes say "cm" (prefs at Maya's default). Anything that
+  turns units into real sizes goes through `scene_m_per_unit()` (0.1 for
+  "cm" via `WORKING_UNIT_M`, other units taken at their word): Smart UDIM's
+  px/m, the default thatch box, Path Scatter's recipes and defaults (written
+  in metres; `ps_in_scene_units` scales `PS_LENGTH_KEYS` in the panel only,
+  the engine's `get_settings` fallback is untouched). Sizes relative to the
+  input (rope, logs, thatch settings, blockers) need nothing. Saved sessions
+  and `unlokUdimLayout` are stamped `m_per_unit`; unstamped ones were read
+  with `legacy_m_per_unit()` (cm as cm) and their px/m are scaled once on
+  load (`largest` dropped). `test_auto_uv.load_toolbox` pins
+  `WORKING_UNIT_M = 0.01` (the older suites' numbers); `test_session.py`
+  checks the decimetre default and the conversion.
 - **Film pipeline.** Don't add game-only features such as lightmap UVs,
   tiling or trim-sheet UVs, or engine export.
 - **Naming convention:** comes from the UnlokRenamer repository

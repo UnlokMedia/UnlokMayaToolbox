@@ -36,6 +36,9 @@ def load_toolbox():
     ns = {"__name__": "unlok_test", "__file__": TOOLBOX}
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), ns)
+    # These scenes and their px/m figures were made reading "cm" as real
+    # centimetres; the decimetre default is checked in test_session.py.
+    ns["WORKING_UNIT_M"] = 0.01
     return ns
 
 

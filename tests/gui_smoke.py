@@ -90,6 +90,7 @@ def main():
     ns = {"__name__": "__main__", "__file__": TOOLBOX}
     with open(TOOLBOX) as f:
         exec(compile(f.read(), TOOLBOX, "exec"), ns)
+    ns["WORKING_UNIT_M"] = 1.0  # Path Scatter's scenes here are built in metres (recipes stay as written)
     import __main__
     window = getattr(__main__, ns["REGISTRY_KEY"])["window"]
     panel = window.panels()[0]
@@ -273,6 +274,7 @@ def main():
     snap("08_thatch_back.png")
 
     # --- Smart UDIM panel: pick root, scan, edit, pre-process
+    ns["WORKING_UNIT_M"] = 0.01  # the px/m checks below were made reading "cm" as centimetres
     cmds.file(new=True, force=True)
     window = getattr(__main__, ns["REGISTRY_KEY"])["window"]
     udim = [p for p in window.panels() if p.TOOL_NAME == "Smart UDIM"][0]

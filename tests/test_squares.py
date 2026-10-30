@@ -387,7 +387,7 @@ def run():
     tu, tv = (udim - 1001) % 10, (udim - 1001) // 10
     inside = all(tb["mesh_tiles"]([m])[m] == {udim} for m in picked)
     boxes, ratios = [], []
-    unit = tb["_UNIT_TO_M"][cmds.currentUnit(q=True, linear=True)] ** 2
+    unit = tb["scene_m_per_unit"]() ** 2
     for m in picked:
         shells_, _ = tb["_read_shells"](m, None, "map1", unit, {}, set())
         for sh in shells_:

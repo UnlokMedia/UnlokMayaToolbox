@@ -407,6 +407,28 @@ def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
 
+# Unlok's working scale is the decimetre: 1 scene unit = 10 cm. Maya has no
+# decimetre setting, so those scenes say "cm". Everything that turns scene
+# units into real sizes (texel density in px/m, the default thatch box, Path
+# Scatter's recipes) goes through scene_m_per_unit(). A scene set to any other
+# unit (m, mm, in...) is taken at its word.
+WORKING_UNIT_M = 0.1  # metres per unit of a "cm" scene (the tests set 0.01: Maya's own reading)
+_UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
+              "mi": 1609.344}
+
+
+def scene_m_per_unit():
+    """Metres in one scene unit: a "cm" scene is Unlok's decimetres."""
+    unit = cmds.currentUnit(q=True, linear=True)
+    return WORKING_UNIT_M if unit == "cm" else _UNIT_TO_M.get(unit, WORKING_UNIT_M)
+
+
+def legacy_m_per_unit():
+    """How the toolbox read the scene's unit before 2026-10-30 ("cm" as real
+    centimetres): px/m figures stored then are converted by this."""
+    return _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01)
+
+
 # =============================================================================
 # Path Scatter - engine
 # =============================================================================
@@ -478,6 +500,17 @@ RECIPES = {
     },
 }
 RECIPE_KEEP = ("seed", "smoothing", "bake_mode", "keep_system", "preview_boxes")
+# Lengths in PS_DEFAULTS and RECIPES are metres; the panel converts them to
+# scene units (scene_m_per_unit: x10 in a decimetre scene) when it loads them.
+PS_LENGTH_KEYS = ("size_x", "size_y", "size_z", "gap", "spacing", "start_offset", "end_offset", "row_spacing",
+                  "row_lift", "surface_offset", "rand_along", "rand_side", "rand_up")
+
+
+def ps_in_scene_units(values):
+    """values with the PS_LENGTH_KEYS turned from metres into scene units."""
+    k = 1.0 / scene_m_per_unit()
+    return dict((key, v * k if key in PS_LENGTH_KEYS and isinstance(v, (int, float)) else v)
+                for key, v in values.items())
 
 WORLD_UP = om.MVector(0, 1, 0)
 WORLD_X = om.MVector(1, 0, 0)
@@ -2849,7 +2882,7 @@ class PathScatterPanel(QtWidgets.QWidget):
         self.status.setContentsMargins(8, 0, 8, 6)
         outer.addWidget(self.status)
 
-        self.set_settings(PS_DEFAULTS)
+        self.set_settings(ps_in_scene_units(PS_DEFAULTS))
 
     def _update_guidance(self):
         """Step badges + the NEXT banner, from the current state."""
@@ -3103,6 +3136,7 @@ class PathScatterPanel(QtWidgets.QWidget):
         current = self.settings()
         values = dict(PS_DEFAULTS)
         values.update({k: v for k, v in recipe.items() if not k.startswith("_")})
+        values = ps_in_scene_units(values)
         for key in RECIPE_KEEP:
             values[key] = current[key]
         if recipe.get("_keep_mesh") and current["source_type"] == "Mesh":
@@ -8172,7 +8206,7 @@ def pack_udims(asset, exclude=(), resolution=None, padding=8.0 / 2048, avoid_til
     rows_per_section = max(1, (len(keys) + 9) // 10)
     first_row = (max((t - 1001) // 10 for t in avoid_tiles) + 1) if avoid_tiles else 0  # above hands-off tiles
     pad = float(padding)
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     caches, claimed = {}, set()
     placed = []
     moves = {}  # mesh -> [(shell, tu, tv, x, y, k, angle)]
@@ -8268,7 +8302,7 @@ def fit_meshes_to_tiles(meshes, tiles, uv_set="map1", padding=8.0 / 2048, progre
     1001), as big as fits at one texel density for the mesh, shells on
     their main axis. No layout across meshes (that's Smart Layout's job),
     so meshes sharing a tile overlap until then. Returns [(mesh, udim)]."""
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     caches, claimed = {}, set()
     out = []
     for m in meshes:
@@ -8406,7 +8440,7 @@ def lay_out_together(meshes, uv_set="map1", padding=8.0 / 2048, orientation="Upr
     small or broken to count go along with their mesh. Undoable (call it
     inside an UndoChunk). Returns the number of shells placed."""
     keep_layout = set(keep_layout)
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     caches, claimed = {}, set()
     shells = []
     items = meshes if isinstance(meshes, dict) else dict.fromkeys(meshes)  # {mesh: faces (whole shells) or None}
@@ -8753,9 +8787,6 @@ MAP_SIZES = ("1024", "2048", "4096", "8192")
 ORIENTATIONS = ("Upright", "Main axis", "Keep")  # the panel defaults to the first
 HANDSOFF_MODES = ("Pack around them", "Reserve their tiles")
 _ORIENT_MODE = {"Main axis": "axis", "Upright": "up", "Keep": "keep"}
-_UNIT_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0, "km": 1000.0, "in": 0.0254, "ft": 0.3048, "yd": 0.9144,
-              "mi": 1609.344}
-
 LAYOUT_DEFAULTS = {
     "texel_density": 1024.0,  # px per metre
     "map_size": "4096",
@@ -9097,7 +9128,7 @@ def collect_shells(asset, uv_set="map1", rotate=True, exclude=(), progress=None,
     score_cache: the panel's Check UVs scores (cached_quality), so a mesh
     that isn't in a tracking set is only scored again if it changed.
     """
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     only = set(only) if only is not None else None
     exclude = set(exclude)
     not_ready = {}
@@ -9233,7 +9264,7 @@ def quick_groups(asset, budget=QUICK_AREA_BUDGET, uv_set="map1"):
     comes from one Maya query (HandsOffFinder; blocked whole tiles after 20
     s) and becomes a fixed piece the squares pack around, and their area is
     left out of their group's square."""
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     t0 = time.time()
     handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
     finder = HandsOffFinder(uv_set)
@@ -10853,9 +10884,15 @@ def layout_settings_of(asset):
     if not root or not cmds.attributeQuery(LAYOUT_SETTINGS_ATTR, node=root, exists=True):
         return {}
     try:
-        return json.loads(cmds.getAttr(root + "." + LAYOUT_SETTINGS_ATTR) or "{}")
+        data = json.loads(cmds.getAttr(root + "." + LAYOUT_SETTINGS_ATTR) or "{}")
     except ValueError:
         return {}
+    if data and "m_per_unit" not in data:  # stored before decimetres: px/m read "cm" as centimetres
+        k = legacy_m_per_unit() / scene_m_per_unit()
+        for key in ("density", "texel_density"):
+            if isinstance(data.get(key), (int, float)):
+                data[key] = data[key] * k
+    return data
 
 
 def store_layout_settings(asset, plan):
@@ -10866,6 +10903,7 @@ def store_layout_settings(asset, plan):
         cmds.addAttr(root, longName=LAYOUT_SETTINGS_ATTR, dataType="string")
     data = dict(plan["settings"])
     data["density"] = plan["density"]
+    data["m_per_unit"] = scene_m_per_unit()
     cmds.setAttr(root + "." + LAYOUT_SETTINGS_ATTR, json.dumps(data, sort_keys=True), type="string")
 
 
@@ -10880,6 +10918,8 @@ def save_session(asset, data):
     root = asset.root_set() if asset else None
     if not root:
         return
+    if data:
+        data = dict(data, m_per_unit=scene_m_per_unit())
     with NoUndo():
         if not cmds.attributeQuery(SESSION_ATTR, node=root, exists=True):
             cmds.addAttr(root, longName=SESSION_ATTR, dataType="string")
@@ -10894,7 +10934,19 @@ def load_session(asset):
         data = json.loads(cmds.getAttr(root + "." + SESSION_ATTR) or "{}")
     except ValueError:
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    if data and "m_per_unit" not in data:  # saved before decimetres: same layout, px/m read anew
+        k = legacy_m_per_unit() / scene_m_per_unit()
+        if k != 1.0:
+            settings = data.get("settings") or {}
+            if isinstance(settings.get("lay_density"), (int, float)):
+                settings["lay_density"] = settings["lay_density"] * k
+            applied = data.get("layout_applied")
+            if isinstance(applied, dict) and isinstance(applied.get("density"), (int, float)):
+                applied["density"] = applied["density"] * k
+            data.pop("largest", None)  # measured in the old px/m: Find measures again
+    return data
 
 
 def session_summary(data):
@@ -11017,7 +11069,7 @@ def validate_layout(asset, uv_set="map1", map_size=None, padding_px=None, target
     map_size = float(map_size or stored.get("map_size") or 4096)
     padding_px = float(stored.get("padding_px", 8) if padding_px is None else padding_px)
     target = target_density or stored.get("density")
-    unit_scale = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+    unit_scale = scene_m_per_unit() ** 2
     groups = _group_lookup(asset)
     meshes, _ = asset.meshes()
     handsoff = set(m for m, st in asset.uv_status().items() if st == "handsoff")
@@ -12048,7 +12100,7 @@ class UVViewer(QtWidgets.QWidget):
         if density is None:
             density = self.mode.value() == "Texel density"
         uv_set = self.panel.uv_set.text().strip() or "map1"
-        unit = _UNIT_TO_M.get(cmds.currentUnit(q=True, linear=True), 0.01) ** 2
+        unit = scene_m_per_unit() ** 2
         res = float(self.panel.lay_map.value() or 2048)
         owner = {}
         for sec in asset.sections():
@@ -20156,7 +20208,6 @@ THATCH_PRESETS = {
 }
 THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
 THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
-THATCH_UNITS = {"mm": 1000.0, "cm": 100.0, "m": 1.0, "km": 0.001, "in": 39.37, "ft": 3.281, "yd": 1.094}
 
 
 def _th_smin(a, b, k):
@@ -22761,7 +22812,8 @@ def _th_free_number(pattern):
 def create_thatch_box(around=None):
     """A box to mark the roof (one Ctrl+Z): wireframe, never renders, selected.
     around: nodes to sit it on (footprint = their bounding box, bottom on
-    their top); otherwise a 6 x 3 x 4 m box (in scene units) at the origin."""
+    their top); otherwise a 6 x 3 x 4 m box at the origin, eaves 2.5 m up
+    (scene_m_per_unit: 60 x 30 x 40 units in a decimetre scene)."""
     with UndoChunk("Thatch box"):
         name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
         node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
@@ -22781,7 +22833,7 @@ def create_thatch_box(around=None):
                                                            (bb[2] + bb[5]) * 0.5))
             cmds.xform(node, scale=(sx, h, sz))
         else:
-            k = THATCH_UNITS.get(cmds.currentUnit(q=True, linear=True), 1.0)
+            k = 1.0 / scene_m_per_unit()
             cmds.xform(node, translation=(0.0, 4.0 * k, 0.0), scale=(6.0 * k, 3.0 * k, 4.0 * k))
         cmds.select(node, replace=True)
     return node

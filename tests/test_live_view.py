@@ -100,7 +100,7 @@ def run():
     wall = [m for m, k in kinds.items() if k == "stretched"][0]
     fn = tb["_mesh_fn"](wall)
     n_shells = fn.getUvShellsIds("map1")[0]
-    unit = tb["_UNIT_TO_M"][cmds.currentUnit(q=True, linear=True)] ** 2
+    unit = tb["scene_m_per_unit"]() ** 2
     outs = tb["scene_shell_outlines"](wall, "map1", unit, density=True)
     check("scene outlines: one per UV shell", len(outs) == n_shells, "%d / %d" % (len(outs), n_shells))
     dens = [o["density"] * 2048 for o in outs if o["density"]]

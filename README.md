@@ -16,6 +16,14 @@ Built for **Maya 2023** (Python 3.9, PySide2); also runs on 2024 and 2025.
 Running it again just replaces the window. To make a shelf button, select the
 pasted code in the Script Editor and middle-mouse-drag it onto a shelf.
 
+**Scale: decimetres.** Unlok works at 1 scene unit = 10 cm. Maya has no
+decimetre setting, so those scenes say "cm", and the toolbox reads a "cm"
+scene as decimetres: texel density in px/m, the default thatch box, Path
+Scatter's recipes. A scene set to any other unit (m, mm, in...) is taken at
+its word. Smart UDIM setups saved before this change have their px/m figures
+converted once when they're opened (the same layout reads 10x lower; nothing
+in the scene moves).
+
 ## Tools
 
 ### Modeling > Path Scatter
@@ -293,7 +301,8 @@ detail (just its shell, instant), get the shape right, then raise
 
 1. **Box:** press **Create Box**. With the building selected, the box sits
    on top of it (footprint = the building, bottom on its top); otherwise
-   it's a 6 x 3 x 4 m box at the origin. Move, rotate and scale it to the
+   it's a 6 x 3 x 4 m box at the origin, eaves 2.5 m up (60 x 30 x 40
+   units in decimetres). Move, rotate and scale it to the
    roof: the footprint is the wall tops, the bottom is the eave line and
    the top is the ridge. It's a wireframe that never renders. Any mesh works
    as a box (its bounding box).

@@ -321,6 +321,9 @@ def run():
     cmds.file(new=True, force=True)
     cmds.undoInfo(state=True, infinity=True)
     b = tb["create_thatch_box"]()
+    bb = cmds.exactWorldBoundingBox(b)
+    check("the default box is 6 x 3 x 4 m in decimetres, eaves 2.5 m up",
+          [round(v, 3) for v in bb] == [-30.0, 25.0, -20.0, 30.0, 55.0, 20.0], str(bb))
     root = tb["make_thatch_roof"](b, {"resolution": 40})["root"]
     other = box("other", move=(20, 0, 0))
     cmds.select(b)

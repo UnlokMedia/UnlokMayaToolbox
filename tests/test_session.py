@@ -6,9 +6,11 @@ The panel's progress (reports, Auto UV results, validation, settings) is
 stored on the asset's root set, so it's saved with the scene and picked up
 again on reopen. This checks the engine side: the data round-trips through
 a real save / reopen, validation packs and unpacks, missing meshes drop out,
-and saving never adds an undo step.
+and saving never adds an undo step. Also decimetres: a "cm" scene's unit is
+10 cm, and px/m saved before that are converted once.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -81,9 +83,47 @@ def run():
     back = tb["unpack_validation"](loaded["validation"])
     check("deleted meshes drop out of restored results",
           not any(i["mesh"] == victim for v in back["items"].values() for i in v))
+    check_decimetres(tb, assets[0])
     tb["save_session"](assets[0], {})
     check("Start Fresh clears it", tb["load_session"](assets[0]) == {} and
           tb["session_summary"]({}) == "set up")
+
+
+def check_decimetres(tb, asset):
+    """The user's working scale (2026-10-30): 1 unit = 1 dm in a "cm" scene."""
+    tb["WORKING_UNIT_M"] = 0.1  # the toolbox's default; load_toolbox pins 0.01 for the older tests
+    try:
+        check("a cm scene is read as decimetres", abs(tb["scene_m_per_unit"]() - 0.1) < 1e-12)
+        cmds.currentUnit(linear="m")
+        in_m = tb["scene_m_per_unit"]()
+        cmds.currentUnit(linear="cm")
+        check("a scene set to metres is taken at its word", in_m == 1.0, str(in_m))
+        conv = tb["ps_in_scene_units"]({"size_z": 1.2, "spacing": 0.03, "rows": 12, "rot_x": 6.0})
+        check("Path Scatter recipes (metres) come out in decimetres",
+              abs(conv["size_z"] - 12.0) < 1e-9 and abs(conv["spacing"] - 0.3) < 1e-9 and conv["rows"] == 12 and
+              conv["rot_x"] == 6.0, str(conv))
+        root = asset.root_set()
+        old = {"saved": "29 Oct 10:00", "settings": {"lay_density": 1000.0, "uv_set": "map1"},
+               "layout_applied": {"tiles": 3, "density": 500.0}, "largest": {"top": [{"density": 9.0}]}}
+        cmds.setAttr(root + "." + tb["SESSION_ATTR"], json.dumps(old), type="string")
+        got = tb["load_session"](asset)
+        near = lambda a, b: abs(a - b) < 1e-6
+        check("an old session's px/m are converted (the same layout reads 10x lower)",
+              near(got["settings"]["lay_density"], 100.0) and near(got["layout_applied"]["density"], 50.0) and
+              "largest" not in got, str(got.get("settings")))
+        tb["save_session"](asset, got)
+        again = tb["load_session"](asset)
+        check("a saved session is stamped and never converted twice",
+              again.get("m_per_unit") == 0.1 and near(again["settings"]["lay_density"], 100.0))
+        attr = tb["LAYOUT_SETTINGS_ATTR"]
+        if not cmds.attributeQuery(attr, node=root, exists=True):
+            cmds.addAttr(root, longName=attr, dataType="string")
+        cmds.setAttr(root + "." + attr, json.dumps({"density": 200.0, "texel_density": 128.0}), type="string")
+        lay = tb["layout_settings_of"](asset)
+        check("an old applied layout's densities are converted for Validate",
+              near(lay["density"], 20.0) and near(lay["texel_density"], 12.8), str(lay))
+    finally:
+        tb["WORKING_UNIT_M"] = 0.01
 
 
 try:
