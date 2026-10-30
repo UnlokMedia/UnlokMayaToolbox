@@ -185,6 +185,80 @@ def main():
             frame_on([root, house], direction=(0.6, -0.25, 1.3))
             snap("13_leaf_panels_below.png")
             window.grab().save(os.path.join(OUT, "14_panel_leaf.png"))
+    # --- palm fronds: presets through the panel, detail levels, close-ups (coloured so leaves and underlay read)
+    def shader(name, rgb):
+        m = cmds.shadingNode("lambert", asShader=True, name=name)
+        cmds.setAttr(m + ".color", *rgb, type="double3")
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=name + "SG")
+        cmds.connectAttr(m + ".outColor", sg + ".surfaceShader")
+        return sg
+    parts = ns["thatch_parts"](root)
+    cmds.sets(parts["straw"], e=True, forceElement=shader("testLeaf", (0.62, 0.55, 0.33)))
+    cmds.sets(parts["underlay"], e=True, forceElement=shader("testUnderlay", (0.33, 0.24, 0.14)))
+    cmds.sets(house, e=True, forceElement=shader("testWall", (0.5, 0.5, 0.52)))
+    cmds.select(clear=True)
+    straw = parts["straw"]
+    palm_shots = {
+        "Palm: nipa shingles (neat)": [("wide", (1.0, 0.55, 1.3), 1.9, [root, house]),
+                                       ("close", (0.2, 0.45, 1.0), 0.3, "straw"),
+                                       ("eave", (0.35, -0.05, 1.0), 0.45, "straw"),
+                                       ("gable", (1.0, 0.1, 0.5), 0.9, [root, house])],
+        "Palm: palapa (hipped, messy top)": [("wide", (1.0, 0.55, 1.3), 1.9, [root, house]),
+                                             ("hip", (1.0, 0.35, 0.7), 0.8, "straw")],
+        "Palm: beach shack (makeshift)": [("wide", (1.0, 0.55, 1.3), 1.9, [root, house]),
+                                          ("gable", (1.0, 0.1, 0.5), 0.9, [root, house])],
+        "Palm: Pacific fale (rounded)": [("wide", (1.0, 0.55, 1.3), 1.9, [root, house])],
+    }
+    for i, (name, views) in enumerate(palm_shots.items()):
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText(name))
+        panel.load_preset()
+        pump()
+        data = ns["thatch_data"](root)
+        check("%s loads" % name, data["style"] == "Palm Fronds" and panel.f["style"].value() == "Palm Fronds" and
+              "on 1 roof" in panel.status.text(), panel.status.text())
+        cmds.select(clear=True)
+        for vname, direction, dist, target in views:
+            frame_on(straw if target == "straw" else target, direction=direction, dist=dist)
+            snap("17_palm%d_%s_%s.png" % (i + 1, name.split(": ")[1].split(" ")[0].lower(), vname))
+    check("palm rows show (fronds section), straw piece sizes hide", not panel.frond_sec.isHidden() and
+          panel._rows["piece_width"][1].isHidden() and not panel._rows["detail"][1].isHidden())
+    scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
+    scroll.ensureWidgetVisible(panel.frond_sec, 0, 0)
+    pump()
+    window.grab().save(os.path.join(OUT, "18_panel_palm.png"))
+    scroll.verticalScrollBar().setValue(0)
+    edit(frond_form="3D Leaflets", detail="High")
+    frame_on(straw, direction=(0.2, 0.45, 1.0), dist=0.3)
+    snap("19_palm_3d_leaflets_high_close.png")
+    check("3D leaflets at High rebuild", ns["thatch_data"](root)["detail"] == "High" and
+          "Updated" in panel.status.text(), panel.status.text())
+    edit(frond_form="Leaflets")
+    for d in ("Proxy", "Rough", "Medium", "Hero"):
+        t0 = time.time()
+        edit(detail=d)
+        dt = time.time() - t0
+        frame_on([root, house])
+        snap("20_detail_%s.png" % d.lower())
+        if d == "Proxy":
+            check("Proxy: the shell only, quick, and the status says so", dt < 1.5 and
+                  not cmds.getAttr(straw + ".visibility") and "Proxy" in panel.status.text(),
+                  "%.2fs | %s" % (dt, panel.status.text()))
+        else:
+            check("%s rebuilds the fronds (%.2fs)" % (d, dt), cmds.getAttr(straw + ".visibility"), panel.status.text())
+    bb = cmds.exactWorldBoundingBox(root)
+    cmds.undoInfo(stateWithoutFlush=False)  # look up at the ceiling side from under the roof
+    try:
+        cmds.setAttr(house + ".visibility", False)
+        cmds.setAttr("persp.translate", bb[3] * 0.3, bb[1] - 0.4, 0.0)
+        cmds.viewLookAt("persp", position=(bb[3] * 0.1, bb[4] - 0.6, (bb[2] + bb[5]) * 0.3))
+        snap("21_palm_underlay_ceiling.png")
+        cmds.setAttr(house + ".visibility", True)
+    finally:
+        cmds.undoInfo(stateWithoutFlush=True)
+    edit(detail="Medium", style="Planes", density=0.35)
+    frame_on(straw, direction=(0.2, 0.45, 1.0), dist=0.3)
+    snap("22_planes_underlay_relief_close.png")
+    edit(density=1.0)
     panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Cottage (hipped)"))
     panel.load_preset()
     edit(style="Surface", warp=0.0, ridge_sag=0.0, ragged=0.0, gaps=0.0)

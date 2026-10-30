@@ -398,6 +398,139 @@ def run():
             check("no underlay for the leaf panel shack", not cmds.getAttr(tb["thatch_parts"](root)["underlay"] +
                                                                            ".visibility"))
 
+    # --- palm fronds: presets, forms, layers, ends, detail levels, the underlay
+    cmds.file(new=True, force=True)
+    b = box("palm")
+    frame = tb["thatch_frame"](b)
+    palms = [k for k in tb["THATCH_PRESETS"] if k.startswith("Palm")]
+    check("four palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 4 and all(
+        tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
+        "stacks" not in tb["thatch_preset"](k) for k in palms))
+    root = None
+    for k in palms:
+        s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"](k))
+        s["stacks"] = 3
+        t0 = time.time()
+        if root is None:
+            rep = tb["make_thatch_roof"](b, s)
+            root = rep["root"]
+        else:
+            rep = tb["update_thatch_roofs"]({root: s})
+        dt = time.time() - t0
+        parts = tb["thatch_parts"](root)
+        fn = mesh_fn(tb, parts["straw"])
+        us, vs, good = uv_stats(fn)
+        tiles = set(int(math.floor(max(0.0, u - 1e-6))) for u in us)
+        normals = fn.getNormals(om.MSpace.kWorld)
+        up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
+        under = mesh_fn(tb, parts["underlay"])
+        check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < 6.0,
+              "%d fronds, %d faces" % (rep["pieces"], fn.numPolygons))
+        check("%s: 3 stacks, UVs the right way round, leaves face out" % k, tiles == {0, 1, 2} and good > 0.99 and
+              up > 0.8, "%s, %.2f%% upright, %.1f%% up" % (sorted(tiles), good * 100, up * 100))
+        check("%s: a closed underlay facing out" % k, cmds.getAttr(parts["underlay"] + ".visibility") and
+              boundary_edges(under) == 0 and signed_volume(under) > 0.0)
+        bb = bbox(parts["straw"])
+        check("%s: leaves cover the roof, tips hang past the eaves" % k, bb[1] < 2.5 - 0.05 and bb[4] > 5.3 and
+              bb[0] < -3.0 and bb[3] > 3.0, str([round(v, 2) for v in bb]))
+
+    def build(**over):
+        s = dict(tb["THATCH_DEFAULTS"], style="Palm Fronds", resolution=80)
+        s.update(over)
+        return tb["thatch_build"](frame, s)
+
+    def tris(mesh):
+        return sum(1 for c in mesh[1] if c == 3)
+
+    # leaflets: each tapers to one tip point (a triangle per leaflet side); forms differ in weight
+    forms = dict((f, build(frond_form=f, top_layer=0.0)) for f in tb["THATCH_FROND_FORMS"])
+    nv = dict((f, len(o["straw"][0])) for f, o in forms.items())
+    lf = forms["Leaflets"]["straw"]
+    check("leaflets taper to a tip, inside the left 85% of the UV square (rachis on the right)",
+          tris(lf) > 1000 and max(lf[3]) <= 1.0 + 1e-6 and
+          all(0.0 - 1e-6 <= u <= 0.85 + 1e-6 or u >= 0.88 for u in lf[3]), "%d tips" % tris(lf))
+    check("forms: cards < leaflets < 3D leaflets, one layout", nv["Cards"] < nv["Leaflets"] < nv["3D Leaflets"] and
+          len(set(o["pieces"] for o in forms.values())) == 1, str(nv))
+    cu = forms["Cards"]["straw"][3]
+    check("cards fill the UV square", abs(min(cu)) < 1e-6 and abs(max(cu) - 1.0) < 1e-6)
+
+    # neat underneath: one under layer only (gables, no top layer, cap or fringe), leaflets measured base -> tip
+    def leaflet_spread(neat):
+        o = build(end_a="Gable", end_b="Gable", top_layer=0.0, ridge_fronds=False, end_fronds=0.0, neat=neat,
+                  mess=1.5, segments=4)
+        pts = o["straw"][0]
+        per = 2 * 4 + 1
+        lens, sides = [], []
+        for i in range(0, len(pts) - per + 1, per):
+            a, b_, tip = pts[i], pts[i + 1], pts[i + per - 1]
+            base = ((a[0] + b_[0]) * 0.5, (a[1] + b_[1]) * 0.5, (a[2] + b_[2]) * 0.5)
+            d = (tip[0] - base[0], tip[1] - base[1], tip[2] - base[2])
+            ln = math.sqrt(sum(c * c for c in d))
+            lens.append(ln)
+            sides.append(abs(d[0]) / max(1e-9, ln))  # how far it turns along the ridge
+        mean = sum(lens) / len(lens)
+        sd = math.sqrt(sum((v - mean) ** 2 for v in lens) / len(lens)) / mean
+        return sd, sum(sides) / len(sides), len(lens)
+    neat_sd, neat_side, n_neat = leaflet_spread(1.0)
+    messy_sd, messy_side, n_messy = leaflet_spread(0.0)
+    check("Neat 1: an even under layer; Neat 0: a messy one", neat_sd < 0.15 and messy_sd > neat_sd * 1.5 and
+          messy_side > neat_side, "length spread %.3f vs %.3f, turn %.3f vs %.3f (%d / %d leaflets)" % (
+              neat_sd, messy_sd, neat_side, messy_side, n_neat, n_messy))
+    o0, o1 = build(top_layer=0.0), build(top_layer=1.0)
+    check("the top layer adds loose fronds over the courses", o1["pieces"] > o0["pieces"] * 1.2 and
+          len(o1["straw"][0]) > len(o0["straw"][0]), "%d -> %d fronds" % (o0["pieces"], o1["pieces"]))
+    c0, c1 = build(ridge_fronds=False), build(ridge_fronds=True)
+    check("a cap of fronds over the ridge", max(p[1] for p in c1["straw"][0]) > max(p[1] for p in c0["straw"][0]))
+
+    # the ends: leaves hang off the gable verges; a hipped end has no fringe
+    edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
+
+    def hanging(o):  # past the verge, above the eaves (a hip's eave leaves hang past the end line too)
+        return sum(1 for p in o["straw"][0] if p[0] > edge + 0.15 and 2.7 < p[1] < 5.0)
+    g0 = build(end_a="Gable", end_fronds=0.0, end_reach=0.0)
+    g1 = build(end_a="Gable", end_fronds=1.5, end_reach=0.5)
+    h1 = build(end_a="Hip", end_fronds=1.5, end_reach=0.5)
+    check("gable fringe and reach: leaves hang down past the verge", hanging(g1) > 3 * max(10, hanging(g0)),
+          "%d vs %d points" % (hanging(g1), hanging(g0)))
+    check("a hipped end has no gable fringe", hanging(h1) < hanging(g1) * 0.05, "%d points" % hanging(h1))
+
+    # detail levels: Proxy is the shell only and quick; the rest keep the layout and add detail
+    t0 = time.time()
+    px = build(detail="Proxy")
+    t_proxy = time.time() - t0
+    check("Proxy: no fronds, the underlay shows the shape, quick", px["straw"] is None and px["underlay"] and
+          px["level"] == 0 and t_proxy < 1.0, "%.2fs" % t_proxy)
+    levels = dict((d, build(detail=d)) for d in ("Rough", "Medium", "High"))
+    vv = dict((d, len(o["straw"][0])) for d, o in levels.items())
+    uv_ = dict((d, len(o["underlay"][0])) for d, o in levels.items())
+    check("Rough < Medium < High, the same fronds at every level", vv["Rough"] < vv["Medium"] < vv["High"] and
+          uv_["Rough"] < uv_["Medium"] < uv_["High"] and len(set(o["pieces"] for o in levels.values())) == 1,
+          "%s / underlay %s" % (vv, uv_))
+    tb["update_thatch_roofs"]({root: {"detail": "Proxy"}})
+    parts = tb["thatch_parts"](root)
+    check("Proxy on a roof: the straw hides, the underlay shows", not cmds.getAttr(parts["straw"] + ".visibility")
+          and cmds.getAttr(parts["underlay"] + ".visibility"))
+    tb["update_thatch_roofs"]({root: {"detail": "Medium"}})
+    check("back to Medium: the fronds come back", cmds.getAttr(parts["straw"] + ".visibility"))
+
+    # the underlay: coursed relief, still a closed shell, the same topology as the plain one
+    for style in ("Palm Fronds", "Planes", "Leaf Panels"):
+        plain = build(style=style, underlay=True, underlay_relief=0.0)["underlay"]
+        rel = build(style=style, underlay=True, underlay_relief=1.0)["underlay"]
+        moved = max(math.sqrt(sum((a[i] - c[i]) ** 2 for i in range(3))) for a, c in zip(plain[0], rel[0]))
+        check("%s: the underlay's relief moves it (%.3f m), same topology" % (style, moved),
+              len(plain[0]) == len(rel[0]) and plain[2] == rel[2] and moved > 0.01)
+    tb["update_thatch_roofs"]({root: {"underlay_relief": 2.0, "resolution": 120}})
+    under = mesh_fn(tb, tb["thatch_parts"](root)["underlay"])
+    us, vs, good = uv_stats(under)
+    check("relief underlay: closed, facing out, UVs in 0..1 the right way round",
+          boundary_edges(under) == 0 and signed_volume(under) > 0.0 and min(us) >= 0.0 and max(us) <= 1.0 and
+          good > 0.995, "%.2f%% upright" % (good * 100))
+    o = build(shape="Cone")
+    check("a palm cone (no gables, no hips) builds", o["pieces"] > 50 and o["straw"] and o["underlay"])
+    o = build(shape="Lean-to", end_a="Gable", end_b="Hip")
+    check("a palm lean-to builds", o["pieces"] > 50)
+
     # --- Smart UDIM: surfaces are Keep UVs, stacked planes Hands off
     cmds.file(new=True, force=True)
     grp = cmds.group(empty=True, name="hut_GRP")

@@ -268,7 +268,8 @@
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
 - **Thatch Roof** (Modeling tab): a roof from a box. Engine `ThatchField`
-  (pure maths) -> `_th_grid` -> `_th_shell_mesh` / `_th_pieces_mesh`, all in
+  (pure maths) -> `_th_grid` -> `_th_shell_mesh` / `_th_pieces_mesh` /
+  `_th_panels_mesh` / `_th_fronds_mesh`, all in
   `thatch_build`; scene side `make_thatch_roof`, `update_thatch_roofs`,
   `rebuild_stale_thatch`, `bake_thatch`; panel `ThatchRoofPanel`.
   - **Frame** (`thatch_frame`): the box's world matrix and its mesh's local
@@ -315,6 +316,56 @@
     less and the courses didn't read), bottom points frayed. A panel whose
     contour runs the other way is reversed with U mirrored, so fronts face
     out and UVs stay upright.
+  - **Contours in one pass** (`_th_contours(F, G, ts)`): every course's
+    crossings from one sweep of the grid's edges (bisect into the sorted
+    t list). One `_th_contour` per course cost 2.4 s on a palm roof's 70
+    courses; `_th_contour` is now a one-t wrapper.
+  - **Palm Fronds** (`_th_fronds_mesh`; research summary in the side-session
+    notes: nipa / attap shingles folded over battens, courses from the eave
+    up, ridge capped with fronds laid across): half fronds along contour
+    courses (`_th_frond_courses`: battens 0.25 leaf apart / density, the
+    first so tips hang 0.2 leaf past the eave, plus a half course doubling
+    the eave), rachis along the batten, leaflets hanging down. Each
+    leaflet walks the roof on its own (`_th_walk` with yaw = pi + slant,
+    `fall` bends steps off the roof edge down). The first version
+    interpolated leaflets between a frond's column walks: at hips the
+    columns diverge and leaflets became chords across the hip (rungs).
+    Stacking: a leaflet's offset is `rise * d / leaf` (d from its batten,
+    `_th_frond_rise`), so the higher course always lies on top. Layers:
+    under (neat: `m_under = (1 - neat) * ...`), top (between courses,
+    lifted over the under layer's tips, turned / curled / broken, longer at
+    the eave, past the verge by 0.12 + reach / 2 frond), cap (contour 0.42
+    leaf below the ridge, walking up over it, only between the hips'
+    ridge ends: past them it stood up in the air), hip leaves (fan of 7
+    down each hip line from the plane formula; the courses fan open there),
+    gable fringe (straight hanging strips along the verge). `verge()`
+    droops only leaves carried past a course's end (ox / oz); leaves
+    walking off the edge already fall (both together made a trellis).
+    Forms: Cards (`leaf_line` per column), Leaflets (2 verts per row, one
+    tip point), 3D (midrib vertex, rachis on top / cap fronds only). UVs:
+    planar leaflet in u 0..0.85 (`uk_leaf`), rachis 0.88..1, cards 0..1.
+    Random values are keyed to (course, line, frond, leaflet), never to
+    segment counts, so Detail doesn't move anything.
+  - **Detail** (`_th_detail` -> settings, level, underlay grid res):
+    Proxy = no straw, underlay forced on, grid <= 48 (0.1 s); Rough = Cards /
+    Planes, 2 segments, underlay grid x0.6; High / Hero = segments and the
+    underlay's own grid x1.5 / x2 (`thatch_build` builds a second grid
+    for it). It's a look key, so shape presets keep it and look presets
+    don't name it.
+  - **Underlay relief** (`_th_relief`, `_th_underlay_relief`, all styles):
+    per grid point an outer offset `step * ((1 - f) * smooth(f / e) + bias)`
+    with f the fraction through the course (`(t - t0) / dt`, matching the
+    pieces' / panels' / fronds' courses) shifted by pointed tips (triangle
+    wave along `PS`, staggered 0.37 a course, so it's continuous) and a
+    slow wander, plus grain noise down the slope; ribs (battens) on the
+    ceiling side at each course line. Palm steps sit just under the
+    lowest leaf layer (`0.85 * rise * sp / leaf`, inset 0.12 rise). The
+    shell also gets a fringe of tips at eaves and gable verges (outer and
+    inner moved together, so it stays closed) and, under fronds, thins to
+    20% within 0.6 leaf of those edges (a full-thickness slab read as a
+    plank at the eave). Same topology as the plain shell; relief 0 = old.
+  - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
+    values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge
     sag are in `height` (so courses and levels follow them); ragged moves
     shell points near the eave down the slope (outer and inner together,
