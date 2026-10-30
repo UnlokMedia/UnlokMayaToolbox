@@ -20058,6 +20058,7 @@ THATCH_BAKED = "unlokThatchBaked"    # string on a baked roof group: its old dat
 THATCH_PART = "unlokThatchPart"      # string on each roof mesh: "straw" or "underlay"
 THATCH_VERTS = "unlokThatchVerts"    # long on each roof mesh: vertex count of the last build
 THATCH_BOX_ATTR = "unlokThatchBox"   # bool on a box the tool made
+THATCH_BLOCKER_ATTR = "unlokThatchBlocker"  # bool on a blocker box the tool made
 THATCH_MATERIAL = "strawThatch"      # material tokens in the mesh names (UnlokRenamer convention)
 THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
@@ -20278,6 +20279,8 @@ class ThatchField(object):
         self.sw = sw
         self.strand_amp = max(0.0, float(s["strands"])) * 0.25 * self.T
         self.edge = 0.01  # width of a lip / the cap's edge in height fractions (set from the grid)
+        self.blockers = []  # roof-space boxes the thatch bends round (_th_blockers_in_roof)
+        self.block_gap = 0.0  # how far leaves keep off them
 
     def height(self, x, z):
         """Height of the roof's base surface: planes, rounding, sag and lumps."""
@@ -20652,6 +20655,10 @@ def _th_shell_mesh(F, G, strands=True, inset=0.0, relief=None):
             move = _rl_mul(down, F.ragged * 0.06 * F.span * min(1.0, e) * jag)
             outer[k] = _rl_add(outer[k], move)
             inner[k] = _rl_add(inner[k], move)
+    if F.blockers:  # butt up against blockers: points inside move out to the nearest face
+        gap = 0.002 * F.span
+        outer = [_th_push(F, q, gap)[0] for q in outer]
+        inner = [_th_push(F, q, gap)[0] for q in inner]
     if cone:  # one apex point each
         vid = lambda i, j: 0 if i == 0 else 1 + (i - 1) * nc + j % nc  # noqa: E731
         pts = [outer[0]] + outer[nc:]
@@ -20872,6 +20879,10 @@ def _th_pieces_mesh(F, G, s):
             if near < 1.0:  # the bottom course hangs over the eaves, hiding the underlay's edge
                 back = _rl_mul(_rl_norm(_rl_sub(Q[1], Q[0])), -hang * (1.0 - max(0.0, near)))
                 Q = [_rl_add(q_, back) for q_ in Q]
+            draped = _th_drape(F, Q, Nn, F.block_gap)
+            if draped is None:  # it would grow out of a blocker
+                continue
+            Q, Nn = draped
             roll = (r[7] - 0.5) * math.radians(30.0) * mess
             stack = min(stacks - 1, int(r[8] * stacks))
             flip = bool(s["mirror"]) and r[9] < 0.5
@@ -21118,7 +21129,7 @@ def _th_panels_mesh(F, G, s):
                         col.append((p_[0] + n_[0] * off + ox, p_[1] + n_[1] * off, p_[2] + n_[2] * off + oz))
                     frayed = (0.08 + 0.35 * F.ragged) * length * _rand12(seed, course * 7919 + li, k, c)[0]
                     col[0] = _rl_add(col[0], _rl_mul(_rl_norm(_rl_sub(col[0], col[1])), frayed))
-                    grid.append(col)
+                    grid.append(_th_drape(F, col, [q for _, q in walk], F.block_gap, drop=False)[0])
                 if len(grid) < cols + 1:
                     continue
                 n_avg = walk[0][1]
@@ -21249,10 +21260,14 @@ def _th_fronds_mesh(F, G, s):
     uk_top = 0.425 / (0.5 * tlw * 1.2)
     vv_leaf = [1.0 - v for v in k_seg]
     pts, counts, conn, us, vs, uvi = [], [], [], [], [], []
-    state = {"capped": False, "pieces": 0}
+    state = {"capped": False, "pieces": 0, "anchors": []}  # anchors: points well inside the roof by a line's ends
 
     def u_of(u, stack):
         return (u + stack) / stacks if columns else u + stack
+
+    def on_roof(x, z):
+        cell = _th_cell(G, F, x, z)
+        return _th_sample(G, *cell)[0] if cell else None
 
     def room(n):
         if len(pts) + n > THATCH_MAX_VERTS:
@@ -21306,6 +21321,21 @@ def _th_fronds_mesh(F, G, s):
         n = len(Q)
         if n < 2 or not room(n * (sides + 1)):
             return False
+        if F.blockers:  # rigid: cut where it enters a blocker, the longest run outside kept
+            runs, cur = [], []
+            for k, (q, r_) in enumerate(zip(Q, radius)):
+                if _th_push(F, q, r_)[1] is None:
+                    cur.append(k)
+                elif cur:
+                    runs.append(cur)
+                    cur = []
+            if cur:
+                runs.append(cur)
+            keep = max(runs, key=len) if runs else []
+            if len(keep) < 2:
+                return False
+            Q, Nn, radius = [Q[k] for k in keep], [Nn[k] for k in keep], [radius[k] for k in keep]
+            n = len(Q)
         base = len(pts)
         for k in range(n):
             t = _rl_norm(_rl_sub(Q[min(n - 1, k + 1)], Q[max(0, k - 1)]))
@@ -21344,7 +21374,7 @@ def _th_fronds_mesh(F, G, s):
     def past_verge(x):
         return max([sign * x - edge for sign, edge in gables] or [0.0])
 
-    def leaf_line(base, L, yaw, layer, curl, limp, heading=None):
+    def leaf_line(base, L, yaw, layer, curl, limp, heading=None, drop=True):
         """A leaf's centreline walking the roof from base ((x, z), ox, oz: on
         a course, or carried past its end) for length L, turned by yaw (pi:
         down the slope), off the roof by layer(distance from its top), bowed
@@ -21355,6 +21385,11 @@ def _th_fronds_mesh(F, G, s):
         if cell is None:
             return None
         pos, nrm = _th_sample(G, *cell)[:2]
+        if (ox or oz) and F.blockers and state["anchors"]:  # carried past a course's end: only if the way out
+            far = (pos[0] + ox, pos[1], pos[2] + oz)        # from the roof doesn't cross a blocker (a wall the
+            a = min(state["anchors"], key=lambda q: _rl_len(_rl_sub(q, far)))  # roof butts up to)
+            if _th_blocked(F, a, far, 10):
+                return None
         ex0 = past_verge(x + ox) if (ox or oz) else 0.0
         Q, Nn = [], []
         for k, (p, n) in enumerate(_th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall_under if limp else fall_top,
@@ -21366,7 +21401,7 @@ def _th_fronds_mesh(F, G, s):
                 q, n = verge(q, n, v * L, ex0, limp)
             Q.append(q)
             Nn.append(n)
-        return Q, Nn
+        return _th_drape(F, Q, Nn, F.block_gap, drop)
 
     def along(point_at, a0, a1, off, n_pts):
         """Points (and normals) along a course from distance a0 to a1, off the roof by off (a stick, a rachis)."""
@@ -21388,7 +21423,7 @@ def _th_fronds_mesh(F, G, s):
         for j in range(ncard + 1):
             r = _rand12(seed, key[0] * 7 + 5, key[1] * 131 + key[2], j)
             L = L0 * (1.0 + (r[0] - 0.5) * 0.15)
-            line = leaf_line(point_at(start + width * j / float(ncard)), L, yaw, layer, 0.0, limp)
+            line = leaf_line(point_at(start + width * j / float(ncard)), L, yaw, layer, 0.0, limp, drop=False)
             if line is None:
                 return False
             grid.append((line, L))
@@ -21491,6 +21526,14 @@ def _th_fronds_mesh(F, G, s):
             n_pts = max(3, int(math.ceil(width / (0.15 * ll)))) + 1
             a0, a1 = (start, start + width) if sgn > 0 else (start + width, start)
             Q, Nn = along(point_at, a0, a1, lift_r, n_pts)
+            if Q and F.blockers and state["anchors"]:  # past a course's end only where it isn't through a blocker
+                total = state["total"]
+                keep = [k for k in range(n_pts) if 0.0 <= a0 + (a1 - a0) * k / float(n_pts - 1) <= total or
+                        not _th_blocked(F, min(state["anchors"], key=lambda q: _rl_len(_rl_sub(q, Q[k]))), Q[k], 10)]
+                if len(keep) < 2:
+                    Q = None
+                else:
+                    Q, Nn, n_pts = [Q[k] for k in keep], [Nn[k] for k in keep], len(keep)
             if Q:
                 ex = [past_verge(q[0]) for q in Q]
                 Q = [verge(q, n, 0.0, e, False)[0] for q, n, e in zip(Q, Nn, ex)]
@@ -21508,6 +21551,9 @@ def _th_fronds_mesh(F, G, s):
             # carried past a line's end only at a gable verge (or round a cone's seam); elsewhere (where
             # a hip's courses meet) just enough to close up: further, they stood up in the air
             closed = _th_closed(line, G)
+            state["total"] = total
+            state["anchors"] = [q for q in (on_roof(*point_at(min(total, 0.3 * tile))[0]),
+                                            on_roof(*point_at(max(0.0, total - 0.3 * tile))[0])) if q]
             reach_lo, reach_hi = [extra if closed or any(abs(sign * p[0] - edge) < 3.0 * G["cell"]
                                                          for sign, edge in gables) else 0.5 * lw
                                   for p in (line[0], line[-1])]
@@ -21556,7 +21602,8 @@ def _th_fronds_mesh(F, G, s):
                 if cell is not None:
                     pos, nrm = _th_sample(G, *cell)[:2]
                     ox, oz = base[1], base[2]
-                    line[0][0] = (pos[0] + nrm[0] * top + ox, pos[1] + nrm[1] * top, pos[2] + nrm[2] * top + oz)
+                    line[0][0] = _th_push(F, (pos[0] + nrm[0] * top + ox, pos[1] + nrm[1] * top,
+                                              pos[2] + nrm[2] * top + oz), F.block_gap)[0]
                 emit(line[0], line[1], [p * 0.5 * lw * (1.0 - 0.1 * r[2]) for p in prof_tile],
                      [(r[3] - 0.5) * 0.3 * v ** 1.5 for v in k_seg], uk_tile, min(stacks - 1, int(r[4] * stacks)),
                      mirror and r[5] < 0.5, 0.25 if three else 0.0)
@@ -21616,6 +21663,8 @@ def _th_fronds_mesh(F, G, s):
             xs = [lo + (hi - lo) * (i + 0.5) / n for i in range(n)]
 
             zc = G["cell"]  # just off the crest, so the walk knows which side is down
+            state["anchors"] = [q for q in (on_roof(min(F.x1, F.x0 + 0.3 * tile), 0.0),
+                                            on_roof(max(F.x0, F.x1 - 0.3 * tile), 0.0)) if q]
 
             def on_ridge(x, side):
                 xc = min(max(x, F.x0 + 1e-6), F.x1 - 1e-6)
@@ -21685,6 +21734,10 @@ def _th_fronds_mesh(F, G, s):
                     t_ = _rl_norm(_rl_sub(Q[min(seg, k + 1)], Q[max(0, k - 1)]))
                     n_ = _rl_norm(_rl_cross(rake, t_), (sign, 0.0, 0.0))
                     Nn.append(_rl_mul(n_, -1.0) if n_[0] * sign < 0.0 else n_)
+                draped = _th_drape(F, Q, Nn, F.block_gap)
+                if draped is None:
+                    continue
+                Q, Nn = draped
                 emit(Q, Nn, [p * 0.5 * lw * (1.0 - 0.12 * r[4]) for p in prof_tile],
                      [(r[5] - 0.5) * 0.8 * v ** 1.2 for v in k_seg], uk_tile, min(stacks - 1, int(r[6] * stacks)),
                      mirror and r[7] < 0.5, 0.25 if three else 0.0)
@@ -21749,15 +21802,190 @@ def _th_underlay_relief(F, s):
             "rib": amt * 0.08 * F.T}
 
 
-def thatch_build(frame, settings):
+def _th_to_roof(frame, pts):
+    """World -> roof space (the inverse of _th_to_world): exact for a plain
+    box; through a deformed box's lattice by Newton steps (only used for
+    blockers' 8 corners)."""
+    o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
+    guess = [(_rl_dot(_rl_sub(w, o), a), _rl_dot(_rl_sub(w, o), y), _rl_dot(_rl_sub(w, o), c)) for w in pts]
+    C = frame.get("corners")
+    if not C:
+        return guess
+    c0 = C[0]
+    bx_, by_, bz_ = _rl_sub(C[1], c0), _rl_sub(C[2], c0), _rl_sub(C[4], c0)
+    bxy = _rl_add(_rl_sub(C[3], C[1]), _rl_sub(c0, C[2]))
+    bxz = _rl_add(_rl_sub(C[5], C[1]), _rl_sub(c0, C[4]))
+    byz = _rl_add(_rl_sub(C[6], C[2]), _rl_sub(c0, C[4]))
+    bxyz = reduce_add((C[7], C[1], C[2], C[4], _rl_mul(reduce_add((C[3], C[5], C[6], c0)), -1.0)))
+    L2, H, W2 = 2.0 * frame["L"], frame["H"], 2.0 * frame["W"]
+    along_x, flip = frame["axis"] == "X", bool(frame.get("flip"))
+    out = []
+    for w, p in zip(pts, guess):
+        sa, sy, sc = p[0] / L2 + 0.5, p[1] / H, p[2] / W2 + 0.5
+        if flip:
+            sc = 1.0 - sc
+        sx, sz = (sa, sc) if along_x else (1.0 - sc, sa)
+        for _ in range(12):
+            f = tuple(c0[i] + bx_[i] * sx + by_[i] * sy + bz_[i] * sz + bxy[i] * sx * sy + bxz[i] * sx * sz +
+                      byz[i] * sy * sz + bxyz[i] * sx * sy * sz - w[i] for i in range(3))
+            if _rl_len(f) < 1e-9:
+                break
+            jx = tuple(bx_[i] + bxy[i] * sy + bxz[i] * sz + bxyz[i] * sy * sz for i in range(3))
+            jy = tuple(by_[i] + bxy[i] * sx + byz[i] * sz + bxyz[i] * sx * sz for i in range(3))
+            jz = tuple(bz_[i] + bxz[i] * sx + byz[i] * sy + bxyz[i] * sx * sy for i in range(3))
+            det = _rl_dot(jx, _rl_cross(jy, jz))
+            if abs(det) < 1e-15:
+                break
+            sx -= _rl_dot(f, _rl_cross(jy, jz)) / det  # Cramer's rule for J ds = f
+            sy -= _rl_dot(jx, _rl_cross(f, jz)) / det
+            sz -= _rl_dot(jx, _rl_cross(jy, f)) / det
+        sa, sc = (sx, sz) if along_x else (sz, 1.0 - sx)
+        if flip:
+            sc = 1.0 - sc
+        out.append(((sa - 0.5) * L2, sy * H, (sc - 0.5) * W2))
+    return out
+
+
+def _th_blockers_in_roof(frame, boxes):
+    """Blockers (world boxes {"c", "u": 3 unit axes, "h": 3 half sizes}) as
+    roof-space boxes (centre, 3 orthonormal axes, 3 half sizes, AABB low,
+    high): the box's 8 corners mapped into roof space and fitted again."""
+    out = []
+    for b in boxes or []:
+        c, u, h = b["c"], b["u"], b["h"]
+        corners = [reduce_add((c, _rl_mul(u[0], sx * h[0]), _rl_mul(u[1], sy * h[1]), _rl_mul(u[2], sz * h[2])))
+                   for sz in (-1.0, 1.0) for sy in (-1.0, 1.0) for sx in (-1.0, 1.0)]
+        r = _th_to_roof(frame, corners)
+        edges = [_rl_mul(reduce_add(_rl_sub(r[j], r[i]) for i, j in pairs), 0.25) for pairs in
+                 (((0, 1), (2, 3), (4, 5), (6, 7)), ((0, 2), (1, 3), (4, 6), (5, 7)), ((0, 4), (1, 5), (2, 6), (3, 7)))]
+        e0 = _rl_norm(edges[0])
+        e1 = _rl_norm(_rl_perp(e0, edges[1]), _rl_any_perp(e0))
+        e2 = _rl_cross(e0, e1)
+        if _rl_dot(e2, edges[2]) < 0.0:
+            e2 = _rl_mul(e2, -1.0)
+        half = (0.5 * abs(_rl_dot(edges[0], e0)), 0.5 * abs(_rl_dot(edges[1], e1)), 0.5 * abs(_rl_dot(edges[2], e2)))
+        mid = _rl_mul(reduce_add(r), 0.125)
+        lo = tuple(min(q[i] for q in r) for i in range(3))
+        hi = tuple(max(q[i] for q in r) for i in range(3))
+        out.append((mid, (e0, e1, e2), half, lo, hi))
+    return out
+
+
+def _th_inside(b, p, m):
+    """p's coordinates in blocker b, and whether it lies inside b grown by m."""
+    c, ax, h = b[0], b[1], b[2]
+    d = (p[0] - c[0], p[1] - c[1], p[2] - c[2])
+    loc = (_rl_dot(d, ax[0]), _rl_dot(d, ax[1]), _rl_dot(d, ax[2]))
+    return loc, abs(loc[0]) < h[0] + m and abs(loc[1]) < h[1] + m and abs(loc[2]) < h[2] + m
+
+
+def _th_push(F, p, m):
+    """p moved out of any blocker it's inside (grown by m) to the nearest
+    face: (point, that face's normal or None)."""
+    nrm = None
+    for b in F.blockers:
+        loc, inside = _th_inside(b, p, m)
+        if not inside:
+            continue
+        k = min(range(3), key=lambda i: b[2][i] + m - abs(loc[i]))
+        sgn = 1.0 if loc[k] >= 0.0 else -1.0
+        nrm = _rl_mul(b[1][k], sgn)
+        p = _rl_add(p, _rl_mul(nrm, b[2][k] + m - abs(loc[k]) + 1e-6))
+    return p, nrm
+
+
+def _th_blocked(F, a, b, steps=6):
+    """True when the straight line from a to b passes through a blocker."""
+    for i in range(1, steps + 1):
+        q = _rl_lerp(a, b, i / float(steps))
+        if any(_th_inside(bx, q, 0.0)[1] for bx in F.blockers):
+            return True
+    return False
+
+
+def _th_drape(F, Q, Nn, m, drop=True):
+    """A leaf (centreline Q, normals Nn, in roof space) bent round the
+    blockers: walked from its top, a step that would enter a blocker stops
+    at the face it hits and carries on along that face for the rest of its
+    length (butting up against a wall, lying down on a lower roof), lying
+    flat on it (its normal); off the face's edge it falls on as before.
+    Steps that miss every blocker are kept, so leaves round a blocker that
+    covers only part of an edge hang free. A leaf that starts inside one
+    can't grow there: None (drop=False: pushed out by the nearest face; the
+    far face of a wall popped leaves out in front of it). Returns (Q, Nn),
+    unchanged when no blocker is near."""
+    if not F.blockers or len(Q) < 2:
+        return Q, Nn
+    lo = [min(q[i] for q in Q) - m for i in range(3)]
+    hi = [max(q[i] for q in Q) + m for i in range(3)]
+    near = [b for b in F.blockers if all(b[3][i] <= hi[i] and b[4][i] >= lo[i] for i in range(3))]
+    if not near:
+        return Q, Nn
+    heading = _rl_sub(Q[-1], Q[0])
+    p, n0 = _th_push(F, Q[0], m)
+    if n0 is not None and drop:
+        return None
+    out, nout = [p], [n0 or Nn[0]]
+    for k in range(1, len(Q)):
+        v = _rl_sub(Q[k], Q[k - 1])
+        cand, face = _rl_add(p, v), None
+        for b in near:
+            loc_c, inside = _th_inside(b, cand, m)
+            if not inside:
+                continue
+            loc_p = _th_inside(b, p, m)[0]
+            vl = (_rl_dot(v, b[1][0]), _rl_dot(v, b[1][1]), _rl_dot(v, b[1][2]))
+            t_in, axis = -1.0, None
+            for i in range(3):  # slab test: where the step enters the box
+                if abs(vl[i]) < 1e-12:
+                    continue
+                t1 = (-(b[2][i] + m) - loc_p[i]) / vl[i]
+                t2 = ((b[2][i] + m) - loc_p[i]) / vl[i]
+                t = min(t1, t2)
+                if t > t_in:
+                    t_in, axis = t, i
+            if axis is None or t_in < 0.0:  # already inside (it started there): out by the nearest face
+                cand, face = _th_push(F, cand, m)
+                continue
+            face = _rl_mul(b[1][axis], -1.0 if vl[axis] > 0.0 else 1.0)
+            hit = _rl_add(p, _rl_mul(v, t_in))
+            rest = (1.0 - t_in) * _rl_len(v)
+            slide = _rl_perp(face, v)
+            if _rl_len(slide) < 0.2 * _rl_len(v):  # head-on: slide the way the leaf was heading
+                slide = _rl_perp(face, heading)
+            slide = _rl_norm(slide, _rl_any_perp(face))
+            cand = _rl_add(_rl_add(hit, _rl_mul(face, 1e-5)), _rl_mul(slide, rest))
+            loc_c, inside = _th_inside(b, cand, m)
+            if inside:  # still in (a corner, or a box thinner than a step): back out of the face it hit, never
+                k = axis  # through the far one
+                want = (b[2][k] + m + 1e-5) * (1.0 if _rl_dot(face, b[1][k]) > 0.0 else -1.0)
+                cand = _rl_add(cand, _rl_mul(b[1][k], want - loc_c[k]))
+            cand, again = _th_push(F, cand, m)  # into another blocker: out of that one too
+            face = again or face
+        out.append(cand)
+        nout.append(face or Nn[k])
+        p = cand
+    return out, nout
+
+
+def thatch_build(frame, settings, blockers=None):
     """Everything a roof is made of (pure maths): {"straw": mesh,
     "underlay": mesh or None, "pieces", "capped", "field"} with meshes as
     (world points, counts, connects, us, vs, uv ids). "level" is the Detail
-    level built (0 Proxy: no straw, the underlay shows the roof's shape)."""
+    level built (0 Proxy: no straw, the underlay shows the roof's shape).
+    blockers: world boxes ({"c", "u", "h"}) the thatch bends round."""
     s = dict(THATCH_DEFAULTS)
     s.update(settings or {})
     s, level, under_res = _th_detail(s)
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
+    F.blockers = _th_blockers_in_roof(frame, blockers)
+    span = F.span
+    if s["style"] == "Palm Fronds":  # leaves keep half their width off a blocker
+        F.block_gap = 0.5 * max(float(s["leaf_width"]), float(s["top_leaf_width"])) * span
+    elif s["style"] == "Leaf Panels":
+        F.block_gap = 0.01 * span
+    else:
+        F.block_gap = 0.5 * float(s["piece_width"]) * span
     G = _th_grid(F, int(s["resolution"]))
     out = {"pieces": 0, "capped": False, "field": F, "underlay": None, "level": level}
     straw = None
@@ -21942,6 +22170,122 @@ def thatch_box(root):
     return found[0] if found else None
 
 
+def _th_blocker_box(node):
+    """A blocker as a world box {"id", "c", "u", "h"}: a mesh's own bounding
+    box through its transform (rotated, scaled), anything else (a group) its
+    world bounding box. None when it's gone or flat."""
+    found = cmds.ls(node, long=True) or []
+    if not found:
+        return None
+    node = found[0]
+    shape = _log_shape(node)
+    if shape:
+        m = cmds.xform(node, q=True, matrix=True, worldSpace=True)
+        lo = cmds.getAttr(shape + ".boundingBoxMin")[0]
+        hi = cmds.getAttr(shape + ".boundingBoxMax")[0]
+        rows = [tuple(m[0:3]), tuple(m[4:7]), tuple(m[8:11])]
+        mid = [(lo[k] + hi[k]) * 0.5 for k in range(3)]
+        c = tuple(m[12 + i] + sum(rows[k][i] * mid[k] for k in range(3)) for i in range(3))
+        u = [_rl_norm(rows[k], (float(k == 0), float(k == 1), float(k == 2))) for k in range(3)]
+        h = [0.5 * _rl_len(rows[k]) * (hi[k] - lo[k]) for k in range(3)]
+    else:
+        bb = cmds.exactWorldBoundingBox(node)
+        c = ((bb[0] + bb[3]) * 0.5, (bb[1] + bb[4]) * 0.5, (bb[2] + bb[5]) * 0.5)
+        u = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+        h = [(bb[3] - bb[0]) * 0.5, (bb[4] - bb[1]) * 0.5, (bb[5] - bb[2]) * 0.5]
+    if min(h) < 1e-6:
+        return None
+    return {"id": (cmds.ls(node, uuid=True) or [""])[0], "c": c, "u": u, "h": h}
+
+
+def thatch_blockers(root):
+    """The blockers a roof bends round that still exist (nodes)."""
+    out = []
+    for uid in thatch_data(root).get("blockers") or []:
+        found = cmds.ls(uid, long=True)
+        if found:
+            out.append(found[0])
+    return out
+
+
+def _th_blocker_boxes(data):
+    """World boxes of a roof's blockers as they are now (gone ones left out)."""
+    boxes = []
+    for uid in data.get("blockers") or []:
+        found = cmds.ls(uid, long=True)
+        b = _th_blocker_box(found[0]) if found else None
+        if b:
+            boxes.append(b)
+    return boxes
+
+
+def _th_same_boxes(a, b, tol=1e-5):
+    if len(a or []) != len(b or []):
+        return False
+    for x, y in zip(a or [], b or []):
+        if x.get("id") != y.get("id"):
+            return False
+        vals = [(p, q) for k in ("c", "h") for p, q in zip(x[k], y[k])]
+        vals += [(p, q) for i in range(3) for p, q in zip(x["u"][i], y["u"][i])]
+        if any(abs(p - q) > tol * max(1.0, abs(p)) for p, q in vals):
+            return False
+    return True
+
+
+def link_thatch_blockers(roots, nodes, add=True):
+    """Make nodes blockers of roots (add) or stop them being blockers, and
+    rebuild. Live edit (out of the undo queue, like the settings). Returns
+    update_thatch_roofs' report."""
+    ids = [u for u in ((cmds.ls(n, uuid=True) or [None])[0] for n in nodes) if u]
+    changes = {}
+    for root in roots:
+        if not is_thatch_roof(root):
+            continue
+        have = list(thatch_data(root).get("blockers") or [])
+        if add:
+            new = have + [u for u in ids if u not in have and u != thatch_data(root).get("box")]
+        else:
+            new = [u for u in have if u not in ids]
+        changes[root] = {"blockers": new}
+    return update_thatch_roofs(changes)
+
+
+def create_thatch_blocker(root):
+    """A blocker box (one Ctrl+Z) the roof bends round: wireframe, never
+    renders, selected, standing like a wall across the roof's +end (move,
+    rotate and scale it to the wall, lower roof or beam it stands for). It's
+    linked to the roof straight away (a live edit). Returns the node."""
+    data = thatch_data(root)
+    frame = data.get("frame")
+    if not frame:
+        raise ValueError("the roof has no frame to place a blocker by")
+    o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
+    L, W, H = frame["L"], frame["W"], frame["H"]
+    sx, sy, sz = 0.15 * W, 1.6 * H, 2.6 * W
+    mid = reduce_add((o, _rl_mul(a, L + 0.5 * sx), _rl_mul(y, 0.5 * sy - 0.3 * H)))
+    with UndoChunk("Thatch blocker"):
+        name = "thatchBlocker%04d" % _th_free_number("thatchBlocker%04d")
+        node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
+        shape = _log_shape(node)
+        cmds.addAttr(node, longName=THATCH_BLOCKER_ATTR, attributeType="bool", defaultValue=True)
+        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                     "visibleInRefractions"):
+            if cmds.attributeQuery(attr, node=shape, exists=True):
+                cmds.setAttr(shape + "." + attr, False)
+        cmds.setAttr(node + ".overrideEnabled", True)
+        cmds.setAttr(node + ".overrideShading", False)
+        cmds.setAttr(node + ".overrideColor", 13)  # red wireframe: not the roof's box
+        m = [a[0] * sx, a[1] * sx, a[2] * sx, 0.0, y[0] * sy, y[1] * sy, y[2] * sy, 0.0,
+             c[0] * sz, c[1] * sz, c[2] * sz, 0.0, mid[0], mid[1], mid[2], 1.0]
+        parent = cmds.listRelatives(root, parent=True, fullPath=True)
+        if parent:
+            node = long_name(cmds.parent(node, parent[0])[0])
+        cmds.xform(node, matrix=m, worldSpace=True)
+        cmds.select(node, replace=True)
+    link_thatch_blockers([root], [node])
+    return node
+
+
 def _th_root_up(node):
     """The roof group node belongs to (itself or a parent), baked or not."""
     while node:
@@ -21953,8 +22297,8 @@ def _th_root_up(node):
 
 
 def thatch_selection():
-    """(roofs, boxes): live roofs picked by any of their parts or their box,
-    and the other selected meshes (each could be a box)."""
+    """(roofs, boxes): live roofs picked by any of their parts, their box or
+    a blocker, and the other selected meshes (each could be a box)."""
     roofs, boxes = [], []
     by_box = None
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
@@ -21972,6 +22316,9 @@ def thatch_selection():
             for r in thatch_roofs():
                 uid = thatch_data(r).get("box")
                 if uid:
+                    by_box.setdefault(uid, r)
+            for r in thatch_roofs():  # a blocker picks the roof it blocks
+                for uid in thatch_data(r).get("blockers") or []:
                     by_box.setdefault(uid, r)
         uid = (cmds.ls(node, uuid=True) or [None])[0]
         if uid in by_box:
@@ -22064,6 +22411,7 @@ def make_thatch_roof(box, settings=None, select=False):
         data = dict(s)
         data["box"] = cmds.ls(box, uuid=True)[0]
         data["frame"] = frame
+        data["blockers"], data["blocker_boxes"] = [], []
         cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
         for part, material in (("straw", THATCH_MATERIAL), ("underlay", THATCH_UNDER_MATERIAL)):
             node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
@@ -22112,9 +22460,11 @@ def update_thatch_roofs(changes):
         if not frame:
             report["errors"].append((root, "no box to build from"))
             continue
-        built = thatch_build(frame, s)
+        boxes = _th_blocker_boxes(data)
+        built = thatch_build(frame, s, boxes)
         data.update(s)
         data["frame"] = frame
+        data["blocker_boxes"] = boxes
         with NoUndo():
             cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
             report["faces"] += _th_write(root, frame, s, built)
@@ -22124,16 +22474,29 @@ def update_thatch_roofs(changes):
     return report
 
 
-def thatch_box_moved(root):
-    """True when the roof's box has moved or changed size since the last build."""
-    box = thatch_box(root)
-    if not box:
-        return False
+def thatch_state(root):
+    """What a roof is built from, as it is in the scene now: (its box's
+    frame or the stored one, its blockers' world boxes)."""
     data = thatch_data(root)
-    try:
-        return not _th_same_frame(thatch_frame(box, data.get("ridge", "Auto")), data.get("frame"))
-    except ValueError:
-        return False
+    frame = data.get("frame")
+    box = thatch_box(root)
+    if box:
+        try:
+            frame = thatch_frame(box, data.get("ridge", "Auto"))
+        except ValueError:
+            pass
+    return frame, _th_blocker_boxes(data)
+
+
+def _th_same_state(a, b):
+    return bool(a and b) and _th_same_frame(a[0], b[0]) and _th_same_boxes(a[1], b[1])
+
+
+def thatch_box_moved(root):
+    """True when the roof's box (or a blocker) has moved, changed size or
+    gone since the last build."""
+    data = thatch_data(root)
+    return not _th_same_state(thatch_state(root), (data.get("frame"), data.get("blocker_boxes") or []))
 
 
 def rebuild_stale_thatch():
@@ -22159,24 +22522,25 @@ def rebuild_stale_thatch():
             frame = data.get("frame")
             if frame:
                 s = thatch_settings_only(data)
-                _th_write(root, frame, s, thatch_build(frame, s))
+                _th_write(root, frame, s, thatch_build(frame, s, data.get("blocker_boxes")))
     return stale
 
 
 def bake_thatch(roofs):
     """Keep roofs as plain meshes (one Ctrl+Z): the tool stops editing them
     and deletes the boxes it made that no other roof follows. The settings
-    move to a hidden attribute only a redo uses. Returns (baked, boxes
-    removed)."""
+    move to a hidden attribute only a redo uses. Blocker boxes the tool made
+    go too when no other roof uses them. Returns (baked, boxes removed)."""
     done, gone = [], []
     with UndoChunk("Thatch bake"):
-        boxes = set()
+        boxes, blockers = set(), set()
         for root in roofs:
             if not is_thatch_roof(root):
                 continue
             box = thatch_box(root)
             if box:
                 boxes.add(box)
+            blockers.update(thatch_blockers(root))
             if cmds.attributeQuery(THATCH_BAKED, node=root, exists=True):
                 cmds.deleteAttr(root + "." + THATCH_BAKED)
             cmds.renameAttr(root + "." + THATCH_SETTINGS, THATCH_BAKED)
@@ -22186,6 +22550,12 @@ def bake_thatch(roofs):
             if box not in still and cmds.attributeQuery(THATCH_BOX_ATTR, node=box, exists=True):
                 gone.append(short_name(box))
                 cmds.delete(box)
+        used = set(b for r in thatch_roofs() for b in thatch_blockers(r))
+        for node in sorted(blockers):
+            if node not in used and cmds.objExists(node) and \
+                    cmds.attributeQuery(THATCH_BLOCKER_ATTR, node=node, exists=True):
+                gone.append(short_name(node))
+                cmds.delete(node)
     return done, gone
 
 
@@ -22360,6 +22730,26 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "gaps", "Gaps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Patchy thatch: planes, pieces or panels left out in clumps (the underlay shows, or the sky with it "
             "off).")
+        card.add(sec)
+        sec = self.block_sec = Section("Blockers", expanded=False)
+        self.block_label = hint_label("Boxes the thatch bends round: a wall the roof butts up against, a lower "
+                                      "roof the eave leaves lie on. Leaves that hit one slide along its face; "
+                                      "the rest hang free. Move one and the roof follows.")
+        sec.add_full(self.block_label)
+        add_b = secondary_button("Add Blocker", "A red wireframe box (never renders) standing like a wall across "
+                                                "the roof's + end, already a blocker: move, rotate and scale it "
+                                                "to the wall, lower roof or beam.")
+        add_b.clicked.connect(lambda *_: self.add_blocker())
+        use_b = secondary_button("Use Selected", "Make the selected meshes or groups blockers of the roof you're "
+                                                 "editing (their bounding boxes, rotated with them).")
+        use_b.clicked.connect(lambda *_: self.use_blockers())
+        rem_b = secondary_button("Remove", "Stop the selected blockers blocking the roof (or all of its "
+                                           "blockers when none is selected).")
+        rem_b.clicked.connect(lambda *_: self.remove_blockers())
+        sel_b = secondary_button("Select", "Select the roof's blockers.")
+        sel_b.clicked.connect(lambda *_: self.select_blockers())
+        sec.add_full(button_row(add_b, use_b))
+        sec.add_full(button_row(rem_b, sel_b))
         card.add(sec)
         sec = Section("Levels")
         row(sec, "levels", "Levels", IntField(1, 12, 1, 8),
@@ -22616,6 +23006,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             else:
                 text = "Nothing selected."
             self.sel_label.setText(text)
+            self.block_label.setText(self._blocker_text(root))
             self.step_box.set_state("done" if boxes or root else "current")
             self.step_make.set_state("current" if boxes else ("done" if root else "todo"))
             for step in (self.step_shape, self.step_thatch):
@@ -22757,6 +23148,77 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         else:
             self.set_status("No roof box to select (select a roof, or it was deleted).", level="warn")
 
+    def _blocker_text(self, root):
+        names = [short_name(n) for n in thatch_blockers(root)] if root else []
+        if not names:
+            return "No blockers. Add one, or select walls / lower roofs and press Use Selected."
+        return "Blockers: %s." % ", ".join(names[:6]) + (" (+%d)" % (len(names) - 6) if len(names) > 6 else "")
+
+    def _picked(self):
+        """The selected transforms that aren't part of a roof (nor a roof's box)."""
+        roofs = set(thatch_roofs())
+        boxes = set(thatch_box(r) for r in roofs)
+        out = []
+        for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+            if cmds.objectType(node, isAType="shape"):
+                node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+            if node and node not in out and node not in boxes and not _th_root_up(node) and \
+                    cmds.objectType(node, isAType="transform"):
+                out.append(node)
+        return out
+
+    @ui_safe
+    def add_blocker(self):
+        root = self.target()
+        if not root:
+            self.set_status("Select (or make) a roof first: the blocker is added to it.", level="warn")
+            return
+        node = create_thatch_blocker(root)
+        self._watch_box()
+        self.block_label.setText(self._blocker_text(root))
+        self.set_status("Added %s to %s: move, rotate and scale it to the wall or lower roof; the roof follows."
+                        % (short_name(node), short_name(root)), level="fixed")
+
+    @ui_safe
+    def use_blockers(self):
+        root = self.target()
+        picked = self._picked()
+        if not root or not picked:
+            self.set_status("Select the walls / lower roofs (and have a roof on the panel), then Use Selected.",
+                            level="warn")
+            return
+        self._rebuild_report(link_thatch_blockers([root], picked), "Blocked by %d node(s):" % len(picked))
+        self._watch_box()
+        self.block_label.setText(self._blocker_text(root))
+
+    @ui_safe
+    def remove_blockers(self):
+        root = self.target()
+        if not root:
+            self.set_status("No roof on the panel.", level="warn")
+            return
+        picked = [n for n in self._picked() if n in thatch_blockers(root)] or thatch_blockers(root)
+        if not picked:
+            self.set_status("%s has no blockers." % short_name(root))
+            return
+        self._rebuild_report(link_thatch_blockers([root], picked, add=False), "Unblocked %d:" % len(picked))
+        self._watch_box()
+        self.block_label.setText(self._blocker_text(root))
+
+    @ui_safe
+    def select_blockers(self):
+        root = self.target()
+        nodes = thatch_blockers(root) if root else []
+        if nodes:
+            cmds.select(nodes, replace=True)
+            self.set_status("Selected %d blocker(s)." % len(nodes))
+        else:
+            self.set_status("No blockers to select.", level="warn")
+
+    def _rebuild_report(self, report, verb):
+        self.set_status("%s rebuilt %d roof(s): %s faces." % (verb, len(report["done"]),
+                                                             "{:,}".format(report["faces"])))
+
     @ui_safe
     def rebuild(self):
         roofs = self._edit_roofs() or thatch_roofs()
@@ -22808,42 +23270,40 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                 reg.remove(job)
 
     def _poll_box(self):
-        """Rebuild the roof being edited when its box has changed (vertices
-        included) and held still for one poll."""
+        """Rebuild the roof being edited when its box or a blocker has changed
+        (vertices included) and held still for one poll."""
         try:
             root = self.target()
-            box = thatch_box(root) if root and self.follow.value() else None
-            if not box:
+            if not root or not self.follow.value() or not (thatch_box(root) or thatch_data(root).get("blockers")):
                 self._seen = None
                 return
             data = thatch_data(root)
-            try:
-                frame = thatch_frame(box, data.get("ridge", "Auto"))
-            except ValueError:
-                return
-            if _th_same_frame(frame, data.get("frame")):
+            state = thatch_state(root)
+            if _th_same_state(state, (data.get("frame"), data.get("blocker_boxes") or [])):
                 self._seen = None
-            elif self._seen is not None and _th_same_frame(frame, self._seen):
+            elif self._seen is not None and _th_same_state(state, self._seen):
                 self._seen = None
                 self._rebuild({root: {}}, "Followed the box:")
             else:
-                self._seen = frame  # still moving: wait for it to settle
+                self._seen = state  # still moving: wait for it to settle
         except Exception:
             traceback.print_exc()
 
     def _watch_box(self):
-        """Rebuild the roof being edited soon after its box moves (the jobs
-        only start a timer; the roof is rebuilt once the drag pauses). Vertex
-        edits are caught by _poll_box."""
+        """Rebuild the roof being edited soon after its box or a blocker moves
+        (the jobs only start a timer; the roof is rebuilt once the drag
+        pauses). Vertex edits are caught by _poll_box."""
         self._kill(self._box_jobs)
         self._box_jobs = []
         root = self.target()
-        box = thatch_box(root) if root else None
-        if not box or not self.follow.value() or maya_main_window() is None:
+        if not root or not self.follow.value() or maya_main_window() is None:
             return
-        for attr in ("translate", "rotate", "scale", "shear"):
-            self._box_jobs.append(cmds.scriptJob(attributeChange=[box + "." + attr, lambda: self._box_timer.start()],
-                                                 killWithScene=True))
+        nodes = ([thatch_box(root)] if thatch_box(root) else []) + thatch_blockers(root)
+        for node in nodes:
+            for attr in ("translate", "rotate", "scale", "shear"):
+                self._box_jobs.append(cmds.scriptJob(attributeChange=[node + "." + attr,
+                                                                      lambda: self._box_timer.start()],
+                                                     killWithScene=True))
         _registry()["jobs"].extend(self._box_jobs)
 
     def _install_jobs(self):

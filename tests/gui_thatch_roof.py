@@ -256,6 +256,32 @@ def main():
         cmds.setAttr(house + ".visibility", True)
     finally:
         cmds.undoInfo(stateWithoutFlush=True)
+
+    # --- blockers: Add Blocker, move it (the roof follows), Remove
+    panel.block_sec.header.setChecked(True)
+    panel.add_blocker()
+    pump()
+    blk = ns["thatch_blockers"](root)
+    check("Add Blocker makes a blocker on the roof", len(blk) == 1 and "Added" in panel.status.text() and
+          "Blockers:" in panel.block_label.text(), panel.status.text())
+    blk = blk[0]
+    cmds.xform(blk, scale=(0.3, 5.0, 2.4), translation=(4.3, 4.2, 1.3), worldSpace=True)  # a wall over half a verge
+    wait(1.0)
+    check("moving the blocker rebuilds the roof round it", not ns["thatch_box_moved"](root) and
+          "Followed" in panel.status.text(), panel.status.text())
+    cmds.select(clear=True)
+    frame_on([root, house, blk], direction=(1.0, 0.25, 0.6), dist=1.1)
+    snap("23_blocker_half_wall.png")
+    scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
+    scroll.ensureWidgetVisible(panel.block_sec, 0, 0)
+    pump()
+    window.grab().save(os.path.join(OUT, "24_panel_blockers.png"))
+    scroll.verticalScrollBar().setValue(0)
+    panel.remove_blockers()
+    pump()
+    check("Remove stops it blocking", not ns["thatch_blockers"](root) and "Unblocked" in panel.status.text(),
+          panel.status.text())
+    cmds.delete(blk)
     edit(detail="Medium", style="Planes", density=0.35)
     frame_on(straw, direction=(0.2, 0.45, 1.0), dist=0.3)
     snap("22_planes_underlay_relief_close.png")

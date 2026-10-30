@@ -383,6 +383,36 @@
     inner moved together, so it stays closed) and, under fronds, thins to
     20% within 0.6 leaf of those edges (a full-thickness slab read as a
     plank at the eave). Same topology as the plain shell; relief 0 = old.
+  - **Blockers** (the user, 2026-10-30: "add a blocker cube ... the fronds
+    react around it", dynamic, not heavy):
+    - Stored on the roof's data: `blockers` (uuids) and `blocker_boxes`
+      (world boxes {"id", "c", "u", "h"} at the last build: `_th_blocker_box`
+      = a mesh's own bbox through its matrix, else the world bbox).
+      `thatch_state` / `_th_same_state` compare frame + boxes, so
+      `thatch_box_moved` and the panel's poll / attributeChange jobs also
+      catch blockers moving, scaling or being deleted (or an undone Add).
+      Linking (`link_thatch_blockers`) is a live edit (NoUndo) like the
+      settings; `create_thatch_blocker` is an UndoChunk (red wireframe box
+      across the + end, `THATCH_BLOCKER_ATTR`) then links outside it.
+    - Engine: `thatch_build(..., blockers)` maps each world box's 8 corners
+      into roof space (`_th_to_roof`: affine for a plain frame, Newton
+      through the corners' trilinear lattice otherwise) and refits an
+      orthonormal box (`F.blockers`). `_th_drape` walks a leaf's
+      centreline: a step that would enter a box (grown by `F.block_gap`,
+      half a leaf width) stops where it enters (slab test) and the rest of
+      its length slides along that face (head-on: along the leaf's
+      heading), normals = the face's, so the leaf lies flat; steps that
+      miss are kept (free hanging). A leaf starting inside returns None
+      (dropped: pushing it out of the nearest face popped leaves out of
+      the far side of walls); panels and cards push instead (else whole
+      panels vanished). Tubes keep their longest run outside. Shells:
+      `_th_push` per point. Cap leaves' crest point is pushed too (it's
+      moved after the drape). Bbox early-out per leaf.
+    - Testing note: from about 13:30 that day, `mayapy` (2024 and 2025)
+      crashed at startup when launched from Claude's shell (access violation
+      in `TrunTimeCommandManager::load`), even on an empty script, while
+      `mayabatch.exe -script` worked. Run the headless tests in mayabatch
+      with a stand-in `maya.standalone` if that happens again.
   - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
     values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge

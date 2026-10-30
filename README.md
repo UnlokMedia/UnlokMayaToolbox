@@ -351,6 +351,23 @@ detail (just its shell, instant), get the shape right, then raise
      in the middle and drags the slopes down), **Ragged eaves** (an uneven,
      hacked-off edge; planes and pieces hang further in places, panels
      fray more) and **Gaps** (pieces or panels left out in clumps).
+   - **Blockers** (for roofs that meet other geometry): boxes the thatch
+     bends round. **Add Blocker** stands a red wireframe box (never
+     renders) across the roof's + end, already blocking: move, rotate and
+     scale it to the wall the roof butts up against, a lower roof under an
+     eave, a beam. **Use Selected** makes your own meshes or groups blockers
+     (their bounding boxes, rotated with them); **Remove** / **Select**.
+     Every leaf, plane, piece and panel is walked from its top: a step that
+     would go into a blocker stops at the face it hits and carries on along
+     it, so leaves butt up flat against a wall and lie down on a lower roof,
+     and off the face's edge they fall on as before; leaves that miss it
+     hang free (a wall over half a verge leaves the other half hanging). A
+     leaf that would grow out of a blocker is left out, sticks and poles are
+     cut where they go in, and the surface / underlay are pushed flat
+     against it. Move, scale or delete a blocker and the roof follows, like
+     its box; selecting a blocker puts its roof on the panel; Bake removes
+     the blockers the tool made (your own meshes stay). Exact on a plain
+     box; through a deformed box blockers are fitted approximately.
    - **Levels:** tiers from the eaves to the ridge cap; each level's bottom
      edge stands proud of the one below by *Level lip*. One level is a plain
      roof with a rounded eave lip.
@@ -1205,10 +1222,14 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   layer, the ridge cap, the gable fringe (none on a hip), the limp under
   layer against the stiff top layer at the eaves, the Detail levels (Proxy
   shell only, the same tiles and fronds at every level) and the underlay's
-  relief (still a closed shell, same topology).
+  relief (still a closed shell, same topology). Blockers: Add Blocker, a wall
+  across the gable, one over half the verge (the open half still hangs), a
+  lower roof the eave leaves lie on, nothing inside a blocker in any style,
+  following a moved / deleted blocker, undo, bake, and the inverse of a
+  deformed box's lattice.
 - `tests/gui_thatch_roof.py`: drives the Thatch Roof panel in a real Maya
   session (box on a house, Make Roof, live edits, following the box, presets,
-  the palm presets and Detail levels, undo / redo, bake) and saves pictures
+  the palm presets and Detail levels, blockers, undo / redo, bake) and saves pictures
   of every shape and style (palm close-ups, eaves, gables, hips, the roof
   seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with

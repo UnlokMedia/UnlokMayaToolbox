@@ -556,6 +556,91 @@ def run():
     o = build(shape="Lean-to", end_a="Gable", end_b="Hip")
     check("a palm lean-to builds", o["pieces"] > 50)
 
+    # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
+    cmds.file(new=True, force=True)
+    cmds.undoInfo(state=True, infinity=True)
+    b = box("blk")
+    root = tb["make_thatch_roof"](b, tb["thatch_preset"]("Palm: nipa shingles (neat)"))["root"]
+
+    def roof_pts(r=None):
+        out = []
+        for part in ("straw", "underlay"):
+            node = tb["thatch_parts"](r or root)[part]
+            if cmds.getAttr(node + ".visibility"):  # plain tuples: an MPoint outlives its array badly
+                out.extend((q.x, q.y, q.z) for q in mesh_fn(tb, node).getPoints(om.MSpace.kWorld))
+        return out
+
+    def inside(pts, node, tol=0.001):
+        bx = tb["_th_blocker_box"](node)
+        n = 0
+        for p in pts:
+            d = (p[0] - bx["c"][0], p[1] - bx["c"][1], p[2] - bx["c"][2])
+            n += all(abs(sum(d[i] * bx["u"][k][i] for i in range(3))) < bx["h"][k] - tol for k in range(3))
+        return n
+    n_free = len(roof_pts())
+    t0 = time.time()
+    wall = tb["create_thatch_blocker"](root)
+    dt = time.time() - t0
+    check("Add Blocker: a red wireframe box that never renders, selected, blocking the roof",
+          cmds.attributeQuery(tb["THATCH_BLOCKER_ATTR"], node=wall, exists=True) and
+          not cmds.getAttr(tb["_log_shape"](wall) + ".primaryVisibility") and
+          cmds.ls(selection=True, long=True) == [wall] and tb["thatch_blockers"](root) == [wall],
+          "%s (%.2fs)" % (wall, dt))
+    check("a wall across the gable: nothing goes into it", inside(roof_pts(), wall) == 0,
+          "%d of %d points inside" % (inside(roof_pts(), wall), len(roof_pts())))
+    check("selecting a blocker picks its roof", (cmds.select(wall) or tb["thatch_selection"]()) == ([root], []))
+    cmds.xform(wall, scale=(0.3, 5.0, 2.2), translation=(3.25, 4.0, 1.4), worldSpace=True)  # half the verge
+    check("moving a blocker is noticed", tb["thatch_box_moved"](root))
+    tb["update_thatch_roofs"]({root: {}})
+    pts = roof_pts()
+    edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
+    free = sum(1 for p in pts if p[0] > edge + 0.03 and p[2] < -0.4 and p[1] < 5.0)
+    past = sum(1 for p in pts if p[0] > 3.45 and 0.8 < p[2] < 2.2)  # well behind the wall (not round its end)
+    check("a wall over half the verge: leaves hang free on the open half, none get past the wall",
+          inside(pts, wall) == 0 and free > 50 and past == 0 and not tb["thatch_box_moved"](root),
+          "inside %d, free %d, past %d" % (inside(pts, wall), free, past))
+    low = box("lowRoof", size=(4.0, 0.3, 2.0), move=(0.0, 1.9, 3.3))
+    tb["link_thatch_blockers"]([root], [low])
+    pts = roof_pts()
+    lying = sum(1 for p in pts if abs(p[0]) < 1.9 and 2.4 < p[2] < 4.2 and 2.05 < p[1] < 2.25)
+    check("a lower roof under the eave: the hanging leaves lie down on it, none go into it",
+          inside(pts, low) == 0 and lying > 100, "inside %d, lying on it %d" % (inside(pts, low), lying))
+    for style in ("Surface", "Planes", "3D Pieces", "Leaf Panels", "Palm Fronds"):
+        t0 = time.time()
+        tb["update_thatch_roofs"]({root: {"style": style, "underlay": True}})
+        dt = time.time() - t0
+        pts = roof_pts()
+        check("%s with two blockers: nothing inside either (%.2fs)" % (style, dt),
+              inside(pts, wall) == 0 and inside(pts, low) == 0 and dt < 6.0,
+              "%d / %d inside" % (inside(pts, wall), inside(pts, low)))
+    tb["update_thatch_roofs"]({root: {"underlay": False}})
+    tb["link_thatch_blockers"]([root], [low], add=False)
+    check("Remove: the lower roof stops blocking", tb["thatch_blockers"](root) == [wall])
+    cmds.delete(wall)
+    check("deleting a blocker is noticed", tb["thatch_box_moved"](root))
+    tb["update_thatch_roofs"]({root: {}})
+    check("with its blockers gone the roof is whole again", len(roof_pts()) == n_free,
+          "%d vs %d points" % (len(roof_pts()), n_free))
+    wall = tb["create_thatch_blocker"](root)
+    cmds.undo()
+    check("undoing Add Blocker removes the box, and the roof sees it", not cmds.objExists(wall) and
+          tb["thatch_box_moved"](root))
+    tb["update_thatch_roofs"]({root: {}})
+    wall = tb["create_thatch_blocker"](root)
+    tb["link_thatch_blockers"]([root], [low])
+    done, gone = tb["bake_thatch"]([root])
+    check("bake removes the blocker the tool made, keeps your own meshes",
+          not cmds.objExists(wall) and cmds.objExists(low) and "thatchBlocker0001" in gone, str(gone))
+    # blockers through a deformed box: world -> roof space undoes the lattice
+    cmds.file(new=True, force=True)
+    b = box("warp")
+    cmds.move(0, 0.7, 0.4, ["warp.vtx[2]", "warp.vtx[3]"], relative=True)
+    f = tb["thatch_frame"](b)
+    pts = [(x * 0.7, y * 0.9, z * 0.5) for x in (-3, 0, 2.9) for y in (-0.2, 1.5, 3.1) for z in (-2, 0.3, 2.1)]
+    back = tb["_th_to_roof"](f, tb["_th_to_world"](f, (pts, [], [], [], [], []))[0])
+    check("a deformed box's lattice is undone exactly for blockers",
+          max(abs(a[i] - c_[i]) for a, c_ in zip(pts, back) for i in range(3)) < 1e-6)
+
     # --- Smart UDIM: surfaces are Keep UVs, stacked planes Hands off
     cmds.file(new=True, force=True)
     grp = cmds.group(empty=True, name="hut_GRP")
