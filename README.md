@@ -353,7 +353,10 @@ detail (just its shell, instant), get the shape right, then raise
      hips steeper or shallower than the sides; *Half-hip at* sets where the
      half-hip starts. *Ridge along* picks the ridge's direction (Auto: the
      box's longer side).
-   - **Overhang, Thickness, Softness** (how round the ridge and hips are),
+   - **Overhang** is 0 by default (every preset too): the roof is exactly
+     the box, so make the box bigger for eaves; the slider adds a little on
+     top if you want it.
+   - **Thickness, Softness** (how round the ridge and hips are),
      **Sag** (old thatch dips; below 0 it bellies out) and **Lumps**.
    - **Makeshift** (for shacks rather than clean cottages): **Warp**
      (crooked rafters, a wavy eave line), **Ridge sag** (the ridge pole dips
@@ -437,6 +440,17 @@ detail (just its shell, instant), get the shape right, then raise
        alpha fits its outline), sticks, rachis and poles in the strip on the
        right (*Sticks, rachis and ridge poles*); stacks and mirroring as
        below.
+     - **Levels** (step 3) work with palm too: every level starts a fresh
+       course right at its step, its leaves hanging down over the level
+       below.
+     - **3D Leaflets** have a real *Leaf thickness* (3 mm on a 5 m span by
+       default): every leaflet is a closed, thin solid (underside on the same
+       UVs, its edges and tip on a sliver of the strip).
+     - **Sticks, rachis and poles** are built like the frame's members:
+       capped ends, a little natural variation, Sub-D topology with the
+       frame's toggle; the tile sticks and the top fronds' rachis stay on
+       the stacked leaf UVs (the strip on the right), the ridge and hip
+       poles go in the frame's mesh (in the straw without a frame).
      - *Leaf length*, *Density* (1 is about four leaves deep), *Lift* (how
        far the courses stand off), *Bend*, *Segments*.
    - Pieces: *Density* (1 covers the roof about three deep), *Width*,
@@ -463,7 +477,13 @@ detail (just its shell, instant), get the shape right, then raise
      you see from inside, in its own mesh (`woodFrame_C_...`) for a wood
      material. *Style*: **Bamboo** (a node ring every ~35 cm), **Poles**
      (round timber, tapering, a little out of round) or **Sawn**
-     (rectangular: rafters deeper than wide, battens flat). *Rafter
+     (rectangular: rafters deeper than wide, battens flat).
+     *Battens*: **Every course**, **Every 2nd**, **Every 3rd** (fewer
+     horizontal lines, the tiles in between tied to the rafters) or **Per
+     level** (a purlin where each of step 3's *Levels* starts, the way tiered
+     roofs are built). The frame follows the roof's shape (sag, lumps, warp,
+     ridge sag) but not the levels' lips or the cap (thatch, not timber);
+     wall plates sit on the wall tops under the rafters. *Rafter
      spacing*, *Rafter size* (ridge beam 1.4x, hips 1.3x), *Batten size*,
      *Crookedness* (gently crooked members, ends cut unevenly; rafter tops
      always meet the ridge beam). Light topology: a ring every ~25 cm, 6
@@ -489,7 +509,17 @@ detail (just its shell, instant), get the shape right, then raise
    - *Seed* / **Randomize** for the lumps, straw and pieces.
 5. **Finish:** **Select Box**, **Rebuild** (from the box as it is now: handy
    after editing the box's vertices) and **Bake** (one Ctrl+Z): the roof
-   stays as plain meshes and the box goes.
+   stays as plain meshes and the box goes. **Upgrade** brings roofs made
+   by an older version of the toolbox up to date in place (the selected
+   ones, or every roof): it adds the meshes they lack (the frame), keeps
+   their settings, gives settings added since their defaults and rebuilds
+   (one Ctrl+Z for the added meshes). Selecting an old roof says so; no
+   need to remake roofs after updating the toolbox.
+
+**Panel:** step 4 shows the main controls for the chosen style (Detail,
+form, leaf sizes, top layer, neatness, density...); the rest is folded into
+*More controls*, *Underlay*, *Frame* and *UV stacks*. In step 3, Makeshift,
+Blockers, Levels and Ridge cap start folded.
 
 Roofs are `thatchRoof0001_GRP` holding `strawThatch_C_thatchRoof0001_GEP`
 (the surface, or the planes / pieces) and `strawUnderlay_C_thatchRoof0001_GEP`

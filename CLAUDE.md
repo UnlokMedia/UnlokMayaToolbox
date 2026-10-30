@@ -457,6 +457,28 @@
       caps = inset ring + 4 quads. `_th_pack` packs skins and caps.
       `sin(pi * u) ** 0.5` with u a hair over 1 gave complex numbers:
       clamp before powers.
+  - **2026-10-30, fourth round** (the user): overhang 0 by default (box =
+    roof; every preset too). Frame samples `_th_sample_base` (grid P / N:
+    sag, lumps, warp, ridge sag; not the lips / cap). `battens`
+    (`THATCH_BATTENS`: every course / 2nd / 3rd / per level at
+    `_th_level_bottoms`). Palm courses `_th_palm_courses`: restart at each
+    level's step (+0.25 dt; further up a slanting view saw sky through the
+    step). Wall plates sit 2.5 plate radii in from the wall line, level at
+    the lowest rafter they carry (centred on the wall line they sank into
+    the house with no overhang). Fronds' `tube()` hands sticks / rachis /
+    poles to `_th_frame_mesh(..., uv_strip=u_of)` (strip UVs u 0.86..1,
+    caps on it), poles to `F.frame_extra` -> the frame mesh. 3D Leaflets:
+    `leaf_thickness` makes each leaflet a closed solid in `emit` (underside
+    mirrored on the same UVs, side / tip / base walls on u 0.86..0.87).
+    **Upgrade** (`THATCH_VERSION`, `thatch_needs_upgrade`,
+    `upgrade_thatch_roofs`): adds missing parts (`THATCH_PART_MATERIALS`,
+    `_th_make_part`) in an UndoChunk, stamps the version, rebuilds (old
+    settings kept, new keys default via `thatch_settings_only`). Bump
+    `THATCH_VERSION` whenever a roof gains a part or a setting needs a
+    rebuild. Panel step 4 is built from a layout table (main / More
+    controls / Underlay / Frame / UV stacks); `_update_rows` shows rows per
+    style. Not done yet (the user's "desirable"): a quick roof-shape builder
+    (click base points and peaks -> box, pitch, gable / hip ends).
   - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
     values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge
