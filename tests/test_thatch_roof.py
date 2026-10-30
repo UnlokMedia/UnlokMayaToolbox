@@ -406,6 +406,20 @@ def run():
     check("four palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 4 and all(
         tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
         "stacks" not in tb["thatch_preset"](k) for k in palms))
+    def sky_from_inside(straw, n=30):
+        """Rays straight up from under the roof over the walls (the ridge line and a hip end's middle
+        included): the ones that miss every leaf."""
+        fn = mesh_fn(tb, straw)
+        acc = fn.autoUniformGridParams()
+        miss = []
+        for i in range(n + 1):
+            for j in range(n + 1):
+                x, z = -2.8 + 5.6 * i / float(n), -1.85 + 3.7 * j / float(n)
+                hit = fn.closestIntersection(om.MFloatPoint(x, 2.4, z), om.MFloatVector(0.0, 1.0, 0.0),
+                                             om.MSpace.kWorld, 100.0, False, accelParams=acc)
+                if not hit:
+                    miss.append((round(x, 2), round(z, 2)))
+        return miss
     root = None
     for k in palms:
         s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"](k))
@@ -423,13 +437,15 @@ def run():
         tiles = set(int(math.floor(max(0.0, u - 1e-6))) for u in us)
         normals = fn.getNormals(om.MSpace.kWorld)
         up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
-        under = mesh_fn(tb, parts["underlay"])
         check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < 6.0,
               "%d fronds, %d faces" % (rep["pieces"], fn.numPolygons))
         check("%s: 3 stacks, UVs the right way round, leaves face out" % k, tiles == {0, 1, 2} and good > 0.99 and
               up > 0.8, "%s, %.2f%% upright, %.1f%% up" % (sorted(tiles), good * 100, up * 100))
-        check("%s: a closed underlay facing out" % k, cmds.getAttr(parts["underlay"] + ".visibility") and
-              boundary_edges(under) == 0 and signed_volume(under) > 0.0)
+        check("%s: no underlay: the fronds are the whole roof" % k,
+              not cmds.getAttr(parts["underlay"] + ".visibility"))
+        miss = sky_from_inside(parts["straw"])
+        check("%s: no gaps: looking up from inside, every ray hits a leaf" % k, not miss,
+              "%d of %d rays see the sky: %s" % (len(miss), 31 * 31, miss[:5]))
         bb = bbox(parts["straw"])
         check("%s: leaves cover the roof, tips hang past the eaves" % k, bb[1] < 2.5 - 0.05 and bb[4] > 5.3 and
               bb[0] < -3.0 and bb[3] > 3.0, str([round(v, 2) for v in bb]))
@@ -457,6 +473,7 @@ def run():
     # neat underneath: one under layer only (gables, no top layer, cap or fringe), leaflets measured base -> tip
     def leaflet_spread(neat):
         o = build(end_a="Gable", end_b="Gable", top_layer=0.0, ridge_fronds=False, end_fronds=0.0, neat=neat,
+                  sticks=False,
                   mess=1.5, segments=4)
         pts = o["straw"][0]
         per = 2 * 4 + 1
@@ -487,12 +504,20 @@ def run():
 
     def hanging(o):  # past the verge, above the eaves (a hip's eave leaves hang past the end line too)
         return sum(1 for p in o["straw"][0] if p[0] > edge + 0.15 and 2.7 < p[1] < 5.0)
-    g0 = build(end_a="Gable", end_fronds=0.0, end_reach=0.0)
+    g0 = build(end_a="Gable", end_fronds=0.0, end_reach=0.0, edge_hang=0.0)
     g1 = build(end_a="Gable", end_fronds=1.5, end_reach=0.5)
     h1 = build(end_a="Hip", end_fronds=1.5, end_reach=0.5)
     check("gable fringe and reach: leaves hang down past the verge", hanging(g1) > 3 * max(10, hanging(g0)),
           "%d vs %d points" % (hanging(g1), hanging(g0)))
     check("a hipped end has no gable fringe", hanging(h1) < hanging(g1) * 0.05, "%d points" % hanging(h1))
+    # two layers at the edges: the limp under layer hangs, the stiff top layer holds its line
+    limp, stiff = build(top_layer=0.0, edge_hang=1.5), build(top_layer=0.0, edge_hang=0.0)
+    out_limp, out_stiff = max(abs(p[2]) for p in limp["straw"][0]), max(abs(p[2]) for p in stiff["straw"][0])
+    check("Edge hang: past the eaves the under layer hangs down instead of reaching out", out_limp < out_stiff - 0.08,
+          "reach %.3f vs %.3f" % (out_limp, out_stiff))
+    tips = build(top_layer=1.5, end_reach=1.0, edge_hang=1.5)
+    check("the top layer sticks out further at the eaves than the hanging under layer",
+          max(abs(p[2]) for p in tips["straw"][0]) > max(abs(p[2]) for p in limp["straw"][0]) + 0.05)
 
     # detail levels: Proxy is the shell only and quick; the rest keep the layout and add detail
     t0 = time.time()
@@ -520,7 +545,7 @@ def run():
         moved = max(math.sqrt(sum((a[i] - c[i]) ** 2 for i in range(3))) for a, c in zip(plain[0], rel[0]))
         check("%s: the underlay's relief moves it (%.3f m), same topology" % (style, moved),
               len(plain[0]) == len(rel[0]) and plain[2] == rel[2] and moved > 0.01)
-    tb["update_thatch_roofs"]({root: {"underlay_relief": 2.0, "resolution": 120}})
+    tb["update_thatch_roofs"]({root: {"underlay": True, "underlay_relief": 2.0, "resolution": 120}})
     under = mesh_fn(tb, tb["thatch_parts"](root)["underlay"])
     us, vs, good = uv_stats(under)
     check("relief underlay: closed, facing out, UVs in 0..1 the right way round",

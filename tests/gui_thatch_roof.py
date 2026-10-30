@@ -103,7 +103,7 @@ def main():
     persp = [p for p in view if cmds.modelPanel(p, q=True, camera=True) == "persp"][0]
     cmds.setFocus(persp)
     cmds.modelEditor(persp, e=True, displayAppearance="smoothShaded", grid=False, headsUpDisplay=False,
-                     cameras=False, wireframeOnShaded=False)
+                     cameras=False, wireframeOnShaded=False, twoSidedLighting=True)
     cmds.setAttr("persp.focalLength", 50)
 
     # --- a house, a box on it, a roof
@@ -246,12 +246,13 @@ def main():
         else:
             check("%s rebuilds the fronds (%.2fs)" % (d, dt), cmds.getAttr(straw + ".visibility"), panel.status.text())
     bb = cmds.exactWorldBoundingBox(root)
-    cmds.undoInfo(stateWithoutFlush=False)  # look up at the ceiling side from under the roof
+    edit(detail="Medium")
+    cmds.undoInfo(stateWithoutFlush=False)  # look up at the roof from inside: fronds, sticks, no sky
     try:
         cmds.setAttr(house + ".visibility", False)
         cmds.setAttr("persp.translate", bb[3] * 0.3, bb[1] - 0.4, 0.0)
         cmds.viewLookAt("persp", position=(bb[3] * 0.1, bb[4] - 0.6, (bb[2] + bb[5]) * 0.3))
-        snap("21_palm_underlay_ceiling.png")
+        snap("21_palm_inside.png")
         cmds.setAttr(house + ".visibility", True)
     finally:
         cmds.undoInfo(stateWithoutFlush=True)

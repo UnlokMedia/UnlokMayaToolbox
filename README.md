@@ -379,39 +379,46 @@ detail (just its shell, instant), get the shape right, then raise
      roof, V up), on the same stacks as planes: one leaf-panel texture with
      alpha per stack.
    - **Palm Fronds:** palm thatch the way it's built (nipa / attap
-     shingles, palapa, Pacific and beach huts). Half fronds are tied in
-     courses along battens from the eaves up, the rachis (midrib) along the
-     batten and the leaflets hanging down the slope, each tapering from a
-     narrow base to a long tip. Each course's tips stand off the roof a
-     little more than its top, so the course above always lies over it.
-     - **Neat underneath, messy on top:** the under layer is even rows of
-       nearly straight leaflets (*Neat under layer*); a sparser **top
-       layer** of loose fronds lies between the courses, turned, lifted,
-       twisted, curling, some leaflets broken or missing (*Top layer*,
-       *Messiness*, *Droop*). Gaps (Makeshift) leave fronds out in clumps.
-     - **Ends:** the top layer reaches further at the eaves and past the
-       gable verges (*Reach at ends*), where leaves bend down; a fringe of
-       leaves hangs off each gable verge (*Gable fringe*); bottom tips hang
-       past the eaves. A cap of fronds is laid across the ridge from both
-       sides, and hips get leaves laid down the hip line (the courses fan
-       open there) (*Fronds laid across the ridge*).
-     - **Form:** **Cards** (one card per frond for an alpha-mapped frond
-       texture; each fills 0..1, rachis at the top), **Leaflets** (each
+     shingles, palapa, Pacific and beach huts), a whole roof on its own: no
+     underlay needed (the palm presets switch it off), no gaps from outside
+     or from inside, where you see the sticks and the backs of the leaves.
+     - **Under layer, neat:** **tiles** (shingles, ~1 m patches), each a
+       stick with wide leaflets folded over it hanging down the slope, side
+       by side and overlapping their neighbours (*Overlap*), tied in courses
+       a quarter leaf apart from the eaves up, every other course shifted
+       half a tile. A leaflet keeps its full width over its top half, so
+       with the overlap and the courses there's always a leaf over every
+       point. Each course's tips stand off the roof a little more than its
+       top, so the course above lies over it. *Under leaf width* (wide: 11
+       cm on a 5 m span), *Tile width*, *Neat under layer*.
+     - **Top layer, messy:** loose half fronds between the courses, with
+       thinner leaflets (*Top leaf width*) on a rachis, turned, lifted,
+       twisted, curling, some broken or missing (*Top layer*, *Slant*,
+       *Messiness*, *Droop*).
+     - **Edges, two layers:** the under layer is limp, so past the eaves
+       and gable verges its leaves hang down (*Edge hang*); the top layer
+       is stiff and sticks out further (*Reach at ends*). *Gable fringe*
+       adds leaves tied along each verge.
+     - **Caps:** leaves laid over the ridge, down each hip and round a
+       cone's apex from the crest down both sides, ending at the courses'
+       height so they blend in, under a pole along the crest (*Cap the
+       ridge, hips and apex*). Courses wrap continuously round hipped ends.
+     - **Form:** **Cards** (one card per tile / frond for an alpha-mapped
+       texture; each fills 0..1; caps stay leaflets), **Leaflets** (each
        leaflet a flat tapered strip) or **3D Leaflets** (creased down the
-       midrib, with a rounded rachis). Leaflets share one UV layout: the
-       leaflet in true proportions in the left 85% of 0..1 (so a leaf
-       texture with alpha fits its outline), the rachis in the strip on the
-       right; stacks and mirroring as below.
-     - *Leaf length*, *Leaf width* (flatter and wider than straw: 8 cm on a
-       5 m span by default), *Frond width* (the rachis' length along the
-       batten), *Slant* (leaflets lean along the rachis), *Density* (1 is
-       about four leaves deep), *Lift* (how far the courses stand off),
-       *Bend*, *Segments*.
+       midrib, rounder sticks). Leaflets share one UV layout: the leaflet in
+       true proportions in the left 85% of 0..1 (so a leaf texture with
+       alpha fits its outline), sticks, rachis and poles in the strip on the
+       right (*Sticks, rachis and ridge poles*); stacks and mirroring as
+       below.
+     - *Leaf length*, *Density* (1 is about four leaves deep), *Lift* (how
+       far the courses stand off), *Bend*, *Segments*.
    - Pieces: *Density* (1 covers the roof about three deep), *Width*,
      *Length*, *Messiness* (random turn, roll and size), *Lift*, *Bend*,
      *Segments*; 3D pieces also *Sides* and *Flatness*.
    - **Underlay:** a closed shell under the planes / pieces / panels /
-     fronds (its own mesh, for its own material) that holds up close: it's
+     fronds (its own mesh, for its own material; palm roofs don't need it,
+     but it's there if you want one) that holds up close: it's
      coursed like the thatch on it (each course's lower edge stands proud,
      cut into leaf or straw tips staggered course to course, with grain
      running down the slope), its eaves and gable verges end in a fringe of
@@ -447,8 +454,8 @@ stack tiles are kept free). Marking one Auto yourself sticks.
 **Speed:** on a 6 x 4 m roof at the defaults, a surface takes about 0.6 s
 (56,000 faces), planes 1 s (3,500 planes) and 3D pieces 1.4 s (92,000
 faces); the leaf-panel shack about 0.7 s (250 panels). The palm presets take
-about 0.15 s on Proxy, 1.2 s on Rough, 2-2.5 s on Medium (130,000 faces
-with the underlay), 4-5 s on High and 6-8 s on Hero. Shape the roof on
+about 0.1 s on Proxy, 0.7 s on Rough, 1.3-1.6 s on Medium (65,000-100,000
+faces), about 2 s on High and 2.3 s on Hero. Shape the roof on
 Proxy (or lower *Resolution*) if edits feel slow.
 
 ### UV > Smart UDIM (in progress)
@@ -1191,16 +1198,19 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   and end type in each style: closed shells facing out, the roof on its box,
   UVs (0..1 for the surface, stacks in their tiles / columns), undo / redo
   (with the rebuild), save / reopen, live edits, following the box, bake,
-  the Smart UDIM marks and speed. Palm fronds: the presets, tapered leaflets
-  and their UVs, the three forms, a neat under layer against a messy one,
-  the top layer, the ridge cap, the gable fringe (none on a hip), the
-  Detail levels (Proxy shell only, the same fronds at every level) and the
-  underlay's relief (still a closed shell, same topology).
+  the Smart UDIM marks and speed. Palm fronds: the presets (no underlay, and
+  no gaps: rays cast up from inside over the whole footprint, the ridge line
+  and hip ends included, must all hit a leaf), tapered leaflets and their
+  UVs, the three forms, a neat under layer against a messy one, the top
+  layer, the ridge cap, the gable fringe (none on a hip), the limp under
+  layer against the stiff top layer at the eaves, the Detail levels (Proxy
+  shell only, the same tiles and fronds at every level) and the underlay's
+  relief (still a closed shell, same topology).
 - `tests/gui_thatch_roof.py`: drives the Thatch Roof panel in a real Maya
   session (box on a house, Make Roof, live edits, following the box, presets,
   the palm presets and Detail levels, undo / redo, bake) and saves pictures
-  of every shape and style (palm close-ups, eaves, gables, hips, the ceiling
-  side and each Detail level) to `tests/_out/thatch_roof`. Launch it like
+  of every shape and style (palm close-ups, eaves, gables, hips, the roof
+  seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with
   `tests/run_gui_thatch_roof.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real

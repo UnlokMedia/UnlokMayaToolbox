@@ -321,31 +321,50 @@
     t list). One `_th_contour` per course cost 2.4 s on a palm roof's 70
     courses; `_th_contour` is now a one-t wrapper.
   - **Palm Fronds** (`_th_fronds_mesh`; research summary in the side-session
-    notes: nipa / attap shingles folded over battens, courses from the eave
-    up, ridge capped with fronds laid across): half fronds along contour
-    courses (`_th_frond_courses`: battens 0.25 leaf apart / density, the
-    first so tips hang 0.2 leaf past the eave, plus a half course doubling
-    the eave), rachis along the batten, leaflets hanging down. Each
-    leaflet walks the roof on its own (`_th_walk` with yaw = pi + slant,
-    `fall` bends steps off the roof edge down). The first version
-    interpolated leaflets between a frond's column walks: at hips the
-    columns diverge and leaflets became chords across the hip (rungs).
-    Stacking: a leaflet's offset is `rise * d / leaf` (d from its batten,
-    `_th_frond_rise`), so the higher course always lies on top. Layers:
-    under (neat: `m_under = (1 - neat) * ...`), top (between courses,
-    lifted over the under layer's tips, turned / curled / broken, longer at
-    the eave, past the verge by 0.12 + reach / 2 frond), cap (contour 0.42
-    leaf below the ridge, walking up over it, only between the hips'
-    ridge ends: past them it stood up in the air), hip leaves (fan of 7
-    down each hip line from the plane formula; the courses fan open there),
-    gable fringe (straight hanging strips along the verge). `verge()`
-    droops only leaves carried past a course's end (ox / oz); leaves
-    walking off the edge already fall (both together made a trellis).
-    Forms: Cards (`leaf_line` per column), Leaflets (2 verts per row, one
-    tip point), 3D (midrib vertex, rachis on top / cap fronds only). UVs:
-    planar leaflet in u 0..0.85 (`uk_leaf`), rachis 0.88..1, cards 0..1.
-    Random values are keyed to (course, line, frond, leaflet), never to
-    segment counts, so Detail doesn't move anything.
+    notes). The user's brief (2026-10-30, second round): a real two-layer
+    roof that holds up without the underlay, seen from inside too, and NO
+    gaps even with thin leaves. So:
+    - **Under layer = tiles** (`tile_at`): attap shingles, a stick (tube)
+      along the course with wide leaflets hanging from it, spaced
+      `leaf_width * (1 - overlap)`, full width over their top 45%
+      (`prof_tile`). Courses `_th_frond_courses`: 0.25 leaf apart /
+      density, the first 0.4 leaf above the eave so the wide part reaches
+      it; every other course shifted half a tile. Course spacing < the wide
+      part + lateral overlap = covered everywhere. Stacking: offset
+      `2 * stick radius + rise * d / leaf` (d from its stick), so the
+      higher course is on top; sticks sit on the roof surface.
+    - **Top layer** (`frond_at`): half fronds between the courses, thin
+      leaflets (`top_leaf_width`, narrow-base `prof_top`) on a rachis tube,
+      lifted over the under layer; skipped within 0.3 leaf of the ridge.
+    - **Edges:** `_th_walk(fall=)` per layer: the under layer limp
+      (`0.15 + 0.7 * edge_hang` a step off the eave), the top stiff (0.03).
+      Past a gable verge (leaves carried past a course's end, ox / oz)
+      `verge()` turns limp leaves down more the further out, and only sags
+      stiff ones. Sticks are cut at the verge (they showed as a row of
+      pegs).
+    - **Caps** (`crest`): leaves from a crest point down each side with a
+      fixed plan heading (`_th_walk(heading=)`: round a hip's apex the
+      fall line swings along the ridge and cap leaves slid off down the
+      hip, leaving a hole), the first point moved onto the crest so both
+      sides meet; offset from `1.15 rise` at the crest down to the courses'
+      height at the tip; long and short leaves in turn; random turn kept
+      under ~8 degrees (more opened gaps). Ridge: heading +-z from just off
+      the crest. Hips: a fan of 5 headings from straight down the side to
+      straight down the end along the hip line (plane formula). Cone: a
+      radial ring at the apex, 0.9 leaf long. Poles (tubes) along ridge and
+      hips. Lean-to: no cap, a last course at the top.
+    - **Contours for courses** (`_th_contours`): a ridge's two slopes are
+      one loop (key `along` on +z, `1e6 - along` on -z), joined only round
+      a hipped end (`joins`), split at gables; a closed loop starts mid +z
+      side (`_th_closed`), so course lines wrap the hips (the old z-sign
+      split left an open seam down the middle of each hip end). Only
+      closed loops and gable ends carry tiles past a line end.
+    - Each leaflet walks the roof on its own (interpolating between a
+      frond's column walks made chords across hips). Random values are
+      keyed to (course, line, tile, leaflet), never segment counts.
+    - **Gap test:** `tests/test_thatch_roof.py` casts 961 rays up from
+      inside over the footprint (ridge line and hip-end middles included)
+      per palm preset; all must hit the straw mesh.
   - **Detail** (`_th_detail` -> settings, level, underlay grid res):
     Proxy = no straw, underlay forced on, grid <= 48 (0.1 s); Rough = Cards /
     Planes, 2 segments, underlay grid x0.6; High / Hero = segments and the
