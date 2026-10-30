@@ -444,6 +444,27 @@ detail (just its shell, instant), get the shape right, then raise
      (what you see from inside). *Underlay relief* scales all of it (0: the
      old plain shell). Fine relief needs grid points: raise *Resolution* or
      use High / Hero.
+   - **Frame** (built the way a thatched roof is): **rafters** down the
+     slope from a **ridge beam** to the eaves (a **hip rafter** down each
+     hip and **jack rafters** off it; radial rafters to a cone's apex), a
+     **batten** across them under every course (the tiles' sticks rest on
+     them; round a hip or a cone they follow the courses), **wall plates**
+     along the wall tops under the rafters. It sits under the thatch (under
+     the underlay or the surface's shell when there is one), so it's what
+     you see from inside, in its own mesh (`woodFrame_C_...`) for a wood
+     material. *Style*: **Bamboo** (a node ring every ~35 cm), **Poles**
+     (round timber, tapering, a little out of round) or **Sawn**
+     (rectangular: rafters deeper than wide, battens flat). *Rafter
+     spacing*, *Rafter size* (ridge beam 1.4x, hips 1.3x), *Batten size*,
+     *Crookedness* (gently crooked members, ends cut unevenly; rafter tops
+     always meet the ridge beam). Light topology: a ring every ~25 cm, 6
+     sides, hard edges on sawn timber, one-face caps. **Sub-D topology**:
+     8 sides, support loops near the cut ends and along sawn corners,
+     quad-filled caps, every member closed and all quads, so it smooths
+     with crisp rounded edges and no chamfers. UVs: each member's skin one
+     shell (seam on the side facing the thatch; sawn faces unfolded side by
+     side), each cap a disc, all packed into 0..1 at one texel density.
+     Blockers cut members where they go in. Not built on Proxy.
    - **Detail:** **Proxy** (no thatch, just the shell on a coarse grid:
      about 0.1 s, for placing and shaping), **Rough** (cards / planes, 2
      segments), **Medium** (as set), **High** and **Hero** (1.5x / 2x the
@@ -1226,10 +1247,13 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   across the gable, one over half the verge (the open half still hangs), a
   lower roof the eave leaves lie on, nothing inside a blocker in any style,
   following a moved / deleted blocker, undo, bake, and the inverse of a
-  deformed box's lattice.
+  deformed box's lattice. Frame: its own mesh, every style with and without
+  Sub-D (UVs packed in 0..1 and the right way round, closed members, Sub-D
+  all quads), under the thatch, rafter spacing, off on Proxy, cones and
+  hipped surface roofs.
 - `tests/gui_thatch_roof.py`: drives the Thatch Roof panel in a real Maya
   session (box on a house, Make Roof, live edits, following the box, presets,
-  the palm presets and Detail levels, blockers, undo / redo, bake) and saves pictures
+  the palm presets and Detail levels, the frame, blockers, undo / redo, bake) and saves pictures
   of every shape and style (palm close-ups, eaves, gables, hips, the roof
   seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with

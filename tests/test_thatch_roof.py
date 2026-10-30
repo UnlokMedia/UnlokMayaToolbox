@@ -556,6 +556,57 @@ def run():
     o = build(shape="Lean-to", end_a="Gable", end_b="Hip")
     check("a palm lean-to builds", o["pieces"] > 50)
 
+    # --- the frame: rafters, battens, ridge beam, wall plates under the thatch, its own mesh
+    cmds.file(new=True, force=True)
+    b = box("frm")
+    root = tb["make_thatch_roof"](b, tb["thatch_preset"]("Palm: nipa shingles (neat)"))["root"]
+    parts = tb["thatch_parts"](root)
+    fr = parts.get("frame")
+    check("a roof has a frame mesh of its own (woodFrame), handed to Smart UDIM as ready",
+          fr is not None and "woodFrame" in fr and cmds.getAttr(fr + ".visibility") and
+          cmds.attributeQuery(tb["UV_READY_ATTR"], node=tb["_log_shape"](fr), exists=True), str(fr))
+
+    def face_sizes(fn):
+        return set(fn.getVertices()[0])
+    for style in tb["THATCH_FRAME_STYLES"]:
+        for subd in (False, True):
+            t0 = time.time()
+            tb["update_thatch_roofs"]({root: {"frame_style": style, "frame_subd": subd}})
+            dt = time.time() - t0
+            fn = mesh_fn(tb, fr)
+            us, vs, good = uv_stats(fn)
+            sizes = face_sizes(fn)
+            label = "%s frame%s" % (style, " (Sub-D)" if subd else "")
+            check("%s: UVs packed in 0..1, every face the right way round (%.2fs)" % (label, dt),
+                  min(us) >= 0.0 and max(us) <= 1.0 and min(vs) >= 0.0 and max(vs) <= 1.0 and good > 0.999,
+                  "%.2f%% upright, %d faces" % (good * 100, fn.numPolygons))
+            if subd:
+                check("%s: all quads, every member closed" % label, sizes == {4} and boundary_edges(fn) == 0,
+                      "faces %s, %d open edges" % (sorted(sizes), boundary_edges(fn)))
+            elif style != "Sawn":
+                check("%s: light (6 sides), every member closed" % label, boundary_edges(fn) == 0 and
+                      sizes <= {4, 6} and fn.numVertices < 60000, "%d verts, %s" % (fn.numVertices, sorted(sizes)))
+            else:
+                check("%s: hard-edged quads" % label, sizes == {4})
+    tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False}})
+    fbb, sbb = bbox(fr), bbox(parts["straw"])
+    check("the frame sits under the thatch, rafters out to the eaves", fbb[4] < sbb[4] - 0.08 and 1.6 < fbb[1] < 2.6,
+          "frame y %.2f..%.2f, thatch top %.2f" % (fbb[1], fbb[4], sbb[4]))
+    n_wide = mesh_fn(tb, fr).numVertices
+    tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.075}})
+    check("closer rafters: more of them", mesh_fn(tb, fr).numVertices > n_wide * 1.1,
+          "%d -> %d verts" % (n_wide, mesh_fn(tb, fr).numVertices))
+    tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.15, "detail": "Proxy"}})
+    check("Proxy: no frame (just the shape)", not cmds.getAttr(fr + ".visibility"))
+    tb["update_thatch_roofs"]({root: {"detail": "Medium", "frame": False}})
+    check("Frame off hides it", not cmds.getAttr(fr + ".visibility"))
+    tb["update_thatch_roofs"]({root: {"frame": True, "shape": "Cone"}})
+    check("a cone gets a frame (radial rafters, ring battens)", cmds.getAttr(fr + ".visibility") and
+          mesh_fn(tb, fr).numPolygons > 1000)
+    tb["update_thatch_roofs"]({root: {"shape": "Ridge", "end_a": "Hip", "end_b": "Hip", "style": "Surface"}})
+    check("a hipped surface roof gets its frame too (under the shell)", cmds.getAttr(fr + ".visibility") and
+          bbox(fr)[4] < bbox(parts["straw"])[4] - 0.1)
+
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)
     cmds.undoInfo(state=True, infinity=True)
@@ -564,7 +615,7 @@ def run():
 
     def roof_pts(r=None):
         out = []
-        for part in ("straw", "underlay"):
+        for part in ("straw", "underlay", "frame"):
             node = tb["thatch_parts"](r or root)[part]
             if cmds.getAttr(node + ".visibility"):  # plain tuples: an MPoint outlives its array badly
                 out.extend((q.x, q.y, q.z) for q in mesh_fn(tb, node).getPoints(om.MSpace.kWorld))

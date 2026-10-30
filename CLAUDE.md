@@ -413,6 +413,36 @@
       in `TrunTimeCommandManager::load`), even on an empty script, while
       `mayabatch.exe -script` worked. Run the headless tests in mayabatch
       with a stand-in `maya.standalone` if that happens again.
+  - **Frame** (the user, 2026-10-30: the sticks looked janky; "better
+    logic for how it would actually be built"; standing rule: good UVs,
+    optimised, a Sub-D toggle with support loops / quad caps):
+    - Third roof part `frame` (`THATCH_FRAME_MATERIAL` "woodFrame", seed
+      plane in `make_thatch_roof`; roofs made earlier have none and the
+      panel says so via `report["no_frame"]`).
+    - Layout `_th_frame_members(F, G, s, depth)`: rafters walk down the roof
+      on a fixed plan heading from the crest (side faces past a hip's ridge
+      end start on the hip line: jacks), hip-end jacks start on the hip line
+      heading +-x, hip rafters follow the plane-formula hip line, cone
+      rafters radial; ridge beam under the rafters' tops; battens on
+      `_th_contours` at `_th_frame_courses` (palm: the frond courses; panels:
+      panel courses; straw: 7% of the span) plus one at the eave; wall plates
+      at |z| = W (and full hips' ends, a cone's ellipse). Depths below the
+      roof surface: batten tops at `depth` (the underlay / shell thickness,
+      else 0 for palm), rafters under battens, beam under rafters.
+    - Mesher `_th_frame_mesh`: stations every ~6% of the span (bamboo nodes
+      plus a holding ring either side), crookedness = low-frequency noise
+      sideways (0.3x towards the roof; not on battens: crooked laths kinked
+      round hips), run-on ends (rafters only at the eave: run on at the top
+      they came up through the cap; run-on direction from 3 points back, a
+      short last step made hooks; not into blockers). Vertices shared round
+      a member, UVs split at a seam facing the thatch; skin u decreasing
+      round it so UVs are upright; caps: start j-increasing, end reversed,
+      UV mirror +1 / -1 (the other way round mirrored them). Sawn without
+      Sub-D: a vertex strip per face (hard edges). Sub-D: 8-point profiles
+      (sawn corners split by support edges), holding rings near the ends,
+      caps = inset ring + 4 quads. `_th_pack` packs skins and caps.
+      `sin(pi * u) ** 0.5` with u a hair over 1 gave complex numbers:
+      clamp before powers.
   - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
     values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge

@@ -196,6 +196,8 @@ def main():
     cmds.sets(parts["straw"], e=True, forceElement=shader("testLeaf", (0.62, 0.55, 0.33)))
     cmds.sets(parts["underlay"], e=True, forceElement=shader("testUnderlay", (0.33, 0.24, 0.14)))
     cmds.sets(house, e=True, forceElement=shader("testWall", (0.5, 0.5, 0.52)))
+    if "frame" in parts:
+        cmds.sets(parts["frame"], e=True, forceElement=shader("testWood", (0.42, 0.27, 0.15)))
     cmds.select(clear=True)
     straw = parts["straw"]
     palm_shots = {
@@ -253,9 +255,29 @@ def main():
         cmds.setAttr("persp.translate", bb[3] * 0.3, bb[1] - 0.4, 0.0)
         cmds.viewLookAt("persp", position=(bb[3] * 0.1, bb[4] - 0.6, (bb[2] + bb[5]) * 0.3))
         snap("21_palm_inside.png")
+        cmds.setAttr(straw + ".visibility", False)  # the frame on its own
+        snap("21_palm_frame_from_inside.png")
+        cmds.setAttr(straw + ".visibility", True)
         cmds.setAttr(house + ".visibility", True)
     finally:
         cmds.undoInfo(stateWithoutFlush=True)
+
+    # --- the frame through the panel: style, Sub-D
+    panel.frame_sec.header.setChecked(True)
+    edit(frame_style="Poles", frame_subd=True)
+    data = ns["thatch_data"](root)
+    check("Frame settings rebuild the roof's frame", data["frame_style"] == "Poles" and data["frame_subd"] and
+          cmds.getAttr(ns["thatch_parts"](root)["frame"] + ".visibility"), panel.status.text())
+    cmds.setAttr(straw + ".visibility", False)
+    frame_on([root, house], direction=(1.0, 0.55, 1.3), dist=1.3)
+    snap("25_frame_poles_subd.png")
+    cmds.setAttr(straw + ".visibility", True)
+    scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
+    scroll.ensureWidgetVisible(panel.frame_sec, 0, 0)
+    pump()
+    window.grab().save(os.path.join(OUT, "26_panel_frame.png"))
+    scroll.verticalScrollBar().setValue(0)
+    edit(frame_style="Bamboo", frame_subd=False)
 
     # --- blockers: Add Blocker, move it (the roof follows), Remove
     panel.block_sec.header.setChecked(True)

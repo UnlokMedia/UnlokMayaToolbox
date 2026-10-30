@@ -20055,18 +20055,20 @@ class RopeLashingPanel(QtWidgets.QWidget):
 
 THATCH_SETTINGS = "unlokThatch"      # string on the roof group: JSON settings, box uuid and frame
 THATCH_BAKED = "unlokThatchBaked"    # string on a baked roof group: its old data, only so a redo can rebuild it
-THATCH_PART = "unlokThatchPart"      # string on each roof mesh: "straw" or "underlay"
+THATCH_PART = "unlokThatchPart"      # string on each roof mesh: "straw", "underlay" or "frame"
 THATCH_VERTS = "unlokThatchVerts"    # long on each roof mesh: vertex count of the last build
 THATCH_BOX_ATTR = "unlokThatchBox"   # bool on a box the tool made
 THATCH_BLOCKER_ATTR = "unlokThatchBlocker"  # bool on a blocker box the tool made
 THATCH_MATERIAL = "strawThatch"      # material tokens in the mesh names (UnlokRenamer convention)
 THATCH_UNDER_MATERIAL = "strawUnderlay"
+THATCH_FRAME_MATERIAL = "woodFrame"
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
 THATCH_AXES = ("Auto", "X", "Z")
 THATCH_STYLES = ("Surface", "Planes", "3D Pieces", "Leaf Panels", "Palm Fronds")
 THATCH_FROND_FORMS = ("Cards", "Leaflets", "3D Leaflets")
 THATCH_DETAILS = ("Proxy", "Rough", "Medium", "High", "Hero")
+THATCH_FRAME_STYLES = ("Bamboo", "Poles", "Sawn")
 THATCH_PATTERNS = ("Straight", "Scallops", "Points")
 THATCH_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
 THATCH_DEFAULTS = {
@@ -20083,6 +20085,8 @@ THATCH_DEFAULTS = {
     "frond_form": "Leaflets", "frond_width": 0.25, "leaf_length": 0.16, "leaf_width": 0.022, "slant": 0.35,
     "droop": 0.5, "neat": 0.8, "top_layer": 0.4, "end_reach": 0.3, "end_fronds": 0.5, "ridge_fronds": True,
     "top_leaf_width": 0.011, "overlap": 0.35, "edge_hang": 1.0, "sticks": True,
+    "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
+    "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False,
 }
 THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
 # How the thatch is made. A preset resets everything else to the defaults; of these it only sets the ones it
@@ -20091,7 +20095,9 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks")
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks",
+                    "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
+                    "wall_plates", "frame_subd")
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -21802,6 +21808,416 @@ def _th_underlay_relief(F, s):
             "rib": amt * 0.08 * F.T}
 
 
+def _th_frame_courses(F, G, s):
+    """Height fractions of the battens: one under every course of fronds /
+    panels (straw: a batten every 7% of the span), plus one at the eave."""
+    t_hi = max(G["T"])
+    if s["style"] == "Palm Fronds":
+        t0, dt = _th_frond_courses(F, s)
+    elif s["style"] == "Leaf Panels":
+        dt = max(1e-4, float(s["panel_length"]) * F.span) * 0.45 / max(0.2, float(s["density"])) / F.slope
+        t0 = F.t_low + 0.15 * dt
+    else:
+        dt = 0.07 * F.span / F.slope
+        t0 = F.t_low + 0.5 * dt
+    ts = [F.t_low + 0.25 * min(dt, (t0 - F.t_low) or dt)]
+    t = t0
+    while t < t_hi - 0.15 * dt:
+        if t - ts[-1] > 0.4 * dt:
+            ts.append(t)
+        t += dt
+    return ts
+
+
+def _th_frame_members(F, G, s, depth):
+    """The roof's frame as members (pure maths, roof space): rafters down
+    the slope from a ridge beam to the eaves (on a hipped end, a hip rafter
+    down each hip and jack rafters from it; on a cone, rafters from the
+    apex), battens across them under every course, a ridge beam under the
+    rafters' tops and wall plates under them along the walls. depth: how
+    far under the roof's surface the battens' tops are (the underlay's
+    thickness when there is one). Each member: {"path", "nrm", "r0", "r1",
+    "kind"} (r0 / r1: radius at its start / end; it tapers)."""
+    span = F.span
+    rr = 0.5 * max(1e-4, float(s["rafter_size"])) * span
+    rb = 0.5 * max(1e-4, float(s["batten_size"])) * span
+    rbeam = 1.4 * rr
+    rp = 1.2 * rr
+    gap = max(2.0 * rr, float(s["rafter_spacing"]) * span)
+    step = max(0.5 * G["cell"], 0.03 * span)
+    d_batten = depth + rb
+    d_rafter = depth + 2.0 * rb + rr
+    members = []
+
+    def at(x, z, d):
+        cell = _th_cell(G, F, x, z)
+        if cell is None:
+            return None
+        pos, nrm = _th_sample(G, *cell)[:2]
+        return (pos[0] - nrm[0] * d, pos[1] - nrm[1] * d, pos[2] - nrm[2] * d), nrm
+
+    def walk(x, z, hx, hz, d, limit=None):
+        """Down the roof from (x, z) along the plan heading (hx, hz) until the eave edge."""
+        ln = math.hypot(hx, hz) or 1.0
+        hx, hz = hx / ln, hz / ln
+        path, nrms = [], []
+        travelled = 0.0
+        while True:
+            q = at(x, z, d)
+            if q is None:
+                break
+            path.append(q[0])
+            nrms.append(q[1])
+            if limit is not None and travelled >= limit:
+                break
+            x += hx * step
+            z += hz * step
+            travelled += step
+        return path, nrms
+
+    def add(path, nrms, r0, r1, kind):
+        if len(path) >= 2:
+            members.append({"path": path, "nrm": nrms, "r0": r0, "r1": r1, "kind": kind})
+
+    def spaced(lo, hi):
+        n = max(1, int(math.ceil((hi - lo) / gap)))
+        return [lo + (hi - lo) * i / float(n) for i in range(n + 1)]
+
+    if F.cone:
+        circ = 2.0 * math.pi * F.R * F.rho
+        n = max(6, int(round(circ / gap)))
+        rho0 = min(0.3, 1.5 * rbeam / F.R)
+        for i in range(n):
+            a = 2.0 * math.pi * i / n
+            x, z = F.L * rho0 * math.cos(a), F.W * rho0 * math.sin(a)
+            p, nr = walk(x, z, math.cos(a) / F.L, math.sin(a) / F.W, d_rafter)
+            add(p, nr, rr * 1.15, rr * 0.9, "rafter")
+    else:
+        inset = 2.0 * rr
+        ends = F.ends
+        lr_hi = ends[0][3] if ends[0] else F.x1 - inset
+        lr_lo = -ends[1][3] if ends[1] else F.x0 + inset
+        sides = (1.0, -1.0) if F.shape == "Ridge" else (1.0,)
+        top_z = 0.0 if F.shape == "Ridge" else F.z0
+        # common rafters (and jack rafters off the hips on the side faces)
+        x_lo = F.x0 + inset if not ends[1] else -(F.L + 0.5 * gap)
+        x_hi = F.x1 - inset if not ends[0] else F.L + 0.5 * gap
+        for zs in sides:
+            for x in spaced(x_lo, x_hi):
+                z0 = top_z + zs * 1e-4
+                kind = "rafter"
+                for e, end in enumerate(ends):
+                    if end is None or not (x > lr_hi if end[0] > 0 else x < lr_lo):
+                        continue
+                    sign, me, h0 = end[0], end[1], end[2]
+                    h = h0 + me * (F.L - sign * x)  # where the hip line crosses this rafter
+                    if h <= F.t_low * F.H:
+                        z0 = None
+                        break
+                    z0 = zs * (F.H - min(F.H, h)) / F.ms if F.shape == "Ridge" else F.z0 + (F.H - min(F.H, h)) / F.ms
+                    kind = "jack"
+                if z0 is None:
+                    continue
+                p, nr = walk(x, z0, 0.0, zs if F.shape == "Ridge" else 1.0, d_rafter)
+                add(p, nr, rr * 1.12, rr * 0.92, kind)
+        # hipped ends: hip rafters down the hip lines, jacks down the end
+        for e, end in enumerate(ends):
+            if end is None:
+                continue
+            sign, me, h0 = end[0], end[1], end[2]
+            for zs in sides:
+                path, nrms = [], []
+                h = F.H
+                while True:
+                    x = sign * (F.L - (h - h0) / me)
+                    z = zs * (F.H - h) / F.ms if F.shape == "Ridge" else F.z0 + (F.H - h) / F.ms
+                    q = at(x, z, d_rafter)
+                    if q is None or h < max(h0, F.t_low * F.H) - 2.0 * step * F.ms:
+                        break
+                    path.append(q[0])
+                    nrms.append(q[1])
+                    h -= step * F.ms / math.hypot(1.0, 1.0 / end[4])
+                add(path, nrms, rr * 1.3, rr * 1.05, "hip")
+            z_lim = F.W if F.shape == "Ridge" else F.W
+            zs_list = spaced(-z_lim + inset, z_lim - inset) if F.shape == "Ridge" else spaced(F.z0 + inset, F.W - inset)
+            for z in zs_list:
+                q = abs(z) if F.shape == "Ridge" else z - F.z0
+                h = F.H - F.ms * q
+                if h <= h0:
+                    continue  # below a half-hip: the gable part
+                x = sign * (F.L - (h - h0) / me)
+                p, nr = walk(x, z, sign, 0.0, d_rafter)
+                add(p, nr, rr * 1.05, rr * 0.9, "jack")
+        # the ridge beam, under the rafters' tops (a lean-to's top rests on its wall)
+        if F.shape == "Ridge":
+            path, nrms = [], []
+            x = lr_lo - (0.0 if ends[1] else 0.5 * inset)
+            while x <= lr_hi + (0.0 if ends[0] else 0.5 * inset) + 1e-9:
+                q = at(min(max(x, F.x0), F.x1), 0.0, d_rafter + rr + rbeam)
+                if q:
+                    path.append(q[0])
+                    nrms.append(q[1])
+                x += step
+            add(path, nrms, rbeam, rbeam * 0.92, "beam")
+    # battens: one along every course (round a hipped roof or a cone they follow the courses)
+    found = _th_contours(F, G, _th_frame_courses(F, G, s))
+    for lines in found:
+        for line in lines:
+            total, point_at = _th_line(line)
+            if total < 4.0 * rb:
+                continue
+            closed = _th_closed(line, G)
+            n = max(2, int(math.ceil(total / step)))
+            path, nrms = [], []
+            for i in range(n + 1):
+                (x, z), ox, oz = point_at(total * i / float(n))
+                q = at(x, z, d_batten)
+                if q:
+                    path.append(q[0])
+                    nrms.append(q[1])
+            if closed and len(path) > 2:
+                path.append(path[0])
+                nrms.append(nrms[0])
+            add(path, nrms, rb, rb * 0.9, "batten")
+    # wall plates along the wall tops, under the rafters
+    if s["wall_plates"]:
+        drop = rr + rp
+
+        def plate(xs_zs):
+            path, nrms = [], []
+            for x, z in xs_zs:
+                q = at(x, z, d_rafter)
+                if q:
+                    path.append((q[0][0], q[0][1] - drop, q[0][2]))
+                    nrms.append((0.0, 1.0, 0.0))
+            add(path, nrms, rp, rp, "plate")
+        if F.cone:
+            n = max(24, int(round(2.0 * math.pi * F.R / step)))
+            plate([(F.L * math.cos(2.0 * math.pi * i / n), F.W * math.sin(2.0 * math.pi * i / n)) for i in range(n + 1)])
+        else:
+            nx = max(2, int(math.ceil(2.0 * F.L / step)))
+            for z in ((F.W, -F.W) if F.shape == "Ridge" else (F.W, -F.W)):
+                plate([(-F.L + 2.0 * F.L * i / float(nx), z) for i in range(nx + 1)])
+            nz = max(2, int(math.ceil(2.0 * F.W / step)))
+            for e, end in enumerate(F.ends):
+                if end is not None and end[2] <= 1e-6:  # a full hip rests on its end wall too
+                    plate([(end[0] * F.L, -F.W + 2.0 * F.W * i / float(nz)) for i in range(nz + 1)])
+    return members
+
+
+def _th_frame_mesh(F, members, s):
+    """Members as natural timber (pure maths, roof space), light and with
+    clean UVs: Bamboo (round, a node ring every ~35 cm), Poles (tapered,
+    slightly out of round) or Sawn (rectangular). Crookedness bends each
+    member gently sideways (low-frequency noise, little towards the roof so
+    members keep their contacts); every member's ends run on by a random
+    amount so cuts don't line up; cut ends are capped.
+
+    Topology: a ring every ~25 cm (plus bamboo's nodes); round members 6
+    sides (sawn: hard edges), caps one face. Sub-D: 8 sides, sawn corners
+    split by support edges, a support ring near each cut end and an inset
+    ring on each cap, caps filled with quads: smoothed, ends stay flat with
+    a crisp rounded edge (no chamfer). Vertices are shared round each
+    member; only the UVs split, at a seam on the side facing the thatch.
+    UVs: each member's skin one shell (round its girth x along it, world
+    scale; sawn: its four faces unfolded side by side), each cap a disc,
+    packed into 0..1 with one scale. Members are cut where they go into a
+    blocker (the longest run outside kept)."""
+    style = s["frame_style"] if s["frame_style"] in THATCH_FRAME_STYLES else "Bamboo"
+    subd = bool(s["frame_subd"])
+    wob = clamp(float(s["frame_wobble"]), 0.0, 2.0)
+    seed = int(s["seed"]) + 7717
+    span = F.span
+    pts, counts, conn, us, vs, uvi, shells = [], [], [], [], [], [], []
+    amp = wob * (0.003 if style == "Sawn" else (0.008 if style == "Bamboo" else 0.014)) * span
+    node_len = 0.35 * span / 4.0  # bamboo's nodes: ~35 cm on a 4 m span
+
+    def profile(kind):
+        """The section as a closed loop of (across, up) offsets, counter-clockwise, its seam at the top."""
+        if style != "Sawn":
+            k = 8 if subd else 6
+            return [(math.cos(math.pi / 2.0 + 2.0 * math.pi * j / k), math.sin(math.pi / 2.0 + 2.0 * math.pi * j / k))
+                    for j in range(k)]
+        wk, hk = (1.5, 0.75) if kind == "batten" else (0.85, 1.3)
+        if not subd:
+            return [(wk, hk), (-wk, hk), (-wk, -hk), (wk, -hk)]
+        e = 0.12 * min(wk, hk)  # support edges hold each corner
+        return [(wk - e, hk), (-wk + e, hk), (-wk, hk - e), (-wk, -hk + e), (-wk + e, -hk), (wk - e, -hk),
+                (wk, -hk + e), (wk, hk - e)]
+
+    for mi, m in enumerate(members):
+        path, nrms = m["path"], m["nrm"]
+        clear = 2.0 * m["r0"] + 0.005 * span  # members stay this far out of blockers
+        if F.blockers:  # cut where it goes into a blocker
+            runs, cur = [], []
+            for k, q in enumerate(path):
+                if _th_push(F, q, clear)[1] is None:
+                    cur.append(k)
+                elif cur:
+                    runs.append(cur)
+                    cur = []
+            if cur:
+                runs.append(cur)
+            keep = max(runs, key=len) if runs else []
+            if len(keep) < 2:
+                continue
+            path, nrms = [path[k] for k in keep], [nrms[k] for k in keep]
+        r = _rand12(seed, mi, len(path), 0)
+        closed = len(path) > 3 and _rl_len(_rl_sub(path[-1], path[0])) < 1e-6
+        if not closed:  # ends run on past their last support by a random amount (rafters only at the eave:
+            back = min(len(path) - 1, 3)  # their tops meet the ridge beam, run on they came up through the cap)
+            for end in ((1,) if m["kind"] in ("rafter", "jack", "hip") else (0, 1)):
+                a, b = (path[back], path[0]) if end == 0 else (path[-1 - back], path[-1])
+                run = (0.01 + (0.015 + 0.03 * wob) * r[end]) * span * (0.5 if m["kind"] == "batten" else 1.0)
+                q = _rl_add(b, _rl_mul(_rl_norm(_rl_sub(b, a)), run))
+                if F.blockers and _th_push(F, q, clear)[1] is not None:
+                    continue  # not into a blocker
+                path, nrms = ([q] + path, [nrms[0]] + nrms) if end == 0 else (path + [q], nrms + [nrms[-1]])
+        acc = [0.0]
+        for a, b in zip(path, path[1:]):
+            acc.append(acc[-1] + _rl_len(_rl_sub(b, a)))
+        length = acc[-1]
+        if length < 4.0 * m["r0"]:
+            continue
+        n_st = max(1, int(math.ceil(length / max(4.0 * m["r0"], 0.06 * span))))
+        stations = [length * i / float(n_st) for i in range(n_st + 1)]
+        nodes = []
+        if style == "Bamboo":
+            d = node_len * (0.3 + 0.7 * r[2])
+            while d < length - 0.5 * node_len:
+                nodes.append(d)
+                d += node_len * (0.85 + 0.3 * _rand12(seed, mi, len(nodes), 1)[0])
+            stations += nodes
+            hold = 0.6 * m["r0"]  # a ring either side keeps the node a ring, not a long swelling
+            stations += [nd + o for nd in nodes for o in (-hold, hold)]
+        if subd and not closed:  # support rings just inside the cut ends
+            hold = min(0.2 * length, 0.25 * m["r0"])
+            stations += [hold, length - hold]
+        stations = sorted(set(round(v, 7) for v in stations if 0.0 <= v <= length))
+        prof = profile(m["kind"])
+        k = len(prof)
+        rs = 1.0 + (r[3] - 0.5) * 0.2  # each member a little thicker or thinner
+        oval = (r[6] - 0.5) * 0.12 if style == "Poles" else 0.0
+        rings = []  # per station: points round it, centre, axes, radius
+        for sv in stations:
+            i = min(len(path) - 2, max(0, bisect.bisect_right(acc, sv) - 1))
+            f = (sv - acc[i]) / max(1e-12, acc[i + 1] - acc[i])
+            c = _rl_lerp(path[i], path[i + 1], f)
+            t = _rl_norm(_rl_sub(path[i + 1], path[i]))
+            b = _rl_cross(t, _rl_norm(_rl_lerp(nrms[i], nrms[i + 1], f), (0.0, 1.0, 0.0)))
+            b = _rl_norm(b) if _rl_len(b) > 1e-6 else _rl_any_perp(t)
+            nn = _rl_cross(b, t)
+            u = clamp(sv / length, 0.0, 1.0)
+            if amp and not closed and m["kind"] != "batten":  # crooked, straighter towards its ends
+                env = max(0.0, math.sin(math.pi * clamp(u, 0.0, 1.0))) ** 0.5
+                w1 = _th_noise(sv / (1.2 + 0.8 * r[4]), mi * 3.7, seed, 0) * env
+                w2 = _th_noise(sv / (1.5 + r[5]), mi * 5.3 + 11.0, seed + 1, 0) * env
+                c = _rl_add(c, _rl_add(_rl_mul(b, amp * w1), _rl_mul(nn, 0.3 * amp * w2)))
+            rad = (m["r0"] + (m["r1"] - m["r0"]) * u) * rs
+            if nodes and min(abs(sv - nd) for nd in nodes) < 1e-6:
+                rad *= 1.1  # bamboo's node bulge
+            ring = []
+            for j, (pa, pb) in enumerate(prof):
+                kk = rad * (1.0 + oval * math.cos(2.0 * j * 2.0 * math.pi / k)) if oval else rad
+                ring.append(_rl_add(c, _rl_add(_rl_mul(b, pa * kk), _rl_mul(nn, pb * kk))))
+            rings.append((ring, c, b, nn, rad, sv))
+        if closed:
+            rings = rings[:-1]  # the last station is the first: wrap round
+        nr = len(rings)
+        if nr < 2:
+            continue
+        # vertices (hard-edged sawn: a strip of its own per face)
+        base = len(pts)
+        hard = style == "Sawn" and not subd
+        if hard:
+            for side in range(4):
+                for ring, c, b, nn, rad, sv in rings:
+                    pts.extend((ring[side], ring[(side + 1) % 4]))
+        else:
+            for ring, c, b, nn, rad, sv in rings:
+                pts.extend(ring)
+
+        def vid(row, j):  # shared vertices (not the hard-edged sawn strips)
+            return base + (row % nr) * k + j % k
+        # the skin's UVs: u round it (world length, decreasing so faces face out), v along; one shell
+        perim = [0.0]
+        for j in range(k):
+            pa, pb = prof[j], prof[(j + 1) % k]
+            perim.append(perim[-1] + math.hypot(pb[0] - pa[0], pb[1] - pa[1]))
+        uv0 = len(us)
+        rows = nr + 1 if closed else nr
+        rad0 = rings[0][4]
+        for row in range(rows):
+            sv = length if (closed and row == nr) else rings[row][5]
+            for j in range(k + 1):
+                us.append((perim[-1] - perim[j]) * rad0)
+                vs.append(sv)
+        shells.append(list(range(uv0, len(us))))
+        for row in range(rows - 1):
+            for j in range(k):
+                if hard:
+                    v = (base + j * 2 * nr + row * 2, base + j * 2 * nr + ((row + 1) % nr) * 2,
+                         base + j * 2 * nr + ((row + 1) % nr) * 2 + 1, base + j * 2 * nr + row * 2 + 1)
+                else:
+                    v = (vid(row, j), vid(row + 1, j), vid(row + 1, j + 1), vid(row, j + 1))
+                counts.append(4)
+                conn.extend(v)
+                uvi.extend((uv0 + row * (k + 1) + j, uv0 + (row + 1) * (k + 1) + j,
+                            uv0 + (row + 1) * (k + 1) + j + 1, uv0 + row * (k + 1) + j + 1))
+        if closed:
+            continue
+        # caps: the start faces back along the member, the end forwards
+        for ci, row in enumerate((0, nr - 1)):
+            ring, c, b, nn, rad, sv = rings[row]
+            order = list(range(k)) if ci == 0 else list(range(k - 1, -1, -1))
+            mirror = 1.0 if ci == 0 else -1.0  # UVs read the right way round from outside
+            if hard:  # its own corners (hard edge round it)
+                first = len(pts)
+                pts.extend(ring[j] for j in order)
+                ring_ids = list(range(first, first + k))
+            else:
+                ring_ids = [vid(row, j) for j in order]
+            cap_uv0 = len(us)
+            for j in order:
+                us.append(mirror * prof[j][0] * rad)
+                vs.append(prof[j][1] * rad)
+            ring_uv = list(range(cap_uv0, cap_uv0 + k))
+            if not subd:
+                counts.append(k)
+                conn.extend(ring_ids)
+                uvi.extend(ring_uv)
+                shells.append(ring_uv)
+                continue
+            # Sub-D: an inset ring (holds the rim) then quads filling the middle (k = 8)
+            first = len(pts)
+            inner = []
+            for j in order:
+                pa, pb = prof[j]
+                pts.append(_rl_add(c, _rl_add(_rl_mul(b, 0.82 * pa * rad), _rl_mul(nn, 0.82 * pb * rad))))
+                us.append(mirror * 0.82 * pa * rad)
+                vs.append(0.82 * pb * rad)
+                inner.append(len(pts) - 1)
+            inner_uv = list(range(cap_uv0 + k, cap_uv0 + 2 * k))
+            pts.append(c)
+            us.append(0.0)
+            vs.append(0.0)
+            mid, mid_uv = len(pts) - 1, len(us) - 1
+            for j in range(k):
+                j1 = (j + 1) % k
+                counts.append(4)
+                conn.extend((ring_ids[j], ring_ids[j1], inner[j1], inner[j]))
+                uvi.extend((ring_uv[j], ring_uv[j1], inner_uv[j1], inner_uv[j]))
+            for q in range(0, k, 2):
+                counts.append(4)
+                conn.extend((inner[q], inner[(q + 1) % k], inner[(q + 2) % k], mid))
+                uvi.extend((inner_uv[q], inner_uv[(q + 1) % k], inner_uv[(q + 2) % k], mid_uv))
+            shells.append(list(range(cap_uv0, len(us))))
+    if not counts:
+        return None
+    _th_pack(shells, us, vs)
+    return pts, counts, conn, us, vs, uvi
+
+
 def _th_to_roof(frame, pts):
     """World -> roof space (the inverse of _th_to_world): exact for a plain
     box; through a deformed box's lattice by Newton steps (only used for
@@ -22006,6 +22422,12 @@ def thatch_build(frame, settings, blockers=None):
     else:
         straw = _th_shell_mesh(F, G, strands=True)
     out["straw"] = _th_to_world(frame, straw) if straw else None
+    out["frame"] = None
+    if s["frame"] and level > 0:  # the roof's timber, under the thatch (and under an underlay or a shell)
+        shelled = s["style"] == "Surface" or (s["underlay"] and s["style"] != "Surface")
+        depth = 1.02 * F.T if shelled else 0.02 * F.T * (s["style"] != "Palm Fronds")
+        fm = _th_frame_mesh(F, _th_frame_members(F, G, s, depth), s)
+        out["frame"] = _th_to_world(frame, fm) if fm else None
     return out
 
 
@@ -22413,7 +22835,8 @@ def make_thatch_roof(box, settings=None, select=False):
         data["frame"] = frame
         data["blockers"], data["blocker_boxes"] = [], []
         cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
-        for part, material in (("straw", THATCH_MATERIAL), ("underlay", THATCH_UNDER_MATERIAL)):
+        for part, material in (("straw", THATCH_MATERIAL), ("underlay", THATCH_UNDER_MATERIAL),
+                               ("frame", THATCH_FRAME_MATERIAL)):
             node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
                                             constructionHistory=False,
                                             name="%s_C_thatchRoof%04d_GEP" % (material, num))[0])
@@ -22440,7 +22863,7 @@ def update_thatch_roofs(changes):
     stay out of the undo queue (API geometry can't be undone anyway). A roof
     whose box is gone keeps its last frame. Returns {"done", "lost",
     "errors", "pieces", "capped", "faces"}."""
-    report = {"done": [], "lost": [], "errors": [], "pieces": 0, "capped": False, "faces": 0}
+    report = {"done": [], "lost": [], "errors": [], "pieces": 0, "capped": False, "faces": 0, "no_frame": []}
     for root, change in changes.items():
         if not is_thatch_roof(root):
             continue
@@ -22471,6 +22894,8 @@ def update_thatch_roofs(changes):
         report["pieces"] += built["pieces"]
         report["capped"] = report["capped"] or built["capped"]
         report["done"].append(root)
+        if s["frame"] and "frame" not in thatch_parts(root):
+            report["no_frame"].append(root)  # made before roofs had a frame mesh
     return report
 
 
@@ -22877,6 +23302,35 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "tips, with grain down the slope, a fringe of tips at the eaves and verges, and battens along the "
             "ceiling side. 0: the plain shell. Needs Resolution (or High / Hero) to show close up.")
         card.add(sec)
+        sec = self.frame_sec = Section("Frame", expanded=False)
+        self.f["frame"] = CheckField("Frame: rafters, battens, ridge beam")
+        self.f["frame"].setToolTip("The timber the thatch is tied to, under it (what you see from inside): rafters "
+                                   "down the slope from a ridge beam to the eaves (hip and jack rafters on a hip, "
+                                   "radial on a cone), a batten under every course, wall plates. Its own mesh "
+                                   "(woodFrame) with packed UVs, for a wood material.")
+        sec.add_full(self.f["frame"])
+        row(sec, "frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
+            "Bamboo: round, a node every ~35 cm.\nPoles: round timber, tapering, a little out of round.\nSawn: "
+            "rectangular timber (rafters deeper than wide, battens flat).")
+        row(sec, "rafter_spacing", "Rafter spacing", FloatField(0.03, 0.6, 0.05, 0.4, decimals=3, step=0.01),
+            "Distance between rafters (fraction of the span: 0.15 = 75 cm on 5 m).")
+        row(sec, "rafter_size", "Rafter size", FloatField(0.004, 0.08, 0.008, 0.05, decimals=4, step=0.001),
+            "Rafter diameter (fraction of the span: 0.02 = 10 cm on 5 m). The ridge beam is 1.4x, hips 1.3x.")
+        row(sec, "batten_size", "Batten size", FloatField(0.002, 0.04, 0.003, 0.025, decimals=4, step=0.0005),
+            "Batten diameter (one batten under every course).")
+        row(sec, "frame_wobble", "Crookedness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How crooked the members are (natural poles and bamboo), and how unevenly their ends are cut. 0: "
+            "straight and even.")
+        self.f["wall_plates"] = CheckField("Wall plates under the rafters")
+        self.f["wall_plates"].setToolTip("A plate along the wall tops (the box's footprint) for the rafters to sit on.")
+        sec.add_full(self.f["wall_plates"])
+        self.f["frame_subd"] = CheckField("Sub-D topology (support loops, quad caps)")
+        self.f["frame_subd"].setToolTip("For smoothing / subdivision at render: 8-sided members, support edges "
+                                        "near the cut ends and round sawn corners, caps filled with quads, so "
+                                        "edges stay crisp and rounded (no chamfers). Off: lighter (6 sides, hard "
+                                        "sawn edges, one-face caps).")
+        sec.add_full(self.f["frame_subd"])
+        card.add(sec)
         sec = self.stack_sec = Section("UV stacks")
         row(sec, "stacks", "Stacks", IntField(1, 16, 1, 8),
             "Every piece has the same UVs. With 2+ stacks each piece picks one at random: one straw texture per "
@@ -23079,6 +23533,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             level = "warn"
         if report["errors"]:
             msg += " %s." % report["errors"][0][1]
+            level = "warn"
+        if report.get("no_frame"):
+            msg += " %d roof(s) were made before roofs had a frame mesh: make them again for one." % (
+                len(report["no_frame"]))
             level = "warn"
         self.set_status(msg, level)
         return report
