@@ -576,6 +576,7 @@ def run():
             t0 = time.time()
             tb["update_thatch_roofs"]({root: {"frame_style": style, "frame_subd": subd}})
             dt = time.time() - t0
+            fr = tb["thatch_parts"](root)["frame"]  # Sub-D renames it _GES
             fn = mesh_fn(tb, fr)
             us, vs, good = uv_stats(fn)
             sizes = face_sizes(fn)
@@ -591,6 +592,12 @@ def run():
                       sizes <= {4, 6} and fn.numVertices < 60000, "%d verts, %s" % (fn.numVertices, sorted(sizes)))
             else:
                 check("%s: hard-edged quads" % label, sizes == {4})
+    tb["update_thatch_roofs"]({root: {"frame_subd": True}})
+    fr = tb["thatch_parts"](root)["frame"]
+    check("Sub-D on: the frame mesh is named _GES", fr.endswith("_GES"), fr)
+    tb["update_thatch_roofs"]({root: {"frame_subd": False}})
+    fr = tb["thatch_parts"](root)["frame"]
+    check("Sub-D off: back to _GEP", fr.endswith("_GEP"), fr)
     tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False, "sticks": False}})
     fbb, sbb = bbox(fr), bbox(parts["straw"])  # (no ridge pole: it rides on top of the cap)
     check("the frame sits under the thatch, rafters out to the eaves", fbb[4] < sbb[4] - 0.08 and 1.6 < fbb[1] < 2.6,
@@ -668,6 +675,40 @@ def run():
           and tb["thatch_data"](root)["frond_form"] == "Leaflets")
     cmds.undo()
     check("one Ctrl+Z takes the added mesh away again", "frame" not in tb["thatch_parts"](root))
+
+    # --- Curl: leaves and straw planes bent across their width
+    def curl_build(**over):
+        s = dict(tb["THATCH_DEFAULTS"], style="Palm Fronds", resolution=80, top_layer=0.0, ridge_fronds=False,
+                 end_fronds=0.0, sticks=False, curl_var=0.0)
+        s.update(over)
+        return tb["thatch_build"](tb["thatch_frame"](tb["thatch_box"](root)), s)["straw"]
+
+    def uv_up(mesh):
+        pts_, counts, conn, us_, vs_, uvi = mesh
+        k = good = tot = 0
+        for c_ in counts:
+            ids = uvi[k:k + c_]
+            k += c_
+            a = sum(us_[ids[i]] * vs_[ids[(i + 1) % c_]] - us_[ids[(i + 1) % c_]] * vs_[ids[i]] for i in range(c_))
+            if abs(a) > 1e-14:
+                tot += 1
+                good += a > 0
+        return good / float(max(1, tot))
+    flat, arched = curl_build(curl=0.0), curl_build(curl=0.6)
+    check("Curl: leaflets get columns across them (3 at Medium), UVs still the right way round",
+          len(arched[0]) > 1.4 * len(flat[0]) and uv_up(arched) > 0.999 and
+          max(arched[3]) <= 1.0 + 1e-6, "%d -> %d verts, %.2f%% upright" % (len(flat[0]), len(arched[0]),
+                                                                             uv_up(arched) * 100))
+    hero = curl_build(curl=0.6, detail="High")
+    check("High / Hero: 5 columns across a curled leaflet", len(hero[0]) > len(arched[0]) * 1.3)
+    pl0, pl1 = curl_build(style="Planes", curl=0.0), curl_build(style="Planes", curl=-0.8)
+    check("Curl on straw planes (cupped): more columns, UVs upright, same stack square",
+          len(pl1[0]) > 1.4 * len(pl0[0]) and uv_up(pl1) > 0.999 and abs(min(pl1[3])) < 1e-6 and
+          abs(max(pl1[3]) - 1.0) < 1e-6)
+    pa0, pa1 = curl_build(style="Leaf Panels", curl=0.0), curl_build(style="Leaf Panels", curl=1.0)
+    moved = max(max(abs(a[i] - b_[i]) for i in range(3)) for a, b_ in zip(pa0[0], pa1[0]))
+    check("Curl on leaf panels: a gentle arch, same topology", len(pa0[0]) == len(pa1[0]) and 0.005 < moved < 0.2,
+          "%.3f m" % moved)
 
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)

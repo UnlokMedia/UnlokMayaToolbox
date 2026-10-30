@@ -479,6 +479,17 @@
     controls / Underlay / Frame / UV stacks); `_update_rows` shows rows per
     style. Not done yet (the user's "desirable"): a quick roof-shape builder
     (click base points and peaks -> box, pitch, gable / hip ends).
+  - **Curl** (`curl`, `curl_var`; the user: bend the reeds widthways):
+    `_th_curl_points(c, h, wide)` wraps a half width round a circle (arc
+    length kept, so u is unchanged; c > 0 arches, c < 0 cups), used by palm
+    `emit` (columns: `s["_cross"]` from `_th_detail`, 3 / 5 at High+; per
+    leaf curl from a hash of its base point) and straw planes (`r[10]`);
+    leaf panels add a parabolic arch across the panel. Planes / panels
+    underlays are sunk by their relief step (their courses poked through
+    cupped planes). Frame mesh suffix `_GES` with Sub-D, `_GEP` without
+    (`_th_suffix` in `_th_write`; tests must re-fetch the part's name).
+    `git rebase` re-checks files out with CRLF here: patch scripts must
+    normalise line endings (read, replace CRLF -> LF, write back).
   - **Noise speed:** `_th_noise` inlines the four `_th_hash` calls (same
     values, checked over 200k samples): the relief calls it ~1M times.
   - **Makeshift** (`warp`, `ridge_sag`, `ragged`, `gaps`): warp and ridge

@@ -20142,6 +20142,7 @@ THATCH_DEFAULTS = {
     "top_leaf_width": 0.011, "overlap": 0.35, "edge_hang": 1.0, "sticks": True, "leaf_thickness": 0.0006,
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
+    "curl": 0.0, "curl_var": 0.5,
 }
 THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
 # How the thatch is made. A preset resets everything else to the defaults; of these it only sets the ones it
@@ -20152,7 +20153,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "frond_form", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
                     "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
-                    "wall_plates", "frame_subd", "battens")
+                    "wall_plates", "frame_subd", "battens", "curl", "curl_var")
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -20185,14 +20186,14 @@ THATCH_PRESETS = {
         "frond_form": "Leaflets", "density": 1.2, "leaf_length": 0.14, "leaf_width": 0.02, "top_leaf_width": 0.01,
         "overlap": 0.35, "frond_width": 0.22, "slant": 0.15, "droop": 0.3, "neat": 0.95, "top_layer": 0.15,
         "mess": 0.3, "lift": 0.4, "bend": 0.2, "edge_hang": 1.0, "end_reach": 0.15, "end_fronds": 0.3,
-        "ridge_fronds": True, "sticks": True, "segments": 6, "underlay": False},
+        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.25, "underlay": False},
     "Palm: palapa (hipped, messy top)": {
         "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "thickness": 0.04, "softness": 0.45, "sag": 0.15,
         "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
         "frond_form": "Leaflets", "density": 1.0, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
         "overlap": 0.3, "frond_width": 0.25, "slant": 0.4, "droop": 0.7, "neat": 0.75, "top_layer": 0.8,
         "mess": 0.9, "lift": 0.5, "bend": 0.3, "edge_hang": 1.2, "end_reach": 0.4, "end_fronds": 0.5,
-        "ridge_fronds": True, "sticks": True, "segments": 6, "underlay": False},
+        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.4, "underlay": False},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
         "lumps": 0.6, "warp": 0.5, "ridge_sag": 0.5, "ragged": 0.4, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -20200,14 +20201,14 @@ THATCH_PRESETS = {
         "leaf_length": 0.18, "leaf_width": 0.024, "top_leaf_width": 0.012, "overlap": 0.25, "frond_width": 0.25,
         "slant": 0.45, "droop": 1.0, "neat": 0.5, "top_layer": 1.0, "mess": 1.3, "lift": 0.6, "bend": 0.4,
         "edge_hang": 1.4, "end_reach": 0.5, "end_fronds": 1.2, "ridge_fronds": True, "sticks": True,
-        "segments": 6, "underlay": False},
+        "segments": 6, "curl": 0.5, "underlay": False},
     "Palm: Pacific fale (rounded)": {
         "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "overhang": 0.0, "thickness": 0.05, "softness": 0.9,
         "sag": 0.05, "lumps": 0.25, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
         "resolution": 150, "frond_form": "Leaflets", "density": 1.2, "leaf_length": 0.15, "leaf_width": 0.022,
         "top_leaf_width": 0.011, "overlap": 0.35, "frond_width": 0.25, "slant": 0.25, "droop": 0.4, "neat": 0.9,
         "top_layer": 0.3, "mess": 0.4, "lift": 0.5, "bend": 0.25, "edge_hang": 0.9, "end_reach": 0.2,
-        "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "underlay": False},
+        "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.3, "underlay": False},
 }
 THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
 THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
@@ -20901,7 +20902,7 @@ def _th_pieces_mesh(F, G, s):
     stacks = max(1, int(s["stacks"]))
     columns = s["stack_layout"] == "Atlas columns"
     seed = int(s["seed"])
-    per_piece = (seg + 1) * sides if three_d else 2 * (seg + 1)
+    per_piece = (seg + 1) * sides if three_d else (int(s.get("_cross", 3)) if s.get("curl") else 2) * (seg + 1)
     nr, nc, P = G["nr"], G["nc"], G["P"]
     # pieces per unit area: density 1 covers the roof about three layers deep
     rate = max(0.0, float(s["density"])) / (w0 * l0 * 0.3)
@@ -20976,20 +20977,22 @@ def _th_pieces_mesh(F, G, s):
                 return (u + stack) / stacks if columns else u + stack
 
             if not three_d:
+                c = _th_leaf_curl(s, r[10])
+                wide = int(s.get("_cross", 3)) if c else 2  # curled: columns across it
                 for k in range(seg + 1):
                     v = k / float(seg)
                     half = 0.5 * ws * (1.0 - 0.25 * v)
-                    b = frames[k][2]
-                    pts.append(_rl_sub(Q[k], _rl_mul(b, half)))
-                    pts.append(_rl_add(Q[k], _rl_mul(b, half)))
-                    us.extend((u_of(1.0), u_of(0.0)))
-                    vs.extend((v, v))
+                    t_, n_, b = frames[k]
+                    for x, side, up in _th_curl_points(c, half, wide):
+                        pts.append(_rl_add(Q[k], _rl_add(_rl_mul(b, side), _rl_mul(n_, up))))
+                        us.append(u_of(0.5 - 0.5 * x))
+                        vs.append(v)
                 for k in range(seg):
-                    a = 2 * k
-                    q = (a, a + 2, a + 3, a + 1)
-                    counts.append(4)
-                    conn.extend(base + x_ for x_ in q)
-                    uvi.extend(uvbase + x_ for x_ in q)
+                    for j in range(wide - 1):
+                        q = (k * wide + j, (k + 1) * wide + j, (k + 1) * wide + j + 1, k * wide + j + 1)
+                        counts.append(4)
+                        conn.extend(base + x_ for x_ in q)
+                        uvi.extend(uvbase + x_ for x_ in q)
             else:
                 body = 0.78
                 for k in range(seg + 1):
@@ -21184,6 +21187,7 @@ def _th_panels_mesh(F, G, s):
                 length = pl * (1.0 + (r[2] - 0.5) * 0.5 * mess)
                 yaw = (r[3] - 0.5) * 2.0 * math.radians(10.0) * mess
                 lift = float(s["lift"]) * 0.25 * length * (0.6 + 0.8 * r[4])  # each course's bottom stands off
+                arch = _th_leaf_curl(s, r[7]) * 0.08 * width  # Curl: arched across (cupped below 0)
                 bend = float(s["bend"]) * 0.05 * length * (0.5 + r[5])
                 layer = 0.01 * length * r[6]  # panels side by side don't share a surface
                 tuck = 0.04 * length
@@ -21199,6 +21203,7 @@ def _th_panels_mesh(F, G, s):
                     for m, (p_, n_) in enumerate(walk):
                         v = m / float(seg)
                         off = layer + lift * (1.0 - v) ** 1.2 + bend * math.sin(math.pi * v) - tuck * v
+                        off += arch * (1.0 - (2.0 * c / cols - 1.0) ** 2) * (0.3 + 0.7 * (1.0 - v))
                         col.append((p_[0] + n_[0] * off + ox, p_[1] + n_[1] * off, p_[2] + n_[2] * off + oz))
                     frayed = (0.08 + 0.35 * F.ragged) * length * _rand12(seed, course * 7919 + li, k, c)[0]
                     col[0] = _rl_add(col[0], _rl_mul(_rl_norm(_rl_sub(col[0], col[1])), frayed))
@@ -21231,6 +21236,29 @@ def _th_panels_mesh(F, G, s):
                         uvi.extend(uvbase + x_ for x_ in q)
                 panels += 1
     return (pts, counts, conn, us, vs, uvi), panels, capped
+
+
+def _th_curl_points(c, h, wide):
+    """Across a leaf / plane of half width h, bent by curl c: [(x, sideways, up)]
+    for wide columns, x from -1 to 1. The width is wrapped round a circle
+    (arc length kept, so UVs don't stretch): c > 0 arches it (edges down
+    towards the roof), c < 0 cups it (edges up), 1 = a half tube."""
+    out = []
+    for j in range(wide):
+        x = -1.0 + 2.0 * j / float(wide - 1)
+        if abs(c) < 1e-4:
+            out.append((x, x * h, 0.0))
+            continue
+        th = c * x * math.pi / 2.0
+        r = h / (c * math.pi / 2.0)
+        out.append((x, r * math.sin(th), r * (math.cos(th) - 1.0)))
+    return out
+
+
+def _th_leaf_curl(s, r):
+    """One leaf's curl from the settings (Curl, Curl variation) and a random 0..1."""
+    c = float(s.get("curl", 0.0))
+    return c * (1.0 + (r - 0.5) * 2.0 * clamp(float(s.get("curl_var", 0.0)), 0.0, 1.0)) if c else 0.0
 
 
 def _th_frond_rise(F, s):
@@ -21349,6 +21377,7 @@ def _th_fronds_mesh(F, G, s):
                                 if F.ends[e] is None]
     three = form == "3D Leaflets"
     thick = max(0.0, float(s["leaf_thickness"])) * span if three else 0.0  # 3D leaflets: a real thickness
+    cross = int(s.get("_cross", 3))  # columns across a curled leaflet (Detail: 3, High / Hero: 5)
     capped_ridge = bool(s["ridge_fronds"])
     k_seg = [k / float(seg) for k in range(seg + 1)]
     # half width down a leaflet: tiles keep their full width over the top half, then a long taper; the
@@ -21380,8 +21409,10 @@ def _th_fronds_mesh(F, G, s):
         tip on a sliver of the strip at u 0.86..0.87)."""
         n = len(Q)
         rows = n - 1
-        wide = 3 if crease else 2
-        if not room((rows * wide + 1) * (2 if thick else 1) + (8 * rows + 8 if thick else 0)):
+        q0 = Q[0]
+        c = _th_leaf_curl(s, (math.sin(q0[0] * 12.9898 + q0[1] * 78.233 + q0[2] * 37.719) * 43758.5453) % 1.0)
+        wide = cross if c else (3 if crease else 2)  # a curled leaf needs columns across it
+        if not room((rows * wide + 1) * (2 if thick else 1) + (4 * rows * 2 + 4 * wide if thick else 0)):
             return False
         base, uvb = len(pts), len(us)
         ups = []
@@ -21396,13 +21427,10 @@ def _th_fronds_mesh(F, G, s):
             h = half[k]
             ups.append(nn)
             du = h * uk * (-1.0 if flip else 1.0)
-            pts.append(_rl_sub(Q[k], _rl_mul(b, h)))
-            us.append(u_of(0.425 + du, stack))
-            if crease:
-                pts.append(_rl_sub(Q[k], _rl_mul(nn, crease * h)))
-                us.append(u_of(0.425, stack))
-            pts.append(_rl_add(Q[k], _rl_mul(b, h)))
-            us.append(u_of(0.425 - du, stack))
+            for x, side, up in _th_curl_points(c, h, wide):
+                up -= crease * h * (1.0 - abs(x))  # 3D: folded down the midrib
+                pts.append(_rl_add(Q[k], _rl_add(_rl_mul(b, side), _rl_mul(nn, up))))
+                us.append(u_of(0.425 - x * du, stack))
             vs.extend([vv_leaf[k]] * wide)
         pts.append(Q[-1])
         us.append(u_of(0.425, stack))
@@ -21889,7 +21917,8 @@ def _th_detail(s):
         if s["style"] == "3D Pieces":
             s["style"] = "Planes"
         s["frond_form"] = "Cards"
-    elif level >= 3:
+    s["_cross"] = 5 if level >= 3 else 3
+    if level >= 3:
         k = 1.5 if level == 3 else 2.0
         s["segments"] = int(math.ceil(int(s["segments"]) * k))
         under = int(res * k)
@@ -22572,9 +22601,11 @@ def thatch_build(frame, settings, blockers=None):
                 inset = 0.1 * float(s["piece_width"]) * F.span * float(s["flatness"])
             else:
                 inset = 0.01 * F.T
+            relief = _th_underlay_relief(F, s)
+            if relief and s["style"] != "Palm Fronds":  # sink it by its relief: its courses poked through planes
+                inset += max(0.0, relief["step"] * (1.3 + relief.get("bias", 0.0)))
             GU = G if under_res == int(s["resolution"]) else _th_grid(F, under_res)
-            out["underlay"] = _th_to_world(frame, _th_shell_mesh(F, GU, strands=False, inset=inset,
-                                                                 relief=_th_underlay_relief(F, s)))
+            out["underlay"] = _th_to_world(frame, _th_shell_mesh(F, GU, strands=False, inset=inset, relief=relief))
     else:
         straw = _th_shell_mesh(F, G, strands=True)
     out["straw"] = _th_to_world(frame, straw) if straw else None
@@ -22952,10 +22983,24 @@ def _th_placeholder(frame):
     return pts, [4], [0, 1, 2, 3], [0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0], [0, 1, 2, 3]
 
 
+def _th_suffix(node, subd):
+    """The frame mesh is named ..._GES when it's Sub-D topology, else ..._GEP
+    (UnlokRenamer's suffixes). Returns the node (renamed or not)."""
+    name = short_name(node)
+    want, other = ("_GES", "_GEP") if subd else ("_GEP", "_GES")
+    m = re.match(r"^(.*)%s(\d*)$" % other, name)
+    if not m:
+        return node
+    return long_name(cmds.rename(node, m.group(1) + want + m.group(2)))
+
+
 def _th_write(root, frame, s, built):
     """Put the built geometry on the roof's meshes (API, not undoable:
     callers run it in NoUndo). Returns the face count."""
     faces = 0
+    parts = thatch_parts(root)
+    if "frame" in parts:
+        _th_suffix(parts["frame"], bool(s["frame_subd"]))
     for part, node in thatch_parts(root).items():
         shape = _log_shape(node)
         mesh = built.get(part)
@@ -23414,6 +23459,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Proxy: just the roof's shell, instant, for placing and shaping it.\nRough: cards / planes, 2 "
             "segments.\nMedium: as set.\nHigh / Hero: more segments and a finer underlay for close-ups.\n"
             "The layout stays the same at every level, so raise it bit by bit once the shape is right.")
+        row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
+            "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
+            "roof), below 0 it cups (edges up), 1 = a half tube, 2 = rolled round. Width (and UVs) kept. Leaf "
+            "panels: a gentle arch across each panel. 3 columns across (High / Hero: 5); 0 keeps them flat and "
+            "lightest.")
         row(sec, "frond_form", "Form", SegmentField(THATCH_FROND_FORMS),
             "Cards: one card per tile / frond, for an alpha-mapped texture (lightest; caps stay leaflets).\n"
             "Leaflets: every leaflet a flat tapered strip (UVs in true proportion in the left 85% of 0..1; "
@@ -23463,6 +23513,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
             "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
             "leaflet is a closed, thin solid (underside, edges, tip); 0: single-sided.")
+        row(sec, "curl_var", "Curl variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaf's curl differs from the next (0: all the same; 1: from none to twice Curl).")
         row(sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How far the top fronds' leaflets lean along their rachis (0: straight down the slope).")
         row(sec, "droop", "Droop", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
@@ -23621,6 +23673,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         for key in ("frond_form", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "top_leaf_width", "slant", "droop", "end_reach"):
             shown[key] = palm
+        for key in ("curl", "curl_var"):
+            shown[key] = palm or leaf or s["style"] == "Planes"
         for key in ("density", "mess", "lift", "bend", "segments"):
             shown[key] = not surface
         for key, on in shown.items():

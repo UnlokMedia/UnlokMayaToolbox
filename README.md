@@ -440,6 +440,13 @@ detail (just its shell, instant), get the shape right, then raise
        alpha fits its outline), sticks, rachis and poles in the strip on the
        right (*Sticks, rachis and ridge poles*); stacks and mirroring as
        below.
+     - **Curl** bends every leaflet across its width (not along it): above
+       0 it arches (edges down to the roof), below 0 it cups (edges up), 1 is
+       a half tube, 2 rolled round; the width and UVs are kept. *Curl
+       variation* gives each leaf its own. Curled leaves get 3 columns across
+       (High / Hero: 5); at 0 they stay flat and lightest. Straw **Planes**
+       curl the same way, and **Leaf Panels** get a gentle arch across each
+       panel. The palm presets use a little (0.25-0.5).
      - **Levels** (step 3) work with palm too: every level starts a fresh
        course right at its step, its leaves hanging down over the level
        below.
@@ -488,7 +495,8 @@ detail (just its shell, instant), get the shape right, then raise
      *Crookedness* (gently crooked members, ends cut unevenly; rafter tops
      always meet the ridge beam). Light topology: a ring every ~25 cm, 6
      sides, hard edges on sawn timber, one-face caps. **Sub-D topology**:
-     8 sides, support loops near the cut ends and along sawn corners,
+     8 sides (the frame mesh is then named `..._GES` instead of `_GEP`),
+     support loops near the cut ends and along sawn corners,
      quad-filled caps, every member closed and all quads, so it smooths
      with crisp rounded edges and no chamfers. UVs: each member's skin one
      shell (seam on the side facing the thatch; sawn faces unfolded side by
