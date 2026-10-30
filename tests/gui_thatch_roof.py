@@ -60,6 +60,16 @@ def snap(name, width=1400, height=900):
     return path
 
 
+def wait_until(cond, seconds=4.0):
+    """Let timers fire until cond() holds (the box-follow runs when Maya goes idle), at most seconds."""
+    end = time.time() + seconds
+    while time.time() < end:
+        wait(0.1)
+        if cond():
+            return True
+    return False
+
+
 def frame_on(nodes, direction=(1.0, 0.55, 1.3), dist=1.9):
     bb = cmds.exactWorldBoundingBox(nodes)
     c = [(bb[i] + bb[i + 3]) * 0.5 for i in range(3)]
@@ -165,7 +175,7 @@ def main():
     edit(style="Planes")
     snap("10_planes_close.png")
     edit(style="3D Pieces")
-    check("pieces rows show, surface rows hide", not panel.piece_sec.isHidden() and panel.surf_sec.isHidden() and
+    check("pieces rows show, surface rows hide", not panel._rows["density"][1].isHidden() and panel._rows["strands"][1].isHidden() and
           not panel._rows["sides"][1].isHidden())
     window.grab().save(os.path.join(OUT, "11_panel_pieces.png"))
     edit(style="Surface")
@@ -222,10 +232,11 @@ def main():
         for vname, direction, dist, target in views:
             frame_on(straw if target == "straw" else target, direction=direction, dist=dist)
             snap("17_palm%d_%s_%s.png" % (i + 1, name.split(": ")[1].split(" ")[0].lower(), vname))
-    check("palm rows show (fronds section), straw piece sizes hide", not panel.frond_sec.isHidden() and
+    check("palm rows show (fronds section), straw piece sizes hide", not panel._rows["frond_form"][1].isHidden() and
           panel._rows["piece_width"][1].isHidden() and not panel._rows["detail"][1].isHidden())
     scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
-    scroll.ensureWidgetVisible(panel.frond_sec, 0, 0)
+    panel.more_sec.header.setChecked(True)
+    scroll.ensureWidgetVisible(panel.main_sec, 0, 0)
     pump()
     window.grab().save(os.path.join(OUT, "18_panel_palm.png"))
     scroll.verticalScrollBar().setValue(0)
@@ -316,12 +327,12 @@ def main():
     box = ns["thatch_box"](root)
     x0 = centre_x(ns["thatch_parts"](root)["straw"])
     cmds.move(4, 0, 0, box, relative=True)
-    wait(0.6)
+    wait_until(lambda: abs(centre_x(ns["thatch_parts"](root)["straw"]) - x0 - 4.0) < 0.05)
     x1 = centre_x(ns["thatch_parts"](root)["straw"])
     check("moving the box moves the roof (once it stops)", abs((x1 - x0) - 4.0) < 0.05,
           "%.3f -> %.3f | %s" % (x0, x1, panel.status.text()))
     cmds.undo()
-    wait(0.6)
+    wait_until(lambda: abs(centre_x(ns["thatch_parts"](root)["straw"]) - x0) < 0.05)
     check("undoing the move puts the roof back", abs(centre_x(ns["thatch_parts"](root)["straw"]) - x0) < 0.05)
 
     # --- moving the box's vertices warps the roof (an API callback starts the timer)

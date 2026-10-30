@@ -591,10 +591,11 @@ def run():
                       sizes <= {4, 6} and fn.numVertices < 60000, "%d verts, %s" % (fn.numVertices, sorted(sizes)))
             else:
                 check("%s: hard-edged quads" % label, sizes == {4})
-    tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False}})
-    fbb, sbb = bbox(fr), bbox(parts["straw"])
+    tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False, "sticks": False}})
+    fbb, sbb = bbox(fr), bbox(parts["straw"])  # (no ridge pole: it rides on top of the cap)
     check("the frame sits under the thatch, rafters out to the eaves", fbb[4] < sbb[4] - 0.08 and 1.6 < fbb[1] < 2.6,
           "frame y %.2f..%.2f, thatch top %.2f" % (fbb[1], fbb[4], sbb[4]))
+    tb["update_thatch_roofs"]({root: {"sticks": True}})
     n_wide = mesh_fn(tb, fr).numVertices
     tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.075}})
     check("closer rafters: more of them", mesh_fn(tb, fr).numVertices > n_wide * 1.1,
@@ -609,6 +610,64 @@ def run():
     tb["update_thatch_roofs"]({root: {"shape": "Ridge", "end_a": "Hip", "end_b": "Hip", "style": "Surface"}})
     check("a hipped surface roof gets its frame too (under the shell)", cmds.getAttr(fr + ".visibility") and
           bbox(fr)[4] < bbox(parts["straw"])[4] - 0.1)
+
+    # --- the frame follows the roof's shape; battens: every course / fewer / per level
+    check("no overhang by default: the roof is the box", tb["THATCH_DEFAULTS"]["overhang"] == 0.0 and
+          all(tb["thatch_preset"](k)["overhang"] == 0.0 for k in tb["THATCH_PRESETS"]))
+    tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"]("Palm: nipa shingles (neat)"), detail="Medium")})
+
+    def frame_top(x0, x1):
+        return max(q.y for q in mesh_fn(tb, fr).getPoints(om.MSpace.kWorld) if x0 < q.x < x1)
+    mid0, end0 = frame_top(-0.3, 0.3), frame_top(2.0, 2.6)
+    tb["update_thatch_roofs"]({root: {"ridge_sag": 1.5}})
+    mid1, end1 = frame_top(-0.3, 0.3), frame_top(2.0, 2.6)
+    check("ridge sag drags the frame's ridge down with the thatch", mid0 - mid1 > 0.15 and mid0 - mid1 > end0 - end1,
+          "middle %.3f -> %.3f, near the end %.3f -> %.3f" % (mid0, mid1, end0, end1))
+    nv = {}
+    for mode in tb["THATCH_BATTENS"]:
+        tb["update_thatch_roofs"]({root: {"ridge_sag": 0.0, "levels": 3, "lip": 0.4, "battens": mode}})
+        nv[mode] = mesh_fn(tb, fr).numVertices
+    check("battens: every course > every 2nd > every 3rd > one per level", nv["Every course"] > nv["Every 2nd"] >
+          nv["Every 3rd"] > nv["Per level"], str(nv))
+    s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"]("Palm: nipa shingles (neat)"))
+    s.update(levels=3, lip=0.4)
+    F = tb["ThatchField"](3.0, 2.0, 3.0, s)
+    t_first = tb["_th_frond_courses"](F, s)[0]
+    ts = tb["_th_palm_courses"](F, s, 1.0)
+    dt_ = tb["_th_frond_courses"](F, s)[1]
+    bottoms = tb["_th_level_bottoms"](F)
+    check("with levels, every level starts a fresh palm course at its bottom step",
+          any(abs(c - (bottoms[0] + t_first - F.t_low)) < 1e-9 for c in ts) and
+          all(any(abs(c - (b_ + 0.25 * dt_)) < 1e-9 for c in ts) for b_ in bottoms[1:]), "%d courses" % len(ts))
+    # 3D leaflets are solids, and the sticks are closed members; poles go to the frame
+    tb["update_thatch_roofs"]({root: {"levels": 1, "lip": 0.0, "battens": "Every 2nd", "frond_form": "3D Leaflets",
+                                      "end_fronds": 0.0}})
+    fn = mesh_fn(tb, parts["straw"])
+    check("3D Leaflets with a thickness: every leaflet a closed solid facing out (and every stick capped)",
+          boundary_edges(fn) == 0 and signed_volume(fn) > 0.0, "%d open edges" % boundary_edges(fn))
+    tb["update_thatch_roofs"]({root: {"leaf_thickness": 0.0}})
+    check("thickness 0: single-sided leaflets again", boundary_edges(mesh_fn(tb, parts["straw"])) > 0)
+    tb["update_thatch_roofs"]({root: {"frond_form": "Leaflets", "leaf_thickness": 0.0006}})
+    with_frame = mesh_fn(tb, parts["straw"]).numPolygons
+    tb["update_thatch_roofs"]({root: {"frame": False}})
+    check("ridge / hip poles sit in the frame's mesh (in the straw without a frame)",
+          mesh_fn(tb, parts["straw"]).numPolygons > with_frame,
+          "%d -> %d straw faces" % (with_frame, mesh_fn(tb, parts["straw"]).numPolygons))
+    tb["update_thatch_roofs"]({root: {"frame": True}})
+    # upgrade an old roof in place
+    cmds.undoInfo(state=True, infinity=True)
+    cmds.delete(fr)
+    data = tb["thatch_data"](root)
+    data["version"] = 2
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], __import__("json").dumps(data), type="string")
+    check("a roof from an older version is spotted", tb["thatch_needs_upgrade"](root))
+    done, rep = tb["upgrade_thatch_roofs"]([root])
+    parts = tb["thatch_parts"](root)
+    check("Upgrade adds the frame mesh, keeps the settings and stamps the version", done == [root] and
+          "frame" in parts and cmds.getAttr(parts["frame"] + ".visibility") and not tb["thatch_needs_upgrade"](root)
+          and tb["thatch_data"](root)["frond_form"] == "Leaflets")
+    cmds.undo()
+    check("one Ctrl+Z takes the added mesh away again", "frame" not in tb["thatch_parts"](root))
 
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)
@@ -653,12 +712,12 @@ def run():
     check("a wall over half the verge: leaves hang free on the open half, none get past the wall",
           inside(pts, wall) == 0 and free > 50 and past == 0 and not tb["thatch_box_moved"](root),
           "inside %d, free %d, past %d" % (inside(pts, wall), free, past))
-    low = box("lowRoof", size=(4.0, 0.3, 2.0), move=(0.0, 1.9, 3.3))
+    low = box("lowRoof", size=(4.0, 0.3, 2.0), move=(0.0, 1.9, 3.0))  # just under the eave (no overhang)
     tb["link_thatch_blockers"]([root], [low])
     pts = roof_pts()
-    lying = sum(1 for p in pts if abs(p[0]) < 1.9 and 2.4 < p[2] < 4.2 and 2.05 < p[1] < 2.25)
+    lying = sum(1 for p in pts if abs(p[0]) < 1.9 and 2.0 < p[2] < 4.0 and 2.05 < p[1] < 2.25)
     check("a lower roof under the eave: the hanging leaves lie down on it, none go into it",
-          inside(pts, low) == 0 and lying > 100, "inside %d, lying on it %d" % (inside(pts, low), lying))
+          inside(pts, low) == 0 and lying > 40, "inside %d, lying on it %d" % (inside(pts, low), lying))
     for style in ("Surface", "Planes", "3D Pieces", "Leaf Panels", "Palm Fronds"):
         t0 = time.time()
         tb["update_thatch_roofs"]({root: {"style": style, "underlay": True}})
