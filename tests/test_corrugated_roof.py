@@ -387,6 +387,21 @@ def run():
         os.remove(path)
     except OSError:
         pass
+    # Duplicate Roof of a metal roof, and linked roofs switching covering together
+    dup = tb["duplicate_thatch_roof"](roofs[0])
+    check("Duplicate Roof copies a metal roof with its metal meshes",
+          tb["thatch_data"](dup["root"])["covering"] == "Corrugated" and
+          {"sheets", "trim", "fixings", "frame"} <= set(tb["thatch_parts"](dup["root"])) and dup["metal"]["sheets"] > 0)
+    tb["link_thatch_roofs"]([roofs[0], dup["root"]])
+    rep = tb["roof_set_covering"]([roofs[0]], "Thatch")
+    check("a linked roof switches covering with the one changed (and gets the thatch meshes it lacked)",
+          tb["thatch_data"](dup["root"])["covering"] == "Thatch" and "straw" in tb["thatch_parts"](dup["root"]) and
+          not rep["errors"], "%s %s" % (sorted(tb["thatch_parts"](dup["root"])), rep["errors"]))
+    rep = tb["roof_set_covering"]([dup["root"]], "Corrugated")
+    check("...and back to metal", all(tb["thatch_data"](r)["covering"] == "Corrugated" for r in (roofs[0], dup["root"]))
+          and not rep["errors"], str(rep["errors"]))
+    cmds.delete(dup["root"], dup["box"])
+    roofs = tb["thatch_roofs"]()
     # bake
     done, gone = tb["bake_thatch"](roofs)
     check("bake keeps the metal meshes as plain meshes", done and not tb["thatch_roofs"]() and

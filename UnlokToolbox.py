@@ -25155,8 +25155,9 @@ def roof_set_covering(roots, covering):
     so switching back keeps them), then the roofs rebuild. Returns the
     update report."""
     roots = [r for r in roots if is_thatch_roof(r)]
-    roof_ensure_parts({r: covering for r in roots})
-    return update_thatch_roofs({r: {"covering": covering} for r in roots})
+    changes = _th_spread_links({r: {"covering": covering} for r in roots})  # linked roofs switch too
+    roof_ensure_parts({r: c["covering"] for r, c in changes.items() if "covering" in c})
+    return update_thatch_roofs(changes)
 
 
 def roof_ensure_parts(coverings):
@@ -26403,8 +26404,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            # a new covering's meshes first (undoable), then the live rebuild
-            roof_ensure_parts({r: c["covering"] for r, c in changes.items() if "covering" in c})
+            # a new covering's meshes first (undoable; linked roofs switch too), then the live rebuild
+            roof_ensure_parts({r: c["covering"] for r, c in _th_spread_links(changes).items() if "covering" in c})
             report = update_thatch_roofs(changes)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
