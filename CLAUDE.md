@@ -490,6 +490,23 @@
     (`_th_suffix` in `_th_write`; tests must re-fetch the part's name).
     `git rebase` re-checks files out with CRLF here: patch scripts must
     normalise line endings (read, replace CRLF -> LF, write back).
+  - **Dried** (`dried`, `dried_var`; the user: Messiness 2 still too smooth,
+    wants leaflets dried, shrunk, coiled, crumpled): `_th_leaf_dry(s, r)`
+    per leaflet (0..2, variation like Curl's); `_th_dry_leaf(F, Q, Nn, half,
+    twist, e, r, cross, coil)` folds the centreline 1-3 times (Rodrigues
+    turns up / sideways, never into the roof; smaller near the base), then
+    rebuilds the tip end as a coil (mostly hooks: theta ~ r^2; extra rows at
+    45 / 30 degrees), returns per-row V, extra curl (edges rolled in) and a
+    crumple (amp + phases, continuous in v so Detail keeps the shape).
+    `emit(..., dry=(e, randoms, coil))`; only `frond_at` (top layer) coils
+    and shrinks (L x (1 - 0.18e), width x max(0.4, 1 - 0.3e), more dropped /
+    torn leaflets); caps get half, crumple + twist only (`coil=False`), the
+    under layer none (the no-gap guarantee). Cards ignore it. Points are
+    pushed out of blockers. Its randoms come from a second `_rand12` keyed
+    `key[0] * 7 + 4`, so Dried 0 builds exactly what it did before.
+    Pictures: run Maya from an empty folder (`scratchpad/run_cwd`); the
+    scratchpad's own .py files shadowed Maya's Python modules ("Invalid
+    Python Environment").
   - **Quick roof shape** (`thatch_shape_from_points`, pure maths;
     `create_thatch_box_from_points`, `thatch_roof_from_points` (one
     UndoChunk), `thatch_selected_points`, `ThatchPointPicker`): points split

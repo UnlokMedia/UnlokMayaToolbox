@@ -710,6 +710,50 @@ def run():
     check("Curl on leaf panels: a gentle arch, same topology", len(pa0[0]) == len(pa1[0]) and 0.005 < moved < 0.2,
           "%.3f m" % moved)
 
+    # --- Dried: the top layer's leaflets shrunk, folded, coiled, rolled and crumpled
+    class _Flat(object):
+        blockers = []
+        block_gap = 0.0
+    dl_line = [(0.1 * k, 0.0, 0.0) for k in range(7)]
+    up_ = [(0.0, 1.0, 0.0)] * 7
+    rnd = [0.5, 0.5, 0.95, 0.5, 0.5, 0.2, 0.3, 0.6, 0.1, 0.4, 0.7, 0.25]
+    Q2, N2, h2, tw2, vv2, roll2, wr2 = tb["_th_dry_leaf"](_Flat(), dl_line, up_, [1.0] * 7, [0.0] * 7, 1.5, rnd, 3)
+    length = sum(math.sqrt(sum((Q2[k][i] - Q2[k - 1][i]) ** 2 for i in range(3))) for k in range(1, len(Q2)))
+    dl_reach = math.sqrt(sum((Q2[-1][i] - Q2[0][i]) ** 2 for i in range(3)))
+    check("a dried leaflet keeps its length, folds and coils up off the roof (never into it), more rows",
+          abs(length - 0.6) < 0.01 and dl_reach < 0.45 and min(q[1] for q in Q2) > -1e-6 and len(Q2) > 7 and
+          len(vv2) == len(h2) == len(tw2) == len(roll2) == len(Q2) and abs(vv2[0] - 1.0) < 1e-9 and
+          abs(vv2[-1]) < 1e-9 and roll2[-1] > roll2[0] > 0.0,
+          "length %.3f, tip %.3f from the base, %d rows, lowest %.4f" % (length, dl_reach, len(Q2),
+                                                                        min(q[1] for q in Q2)))
+    fr_ = tb["thatch_frame"](tb["thatch_box"](root))
+
+    def dry_build(**over):
+        s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"]("Palm: palapa (hipped, messy top)"))
+        s.update(resolution=80, dried=0.0)
+        s.update(over)
+        return tb["thatch_build"](fr_, s)["straw"]
+    a_, b_ = dry_build(top_layer=0.0, ridge_fronds=False), dry_build(top_layer=0.0, ridge_fronds=False, dried=2.0)
+    check("Dried leaves the neat under layer alone", a_[0] == b_[0])
+    c0_, c1_ = dry_build(frond_form="Cards"), dry_build(frond_form="Cards", dried=1.0)
+    check("Cards ignore Dried (an alpha card can't coil)", c0_[0] == c1_[0])
+    t0 = time.time()
+    d0_, d1_ = dry_build(), dry_build(dried=1.0)
+    dt = time.time() - t0
+    check("Dried 1: the top layer changes, a few more rows (not a heavy roof), UVs upright and in the stack "
+          "(%.2fs for both)" % dt, d0_[0] != d1_[0] and 1.0 < len(d1_[0]) / float(len(d0_[0])) < 1.8 and
+          uv_up(d1_) > 0.999 and min(d1_[3]) >= -1e-6 and dt < 8.0,
+          "%d -> %d verts, %.2f%% upright" % (len(d0_[0]), len(d1_[0]), uv_up(d1_) * 100))
+    check("Dried is repeatable (same seed, same leaves)", dry_build(dried=1.0)[0] == d1_[0])
+    tb["update_thatch_roofs"]({root: {"frond_form": "3D Leaflets", "dried": 1.5, "dried_var": 1.0}})
+    parts = tb["thatch_parts"](root)
+    fn = mesh_fn(tb, parts["straw"])
+    miss = sky_from_inside(parts["straw"])
+    check("Dried 1.5, 3D Leaflets: still closed solids facing out, still no gaps from inside",
+          boundary_edges(fn) == 0 and signed_volume(fn) > 0.0 and not miss,
+          "%d open edges, %d rays see the sky" % (boundary_edges(fn), len(miss)))
+    tb["update_thatch_roofs"]({root: {"frond_form": "Leaflets", "dried": 0.0, "dried_var": 0.6}})
+
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)
     cmds.undoInfo(state=True, infinity=True)

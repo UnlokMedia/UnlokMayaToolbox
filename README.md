@@ -464,6 +464,19 @@ detail (just its shell, instant), get the shape right, then raise
        (High / Hero: 5); at 0 they stay flat and lightest. Straw **Planes**
        curl the same way, and **Leaf Panels** get a gentle arch across each
        panel. The palm presets use a little (0.25-0.5).
+     - **Dried** ages the top layer's leaflets, for the old, weathered look
+       Messiness alone doesn't reach: shorter and narrower (shrunk), folded
+       once or twice along their length, the tip end hooked or coiled up
+       off the roof (a few right round, some leaning over into corkscrews),
+       the edges rolled in towards the tip, the blade crumpled and twisted,
+       and more of them broken or fallen off. 0 is fresh, 1 old and dry, 2
+       shrivelled into thin curls. *Dried variation* (More controls) gives
+       each leaflet its own amount, so old leaves stand out among fresh ones
+       (1: from fresh to twice *Dried*). The neat under layer is left alone
+       and the caps only crumple, so the roof stays closed. Leaflets and 3D
+       Leaflets (Cards stay flat); a coiled leaflet gets a few more rows (45
+       degrees a row, High / Hero 30). The palapa preset uses 0.35, the
+       beach shack 0.8.
      - **Levels** (step 3) work with palm too: every level starts a fresh
        course right at its step, its leaves hanging down over the level
        below.
