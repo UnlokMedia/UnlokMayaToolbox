@@ -1,9 +1,10 @@
-"""GUI test for Thatch Roof: run inside an interactive Maya.
+"""GUI test for the Roof tool: run inside an interactive Maya.
 
-Opens the toolbox, drives the Thatch Roof panel (box on a house, Make Roof,
+Opens the toolbox, drives the Roof panel (box on a house, Make Roof,
 live edits through the fields, the roof following its box, undo / redo with
-the automatic rebuild, bake) and saves pictures of each roof shape and
-thatch style, and of the panel.
+the automatic rebuild, bake, corrugated metal: covering switch, modes,
+profile, UVs, a metal preset) and saves pictures of each roof shape and
+thatch style, of metal roofs, and of the panel.
 
 Launch (Maya 2023+), with UNLOK_TEST_DIR set to this folder:
 
@@ -101,11 +102,11 @@ def main():
     ns["show"]()
     pump(20)
     window = getattr(__main__, ns["REGISTRY_KEY"])["window"]
-    panel = [p for p in window.panels() if p.TOOL_NAME == "Thatch Roof"][0]
+    panel = [p for p in window.panels() if p.TOOL_NAME == "Roof"][0]
     names = [window.tabs.tabText(i) for i in range(window.tabs.count())]
     window.tabs.setCurrentIndex(names.index("Modeling"))
     page = window.pages[names.index("Modeling")]
-    [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Thatch Roof"][0].click()
+    [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == "Roof"][0].click()
     pump(20)
     check("the panel is on screen", panel.isVisible())
 
@@ -496,6 +497,83 @@ def main():
             cmds.optionVar(remove=var)
         else:
             cmds.optionVar(stringValue=(var, old))
+
+    # --- corrugated metal: an 8 x 5 m house (decimetre scene), switched from thatch, then edited
+    house3 = cmds.polyCube(w=80, h=30, d=50, name="metalHouse", constructionHistory=False)[0]
+    cmds.move(200, 15, 0, house3)
+    cmds.select(house3)
+    panel.create_box()
+    pump()
+    box3 = cmds.ls(selection=True, long=True)[0]
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Gabled cottage"))
+    panel.load_preset()
+    panel.f["covering"].setValue("Thatch")
+    panel._update_rows()
+    panel._sync_from_selection()
+    panel.make_roof()
+    pump()
+    root3 = [r for r in ns["thatch_roofs"]() if ns["thatch_box"](r) == box3][0]
+    check("thatch rows show while the covering is Thatch", not panel._rows["thickness"][1].isHidden() and
+          panel._rows["m_pitch"][1].isHidden() and panel.f["m_mode"].isHidden() and not panel.f["style"].isHidden())
+    edit(covering="Corrugated")
+    parts = ns["thatch_parts"](root3)
+    check("Covering: Corrugated adds the metal meshes, hides the thatch, and the status counts sheets",
+          ns["thatch_data"](root3)["covering"] == "Corrugated" and {"sheets", "trim", "fixings"} <= set(parts) and
+          cmds.getAttr(parts["sheets"] + ".visibility") and not cmds.getAttr(parts["straw"] + ".visibility") and
+          "sheets" in panel.status.text(), panel.status.text())
+    check("metal rows show, thatch rows hide", not panel._rows["m_pitch"][1].isHidden() and
+          panel._rows["thickness"][1].isHidden() and panel._rows["density"][1].isHidden() and
+          not panel.f["m_mode"].isHidden() and panel.f["style"].isHidden() and panel.levels_sec.isHidden() and
+          panel.mmk_sec.isHidden() and not panel.trim_sec.isHidden() and not panel._rows["detail"][1].isHidden())
+    edit(detail="High")
+    cmds.select(clear=True)
+    frame_on([root3, house3], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("30_metal_clean.png")
+    frame_on(parts["sheets"], direction=(0.3, 0.35, 1.0), dist=0.35)
+    snap("31_metal_clean_close.png")
+    frame_on([root3, house3], direction=(0.5, -0.35, 1.3), dist=0.9)
+    snap("32_metal_clean_below.png")
+    scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
+    scroll.ensureWidgetVisible(panel.f["covering"], 0, 0)
+    window.grab().save(os.path.join(OUT, "33_panel_metal.png"))
+    panel.f["m_profile"].setValue("Box")
+    panel._queue("m_profile")
+    panel._apply_pending()
+    pump()
+    data = ns["thatch_data"](root3)
+    check("picking Box sets its pitch and depth", data["m_profile"] == "Box" and abs(data["m_pitch"] - 0.19) < 1e-9 and
+          abs(panel.f["m_depth"].value() - 0.029) < 1e-9, panel.status.text())
+    edit(m_full_length=False)
+    check("rows of shorter sheets show the sheet length", not panel._rows["m_sheet_length"][1].isHidden() and
+          ns["thatch_data"](root3)["m_full_length"] is False)
+    frame_on([root3, house3], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("34_metal_box_rows.png")
+    edit(m_profile="Sine", m_pitch=0.076, m_depth=0.018, m_mode="Makeshift", end_a="Hip")
+    check("Makeshift shows its section and rebuilds", not panel.mmk_sec.isHidden() and
+          ns["thatch_data"](root3)["m_mode"] == "Makeshift" and "Updated" in panel.status.text(), panel.status.text())
+    frame_on([root3, house3], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("35_metal_makeshift.png")
+    frame_on(parts["sheets"], direction=(0.3, 0.35, 1.0), dist=0.35)
+    snap("36_metal_makeshift_close.png")
+    edit(m_uv_mode="All laid out")
+    sh = ns["_log_shape"](parts["sheets"])
+    check("All laid out: the sheets aren't stacked, and the status counts UV tiles",
+          not cmds.getAttr(sh + "." + ns["UV_STACKED_ATTR"]) and "tile" in panel.status.text() and
+          panel._rows["stacks"][1].isHidden(), panel.status.text())
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Metal: makeshift shanty"))
+    panel.load_preset()
+    pump()
+    data = ns["thatch_data"](root3)
+    check("the makeshift shanty preset loads (whole metal look)", data["covering"] == "Corrugated" and
+          data["m_mode"] == "Makeshift" and data["m_uv_mode"] == "Variations" and "on 1 roof" in panel.status.text(),
+          panel.status.text())
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Palm: nipa shingles (neat)"))
+    panel.load_preset()
+    pump()
+    check("a thatch look preset switches back to thatch", ns["thatch_data"](root3)["covering"] == "Thatch" and
+          cmds.getAttr(ns["thatch_parts"](root3)["straw"] + ".visibility") and
+          not cmds.getAttr(ns["thatch_parts"](root3)["sheets"] + ".visibility"), panel.status.text())
+    cmds.delete(house3)
 
     # --- bake
     cmds.select(root2)

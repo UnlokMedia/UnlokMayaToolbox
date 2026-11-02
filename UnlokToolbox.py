@@ -20126,8 +20126,37 @@ THATCH_FRAME_STYLES = ("Bamboo", "Poles", "Sawn")
 THATCH_BATTENS = ("Every course", "Every 2nd", "Every 3rd", "Per level")
 THATCH_PATTERNS = ("Straight", "Scallops", "Points")
 THATCH_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
+# --------------------------------------------------------- corrugated metal
+# The second covering (covering "Corrugated"): the same box, shapes, overhang,
+# frame and live rebuild as thatch, covered with corrugated sheets on purlins.
+# Each roof face is a plane of the height field (min of the side / end
+# planes, crisp: no softness); sheets are laid in that face's own
+# coordinates (a: along the eave, s: slope distance up from the wall line)
+# and clipped to it (hip lines, the ridge, verges), so hips are cut under a
+# hip capping. Sizes are real metres (m_ keys) turned into scene units with
+# the roof's metres per unit. Every sheet is a closed solid (top, underside,
+# edges) with the profile across it; laps nest (clean) or rest on what's
+# under them (makeshift, a height raster per face).
+
+ROOF_COVERINGS = ("Thatch", "Corrugated")
+METAL_MODES = ("Clean", "Makeshift")
+METAL_PROFILES = ("Sine", "Box")
+METAL_UV_MODES = ("Variations", "All laid out")
+METAL_WEATHER = ("End A", "End B")
+METAL_PROFILE_SIZES = {"Sine": (0.076, 0.018), "Box": (0.19, 0.029)}  # pitch, depth (m): 3" corrugated, trapezoid
+METAL_PART_MATERIALS = (("sheets", "metalCorrugated"), ("trim", "metalFlashing"), ("fixings", "metalFixings"),
+                        ("frame", "woodFrame"))
+METAL_DEFAULTS = {
+    "m_mode": "Clean", "m_profile": "Sine", "m_pitch": 0.076, "m_depth": 0.018, "m_cover": 0.762,
+    "m_side_lap": 1, "m_full_length": True, "m_sheet_length": 2.4, "m_end_lap": 0.15, "m_thickness": 0.0005,
+    "m_gutter": 0.05, "m_weather": "End A", "m_ridge_cap": True, "m_hip_cap": True, "m_barge": True,
+    "m_fixings": True, "m_fix_every": 3, "m_purlin_spacing": 0.9, "m_purlin_size": 0.075,
+    "m_rafter_spacing": 0.9, "m_rafter_size": 0.15, "m_frame_style": "Sawn", "m_frame_wobble": 0.15,
+    "m_fascia": True, "m_mess": 1.0, "m_panel_size": 1.0, "m_patches": 0.3, "m_dents": 0.4, "m_lift": 0.4,
+    "m_sag": 0.0, "m_uv_mode": "Variations", "m_uv_tile": 4.0,
+}
 THATCH_DEFAULTS = {
-    "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "half_hip": 0.55,
+    "covering": "Thatch", "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "half_hip": 0.55,
     "overhang": 0.0, "thickness": 0.07, "softness": 0.5, "sag": 0.15, "lumps": 0.3,
     "warp": 0.0, "ridge_sag": 0.0, "ragged": 0.0, "gaps": 0.0,
     "levels": 3, "lip": 0.35, "top": 0.16, "cap": 0.6, "pattern": "Scallops", "pattern_size": 0.07,
@@ -20144,6 +20173,7 @@ THATCH_DEFAULTS = {
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
     "curl": 0.0, "curl_var": 0.5, "dried": 0.0, "dried_var": 0.6,
 }
+THATCH_DEFAULTS.update(METAL_DEFAULTS)
 THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
 # How the thatch is made. A preset resets everything else to the defaults; of these it only sets the ones it
 # names (a shape preset keeps your style, pieces and stacks; a look preset sets them).
@@ -20154,7 +20184,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
-                    "dried_var")
+                    "dried_var", "covering") + tuple(sorted(METAL_DEFAULTS))
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -20181,6 +20211,20 @@ THATCH_PRESETS = {
         "top": 0.1, "cap": 0.4, "pattern": "Straight", "style": "3D Pieces", "density": 1.2, "piece_width": 0.012,
         "piece_length": 0.2, "mess": 1.0, "lift": 0.6, "bend": 0.4, "flatness": 0.25, "underlay": True},
     # palm fronds: neat courses tied on battens underneath, a messier layer on top
+    # corrugated metal (whole looks: covering, mode and profile)
+    "Metal: clean corrugated (gable)": {
+        "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Corrugated", "m_mode": "Clean",
+        "m_profile": "Sine", "m_pitch": 0.076, "m_depth": 0.018},
+    "Metal: box profile (hipped)": {
+        "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "covering": "Corrugated", "m_mode": "Clean",
+        "m_profile": "Box", "m_pitch": 0.19, "m_depth": 0.029, "m_full_length": True},
+    "Metal: lean-to shed": {
+        "shape": "Lean-to", "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Corrugated",
+        "m_mode": "Clean", "m_full_length": False, "m_sheet_length": 2.4},
+    "Metal: makeshift shanty": {
+        "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Corrugated", "m_mode": "Makeshift",
+        "m_mess": 1.2, "m_panel_size": 0.9, "m_patches": 0.5, "m_dents": 0.6, "m_lift": 0.6, "m_sag": 0.6,
+        "m_frame_style": "Poles", "m_frame_wobble": 0.8, "m_fascia": False},
     "Palm: nipa shingles (neat)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.15, "sag": 0.1,
         "lumps": 0.2, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
@@ -22066,7 +22110,10 @@ def _th_underlay_relief(F, s):
 def _th_frame_courses(F, G, s):
     """Height fractions of the battens, plus one at the eave: under every
     course of fronds / panels (straw: every 7% of the span), every 2nd or
-    3rd of them, or one where each level starts ("battens")."""
+    3rd of them, or one where each level starts ("battens"). A metal roof
+    passes its purlins' own height fractions as "_purlins"."""
+    if s.get("_purlins") is not None:
+        return list(s["_purlins"])
     t_hi = max(G["T"])
     mode = s["battens"] if s["battens"] in THATCH_BATTENS else "Every course"
     if s["style"] == "Palm Fronds":
@@ -22316,7 +22363,7 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
             k = 8 if subd else 6
             return [(math.cos(math.pi / 2.0 + 2.0 * math.pi * j / k), math.sin(math.pi / 2.0 + 2.0 * math.pi * j / k))
                     for j in range(k)]
-        wk, hk = (1.5, 0.75) if kind == "batten" else (0.85, 1.3)
+        wk, hk = (1.5, 0.75) if kind == "batten" else ((0.12, 1.0) if kind == "fascia" else (0.85, 1.3))
         if not subd:
             return [(wk, hk), (-wk, hk), (-wk, -hk), (wk, -hk)]
         e = 0.12 * min(wk, hk)  # support edges hold each corner
@@ -22347,7 +22394,7 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
         closed = len(path) > 3 and _rl_len(_rl_sub(path[-1], path[0])) < 1e-6
         if not closed:  # ends run on past their last support by a random amount (rafters only at the eave:
             back = min(len(path) - 1, 3)  # their tops meet the ridge beam, run on they came up through the cap)
-            for end in ((1,) if m["kind"] in ("rafter", "jack", "hip") else (() if m["kind"] == "rachis" else (0, 1))):
+            for end in ((1,) if m["kind"] in ("rafter", "jack", "hip") else (() if m["kind"] in ("rachis", "fascia") else (0, 1))):
                 a, b = (path[back], path[0]) if end == 0 else (path[-1 - back], path[-1])
                 run = (0.01 + (0.015 + 0.03 * wob) * r[end]) * span * (0.5 if m["kind"] == "batten" else 1.0)
                 q = _rl_add(b, _rl_mul(_rl_norm(_rl_sub(b, a)), run))
@@ -22678,6 +22725,1436 @@ def _th_drape(F, Q, Nn, m, drop=True):
     return out, nout
 
 
+METAL_MAX_VERTS = 3000000
+
+
+def _mt_profile(kind, pitch, depth, samples):
+    """One pitch of the profile, valley first: [(u, y)] for u in [0, pitch).
+    Sine: samples points. Box (trapezoid): a flat pan and a rib, each
+    corner held by a support point either side so smoothing keeps it crisp."""
+    if kind == "Box":
+        tw, fw, e = 0.18 * pitch, 0.12 * pitch, 0.012 * pitch
+        c = 0.5 * pitch
+        a, b = c - 0.5 * tw - fw, c - 0.5 * tw
+        cc, d = c + 0.5 * tw, c + 0.5 * tw + fw
+        sl = depth / fw
+        return [(0.0, 0.0), (a - e, 0.0), (a, 0.0), (a + e, e * sl), (b - e, depth - e * sl), (b, depth),
+                (b + e, depth), (cc - e, depth), (cc, depth), (cc + e, depth - e * sl), (d - e, e * sl),
+                (d, 0.0), (d + e, 0.0)]
+    n = max(2, int(samples))
+    return [(pitch * i / float(n), depth * 0.5 * (1.0 - math.cos(2.0 * math.pi * i / n))) for i in range(n)]
+
+
+def _mt_yat(kind, pitch, depth, u):
+    """The profile's height at any u (valley 0)."""
+    f = (u / pitch) % 1.0
+    if kind == "Box":
+        tw, fw = 0.18, 0.12
+        x = abs(f - 0.5)
+        if x <= 0.5 * tw:
+            return depth
+        if x >= 0.5 * tw + fw:
+            return 0.0
+        return depth * (0.5 * tw + fw - x) / fw
+    return depth * 0.5 * (1.0 - math.cos(2.0 * math.pi * f))
+
+
+def _mt_clip(poly, nx, nz, c):
+    """A convex polygon [(x, z)] cut to the half-plane nx * x + nz * z >= c."""
+    out = []
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        dp = nx * p[0] + nz * p[1] - c
+        dq = nx * q[0] + nz * q[1] - c
+        if dp >= 0.0:
+            out.append(p)
+        if (dp >= 0.0) != (dq >= 0.0):
+            f = dp / (dp - dq)
+            out.append((p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f))
+    return out
+
+
+def _mt_span(poly, u):
+    """(lo, hi) of a convex polygon [(u, v)] along the line at u, or None."""
+    vals = []
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        if p[0] == u:
+            vals.append(p[1])
+        if (p[0] - u) * (q[0] - u) < 0.0:
+            vals.append(p[1] + (u - p[0]) / (q[0] - p[0]) * (q[1] - p[1]))
+    if not vals:
+        return None
+    return min(vals), max(vals)
+
+
+class _MtFace(object):
+    """One roof face: a plane h = c - m * (d . p) (d its plan downhill
+    direction) with face coordinates a (along the eave, plan vector av) and
+    s (slope distance up from h = 0); poly: the face as a convex polygon in
+    (a, s). A cone is one face too (cone=True): a is the angle times R, s
+    the slope distance up from the wall line."""
+
+    def __init__(self, F, c=0.0, m=1.0, d=(0.0, 1.0), av=(1.0, 0.0), cone=False):
+        self.F, self.cone = F, cone
+        self.c, self.m, self.d, self.av = c, m, d, av
+        self.k = math.sqrt(1.0 + m * m)
+        self.planar = not (F.warp or F.ridge_sag)
+        if cone:
+            self.Re = F.R
+            self.slope = math.hypot(F.H, F.R)
+            return
+        k = self.k
+        self.N = _rl_norm((m * d[0], 1.0, m * d[1]))
+        self.A3 = (av[0], 0.0, av[1])
+        self.V3 = (-d[0] / k, m / k, -d[1] / k)
+        self.poly = []
+
+    def plan(self, a, s):
+        if self.cone:
+            rho = 1.0 - s / self.slope
+            th = a / self.Re
+            return self.F.L * rho * math.cos(th), self.F.W * rho * math.sin(th)
+        q = self.c / self.m - s / self.k
+        return a * self.av[0] + q * self.d[0], a * self.av[1] + q * self.d[1]
+
+    def coords(self, x, z):
+        if self.cone:
+            r = math.sqrt((x / self.F.L) ** 2 + (z / self.F.W) ** 2)
+            return math.atan2(z / self.F.W, x / self.F.L) * self.Re, (1.0 - r) * self.slope
+        q = x * self.d[0] + z * self.d[1]
+        return x * self.av[0] + z * self.av[1], (self.c / self.m - q) * self.k
+
+    def frame(self, a, s):
+        """(base point, normal, across (+a), up the slope (+s)) at (a, s)."""
+        x, z = self.plan(a, s)
+        if self.cone:
+            F = self.F
+            rho = max(1e-4, 1.0 - s / self.slope)
+            th = a / self.Re
+            h = F.H * (1.0 - rho)
+            if not self.planar:
+                h = F.height(x, z)
+            n = _rl_norm((F.H * x / (rho * F.L * F.L), 1.0, F.H * z / (rho * F.W * F.W)))
+            ac = _rl_norm((-F.L * math.sin(th), 0.0, F.W * math.cos(th)))
+            up = _rl_norm(_rl_cross(n, ac))
+            return (x, h, z), n, ac, up
+        h = s * self.m / self.k
+        if not self.planar:
+            h = self.F.height(x, z)
+        return (x, h, z), self.N, self.A3, self.V3
+
+
+def _mt_faces(F, sz, mode):
+    """The roof's faces (_MtFace) with their polygons: the footprint (the
+    eaves carried on into the gutter, verges a little past the barge) cut to
+    where each plane is the lowest, a small gap short of hips and the ridge
+    (the cappings cover it)."""
+    gutter = sz["gutter"] + (sz["ragged"] if mode == "Makeshift" else 0.0)
+    verge = sz["verge"] + (sz["ragged"] if mode == "Makeshift" else 0.0)
+    gap = sz["cut_gap"]
+    if F.cone:
+        f = _MtFace(F, cone=True)
+        s_lo = -(F.rho - 1.0) * f.slope - gutter
+        s_hi = (1.0 - sz["cap_rho"] * 0.8) * f.slope
+        ring = 2.0 * math.pi * f.Re
+        f.poly = [(-ring, s_lo), (2.0 * ring, s_lo), (2.0 * ring, s_hi), (-ring, s_hi)]
+        f.a_range, f.s_range = (0.0, ring), (s_lo, s_hi)
+        f.kind, f.end = "cone", None
+        return [f]
+    wsign = 1.0 if sz["weather"] == "End A" else -1.0
+    ms = F.ms
+    planes = []  # (c, m, d, av, kind, end)
+    if F.shape == "Ridge":
+        planes.append((F.H, ms, (0.0, 1.0), (wsign, 0.0), "side", None))
+        planes.append((F.H, ms, (0.0, -1.0), (-wsign, 0.0), "side", None))
+    else:
+        planes.append((F.H + ms * F.z0, ms, (0.0, 1.0), (wsign, 0.0), "side", None))
+    for e, end in enumerate(F.ends):
+        if end is None:
+            continue
+        sign, me, h0 = end[0], end[1], end[2]
+        planes.append((h0 + me * F.L, me, (sign, 0.0), (0.0, sign), "end", e))
+    ex = []
+    for e in (0, 1):
+        end = F.ends[e]
+        ex.append(gutter / math.sqrt(1.0 + end[1] ** 2) if end and end[2] <= 1e-6 else
+                  (verge if not end else gutter / math.sqrt(1.0 + end[1] ** 2)))
+    ez = gutter / math.sqrt(1.0 + ms * ms)
+    x0, x1 = F.x0 - ex[1], F.x1 + ex[0]
+    z0 = F.z0 - (ez if F.shape == "Ridge" else 0.0)
+    z1 = F.z1 + ez
+    foot = [(x0, z0), (x1, z0), (x1, z1), (x0, z1)]
+    faces = []
+    for i, (c, m, d, av, kind, end) in enumerate(planes):
+        poly = list(foot)
+        for j, (c2, m2, d2, av2, kind2, end2) in enumerate(planes):
+            if j == i or not poly:
+                continue
+            nx, nz = m * d[0] - m2 * d2[0], m * d[1] - m2 * d2[1]
+            ln = math.hypot(nx, nz)
+            if ln < 1e-9:
+                continue
+            poly = _mt_clip(poly, nx, nz, c - c2 + gap * ln)
+        if len(poly) < 3:
+            continue
+        f = _MtFace(F, c, m, d, av)
+        f.kind, f.end = kind, end
+        f.plan_poly = poly
+        f.poly = [f.coords(x, z) for x, z in poly]
+        f.a_range = (min(p[0] for p in f.poly), max(p[0] for p in f.poly))
+        f.s_range = (min(p[1] for p in f.poly), max(p[1] for p in f.poly))
+        faces.append(f)
+    return faces
+
+
+def _mt_sizes(s, F, mpu, level):
+    """Every metal size in scene units, plus the look's switches."""
+    k = 1.0 / max(1e-9, mpu)
+    prof = s["m_profile"] if s["m_profile"] in METAL_PROFILES else "Sine"
+    pitch = max(0.02, float(s["m_pitch"])) * k
+    depth = clamp(float(s["m_depth"]), 0.0, 0.25) * k
+    n_cover = max(2, int(round(max(0.1, float(s["m_cover"])) * k / pitch)))
+    n_lap = max(0, min(n_cover - 1, int(round(float(s["m_side_lap"])))))
+    samples = (2, 4, 6, 10, 16)[level]
+    mode = s["m_mode"] if s["m_mode"] in METAL_MODES else "Clean"
+    if level == 0:
+        depth = 0.0
+    t = clamp(float(s["m_thickness"]), 0.0001, 0.01) * k
+    # a lapping sheet's lift: across the profile's steepest flank the sheet
+    # under it is t / cos(flank) thick, measured along the roof's normal
+    slope = (math.pi * depth / pitch if prof == "Sine" else depth / (0.12 * pitch)) if depth > 0.0 else 0.0
+    return {
+        "mpu": mpu, "k": k, "profile": prof, "pitch": pitch, "depth": depth, "n_cover": n_cover, "n_lap": n_lap,
+        "samples": samples, "mode": mode, "t": t, "tg": 1.1 * t * math.sqrt(1.0 + slope * slope) + 0.0002 * k,
+        "full": bool(s["m_full_length"]), "length": max(0.5, float(s["m_sheet_length"])) * k,
+        "max_full": 12.0 * k, "end_lap": clamp(float(s["m_end_lap"]), 0.0, 1.0) * k,
+        "gutter": clamp(float(s["m_gutter"]), 0.0, 0.5) * k, "verge": 0.04 * k, "ragged": 0.15 * k,
+        "cut_gap": 0.01 * k, "weather": s["m_weather"] if s["m_weather"] in METAL_WEATHER else "End A",
+        "purlin_sp": max(0.2, float(s["m_purlin_spacing"])) * k, "purlin": max(0.01, float(s["m_purlin_size"])) * k,
+        "rafter_sp": max(0.2, float(s["m_rafter_spacing"])) * k, "rafter": max(0.02, float(s["m_rafter_size"])) * k,
+        "cap_w": 0.16 * k, "cap_roll": 0.03 * k, "cap_rho": min(0.35, 0.3 * k / max(1e-6, F.R)),
+        "barge_w": 0.13 * k, "barge_leg": 0.12 * k, "fascia": 0.2 * k, "fascia_t": 0.025 * k,
+        "mess": clamp(float(s["m_mess"]), 0.0, 2.0), "size": clamp(float(s["m_panel_size"]), 0.3, 3.0),
+        "patches": clamp(float(s["m_patches"]), 0.0, 2.0), "dents": clamp(float(s["m_dents"]), 0.0, 2.0),
+        "lift": clamp(float(s["m_lift"]), 0.0, 2.0), "fix_every": max(1, int(s["m_fix_every"])),
+        "uv_tile": max(0.5, float(s["m_uv_tile"])) * k,
+    }
+
+
+def _mt_purlins(F, sz):
+    """Heights (roof units) of the purlins: one just in from the eave, one
+    just under the ridge (or the cone's cap), evenly between at no more
+    than the spacing (measured down the main slope)."""
+    m = F.ms
+    k = math.sqrt(1.0 + m * m)
+    s_eave = -(F.rho - 1.0) * F.R * k if F.cone else -(F.z1 - F.W) * k
+    s_top = F.H / m * k
+    if F.cone:
+        s_top *= 1.0 - sz["cap_rho"]
+    lo = s_eave + 0.1 * sz["k"]
+    hi = s_top - 0.15 * sz["k"]
+    if hi <= lo:
+        return [0.5 * (lo + hi) * m / k]
+    n = max(1, int(math.ceil((hi - lo) / sz["purlin_sp"] - 1e-6)))
+    return [(lo + (hi - lo) * i / float(n)) * m / k for i in range(n + 1)]
+
+
+def _mt_face_purlins(face, heights):
+    """The purlins' s on a face (same heights round a hip: hip-end faces of
+    another pitch get them at other slope distances)."""
+    if face.cone:
+        F = face.F
+        return [h / F.H * face.slope for h in heights]
+    return [h * face.k / face.m for h in heights]
+
+
+def _mt_layout_clean(faces, sz, heights, seed):
+    """Big sheets, neatly aligned: columns from the end away from the
+    weather (each sheet laps over the last by n_lap corrugations, its edge
+    facing downwind), full length eave to ridge or in rows whose end laps
+    sit on a purlin, upper over lower."""
+    sheets = []
+    pitch = sz["pitch"]
+    for fi, f in enumerate(faces):
+        (a_lo, a_hi), (s_lo, s_hi) = f.a_range, f.s_range
+        pa = pitch
+        if f.cone:  # a whole number of corrugations round the cone
+            pa = 2.0 * math.pi * f.Re / max(8, int(round(2.0 * math.pi * f.Re / pitch)))
+        coverw = sz["n_cover"] * pa
+        lapw = sz["n_lap"] * pa
+        purl = _mt_face_purlins(f, heights)
+        rows = []
+        b = s_lo
+        while True:
+            if (sz["full"] and s_hi - b <= sz["max_full"]) or s_hi - b <= sz["length"]:
+                rows.append((b, s_hi))
+                break
+            lim = sz["length"] if not sz["full"] else sz["max_full"]
+            cand = [p for p in purl if p + 0.5 * sz["end_lap"] <= b + lim and p - 0.5 * sz["end_lap"] > b + 0.3 * lim]
+            if cand:
+                p = max(cand)
+                top, nb = p + 0.5 * sz["end_lap"], p - 0.5 * sz["end_lap"]
+            else:
+                top = b + lim
+                nb = top - sz["end_lap"]
+            rows.append((b, top))
+            b = nb
+        if f.cone:
+            total = 2.0 * math.pi * f.Re
+            ncol = max(1, int(math.ceil(total / coverw - 1e-6)))
+        else:
+            ncol = max(1, int(math.ceil((a_hi - a_lo - lapw) / coverw - 1e-6)))
+        for r, (b, top) in enumerate(rows):
+            for j in range(ncol):
+                a0 = a_lo + j * coverw
+                w = coverw + lapw
+                if f.cone and j == ncol - 1:  # the last one closes the ring over the first
+                    w = total - j * coverw + lapw
+                    w = max(pa * 2, round(w / pa) * pa)
+                key = fi * 1000003 + r * 1009 + j
+                sheets.append({
+                    "face": fi, "ac": a0 + 0.5 * w, "sc": 0.5 * (b + top), "w": w, "len": top - b, "rot": 0.0,
+                    "pa": pa, "lift_l": j > 0, "lift_r": bool(f.cone and j == ncol - 1 and ncol > 1),
+                    "lift_b": r > 0, "key": key, "rand": _rand12(seed + 6151, fi, r, j), "row": r, "col": j})
+    return sheets
+
+
+def _mt_layout_makeshift(faces, sz, seed):
+    """Lots of smaller, mismatched panels: rows up the slope, each panel its
+    own width (whole corrugations), length, small turn and offsets, every
+    overlap big enough that the turns open no gap (each edge moves by at
+    most its slack), then patches thrown on top."""
+    sheets = []
+    pitch, k = sz["pitch"], sz["k"]
+    mess, size = sz["mess"], sz["size"]
+    th_max = math.radians(2.5) * mess
+    jit = 0.06 * mess * k
+    minlap = 0.1 * k
+    for fi, f in enumerate(faces):
+        (a_lo, a_hi), (s_lo, s_hi) = f.a_range, f.s_range
+        pa = pitch
+        if f.cone:
+            pa = 2.0 * math.pi * f.Re / max(8, int(round(2.0 * math.pi * f.Re / pitch)))
+        b = s_lo + sz["ragged"] - 0.02 * k
+        r = 0
+        while True:
+            R = _rand12(seed + 7001, fi, r, 99991)
+            Lr = (0.9 + 1.5 * R[0]) * size * k
+            last = b + Lr >= s_hi - 0.15 * k
+            sl_v_max = 0.5 * (Lr + 0.6 * k) * math.sin(th_max) + 0.5 * size * 0.9 * k * (1.0 - math.cos(th_max))
+            sl_a_max = 0.5 * (Lr + 0.6 * k) * math.sin(th_max) + 0.5 * size * 0.9 * k * (1.0 - math.cos(th_max))
+            nb = b + Lr - (0.18 + 0.15 * R[1]) * k
+            a = a_lo - (0.03 + 0.1 * R[2]) * k
+            j = 0
+            while True:
+                Q = _rand12(seed + 7003, fi, r, j)
+                n = max(4, int(round((5 + 7 * Q[0]) * size * k * 0.076 / pa)))
+                th = (2.0 * Q[1] - 1.0) * th_max
+                bot = b - (jit + (sz["ragged"] if r == 0 else 0.0) * 0.8) * Q[2]
+                for _ in range(2):  # a panel at least 2.5x as wide as its lap, so it can lie down past it
+                    w = n * pa
+                    sl_v = 0.5 * w * abs(math.sin(th))
+                    if last:
+                        top = s_hi + 0.05 * k + 0.5 * Lr * abs(math.sin(th)) + sl_v
+                    else:
+                        top = nb + sl_v_max + sl_v + minlap + (0.25 * Q[3]) * k
+                    ln = top - bot
+                    sl_v += 0.5 * ln * (1.0 - math.cos(th))
+                    sl_a = 0.5 * ln * abs(math.sin(th)) + 0.5 * w * (1.0 - math.cos(th))
+                    ovl = pa * (1.0 + 1.5 * Q[4]) + sl_a + sl_a_max + 0.02 * k
+                    if ovl <= 0.4 * w:
+                        break
+                    n = int(math.ceil(ovl / (0.4 * pa)))
+                sheets.append({
+                    "face": fi, "ac": a + 0.5 * w, "sc": 0.5 * (bot + top), "w": w, "len": ln, "rot": th, "pa": pa,
+                    "key": fi * 1000003 + r * 1009 + j, "rand": _rand12(seed + 6151, fi, r, j), "row": r, "col": j})
+                if a + w - sl_a >= a_hi + 0.02 * k:
+                    break
+                a += w - ovl
+                j += 1
+                if j > 4000:
+                    break
+            if last or r > 400:
+                break
+            b = nb
+            r += 1
+        # patches on top
+        area = (a_hi - a_lo) * (s_hi - s_lo) * 0.6
+        npatch = int(sz["patches"] * area / (1.5 * k * k))
+        for i in range(npatch):
+            Q = _rand12(seed + 7011, fi, i, 5)
+            ac = a_lo + (a_hi - a_lo) * Q[0]
+            sc = s_lo + (s_hi - s_lo) * Q[1]
+            if _mt_span(f.poly, ac) is None:
+                continue
+            lo, hi = _mt_span(f.poly, ac)
+            if not (lo + 0.2 * k < sc < hi - 0.3 * k):
+                continue
+            n = max(3, int(round((3 + 5 * Q[2]) * size * k * 0.076 / pa)))
+            ln = (0.4 + 0.9 * Q[3]) * size * k
+            th = (2.0 * Q[4] - 1.0) * math.radians(9.0) * max(0.3, mess)
+            sheets.append({
+                "face": fi, "ac": ac, "sc": sc, "w": n * pa, "len": ln, "rot": th, "pa": pa, "patch": True,
+                "key": fi * 1000003 + 900000 + i, "rand": _rand12(seed + 6157, fi, i, 3), "row": -1, "col": i})
+    return sheets
+
+
+class _MtRaster(object):
+    """Per face, what is on the roof so far: the height of the top of the
+    highest sheet above the base surface and which sheet that is, on a grid
+    in face coordinates. A panel rests on the cells under it (dilated
+    through its coarse lattice, so its valleys clear what's below)."""
+
+    def __init__(self, face, cell, margin):
+        a_lo, a_hi = face.a_range[0] - margin, face.a_range[1] + margin
+        s_lo, s_hi = face.s_range[0] - margin, face.s_range[1] + margin
+        self.c = cell
+        self.a0, self.s0 = a_lo, s_lo
+        self.na = max(2, int((a_hi - a_lo) / cell) + 2)
+        self.ns = max(2, int((s_hi - s_lo) / cell) + 2)
+        self.h = [0.0] * (self.na * self.ns)
+        self.own = [-1] * (self.na * self.ns)
+        self.wrap = 2.0 * math.pi * face.Re if face.cone else 0.0
+
+    def cells(self, sh):
+        """(index, u, v) of the cells under a sheet (its full rectangle, a half cell grown)."""
+        cs, sn = math.cos(sh["rot"]), math.sin(sh["rot"])
+        w, ln = sh["w"], sh["len"]
+        e = 0.75 * self.c
+        hw, hl = 0.5 * w + e, 0.5 * ln + e
+        ra = hw * abs(cs) + hl * abs(sn)
+        rs = hw * abs(sn) + hl * abs(cs)
+        shifts = (0.0, -self.wrap, self.wrap) if self.wrap else (0.0,)
+        out = []
+        for sh_a in shifts:
+            ac = sh["ac"] + sh_a
+            i0 = max(0, int((ac - ra - self.a0) / self.c))
+            i1 = min(self.na - 1, int((ac + ra - self.a0) / self.c) + 1)
+            j0 = max(0, int((sh["sc"] - rs - self.s0) / self.c))
+            j1 = min(self.ns - 1, int((sh["sc"] + rs - self.s0) / self.c) + 1)
+            for j in range(j0, j1 + 1):
+                ds = self.s0 + (j + 0.5) * self.c - sh["sc"]
+                for i in range(i0, i1 + 1):
+                    da = self.a0 + (i + 0.5) * self.c - ac
+                    u = da * cs + ds * sn
+                    v = -da * sn + ds * cs
+                    if -hw <= u <= hw and -hl <= v <= hl:
+                        out.append((j * self.na + i, u + 0.5 * w, v + 0.5 * ln))
+        return out
+
+    def at(self, a, s):
+        """(height, owner) at a point in face coordinates."""
+        if self.wrap:
+            a = (a - self.a0) % self.wrap + self.a0
+        i = int((a - self.a0) / self.c)
+        j = int((s - self.s0) / self.c)
+        if 0 <= i < self.na and 0 <= j < self.ns:
+            q = j * self.na + i
+            return self.h[q], self.own[q]
+        return 0.0, -1
+
+
+def _mt_rest(raster, sh, cells, step, slope=0.1):
+    """A panel's rest height (bilinear on a lattice in its own u, v): each
+    lattice corner is at least the highest cell in the lattice cells round
+    it, so interpolated it clears every cell under it; then no steeper than
+    slope (a sheet is stiff: it ramps off what it rests on instead of
+    following each edge)."""
+    w, ln = sh["w"], sh["len"]
+    nu = max(1, int(math.ceil(w / step)))
+    nv = max(1, int(math.ceil(ln / step)))
+    du, dv = w / nu, ln / nv
+    lat = [0.0] * ((nu + 1) * (nv + 1))
+    hs = raster.h
+    for q, u, v in cells:
+        h = hs[q]
+        if h <= 0.0:
+            continue
+        iu = min(nu - 1, max(0, int(u / du)))
+        iv = min(nv - 1, max(0, int(v / dv)))
+        for jj in (iv, iv + 1):
+            row = jj * (nu + 1)
+            for ii in (iu, iu + 1):
+                if lat[row + ii] < h:
+                    lat[row + ii] = h
+    gu, gv = slope * du, slope * dv
+    n1 = nu + 1
+    for jj in range(nv + 1):
+        row = jj * n1
+        for ii in range(1, nu + 1):
+            if lat[row + ii] < lat[row + ii - 1] - gu:
+                lat[row + ii] = lat[row + ii - 1] - gu
+        for ii in range(nu - 1, -1, -1):
+            if lat[row + ii] < lat[row + ii + 1] - gu:
+                lat[row + ii] = lat[row + ii + 1] - gu
+    for ii in range(n1):
+        for jj in range(1, nv + 1):
+            if lat[jj * n1 + ii] < lat[(jj - 1) * n1 + ii] - gv:
+                lat[jj * n1 + ii] = lat[(jj - 1) * n1 + ii] - gv
+        for jj in range(nv - 1, -1, -1):
+            if lat[jj * n1 + ii] < lat[(jj + 1) * n1 + ii] - gv:
+                lat[jj * n1 + ii] = lat[(jj + 1) * n1 + ii] - gv
+    return {"nu": nu, "nv": nv, "du": du, "dv": dv, "lat": lat}
+
+
+def _mt_rest_at(rest, u, v):
+    if rest is None:
+        return 0.0
+    nu, du, dv = rest["nu"], rest["du"], rest["dv"]
+    fu = clamp(u / du, 0.0, nu - 1e-9)
+    fv = clamp(v / dv, 0.0, rest["nv"] - 1e-9)
+    iu, iv = int(fu), int(fv)
+    fu -= iu
+    fv -= iv
+    lat = rest["lat"]
+    r0 = iv * (nu + 1) + iu
+    r1 = r0 + nu + 1
+    return (lat[r0] * (1.0 - fu) + lat[r0 + 1] * fu) * (1.0 - fv) + (lat[r1] * (1.0 - fu) + lat[r1 + 1] * fu) * fv
+
+
+def _mt_shape(sh, sz):
+    """A makeshift panel's own shape: lifted corners, a bent-up end and
+    dents (crushed crests). All upward or flattening, never into what's
+    under it."""
+    R = sh["rand"]
+    k, lift, dents = sz["k"], sz["lift"], sz["dents"]
+    out = {"corners": [], "kink": None, "dents": []}
+    if R[0] < 0.35 * lift:
+        corner = int(R[1] * 4) % 4
+        out["corners"].append((corner, (0.015 + 0.05 * R[2]) * lift * k))
+    if R[3] < 0.15 * lift:
+        end = 0 if R[4] < 0.6 else 1
+        out["kink"] = (end, (0.12 + 0.25 * R[5]) * k, math.radians(2.0 + 6.0 * R[6]) * lift)
+    nd = int(dents * 2.5 * R[7] + 0.5 * dents * R[8])
+    for i in range(nd):
+        Q = _rand12(sz["seed"] + 913, sh["key"], i, 1)
+        out["dents"].append((Q[0] * sh["w"], Q[1] * sh["len"], (0.06 + 0.2 * Q[2]) * k, 0.4 + 0.6 * Q[3]))
+    return out
+
+
+def _mt_bend(shape, sh, u, v):
+    """Extra lift of a makeshift panel at (u, v), and its crest scale (dents)."""
+    up = 0.0
+    w, ln = sh["w"], sh["len"]
+    for corner, amp in shape["corners"]:
+        du = u if corner in (0, 2) else w - u
+        dv = v if corner in (0, 1) else ln - v
+        ru, rv = min(w, 0.5 * w + 1e-9), min(ln, 0.45 * ln + 1e-9)
+        fu, fv = max(0.0, 1.0 - du / ru), max(0.0, 1.0 - dv / rv)
+        up += amp * fu * fu * fv * fv
+    if shape["kink"]:
+        end, at, ang = shape["kink"]
+        d = (at - v) if end == 0 else (v - (ln - at))
+        if d > 0.0:
+            up += d * math.tan(ang)
+    amp = 1.0
+    for cu, cv, rad, st in shape["dents"]:
+        d2 = ((u - cu) ** 2 + (v - cv) ** 2) / (rad * rad)
+        if d2 < 4.0:
+            amp *= 1.0 - st * math.exp(-d2 * 1.5)
+    return up, amp
+
+
+class _MtMesh(object):
+    """Mesh lists plus the UV shells of each piece (for the layout pass)."""
+
+    def __init__(self):
+        self.pts, self.counts, self.conn, self.us, self.vs, self.uvi = [], [], [], [], [], []
+        self.shells = []  # {"top": (uv0, uv1), "bot": (...), "walls": (...), "w", "h", "stack", "pa"}
+
+    def mesh(self):
+        if not self.counts:
+            return None
+        return self.pts, self.counts, self.conn, self.us, self.vs, self.uvi
+
+
+def _mt_solid(M, top, bot, U, V, tw, nhint, info):
+    """A closed sheet from a grid of top points (rows along it, columns
+    across) and the underside under each; UVs U (across), V (along) per
+    grid point, the underside on its own UVs (same values), thin edge
+    strips tw wide just outside the shell."""
+    nr, nc = len(top), len(top[0])
+    if nr < 2 or nc < 2:
+        return
+    base = len(M.pts)
+    for row in top:
+        M.pts.extend(row)
+    for row in bot:
+        M.pts.extend(row)
+    nb = nr * nc
+    # winding: the first good quad against the outward hint
+    flip = False
+    for j in range(nr - 1):
+        for i in range(nc - 1):
+            n = _rl_cross(_rl_sub(top[j][i + 1], top[j][i]), _rl_sub(top[j + 1][i], top[j][i]))
+            if _rl_len(n) > 1e-14:
+                flip = _rl_dot(n, nhint) < 0.0
+                break
+        else:
+            continue
+        break
+    uv0 = len(M.us)
+    for j in range(nr):
+        M.us.extend(U[j])
+        M.vs.extend(V[j])
+    uvb = len(M.us)
+    for j in range(nr):
+        M.us.extend(U[j])
+        M.vs.extend(V[j])
+    uvw = len(M.us)
+    counts, conn, uvi = M.counts, M.conn, M.uvi
+    for j in range(nr - 1):
+        r0, r1 = j * nc, (j + 1) * nc
+        for i in range(nc - 1):
+            a, b, c, d = r0 + i, r0 + i + 1, r1 + i + 1, r1 + i
+            q = (a, b, c, d) if not flip else (a, d, c, b)
+            counts.append(4)
+            conn.extend((base + q[0], base + q[1], base + q[2], base + q[3]))
+            uvi.extend((uv0 + q[0], uv0 + q[1], uv0 + q[2], uv0 + q[3]))
+            q = (a, d, c, b) if not flip else (a, b, c, d)
+            counts.append(4)
+            conn.extend((base + nb + q[0], base + nb + q[1], base + nb + q[2], base + nb + q[3]))
+            uvi.extend((uvb + q[0], uvb + q[1], uvb + q[2], uvb + q[3]))
+    # the edges: round the boundary (counter-clockwise on the top when not flipped)
+    loop = [(0, i) for i in range(nc)] + [(j, nc - 1) for j in range(1, nr)] + \
+           [(nr - 1, i) for i in range(nc - 2, -1, -1)] + [(j, 0) for j in range(nr - 2, 0, -1)]
+    n_loop = len(loop)
+    # strip side per boundary edge: bottom row -V, right +U, top +V, left -U;
+    # each side's edges share their UVs (one strip a side)
+    prev = None
+    for e in range(n_loop):
+        (ja, ia), (jb, ib) = loop[e], loop[(e + 1) % n_loop]
+        ta, tb = base + ja * nc + ia, base + jb * nc + ib
+        ba, bb = ta + nb, tb + nb
+        if ja == jb == 0:
+            du, dv = 0.0, -tw
+        elif ja == jb == nr - 1:
+            du, dv = 0.0, tw
+        elif ia == ib == nc - 1:
+            du, dv = tw, 0.0
+        else:
+            du, dv = -tw, 0.0
+        ua, va = U[ja][ia], V[ja][ia]
+        ub, vb = U[jb][ib], V[jb][ib]
+        if prev is not None and prev[0] == (du, dv):
+            i0, i1 = prev[1], prev[2]
+        else:
+            i0 = len(M.us)
+            i1 = i0 + 1
+            M.us.extend((ua, ua + du))
+            M.vs.extend((va, va + dv))
+        i2 = len(M.us)
+        i3 = i2 + 1
+        M.us.extend((ub + du, ub))
+        M.vs.extend((vb + dv, vb))
+        prev = ((du, dv), i3, i2)
+        counts.append(4)
+        if not flip:
+            conn.extend((ta, ba, bb, tb))
+            uvi.extend((i0, i1, i2, i3))
+        else:
+            conn.extend((tb, bb, ba, ta))
+            uvi.extend((i3, i2, i1, i0))
+    sh = dict(info)
+    sh.update({"top": (uv0, uvb), "bot": (uvb, uvw), "walls": (uvw, len(M.us)),
+               "u0": min(min(r) for r in U) - tw, "u1": max(max(r) for r in U) + tw,
+               "v0": min(min(r) for r in V) - tw, "v1": max(max(r) for r in V) + tw})
+    M.shells.append(sh)
+
+
+def _mt_sheet_mesh(M, face, sh, sz, raster=None, shape=None):
+    """One sheet: its columns (the profile's points, cut to the face) and
+    rows, each point on the face plus the profile, its laps and (makeshift)
+    rest and shape. Returns how it was built ({"cols", "evals"}) or None
+    when the face leaves nothing of it."""
+    w, ln, th = sh["w"], sh["len"], sh["rot"]
+    cs, sn = math.cos(th), math.sin(th)
+    ac, sc = sh["ac"], sh["sc"]
+    hw, hl = 0.5 * w, 0.5 * ln
+    poly = []
+    for a, s in face.poly:
+        da, ds = a - ac, s - sc
+        poly.append((da * cs + ds * sn + hw, -da * sn + ds * cs + hl))
+    ulo = max(0.0, min(p[0] for p in poly))
+    uhi = min(w, max(p[0] for p in poly))
+    if uhi - ulo < 1e-6:
+        return None
+    kind, pa, depth = sz["profile"], sh["pa"], sz["depth"]
+    prof = _mt_profile(kind, pa, depth, sz["samples"]) if depth > 0.0 else [(0.0, 0.0)]
+    cols = []
+    npitch = int(round(w / pa))
+    if depth > 0.0:
+        for kk in range(npitch + 1):
+            for pu, py in prof:
+                u = kk * pa + pu
+                if u > w + 1e-9:
+                    break
+                cols.append((u, py))
+    else:
+        cols = [(0.0, 0.0), (w, 0.0)]
+    eps = 1e-7
+    keep = [(u, y) for u, y in cols if ulo + eps < u < uhi - eps]
+    yat = (lambda u: _mt_yat(kind, pa, depth, u)) if depth > 0.0 else (lambda u: 0.0)
+    keep = [(ulo, yat(ulo))] + keep + [(uhi, yat(uhi))]
+    spans = []
+    good = []
+    for u, y in keep:
+        sp = _mt_span(poly, min(max(u, min(p[0] for p in poly) + 1e-9), max(p[0] for p in poly) - 1e-9))
+        if sp is None:
+            continue
+        lo, hi = max(0.0, sp[0]), min(ln, sp[1])
+        if hi - lo < 1e-5:
+            continue
+        good.append((u, y))
+        spans.append((lo, hi))
+    if len(good) < 2:
+        return None
+    # arc length across (the UVs' u) and the underside's offsets (mitred)
+    n = len(good)
+    arc = [0.0]
+    for i in range(1, n):
+        arc.append(arc[-1] + math.hypot(good[i][0] - good[i - 1][0], good[i][1] - good[i - 1][1]))
+    offs = []
+    t = sz["t"]
+    for i in range(n):
+        segs = []
+        for a_, b_ in ((i - 1, i), (i, i + 1)):
+            if 0 <= a_ and b_ < n:
+                du, dy = good[b_][0] - good[a_][0], good[b_][1] - good[a_][1]
+                ll = math.hypot(du, dy)
+                if ll > 1e-12:
+                    segs.append((-dy / ll, du / ll))
+        if not segs:
+            segs = [(0.0, 1.0)]
+        mx = sum(q[0] for q in segs) / len(segs)
+        my = sum(q[1] for q in segs) / len(segs)
+        ml = math.hypot(mx, my) or 1.0
+        mx, my = mx / ml, my / ml
+        cosv = max(0.35, mx * segs[0][0] + my * segs[0][1])
+        offs.append((-mx * t / cosv, -my * t / cosv))
+    # rows along it (absolute; a cut column squeezes them between its ends)
+    vs = {0.0, ln}
+    clean = raster is None or shape is None
+    step = (0.6 if clean else 0.18) * sz["k"]
+    if not face.planar or face.cone:
+        step = min(step, 0.35 * sz["k"])
+    nseg = max(1, int(math.ceil(ln / step)))
+    vs.update(ln * i / float(nseg) for i in range(1, nseg))
+    tg = sz["tg"]
+    lap_end = sz["end_lap"] + 0.03 * sz["k"]
+    taper_v = 0.3 * sz["k"]
+    lapw = sz["n_lap"] * pa
+    taper_u = 0.5 * pa
+    if sh.get("lift_b"):
+        vs.update(v for v in (lap_end, lap_end + taper_v) if v < ln)
+    rows = sorted(vs)
+    rest = sh.get("rest")
+    # crest scale near a cone's apex (tapered sheets: the pitch narrows)
+    lift_b_h = sh.get("lift_b_h", tg)
+
+    def lift_at(u, v):
+        up = 0.0
+        if sh.get("lift_l"):
+            up += tg if u <= lapw else max(0.0, tg * (1.0 - (u - lapw) / taper_u))
+        if sh.get("lift_r"):
+            d = w - u
+            up += tg if d <= lapw else max(0.0, tg * (1.0 - (d - lapw) / taper_u))
+        if sh.get("lift_b"):
+            up += lift_b_h if v <= lap_end else max(0.0, lift_b_h * (1.0 - (v - lap_end) / taper_v))
+        return up
+    top, bot, U, V = [], [], [], []
+    fr_cache = {}
+    for j, vj in enumerate(rows):
+        rt, rb, ru, rv = [], [], [], []
+        f = vj / ln if ln > 0.0 else 0.0
+        for i in range(n):
+            u, y = good[i]
+            lo, hi = spans[i]
+            v = lo + (hi - lo) * f
+            du, dv = u - hw, v - hl
+            a = ac + du * cs - dv * sn
+            s = sc + du * sn + dv * cs
+            base, nrm, acr, upv = face.frame(a, s)
+            if th:
+                acr = _rl_add(_rl_mul(acr, cs), _rl_mul(upv, sn))
+            up = lift_at(u, v) + _mt_rest_at(rest, u, v)
+            amp = 1.0
+            if shape is not None:
+                b_up, amp = _mt_bend(shape, sh, u, v)
+                up += b_up
+            if face.cone:
+                rho = 1.0 - s / face.slope
+                amp *= clamp(rho * 1.6, 0.25, 1.0)
+            yy = y * amp
+            ox, oy = offs[i]
+            h = t + up + yy
+            p = (base[0] + nrm[0] * h, base[1] + nrm[1] * h, base[2] + nrm[2] * h)
+            rt.append(p)
+            rb.append((p[0] + acr[0] * ox + nrm[0] * oy, p[1] + acr[1] * ox + nrm[1] * oy,
+                       p[2] + acr[2] * ox + nrm[2] * oy))
+            ru.append(arc[i])
+            rv.append(v)
+        top.append(rt)
+        bot.append(rb)
+        U.append(ru)
+        V.append(rv)
+    nh = face.frame(ac, sc)[1]
+    _mt_solid(M, top, bot, U, V, max(t, 0.002 * sz["k"]), nh,
+              {"kind": "sheet", "stack": sh.get("stack", 0), "pa_arc": arc[-1] / max(1e-9, good[-1][0] - good[0][0]) * pa,
+               "key": sh["key"], "u_start": good[0][0]})
+    return {"good": good, "spans": spans, "rest": rest, "shape": shape, "lift": lift_at}
+
+
+def _mt_sheet_point(face, sh, sz, u, v, built):
+    """The top of a sheet's profile at (u, v) and the normal there (for a fixing)."""
+    w, ln, th = sh["w"], sh["len"], sh["rot"]
+    cs, sn = math.cos(th), math.sin(th)
+    du, dv = u - 0.5 * w, v - 0.5 * ln
+    a = sh["ac"] + du * cs - dv * sn
+    s = sh["sc"] + du * sn + dv * cs
+    base, nrm, acr, upv = face.frame(a, s)
+    up = built["lift"](u, v) + _mt_rest_at(built["rest"], u, v)
+    amp = 1.0
+    if built["shape"] is not None:
+        b_up, amp = _mt_bend(built["shape"], sh, u, v)
+        up += b_up
+    if face.cone:
+        amp *= clamp((1.0 - s / face.slope) * 1.6, 0.25, 1.0)
+    y = _mt_yat(sz["profile"], sh["pa"], sz["depth"], u) * amp if sz["depth"] > 0.0 else 0.0
+    h = sz["t"] + up + y
+    return (base[0] + nrm[0] * h, base[1] + nrm[1] * h, base[2] + nrm[2] * h), nrm, (a, s)
+
+
+def _mt_fixing(M, p, n, sz, tilt=None):
+    """A roofing screw on a crest: a bonded washer and a hex head (both
+    closed, stacked UVs: every fixing shares one layout)."""
+    k = sz["k"]
+    t1 = _rl_norm(_rl_any_perp(n))
+    t2 = _rl_cross(n, t1)
+    if tilt:
+        n = _rl_norm(_rl_add(n, _rl_add(_rl_mul(t1, tilt[0]), _rl_mul(t2, tilt[1]))))
+        t1 = _rl_norm(_rl_perp(n, t1))
+        t2 = _rl_cross(n, t1)
+    parts = ((8, 0.008 * k, -0.0005 * k, 0.0022 * k, 0.0, 0.5), (6, 0.0046 * k, 0.0022 * k, 0.0075 * k, 0.5, 1.0))
+    for sides, rad, z0, z1, ua, ub in parts:
+        base = len(M.pts)
+        for z in (z0, z1):
+            for i in range(sides):
+                ang = 2.0 * math.pi * (i + 0.5) / sides
+                ca, sa = math.cos(ang) * rad, math.sin(ang) * rad
+                M.pts.append((p[0] + t1[0] * ca + t2[0] * sa + n[0] * z, p[1] + t1[1] * ca + t2[1] * sa + n[1] * z,
+                              p[2] + t1[2] * ca + t2[2] * sa + n[2] * z))
+        uv0 = len(M.us)
+        for row, vv in ((0, 0.0), (1, 0.25)):  # side band
+            for i in range(sides + 1):
+                M.us.append(ua + (ub - ua) * i / float(sides))
+                M.vs.append(vv)
+        for i in range(sides):  # side quads
+            M.counts.append(4)
+            M.conn.extend((base + i, base + (i + 1) % sides, base + sides + (i + 1) % sides, base + sides + i))
+            M.uvi.extend((uv0 + i, uv0 + i + 1, uv0 + sides + 2 + i, uv0 + sides + 1 + i))
+        for cap, z_off, vc in ((1, sides, 0.62), (0, 0, 0.62)):  # top and bottom discs
+            c0 = len(M.us)
+            for i in range(sides):
+                ang = 2.0 * math.pi * (i + 0.5) / sides
+                M.us.append(0.5 * (ua + ub) + 0.2 * (ub - ua) * math.cos(ang) * (1 if cap else -1))
+                M.vs.append(vc + 0.3 * math.sin(ang))
+            ids = [base + z_off + i for i in range(sides)]
+            uvs = [c0 + i for i in range(sides)]
+            if not cap:
+                ids.reverse()
+                uvs.reverse()
+            M.counts.append(sides)
+            M.conn.extend(ids)
+            M.uvi.extend(uvs)
+
+
+def _mt_strip(M, sections, normals, sz, nhint, info, closed=False):
+    """A capping / flashing from cross-sections along its path (each a list
+    of top points with their normals): a closed thin solid like a sheet."""
+    t = sz["t"]
+    top = sections
+    bot = [[_rl_sub(p, _rl_mul(nn, t)) for p, nn in zip(sec, nrm)] for sec, nrm in zip(sections, normals)]
+    U, V = [], []
+    along = 0.0
+    for j, sec in enumerate(sections):
+        if j:
+            mid = len(sec) // 2
+            along += _rl_len(_rl_sub(sec[mid], sections[j - 1][mid]))
+        acc = [0.0]
+        for a, b in zip(sec, sec[1:]):
+            acc.append(acc[-1] + _rl_len(_rl_sub(b, a)))
+        U.append(acc)
+        V.append([along] * len(sec))
+    _mt_solid(M, top, bot, U, V, max(t, 0.002 * sz["k"]), nhint, info)
+
+
+def _mt_under_cap(face, a, s, sz, settings):
+    """Is a point on a face under a ridge / hip capping or a barge flashing?"""
+    if face.cone:
+        return settings["m_ridge_cap"] and s > face.slope * (1.0 - sz["cap_rho"] * 1.1)
+    (a_lo, a_hi), (s_lo, _) = face.a_range, face.s_range
+    crest = 1.5 * sz["cap_w"] if (settings["m_ridge_cap"] or settings["m_hip_cap"]) else -1.0
+    verge = 1.3 * sz["barge_w"] if settings["m_barge"] else -1.0
+    poly = face.poly
+    eps = 1e-3 * sz["k"]
+    for (pa, ps), (qa, qs) in zip(poly, poly[1:] + poly[:1]):
+        if ps < s_lo + eps and qs < s_lo + eps:
+            continue  # the eave
+        lim = verge if abs(pa - qa) < eps and (abs(pa - a_lo) < eps or abs(pa - a_hi) < eps) else crest
+        if lim <= 0.0:
+            continue
+        da, ds = qa - pa, qs - ps
+        ll = da * da + ds * ds
+        f = clamp(((a - pa) * da + (s - ps) * ds) / ll, 0.0, 1.0) if ll > 1e-12 else 0.0
+        if math.hypot(a - pa - da * f, s - ps - ds * f) < lim:
+            return True
+    return False
+
+
+def _mt_lift_near(rasters, faces, x, z, sz):
+    """Highest sheet top near a plan point over the faces (makeshift caps sit on it)."""
+    best = 0.0
+    r = sz["cap_w"]
+    for f, ras in zip(faces, rasters):
+        if ras is None:
+            continue
+        a, s = f.coords(x, z)
+        for da in (-r, 0.0, r):
+            for ds in (-r, 0.0, r):
+                best = max(best, ras.at(a + da, s + ds)[0])
+    return best
+
+
+def _mt_trim(M, F, faces, sz, s, rasters, seed):
+    """Ridge capping (a roll top), hip cappings down each hip, barge
+    flashings up gable verges, a top flashing on a lean-to and a cone cap:
+    each in lengths that lap (alternate ones a thickness up), sitting on the
+    sheets' crests (makeshift: on the highest sheet under it)."""
+    k = sz["k"]
+    t = sz["t"]
+    base_lift = sz["depth"] + 3.0 * sz["tg"] + 0.001 * k
+    makeshift = sz["mode"] == "Makeshift"
+    wing = sz["cap_w"]
+    caps = 0
+
+    def h_at(x, z):
+        return F.height(x, z)
+
+    def nrm_at(x, z):
+        e = 0.01 * k
+        hx = (h_at(x + e, z) - h_at(x - e, z)) / (2.0 * e)
+        hz = (h_at(x, z + e) - h_at(x, z - e)) / (2.0 * e)
+        return _rl_norm((-hx, 1.0, -hz))
+
+    def lift_at(x, z, extra):
+        up = base_lift + extra
+        if makeshift and rasters:
+            up = max(up, _mt_lift_near(rasters, faces, x, z, sz) + 2.0 * sz["tg"] + 0.002 * k + extra)
+        return up
+
+    def stiff(fs, ups):
+        """A capping length is straight: the lowest line over every station's
+        lift (it rests on the highest sheets under it, not on each bump)."""
+        if len(ups) < 2 or not makeshift:
+            return ups
+        best, best_sum = None, None
+        top = max(ups)
+        cands = [(top, 0.0)]
+        for i in range(len(fs)):
+            for j in range(i + 1, len(fs)):
+                if fs[j] - fs[i] > 1e-9:
+                    m = (ups[j] - ups[i]) / (fs[j] - fs[i])
+                    cands.append((ups[i] - m * fs[i], m))
+        for c0, m in cands:
+            line = [c0 + m * f for f in fs]
+            if all(l >= u - 1e-9 for l, u in zip(line, ups)):
+                tot = sum(line)
+                if best is None or tot < best_sum:
+                    best, best_sum = line, tot
+        return best or [top] * len(ups)
+
+    def pieces(total, piece=2.4 * k, lap=0.15 * k):
+        out = []
+        a = 0.0
+        i = 0
+        while a < total - 1e-9:
+            b = min(total, a + piece)
+            out.append((a, b, i))
+            if b >= total:
+                break
+            a = b - lap
+            i += 1
+        return out
+
+    def emit_line(path_plan, section_fn, info, extra=0.0):
+        """path_plan: (start, end) plan points of a straight line; section_fn(x, z, up) -> (pts, nrms)."""
+        (xa, za), (xb, zb) = path_plan
+        total_plan = math.hypot(xb - xa, zb - za)
+        if total_plan < 1e-6:
+            return 0
+        n = 0
+        for a, b, i in pieces(total_plan * 1.0):
+            ex_ = extra + (i % 2) * 2.0 * sz["tg"]
+            ns = max(2, int(math.ceil((b - a) / (0.4 * k))) + 1)
+            secs, nrms = [], []
+            fs = [(a + (b - a) * q / float(ns - 1)) / total_plan for q in range(ns)]
+            xz = [(xa + (xb - xa) * f, za + (zb - za) * f) for f in fs]
+            ups = stiff(fs, [lift_at(x, z, ex_) for x, z in xz])
+            for (x, z), up in zip(xz, ups):
+                pts, nn = section_fn(x, z, up)
+                secs.append(pts)
+                nrms.append(nn)
+            _mt_strip(M, secs, nrms, sz, (0.0, 1.0, 0.0), info)
+            n += 1
+        return n
+
+    def wing_pts(x, z, dirs, up, roll):
+        """Cross-section over a crest at plan (x, z), up off the roof: out
+        along each plan direction in dirs (one per face) on that face,
+        meeting over the crest."""
+        h0 = h_at(x, z)
+        pts, nrms = [], []
+        sides = []
+        for dx, dz in dirs:
+            side = []
+            for f in (1.0, 0.55, 0.15):
+                px, pz = x + dx * wing * f, z + dz * wing * f
+                nn = nrm_at(px, pz)
+                hp = h_at(px, pz)
+                side.append(((px + nn[0] * up, hp + nn[1] * up, pz + nn[2] * up), nn))
+            sides.append(side)
+        n1, n2 = sides[0][0][1], sides[1][0][1]
+        bis = _rl_add(n1, n2)
+        cosh = max(0.3, _rl_len(bis) * 0.5)
+        bis = _rl_norm(bis)
+        apex = (x + bis[0] * up / cosh, h0 + bis[1] * up / cosh, z + bis[2] * up / cosh)
+        for p, nn in sides[0]:
+            pts.append(p)
+            nrms.append(nn)
+        if roll:  # the roll over the crest
+            r = sz["cap_roll"]
+            d1 = _rl_norm(_rl_sub(sides[0][2][0], apex))
+            d2 = _rl_norm(_rl_sub(sides[1][2][0], apex))
+            for g in (-0.9, -0.55, -0.2, 0.2, 0.55, 0.9):
+                d = d1 if g < 0 else d2
+                f = abs(g)
+                bump = r * math.sqrt(max(0.0, 1.0 - f * f))
+                q = _rl_add(apex, _rl_add(_rl_mul(d, f * r), _rl_mul(bis, bump)))
+                pts.append(q)
+                nrms.append(_rl_norm(_rl_add(_rl_mul(d, f), _rl_mul(bis, math.sqrt(max(0.0, 1.0 - f * f))))))
+        else:
+            pts.append(apex)
+            nrms.append(bis)
+        for p, nn in reversed(sides[1]):
+            pts.append(p)
+            nrms.append(nn)
+        return pts, nrms
+
+    if F.cone:
+        if s["m_ridge_cap"]:
+            rc = sz["cap_rho"] * 1.05
+            secs, nrms = [], []
+            n_ang = 48
+            up0 = base_lift
+            if makeshift:
+                up0 = max(lift_at(F.L * rc * f * math.cos(2.0 * math.pi * q / 16), F.W * rc * f *
+                                  math.sin(2.0 * math.pi * q / 16), 0.0) for q in range(16) for f in (1.0, 0.5, 0.02))
+            for q in range(n_ang + 1):
+                th = 2.0 * math.pi * q / n_ang
+                sec, nn_ = [], []
+                for f in (1.0, 0.75, 0.5, 0.25, 0.0):  # closed over the apex
+                    x, z = F.L * rc * f * math.cos(th), F.W * rc * f * math.sin(th)
+                    nn = nrm_at(x, z) if f > 0.1 else _rl_norm(_rl_add(nrm_at(x, z), (0.0, 1.0, 0.0)))
+                    up = up0
+                    hp = h_at(x, z)
+                    sec.append((x + nn[0] * up, hp + nn[1] * up, z + nn[2] * up))
+                    nn_.append(nn)
+                secs.append(sec)
+                nrms.append(nn_)
+            _mt_strip(M, secs, nrms, sz, (0.0, 1.0, 0.0), {"kind": "trim"})
+            caps += 1
+        return caps
+    ends = F.ends
+    if F.shape == "Ridge" and s["m_ridge_cap"]:
+        lo = -ends[1][3] if ends[1] else F.x0 - sz["verge"] - 0.02 * k
+        hi = ends[0][3] if ends[0] else F.x1 + sz["verge"] + 0.02 * k
+        lo -= 0.1 * k + 0.5 * wing if ends[1] else 0.0
+        hi += 0.1 * k + 0.5 * wing if ends[0] else 0.0
+        caps += emit_line(((lo, 0.0), (hi, 0.0)), lambda x, z, up: wing_pts(x, z, ((0.0, -1.0), (0.0, 1.0)), up,
+                                                                            True),
+                          {"kind": "trim"}, extra=2.0 * sz["tg"])
+    if s["m_hip_cap"]:
+        for e, end in enumerate(ends):
+            if end is None:
+                continue
+            sign, me, h0 = end[0], end[1], end[2]
+            for zs in ((1.0, -1.0) if F.shape == "Ridge" else (1.0,)):
+                def hip_xz(h, sign=sign, me=me, h0=h0, zs=zs):
+                    if F.shape == "Ridge":
+                        return sign * (F.L - (h - h0) / me), zs * (F.H - h) / F.ms
+                    return sign * (F.L - (h - h0) / me), F.z0 + (F.H - h) / F.ms
+                # from well up under the ridge cap's wing (lifted makeshift caps shift down the slope) down
+                # to the gutter line at the corner
+                h_top = F.H - (0.4 * wing * F.ms if F.shape == "Ridge" else 0.0)
+                ez = sz["gutter"] / math.sqrt(1.0 + F.ms ** 2)
+                exe = sz["gutter"] / math.sqrt(1.0 + me * me)
+                x_ext = (F.x1 + exe) if sign > 0 else (exe - F.x0)
+                h_low = max(F.H - F.ms * ((F.z1 + ez) if F.shape == "Ridge" else (F.z1 + ez - F.z0)),
+                            h0 + me * (F.L - x_ext))
+                if h0 > 1e-6:
+                    h_low = max(h_low, h0 - 0.02 * k)
+                pa_, pb_ = hip_xz(h_top), hip_xz(h_low)
+                hd = _rl_norm((pb_[0] - pa_[0], 0.0, pb_[1] - pa_[1]))
+                perp = (-hd[2], hd[0])
+                # one wing on the side face, one on the end face (whichever plane is lower there)
+                mx, mz = 0.5 * (pa_[0] + pb_[0]) + perp[0] * wing, 0.5 * (pa_[1] + pb_[1]) + perp[1] * wing
+                h_side = F.H - F.ms * (abs(mz) if F.shape == "Ridge" else mz - F.z0)
+                h_end = h0 + me * (F.L - sign * mx)
+                d_side = perp if h_side < h_end else (-perp[0], -perp[1])
+                d_end = (-d_side[0], -d_side[1])
+                caps += emit_line((pa_, pb_), lambda x, z, up, ds=d_side, de=d_end: wing_pts(x, z, (ds, de), up,
+                                                                                               True),
+                                  {"kind": "trim"})
+    if s["m_barge"]:
+        # barge flashings: up each gable verge (and a lean-to's top edge), a wing over the sheets and a leg
+        # down the barge board
+        def barge(path, inward, outward, extra=0.0):
+            (xa, za), (xb, zb) = path
+            total = math.hypot(xb - xa, zb - za)
+            n = 0
+            for a, b, i in pieces(total):
+                ex_ = extra + (i % 2) * 2.0 * sz["tg"]
+                ns = max(2, int(math.ceil((b - a) / (0.4 * k))) + 1)
+                secs, nrms = [], []
+                fs = [(a + (b - a) * q / float(ns - 1)) / total for q in range(ns)]
+                xz = [(xa + (xb - xa) * f, za + (zb - za) * f) for f in fs]
+                ups = stiff(fs, [lift_at(x, z, ex_) for x, z in xz])
+                for (x, z), up in zip(xz, ups):
+                    sec, nn_ = [], []
+                    for g in (1.0, 0.5, 0.0):
+                        px, pz = x + inward[0] * sz["barge_w"] * g, z + inward[1] * sz["barge_w"] * g
+                        nn = nrm_at(px, pz)
+                        hp = h_at(px, pz)
+                        sec.append((px + nn[0] * up, hp + nn[1] * up, pz + nn[2] * up))
+                        nn_.append(nn)
+                    edge = sec[-1]
+                    out = (edge[0] + outward[0] * 0.012 * k, edge[1] + 0.004 * k, edge[2] + outward[1] * 0.012 * k)
+                    sec.append(out)
+                    nn_.append(_rl_norm((outward[0], 1.0, outward[1])))
+                    leg = (out[0] + outward[0] * 0.006 * k, out[1] - sz["barge_leg"], out[2] + outward[1] * 0.006 * k)
+                    sec.append(leg)
+                    nn_.append((outward[0], 0.0, outward[1]))
+                    secs.append(sec)
+                    nrms.append(nn_)
+                _mt_strip(M, secs, nrms, sz, (0.0, 1.0, 0.0), {"kind": "trim"})
+                n += 1
+            return n
+        ez = sz["gutter"] / math.sqrt(1.0 + F.ms ** 2)
+        for e, end in enumerate(ends):
+            sign = 1.0 if e == 0 else -1.0
+            xe = (F.x1 + sz["verge"]) if e == 0 else (F.x0 - sz["verge"])
+            if end is not None:
+                if end[2] <= 1e-6:
+                    continue  # a full hip has no verge
+                # a half-hip: the gable part under the hip
+                zt = (F.H - end[2]) / F.ms
+                if F.shape == "Ridge":
+                    for zs in (1.0, -1.0):
+                        caps += barge(((xe, zs * zt), (xe, zs * (F.z1 + ez))), (-sign, 0.0), (sign, 0.0))
+                continue
+            if F.shape == "Ridge":
+                for zs in (1.0, -1.0):
+                    caps += barge(((xe, 0.0), (xe, zs * (F.z1 + ez))), (-sign, 0.0), (sign, 0.0))
+            else:
+                caps += barge(((xe, F.z0), (xe, F.z1 + ez)), (-sign, 0.0), (sign, 0.0))
+        if F.shape == "Lean-to":
+            lo = F.x0 - sz["verge"] if not ends[1] else F.x0
+            hi = F.x1 + sz["verge"] if not ends[0] else F.x1
+            caps += barge(((lo, F.z0), (hi, F.z0)), (0.0, 1.0), (0.0, -1.0), extra=2.0 * sz["tg"])
+    return caps
+
+
+def _mt_extra_members(F, sz, s):
+    """Fascia boards along the eaves and barge boards up gable verges (frame
+    members, sawn, standing upright under the sheets' edges)."""
+    k = sz["k"]
+    r = 0.5 * sz["fascia"]
+    th = sz["fascia_t"]
+    out = []
+    step = 0.5 * k
+
+    def board(pts_plan, drop=0.004 * k, rake=False):
+        path, nrms = [], []
+        for x, z in pts_plan:
+            h = F.height(x, z)
+            path.append([x, h, z])
+        if len(path) < 2:
+            return
+        for i, p in enumerate(path):
+            a, b = path[max(0, i - 1)], path[min(len(path) - 1, i + 1)]
+            d = _rl_norm(_rl_sub(b, a))
+            nrm = _rl_norm(_rl_perp(d, (0.0, 1.0, 0.0))) if rake else (0.0, 1.0, 0.0)
+            nrms.append(nrm)
+        path = [tuple(_rl_sub(p, _rl_mul(n_, drop + r))) for p, n_ in zip(path, nrms)]
+        out.append({"path": path, "nrm": nrms, "r0": r, "r1": r, "kind": "fascia", "style": "Sawn", "wob": 0.2})
+
+    def line(a, b):
+        n = max(2, int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / step)))
+        return [(a[0] + (b[0] - a[0]) * i / float(n), a[1] + (b[1] - a[1]) * i / float(n)) for i in range(n + 1)]
+    if F.cone:
+        n = max(24, int(round(2.0 * math.pi * F.R / step)))
+        rho = F.rho - 0.5 * th / F.R
+        pts = [(F.L * rho * math.cos(2.0 * math.pi * i / n), F.W * rho * math.sin(2.0 * math.pi * i / n))
+               for i in range(n + 1)]
+        board(pts)
+        return out
+    ends = F.ends
+    zi = F.z1 - 0.5 * th
+    xa, xb = F.x0 + (0.5 * th if ends[1] else 0.0), F.x1 - (0.5 * th if ends[0] else 0.0)
+    if F.shape == "Ridge":
+        board(line((xa, zi), (xb, zi)))
+        board(line((xb, -zi), (xa, -zi)))
+    else:
+        board(line((xa, zi), (xb, zi)))
+        board(line((xb, F.z0 + 0.5 * th), (xa, F.z0 + 0.5 * th)), drop=0.03 * k)
+    for e, end in enumerate(ends):
+        sign = 1.0 if e == 0 else -1.0
+        xe = (F.x1 - 0.5 * th) if e == 0 else (F.x0 + 0.5 * th)
+        if end is not None:  # a hip's end eave (a half-hip: up to the hip's foot, then the gable's barge)
+            ze = F.z1 - 0.5 * th
+            zlo = -ze if F.shape == "Ridge" else F.z0 + 0.5 * th
+            if end[2] <= 1e-6:
+                board(line((xe, zlo), (xe, ze)))
+                continue
+            zt = (F.H - end[2]) / F.ms
+            if F.shape == "Ridge":
+                for zs in (1.0, -1.0):
+                    board(line((xe, zs * zt), (xe, zs * F.z1)), rake=True)
+            continue
+        if F.shape == "Ridge":
+            for zs in (1.0, -1.0):
+                board(line((xe, 0.0), (xe, zs * F.z1)), rake=True)
+        else:
+            board(line((xe, F.z0), (xe, F.z1)), rake=True)
+    return out
+
+
+def _mt_uv_layout(M, sz, s, seed):
+    """Sheets' UVs at one real-world density (uv_tile metres a tile).
+    Variations: each sheet in its stack's UDIM tile / atlas column (stacked,
+    from a random whole corrugation and a random height so sheets show
+    different parts of the texture), the underside on the same UVs. All
+    laid out: every top and underside its own place, in rows (tallest
+    first), long sides all up V, filling UDIM tiles left to right."""
+    if not M.shells:
+        return {"tiles": 0}
+    sc = 1.0 / sz["uv_tile"]
+    big = max(max(sh["u1"] - sh["u0"], sh["v1"] - sh["v0"]) for sh in M.shells)
+    if big * sc > 0.98:
+        sc = 0.98 / big
+    us, vs = M.us, M.vs
+    mode = s["m_uv_mode"] if s["m_uv_mode"] in METAL_UV_MODES else "Variations"
+    stacks = max(1, int(s["stacks"]))
+    if mode == "Variations":
+        cols = s["stack_layout"] == "Atlas columns"
+        colw = 1.0 / stacks if cols else 1.0
+        widest = max(sh["u1"] - sh["u0"] for sh in M.shells)
+        if widest * sc > colw * 0.98:
+            sc = colw * 0.98 / widest
+        for sh in M.shells:
+            st = min(stacks - 1, sh["stack"])
+            R = _rand12(seed + 5003, sh["key"], 0, 0)
+            wu, hv = (sh["u1"] - sh["u0"]) * sc, (sh["v1"] - sh["v0"]) * sc
+            room_u = max(0.0, colw - wu)
+            step = sh["pa_arc"] * sc
+            ou = (int(R[0] * room_u / step) * step) if step > 1e-9 and room_u > step else 0.0
+            ov = R[1] * max(0.0, 1.0 - hv)
+            u_org = (st * colw if cols else float(st)) + ou
+            for rng in (sh["top"], sh["bot"], sh["walls"]):
+                for q in range(rng[0], rng[1]):
+                    us[q] = u_org + (us[q] - sh["u0"]) * sc
+                    vs[q] = ov + (vs[q] - sh["v0"]) * sc
+        return {"tiles": stacks if not cols else 1, "scale": sc}
+    pad = 0.006
+    rects = []
+    for i, sh in enumerate(M.shells):
+        rects.append((i, "top"))
+    for i, sh in enumerate(M.shells):
+        rects.append((i, "bot"))
+    order = sorted(range(len(M.shells)), key=lambda i: -(M.shells[i]["v1"] - M.shells[i]["v0"]))
+    tile, x, y, row = 0, pad, pad, 0.0
+    placed = {}
+    for part in ("top", "bot"):
+        if part == "bot" and placed:  # undersides start on a fresh tile, laid out the same way
+            tile, x, y, row = tile + 1, pad, pad, 0.0
+        for i in order:
+            sh = M.shells[i]
+            wu, hv = (sh["u1"] - sh["u0"]) * sc, (sh["v1"] - sh["v0"]) * sc
+            if x > pad and x + wu > 1.0 - pad:
+                x, y, row = pad, y + row + pad, 0.0
+            if y > pad and y + hv > 1.0 - pad:
+                tile, x, y, row = tile + 1, pad, pad, 0.0
+            placed[(i, part)] = (tile, x, y)
+            x += wu + pad
+            row = max(row, hv)
+    for (i, part), (tl, px, py) in placed.items():
+        sh = M.shells[i]
+        u_org = (tl % 10) + px
+        v_org = (tl // 10) + py
+        rngs = (sh["top"], sh["walls"]) if part == "top" else (sh["bot"],)
+        for rng in rngs:
+            for q in range(rng[0], rng[1]):
+                us[q] = u_org + (us[q] - sh["u0"]) * sc
+                vs[q] = v_org + (vs[q] - sh["v0"]) * sc
+    return {"tiles": tile + 1, "scale": sc}
+
+
+def _mt_pack_trim(M):
+    """Trim pieces' tops and undersides as their own shells, in rows in 0..1 (one scale)."""
+    if not M.shells:
+        return
+    shells = []
+    for sh in M.shells:
+        shells.append(list(range(sh["top"][0], sh["top"][1])) + list(range(sh["walls"][0], sh["walls"][1])))
+        shells.append(list(range(sh["bot"][0], sh["bot"][1])))
+    _th_pack(shells, M.us, M.vs)
+
+
+def metal_build(frame, s, blockers=None):
+    """A corrugated metal roof (pure maths): {"sheets", "trim", "fixings",
+    "frame": meshes in world space or None, "pieces": sheets, "capped",
+    "field", "level", "metal": {"sheets", "fixings", "tiles", ...}}."""
+    mpu = frame.get("mpu") or scene_m_per_unit()
+    level = THATCH_DETAILS.index(s["detail"]) if s.get("detail") in THATCH_DETAILS else 2
+    seed = int(s["seed"])
+    fs = dict(s)
+    sag = clamp(float(s["m_sag"]), 0.0, 2.0)
+    fs.update({"softness": 0.0, "sag": 0.0, "lumps": 0.0, "warp": 0.35 * sag, "ridge_sag": 0.6 * sag,
+               "ragged": 0.0, "gaps": 0.0, "levels": 1, "lip": 0.0, "top": 0.0, "thickness": 0.002,
+               "strands": 0.0, "pattern": "Straight"})
+    F = ThatchField(frame["L"], frame["W"], frame["H"], fs)
+    F.blockers = _th_blockers_in_roof(frame, blockers)
+    sz = _mt_sizes(s, F, mpu, level)
+    sz["seed"] = seed
+    faces = _mt_faces(F, sz, sz["mode"])
+    heights = _mt_purlins(F, sz)
+    if sz["mode"] == "Makeshift" and level > 0:
+        sheets = _mt_layout_makeshift(faces, sz, seed)
+    else:
+        sheets = _mt_layout_clean(faces, sz, heights, seed)
+    stacks = max(1, int(s["stacks"]))
+    for sh in sheets:
+        sh["stack"] = min(stacks - 1, int(sh["rand"][11] * stacks))
+    # lay them in order (rows up the slope, columns in laying order, patches last), each resting on what's there
+    rasters = [_MtRaster(f, 0.06 * sz["k"], 0.5 * sz["k"]) for f in faces]
+    M = _MtMesh()
+    makeshift = sz["mode"] == "Makeshift" and level > 0
+    built = []
+    tops = sz["depth"] + sz["t"] + 0.002 * sz["k"]
+    for idx, sh in enumerate(sheets):
+        f = faces[sh["face"]]
+        ras = rasters[sh["face"]]
+        cells = ras.cells(sh)
+        shape = None
+        if makeshift:
+            sh["rest"] = _mt_rest(ras, sh, cells, 0.08 * sz["k"])
+            shape = _mt_shape(sh, sz)
+        b = _mt_sheet_mesh(M, f, sh, sz, ras if makeshift else None, shape)
+        if b is None:
+            continue
+        hs, own = ras.h, ras.own
+        for q, u, v in cells:
+            top = tops + _mt_rest_at(sh.get("rest"), u, v)
+            if shape is not None:
+                top += _mt_bend(shape, sh, u, v)[0]
+            elif not makeshift:
+                top += b["lift"](u, v)
+            if top > hs[q]:
+                hs[q] = top
+            own[q] = idx
+        built.append((idx, sh, b))
+        if len(M.pts) > METAL_MAX_VERTS:
+            break
+    # fixings: through the crests into every purlin, on the sheet that's on top there
+    FX = _MtMesh()
+    n_fix = 0
+    if s["m_fixings"] and level >= 2:
+        every = sz["fix_every"]
+        for idx, sh, b in built:
+            f = faces[sh["face"]]
+            ras = rasters[sh["face"]]
+            purl = _mt_face_purlins(f, heights)
+            pa = sh["pa"]
+            npitch = int(round(sh["w"] / pa))
+            cs, sn = math.cos(sh["rot"]), math.sin(sh["rot"])
+            for pi, sp in enumerate(purl):
+                for kk in range(npitch):
+                    last_lap = kk >= npitch - max(1, sz["n_lap"])
+                    if kk % every and not (last_lap and kk == npitch - 1):
+                        continue
+                    if makeshift and _rand12(seed + 4441, sh["key"], pi, kk)[0] < 0.35:
+                        continue
+                    u = (kk + 0.5) * pa
+                    if abs(cs) < 1e-6:
+                        continue
+                    v = (sp - sh["sc"] - (u - 0.5 * sh["w"]) * sn) / cs + 0.5 * sh["len"]
+                    if not (0.0 < v < sh["len"]):
+                        continue
+                    p, n, (a, s_) = _mt_sheet_point(f, sh, sz, u, v, b)
+                    if _mt_span(f.poly, a) is None:
+                        continue
+                    lo, hi = _mt_span(f.poly, a)
+                    if not (lo + 0.02 * sz["k"] < s_ < hi - 0.02 * sz["k"]):
+                        continue
+                    if _mt_under_cap(f, a, s_, sz, s):
+                        continue  # the capping is screwed down over it, not through it
+                    if ras.at(a, s_)[1] != idx:
+                        continue
+                    tilt = None
+                    if makeshift:
+                        R = _rand12(seed + 4447, sh["key"], pi, kk)
+                        tilt = ((R[0] - 0.5) * 0.25 * sz["mess"], (R[1] - 0.5) * 0.25 * sz["mess"])
+                    _mt_fixing(FX, p, n, sz, tilt)
+                    n_fix += 1
+    TR = _MtMesh()
+    caps = _mt_trim(TR, F, faces, sz, s, rasters if makeshift else None, seed)
+    uv = _mt_uv_layout(M, sz, s, seed)
+    _mt_pack_trim(TR)
+    out = {"pieces": len(built), "capped": caps > 0, "field": F, "level": level, "underlay": None, "straw": None,
+           "metal": {"sheets": len(built), "fixings": n_fix, "tiles": uv.get("tiles", 0), "caps": caps,
+                     "purlins": len(heights), "faces": len(faces)}}
+    out["sheets"] = _th_to_world(frame, M.mesh()) if M.counts else None
+    out["trim"] = _th_to_world(frame, TR.mesh()) if TR.counts else None
+    out["fixings"] = _th_to_world(frame, FX.mesh()) if FX.counts else None
+    out["frame"] = None
+    if s["frame"] and level > 0:
+        G = _th_grid(F, 60)
+        span = F.span
+        sf = dict(s)
+        sf.update({"frame_style": s["m_frame_style"] if s["m_frame_style"] in THATCH_FRAME_STYLES else "Sawn",
+                   "frame_wobble": float(s["m_frame_wobble"]), "rafter_spacing": sz["rafter_sp"] / span,
+                   "rafter_size": sz["rafter"] / (1.3 * span), "batten_size": sz["purlin"] / (1.5 * span),
+                   "battens": "Every course", "_purlins": [h / F.H for h in heights]})
+        rb = 0.5 * sf["batten_size"] * span
+        members = _th_frame_members(F, G, sf, -0.25 * rb)
+        # a square-topped hip rafter's corners stand above the slopes falling away either side of the
+        # hip line (thatch hides them, metal doesn't): drop it by its half width times the pitch
+        drop = 0.9 * max(F.ms, max([e[1] for e in F.ends if e] or [0.0]))
+        for m in members:
+            if m["kind"] == "hip":
+                d = drop * m["r0"]
+                m["path"] = [(p[0] - n[0] * d, p[1] - n[1] * d, p[2] - n[2] * d) for p, n in zip(m["path"], m["nrm"])]
+        if s["m_fascia"]:
+            members += _mt_extra_members(F, sz, s)
+        fm = _th_frame_mesh(F, members, sf)
+        out["frame"] = _th_to_world(frame, fm) if fm else None
+    return out
+
+
 def thatch_build(frame, settings, blockers=None):
     """Everything a roof is made of (pure maths): {"straw": mesh,
     "underlay": mesh or None, "pieces", "capped", "field"} with meshes as
@@ -22686,6 +24163,8 @@ def thatch_build(frame, settings, blockers=None):
     blockers: world boxes ({"c", "u", "h"}) the thatch bends round."""
     s = dict(THATCH_DEFAULTS)
     s.update(settings or {})
+    if s["covering"] == "Corrugated":
+        return metal_build(frame, s, blockers)
     s, level, under_res = _th_detail(s)
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
     F.blockers = _th_blockers_in_roof(frame, blockers)
@@ -23610,27 +25089,85 @@ def _th_write(root, frame, s, built):
         cmds.setAttr(shape + "." + THATCH_VERTS, count)
         if cmds.getAttr(node + ".visibility") != used:
             cmds.setAttr(node + ".visibility", used)
-        if part == "straw" and cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True):
-            cmds.setAttr(shape + "." + UV_STACKED_ATTR, s["style"] != "Surface")
+        if part in ROOF_STACKED_PARTS and cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True):
+            cmds.setAttr(shape + "." + UV_STACKED_ATTR, s["style"] != "Surface" if part == "straw" else
+                         (part == "fixings" or s["m_uv_mode"] != "All laid out"))
         if used:
             faces += len(mesh[1])
     return faces
 
 
-def _th_make_part(root, num, part, material):
+ROOF_STACKED_PARTS = ("straw", "sheets", "fixings")  # parts whose UVs can be stacked (UV_STACKED_ATTR)
+
+
+def roof_parts(covering):
+    """(part, material) of the meshes a roof with this covering has."""
+    return METAL_PART_MATERIALS if covering == "Corrugated" else THATCH_PART_MATERIALS
+
+
+def _roof_stem(covering):
+    return "metalRoof" if covering == "Corrugated" else "thatchRoof"
+
+
+def _th_make_part(root, num, part, material, stem="thatchRoof"):
     """One of a roof's meshes: a seed plane (filled through the API later),
     tagged with its part. Undoable: callers are in an UndoChunk."""
     node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1, constructionHistory=False,
-                                    name="%s_C_thatchRoof%04d_GEP" % (material, num))[0])
+                                    name="%s_C_%s%04d_GEP" % (material, stem, num))[0])
     node = long_name(cmds.parent(node, root)[0])
     shape = _log_shape(node)
     cmds.addAttr(shape, longName=THATCH_PART, dataType="string")
     cmds.setAttr(shape + "." + THATCH_PART, part, type="string")
     cmds.addAttr(shape, longName=THATCH_VERTS, attributeType="long", defaultValue=0)
     cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
-    if part == "straw":
+    if part in ROOF_STACKED_PARTS:
         cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=False)
     return node
+
+
+def _roof_number(root):
+    """The number in a roof's names (its group, else a part), for new parts."""
+    for node in [root] + list(thatch_parts(root).values()):
+        found = re.search(r"(?:thatch|metal)Roof(\d+)", short_name(node))
+        if found:
+            return int(found.group(1))
+    return 1
+
+
+def _roof_add_parts(root, covering):
+    """Add the meshes a covering needs that a roof lacks (undoable: callers
+    are in an UndoChunk). Returns how many were added."""
+    have = thatch_parts(root)
+    num = _roof_number(root)
+    added = 0
+    for part, material in roof_parts(covering):
+        if part not in have:
+            _th_make_part(root, num, part, material, _roof_stem(covering))
+            added += 1
+    return added
+
+
+def roof_set_covering(roots, covering):
+    """Switch roofs to another covering (Thatch / Corrugated): the meshes it
+    needs are added in one Ctrl+Z, the other covering's meshes stay (hidden,
+    so switching back keeps them), then the roofs rebuild. Returns the
+    update report."""
+    roots = [r for r in roots if is_thatch_roof(r)]
+    roof_ensure_parts({r: covering for r in roots})
+    return update_thatch_roofs({r: {"covering": covering} for r in roots})
+
+
+def roof_ensure_parts(coverings):
+    """Give roofs ({root: covering}) the meshes their covering needs that
+    they lack, in one Ctrl+Z (nothing when none is missing). Returns the
+    roofs that got meshes."""
+    need = [r for r, c in coverings.items()
+            if is_thatch_roof(r) and any(p not in thatch_parts(r) for p, _ in roof_parts(c))]
+    if need:
+        with UndoChunk("Roof covering"):
+            for root in need:
+                _roof_add_parts(root, coverings[root])
+    return need
 
 
 def thatch_needs_upgrade(root):
@@ -23639,7 +25176,9 @@ def thatch_needs_upgrade(root):
     if not is_thatch_roof(root):
         return False
     have = thatch_parts(root)
-    return int(thatch_data(root).get("version") or 0) < THATCH_VERSION or         any(part not in have for part, _ in THATCH_PART_MATERIALS)
+    data = thatch_data(root)
+    return int(data.get("version") or 0) < THATCH_VERSION or \
+        any(part not in have for part, _ in roof_parts(data.get("covering")))
 
 
 def upgrade_thatch_roofs(roots):
@@ -23652,16 +25191,8 @@ def upgrade_thatch_roofs(roots):
         return [], {"done": [], "faces": 0}
     with UndoChunk("Thatch upgrade"):
         for root in roots:
-            have = thatch_parts(root)
-            num = 1
-            straw = have.get("straw")
-            if straw:
-                found = re.search(r"thatchRoof(\d+)", short_name(straw))
-                num = int(found.group(1)) if found else 1
-            for part, material in THATCH_PART_MATERIALS:
-                if part not in have:
-                    _th_make_part(root, num, part, material)
             data = thatch_data(root)
+            _roof_add_parts(root, data.get("covering"))
             data["version"] = THATCH_VERSION
             cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
     return roots, update_thatch_roofs({r: {} for r in roots})
@@ -23677,11 +25208,12 @@ def make_thatch_roof(box, settings=None, select=False):
     built = thatch_build(frame, s)
     parent = cmds.listRelatives(box, parent=True, fullPath=True)
     with UndoChunk("Thatch Roof"):
-        num = _th_free_number("thatchRoof%04d_GRP")
+        stem = _roof_stem(s["covering"])
+        num = _th_free_number(stem + "%04d_GRP")
         if parent:
-            root = long_name(cmds.group(empty=True, parent=parent[0], name="thatchRoof%04d_GRP" % num))
+            root = long_name(cmds.group(empty=True, parent=parent[0], name="%s%04d_GRP" % (stem, num)))
         else:
-            root = long_name(cmds.group(empty=True, world=True, name="thatchRoof%04d_GRP" % num))
+            root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (stem, num)))
         cmds.addAttr(root, longName=THATCH_SETTINGS, dataType="string")
         data = dict(s)
         data["box"] = cmds.ls(box, uuid=True)[0]
@@ -23690,15 +25222,16 @@ def make_thatch_roof(box, settings=None, select=False):
         data["blockers"], data["blocker_boxes"] = [], []
         data["version"] = THATCH_VERSION
         cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
-        for part, material in THATCH_PART_MATERIALS:
-            _th_make_part(root, num, part, material)
+        for part, material in roof_parts(s["covering"]):
+            _th_make_part(root, num, part, material, stem)
         if select:
             cmds.select(root, replace=True)
     with NoUndo():
         faces = _th_write(root, frame, s, built)
         for node in thatch_parts(root).values():
             cmds.xform(node, centerPivots=True)
-    return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces}
+    return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces,
+            "metal": built.get("metal")}
 
 
 def update_thatch_roofs(changes, split=True):
@@ -23743,6 +25276,10 @@ def update_thatch_roofs(changes, split=True):
             report["faces"] += _th_write(root, frame, s, built)
         report["pieces"] += built["pieces"]
         report["capped"] = report["capped"] or built["capped"]
+        if built.get("metal"):
+            mt = report.setdefault("metal", {"sheets": 0, "fixings": 0, "tiles": 0})
+            for key in mt:
+                mt[key] = (max if key == "tiles" else (lambda a, b: a + b))(mt[key], built["metal"].get(key, 0))
         report["done"].append(root)
         if s["frame"] and "frame" not in thatch_parts(root):
             report["no_frame"].append(root)  # made before roofs had a frame mesh
@@ -23848,6 +25385,10 @@ def thatch_preset(name):
         s.update((k, v) for k, v in mine.items() if k in s)
         return s
     s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
+    if over.get("covering") == "Corrugated":
+        s.update(METAL_DEFAULTS)  # a metal look sets every metal setting
+    elif "style" in over:
+        s["covering"] = "Thatch"  # a thatch look
     s.update(over)
     return s
 
@@ -24081,11 +25622,24 @@ def duplicate_thatch_roof(root, link=False, offset=None):
     return report
 
 
+def _roof_counts(report):
+    """', 12 sheets, 340 screws, UVs in 3 tiles' for a metal roof's report, ', N pieces' for thatch."""
+    mt = report.get("metal")
+    if mt:
+        text = ", %s sheets" % "{:,}".format(mt["sheets"])
+        if mt.get("fixings"):
+            text += ", %s screws" % "{:,}".format(mt["fixings"])
+        if mt.get("tiles"):
+            text += ", UVs in %d tile%s" % (mt["tiles"], "" if mt["tiles"] == 1 else "s")
+        return text
+    return ", %s pieces" % "{:,}".format(report["pieces"]) if report.get("pieces") else ""
+
+
 class ThatchRoofPanel(QtWidgets.QWidget):
-    TOOL_NAME = "Thatch Roof"
-    TOOL_TIP = "Thatched roofs from a box: gable, hip or half-hip ends, levels, a cut ridge, as a surface, " \
-               "straw planes / 3D pieces, leaf panels or palm fronds on stacked UVs, from a quick proxy up to " \
-               "hero detail."
+    TOOL_NAME = "Roof"
+    TOOL_TIP = "Roofs from a box: gable, hip or half-hip ends, lean-to or cone, thatched (a surface, straw " \
+               "planes / 3D pieces, leaf panels or palm fronds) or corrugated metal (clean sheets or makeshift " \
+               "panels), on their timber frame, with laid-out UVs, from a quick proxy up to hero detail."
 
     def __init__(self, parent=None):
         super(ThatchRoofPanel, self).__init__(parent)
@@ -24140,8 +25694,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         tl = QtWidgets.QVBoxLayout(top)
         tl.setContentsMargins(6, 0, 6, 0)
         tl.setSpacing(6)
-        tl.addWidget(ToolHeader("Thatch Roof", "Draw a box over the walls, press Make Roof, then shape it live: "
-                                               "ends, levels, the ridge, and the straw itself."))
+        tl.addWidget(ToolHeader("Roof", "Draw a box over the walls, press Make Roof, then shape it live: the "
+                                        "ends, the ridge, and the covering: thatch or corrugated metal."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
         outer.addWidget(top)
@@ -24149,10 +25703,19 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         outer.addWidget(scroll, 1)
         self.f = {}
         self._rows = {}
+        self._group = {}  # key -> "thatch" / "metal" / "both": which covering shows it
+        group = ["both"]
 
         def row(grid, key, label, widget, tip):
             self.f[key] = widget
             self._rows[key] = (grid.add_row(label, widget, tip), widget)
+            self._group[key] = group[0]
+
+        def check(sec, key, label, tip):
+            self.f[key] = CheckField(label)
+            self.f[key].setToolTip(tip)
+            sec.add_full(self.f[key])
+            self._group[key] = group[0]
 
         # ---- 1. box
         card = self.step_box = StepCard(1, "Box", "The box is the roof: footprint over the wall tops, bottom at the "
@@ -24181,14 +25744,14 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         col.addWidget(card)
 
         # ---- 2. make
-        card = self.step_make = StepCard(2, "Make roof", "Thatches the selected box with the settings below (one "
+        card = self.step_make = StepCard(2, "Make roof", "Roofs the selected box with the settings below (one "
                                                          "Ctrl+Z). The roof follows the box when you move or scale "
                                                          "it. Duplicate copies a roof onto a box of its own; linked "
                                                          "roofs share their look.")
         self.make_btn = primary_button("Make Roof")
         self.make_btn.setMinimumHeight(28)
-        self.make_btn.setToolTip("Build a thatched roof on the selected box (or mesh). Then every setting edits it "
-                                 "live.")
+        self.make_btn.setToolTip("Build a roof (thatch or corrugated metal, step 4) on the selected box (or mesh). "
+                                 "Then every setting edits it live.")
         self.make_btn.clicked.connect(lambda *_: self.make_roof())
         card.add(self.make_btn)
         self.follow = CheckField("The roof follows its box as you move or scale it")
@@ -24234,10 +25797,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         plabel.setMinimumWidth(92)
         self.preset_combo = _Combo()
         _guard_focus(self.preset_combo)
-        self.preset_combo.setToolTip("Pick a preset to load it. Shape presets set the roof's shape; how the straw "
-                                     "is made (step 4) stays. Look presets (Cambodian shack, Grass hut, Palm) set "
-                                     "the whole look, step 4 included (Detail stays). Your own presets (under "
-                                     "the line) set everything but the Seed, Ridge along and Detail.")
+        self.preset_combo.setToolTip("Pick a preset to load it. Shape presets set the roof's shape; the "
+                                     "covering (step 4) stays. Look presets (Cambodian shack, Grass hut, "
+                                     "Palm, Metal) set the whole look, step 4 included (Detail stays). Your "
+                                     "own presets (under the line) set everything but the Seed, Ridge "
+                                     "along and Detail.")
         self.preset_combo.activated.connect(lambda *_: self.load_preset())
         save = secondary_button("Save...", "Keep the panel's settings (steps 3 and 4) as a preset of your own, "
                                            "listed under the built-in ones. It's kept in Maya's preferences, so "
@@ -24271,6 +25835,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(grid, "overhang", "Overhang", FloatField(0.0, 0.5, 0.0, 0.25, decimals=3, step=0.005),
             "How far the eaves and verges reach past the box. 0 (the default): the roof stops at the box, so make "
             "the box bigger for eaves; or add a little here (0.08 = 40 cm on a 5 m span).")
+        group[0] = "thatch"
         row(grid, "thickness", "Thickness", FloatField(0.005, 0.3, 0.01, 0.15, decimals=3, step=0.005),
             "Thatch thickness (0.07 = 35 cm on a 5 m span, about right for long straw).")
         row(grid, "softness", "Softness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
@@ -24280,7 +25845,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(grid, "lumps", "Lumps", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "Slow, uneven swells across the roof.")
         card.add(grid)
-        sec = Section("Makeshift", expanded=False)
+        sec = self.mk_sec = Section("Makeshift", expanded=False)
         row(sec, "warp", "Warp", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "Crooked rafters: the slopes twist and the eave line waves.")
         row(sec, "ridge_sag", "Ridge sag", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
@@ -24312,14 +25877,14 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sec.add_full(button_row(add_b, use_b))
         sec.add_full(button_row(rem_b, sel_b))
         card.add(sec)
-        sec = Section("Levels", expanded=False)
+        sec = self.levels_sec = Section("Levels", expanded=False)
         row(sec, "levels", "Levels", IntField(1, 12, 1, 8),
             "Tiers from the eaves up to the ridge cap. Each one's bottom edge stands proud of the one below.")
         row(sec, "lip", "Level lip", FloatField(0.0, 2.0, 0.0, 1.2, decimals=2, step=0.05),
             "How far each level stands out at its bottom edge (fraction of the thickness). 1 level: the eave's "
             "rounded lip.")
         card.add(sec)
-        sec = Section("Ridge cap", expanded=False)
+        sec = self.cap_sec = Section("Ridge cap", expanded=False)
         row(sec, "top", "Top depth", FloatField(0.0, 0.8, 0.0, 0.4, decimals=3, step=0.01),
             "How far down from the ridge the cap reaches (fraction of the roof's height). 0: no cap.")
         row(sec, "cap", "Cap thickness", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
@@ -24332,13 +25897,29 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "How far the scallops / points hang down, relative to their width.")
         card.add(sec)
         col.addWidget(card)
+        group[0] = "both"
 
-        # ---- 4. thatch
-        card = self.step_thatch = StepCard(4, "Thatch", "Surface: one displaced mesh. Planes / 3D Pieces / Leaf "
-                                                        "Panels / Palm Fronds: laid in courses over an underlay, "
-                                                        "all on the same stacked UVs. Shape it on Proxy, then "
-                                                        "raise Detail.")
+        # ---- 4. covering
+        card = self.step_thatch = StepCard(4, "Covering", "Thatch (a surface, or straw / leaves laid in courses) or "
+                                                          "corrugated metal (sheets laid eave to ridge, capped and "
+                                                          "screwed down). Shape it on Proxy, then raise Detail.")
+        self.f["covering"] = SegmentField(ROOF_COVERINGS)
+        self.f["covering"].setToolTip("Thatch: straw, leaf panels or palm fronds over an underlay.\nCorrugated: "
+                                      "metal sheets on purlins, with ridge / hip cappings, barge flashings and "
+                                      "screws. Switching keeps the other covering's meshes (hidden) and its "
+                                      "settings, so you can switch back.")
+        card.add(self.f["covering"])
+        self.f["m_mode"] = SegmentField(METAL_MODES)
+        self.f["m_mode"].setToolTip("Clean: big aligned sheets, exact side laps (in whole corrugations) and end laps "
+                                    "on a purlin, a neat new roof.\nMakeshift: lots of smaller, mismatched panels, "
+                                    "each a little turned and offset, overlapping and resting on each other, with "
+                                    "lifted corners, dents and patches thrown on top: no gaps, nothing through "
+                                    "anything.")
+        self._group["m_mode"] = "metal"
+        card.add(self.f["m_mode"])
+        group[0] = "thatch"
         self.f["style"] = SegmentField(THATCH_STYLES)
+        self._group["style"] = "thatch"
         self.f["style"].setToolTip("Surface: a closed, displaced shell with straw grooves (lightest).\nPlanes: "
                                    "flat straw cards for an alpha-mapped straw texture.\n3D Pieces: little "
                                    "tapered bundles with a cut butt end (close-ups).\nLeaf Panels: rows of "
@@ -24348,10 +25929,41 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                    "fronds hanging off the gables (nipa / attap, palapa, Pacific).")
         card.add(self.f["style"])
         sec = self.main_sec = Section("", header=False)
+        group[0] = "both"
         row(sec, "detail", "Detail", SegmentField(THATCH_DETAILS),
-            "Proxy: just the roof's shell, instant, for placing and shaping it.\nRough: cards / planes, 2 "
-            "segments.\nMedium: as set.\nHigh / Hero: more segments and a finer underlay for close-ups.\n"
+            "Proxy: just the roof's shell (metal: flat sheets), instant, for placing and shaping it.\nRough: "
+            "cards / planes, 2 segments (metal: a coarse profile).\nMedium: as set.\nHigh / Hero: more "
+            "segments and a finer underlay (metal: rounder corrugations, screws from High) for close-ups.\n"
             "The layout stays the same at every level, so raise it bit by bit once the shape is right.")
+        group[0] = "metal"
+        row(sec, "m_profile", "Profile", SegmentField(METAL_PROFILES),
+            "Sine: classic round corrugated iron (76 mm pitch, 18 mm deep).\nBox: trapezoidal / box rib "
+            "(flat pans, a rib every 190 mm, 29 mm deep). Picking one sets its usual pitch and depth.")
+        row(sec, "m_pitch", "Pitch", FloatField(0.02, 0.4, 0.04, 0.3, decimals=3, step=0.001),
+            "Distance from one corrugation to the next, in metres (0.076 = 3 inch, the usual).")
+        row(sec, "m_depth", "Depth", FloatField(0.0, 0.08, 0.005, 0.05, decimals=4, step=0.001),
+            "How deep the corrugations are, valley to crest, in metres.")
+        row(sec, "m_cover", "Cover width", FloatField(0.3, 1.5, 0.5, 1.2, decimals=3, step=0.01),
+            "How much roof each sheet covers across (metres; 0.762 = 10 corrugations). The sheet is wider by "
+            "its side lap. Rounded to whole corrugations.")
+        row(sec, "m_side_lap", "Side lap", IntField(0, 4, 0, 3),
+            "Corrugations each sheet laps over the one beside it (1 is usual, 2 in exposed places). Laid away "
+            "from the weather (see Laid from).")
+        check(sec, "m_full_length", "Sheets run eave to ridge in one length",
+              "On: one sheet from the eave to the ridge (up to 12 m). Off: rows of shorter sheets, each lapping "
+              "over the one below by the end lap, the joins on a purlin.")
+        row(sec, "m_sheet_length", "Sheet length", FloatField(0.5, 12.0, 1.8, 3.6, decimals=2, step=0.1),
+            "The longest sheet (metres; 1.8 to 3.6 m are the usual stock lengths).")
+        row(sec, "m_end_lap", "End lap", FloatField(0.0, 0.6, 0.1, 0.3, decimals=3, step=0.01),
+            "How far an upper sheet laps over the one below (metres; 150 mm is usual), centred on a purlin.")
+        row(sec, "m_gutter", "Into gutter", FloatField(0.0, 0.3, 0.0, 0.15, decimals=3, step=0.005),
+            "How far the sheets reach past the eave, over the gutter (metres).")
+        row(sec, "m_weather", "Laid from", SegmentField(METAL_WEATHER),
+            "Which end the laying starts from: each sheet laps over the one before, so the laps face away "
+            "from the weather on that side. End A: the box's - end.")
+        row(sec, "m_thickness", "Thickness", FloatField(0.0002, 0.003, 0.0003, 0.0015, decimals=4, step=0.0001),
+            "Sheet thickness (metres; 0.0005 = 0.5 mm). Every sheet is a closed solid, both sides.")
+        group[0] = "thatch"
         row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
             "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
             "roof), below 0 it cups (edges up), 1 = a half tube, 2 = rolled round. Width (and UVs) kept. Leaf "
@@ -24393,6 +26005,33 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
             "Random turn, roll and size of each piece.")
         card.add(sec)
+        group[0] = "metal"
+        sec = self.mmk_sec = Section("Makeshift panels", expanded=True)
+        row(sec, "m_mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How mismatched the panels are: their turn (up to 2.5 degrees at 1), offsets and odd sizes.")
+        row(sec, "m_panel_size", "Panel size", FloatField(0.3, 3.0, 0.5, 2.0, decimals=2, step=0.05),
+            "Size of the panels (1: about 0.4 to 0.9 m wide, 0.9 to 2.4 m long).")
+        row(sec, "m_patches", "Patches", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "Small offcuts thrown on top over holes, more turned than the rest.")
+        row(sec, "m_dents", "Dents", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "Crushed crests: dents flattening the corrugations here and there.")
+        row(sec, "m_lift", "Lifted edges", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "Corners lifting off and ends bent up (always upwards, never into what's under them).")
+        row(sec, "m_sag", "Sag", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "An old roof's crooked frame: the slopes twist and the ridge sags (clean roofs too).")
+        card.add(sec)
+        sec = self.trim_sec = Section("Trim and fixings", expanded=False)
+        check(sec, "m_ridge_cap", "Ridge capping (a roll-top along the ridge, a cap on a cone)",
+              "Capping lengths lapping along the ridge, its wings over both slopes.")
+        check(sec, "m_hip_cap", "Hip cappings", "Capping down each hip, over the sheets cut along the hip line.")
+        check(sec, "m_barge", "Barge flashings (gable verges, a lean-to's top)",
+              "Flashing over the sheets' edge at each gable verge, its leg down the barge board.")
+        check(sec, "m_fixings", "Screws", "A roofing screw and washer through a crest into each purlin (High and "
+                                          "Hero), on the sheet that's on top there; none under the cappings.")
+        row(sec, "m_fix_every", "Screw every", IntField(1, 8, 1, 6),
+            "A screw in every n-th crest along each purlin (plus the side lap).")
+        card.add(sec)
+        group[0] = "thatch"
         sec = self.more_sec = Section("More controls", expanded=False)
         row(sec, "resolution", "Resolution", IntField(16, 600, 30, 300),
             "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
@@ -24455,12 +26094,14 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "ceiling side. 0: the plain shell. Needs Resolution (or High / Hero) to show close up.")
         card.add(sec)
         sec = self.frame_sec = Section("Frame", expanded=False)
-        self.f["frame"] = CheckField("Frame: rafters, battens, ridge beam")
+        group[0] = "both"
+        self.f["frame"] = CheckField("Frame: rafters, battens / purlins, ridge beam")
         self.f["frame"].setToolTip("The timber the thatch is tied to, under it (what you see from inside): rafters "
                                    "down the slope from a ridge beam to the eaves (hip and jack rafters on a hip, "
                                    "radial on a cone), a batten under every course, wall plates. Its own mesh "
                                    "(woodFrame) with packed UVs, for a wood material.")
         sec.add_full(self.f["frame"])
+        group[0] = "thatch"
         row(sec, "frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
             "Bamboo: round, a node every ~35 cm.\nPoles: round timber, tapering, a little out of round.\nSawn: "
             "rectangular timber (rafters deeper than wide, battens flat).")
@@ -24479,7 +26120,25 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "straight and even.")
         self.f["wall_plates"] = CheckField("Wall plates under the rafters")
         self.f["wall_plates"].setToolTip("A plate along the wall tops (the box's footprint) for the rafters to sit on.")
+        self._group["wall_plates"] = "both"
         sec.add_full(self.f["wall_plates"])
+        group[0] = "metal"
+        row(sec, "m_frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
+            "Sawn: rectangular timber (the usual under metal).\nPoles / Bamboo: a makeshift frame.")
+        row(sec, "m_purlin_spacing", "Purlin spacing", FloatField(0.3, 2.0, 0.6, 1.2, decimals=2, step=0.05),
+            "Most distance between purlins down the slope (metres); the purlins are spread evenly from just "
+            "above the eave to just below the ridge.")
+        row(sec, "m_purlin_size", "Purlin size", FloatField(0.03, 0.2, 0.05, 0.12, decimals=3, step=0.005),
+            "Purlin depth (metres). The sheets lie on them.")
+        row(sec, "m_rafter_spacing", "Rafter spacing", FloatField(0.3, 2.0, 0.6, 1.2, decimals=2, step=0.05),
+            "Distance between rafters (metres). The purlins run across them.")
+        row(sec, "m_rafter_size", "Rafter size", FloatField(0.05, 0.4, 0.1, 0.25, decimals=3, step=0.005),
+            "Rafter depth (metres); the ridge beam is 1.4x, hip rafters 1.3x.")
+        row(sec, "m_frame_wobble", "Crookedness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How crooked the members are. 0: straight.")
+        check(sec, "m_fascia", "Fascia and barge boards",
+              "Boards along the eaves and up the gable verges, under the sheets' edges.")
+        group[0] = "both"
         self.f["frame_subd"] = CheckField("Sub-D topology (support loops, quad caps)")
         self.f["frame_subd"].setToolTip("For smoothing / subdivision at render: 8-sided members, support edges "
                                         "near the cut ends and round sawn corners, caps filled with quads, so "
@@ -24487,7 +26146,16 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                         "sawn edges, one-face caps).")
         sec.add_full(self.f["frame_subd"])
         card.add(sec)
-        sec = self.stack_sec = Section("UV stacks", expanded=False)
+        sec = self.stack_sec = Section("UVs", expanded=False)
+        group[0] = "metal"
+        row(sec, "m_uv_mode", "Sheets", SegmentField(METAL_UV_MODES),
+            "Variations: every sheet on one of the stacks below (each from a random corrugation and height, so "
+            "neighbours differ): one texture per stack.\nAll laid out: every sheet (top and underside) its own "
+            "place in neat rows, long sides up V, filling as many UDIM tiles as it takes: for painting each "
+            "sheet. Either way at one real-world density.")
+        row(sec, "m_uv_tile", "Tile size", FloatField(0.5, 12.0, 1.0, 8.0, decimals=2, step=0.1),
+            "How many metres of sheet one UV tile holds (both ways): the texel density.")
+        group[0] = "both"
         row(sec, "stacks", "Stacks", IntField(1, 16, 1, 8),
             "Every piece has the same UVs. With 2+ stacks each piece picks one at random: one straw texture per "
             "stack.")
@@ -24495,6 +26163,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "UDIM tiles: stack 1 in 1001, stack 2 in 1002...\nAtlas columns: the stacks share 0..1, side by side "
             "(one texture with the straw images in columns).")
         self.f["mirror"] = CheckField("Mirror half the pieces")
+        self._group["mirror"] = "thatch"
         self.f["mirror"].setToolTip("Flips the texture on every other piece (at random) so repeats show less. "
                                     "The UVs are mirrored: fine for colour, careful with normal maps.")
         sec.add_full(self.f["mirror"])
@@ -24506,7 +26175,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         seed_label = QtWidgets.QLabel("Seed")
         seed_label.setMinimumWidth(92)
         self.f["seed"] = IntField(0, 99999, 0, 9999)
-        self.f["seed"].setToolTip("Random seed for the lumps, straw and pieces.")
+        self.f["seed"].setToolTip("Random seed for the lumps, straw and pieces (metal: the panels, offsets, "
+                                  "dents and UV variations).")
         rand = secondary_button("Randomize", "A new random seed.")
         rand.clicked.connect(lambda *_: self.randomize())
         sl.addWidget(seed_label)
@@ -24573,6 +26243,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
 
     def _update_rows(self):
         s = self._settings()
+        metal = s["covering"] == "Corrugated"
         cone = s["shape"] == "Cone"
         ends = (s["end_a"], s["end_b"])
         three = s["style"] == "3D Pieces"
@@ -24592,15 +26263,33 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             shown[key] = palm or leaf or s["style"] == "Planes"
         for key in ("density", "mess", "lift", "bend", "segments"):
             shown[key] = not surface
-        for key, on in shown.items():
-            label, widget = self._rows[key]
+        shown["m_sheet_length"] = not s["m_full_length"]
+        shown["m_end_lap"] = not s["m_full_length"]
+        shown["m_fix_every"] = s["m_fixings"]
+        shown["m_weather"] = not cone
+        shown["stack_layout"] = not metal or s["m_uv_mode"] == "Variations"
+        shown["stacks"] = shown["stack_layout"]
+        for key, (label, widget) in self._rows.items():
+            grp = self._group.get(key, "both")
+            on = shown.get(key, True) and (grp == "both" or (grp == "metal") == metal)
             label.setVisible(on)
             widget.setVisible(on)
+        for key in ("m_full_length", "m_ridge_cap", "m_fixings", "m_fascia", "m_mode"):
+            self.f[key].setVisible(metal)
+        self.f["m_hip_cap"].setVisible(metal and not cone and ends != ("Gable", "Gable"))
+        self.f["m_barge"].setVisible(metal and not cone)
+        self.f["style"].setVisible(not metal)
+        self.f["mirror"].setVisible(not metal)
         surface = s["style"] == "Surface"
-        self.under_sec.setVisible(not surface)
-        self.stack_sec.setVisible(not surface)
+        self.under_sec.setVisible(not metal and not surface)
+        self.stack_sec.setVisible(metal or not surface)
+        self.more_sec.setVisible(not metal)
+        self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
+        self.trim_sec.setVisible(metal)
+        for sec in (self.mk_sec, self.levels_sec, self.cap_sec, self.block_sec):
+            sec.setVisible(not metal)  # metal has its own makeshift controls; levels / blockers: thatch only
         for key in ("ridge_fronds", "sticks"):
-            self.f[key].setVisible(palm)
+            self.f[key].setVisible(palm and not metal)
 
     def target(self):
         """The roof being edited (selected, or the last one), or None."""
@@ -24681,6 +26370,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
 
     # ============================================================= actions
     def _queue(self, key):
+        if key == "m_profile":  # a profile comes with its usual pitch and depth
+            pitch, depth = METAL_PROFILE_SIZES.get(self.f["m_profile"].value(), (None, None))
+            if pitch is not None:
+                for k, v in (("m_pitch", pitch), ("m_depth", depth)):
+                    if abs(self.f[k].value() - v) > 1e-9:
+                        self.f[k].setValue(v)
+                        self._pending.add(k)
         self._update_rows()
         self._pending.add(key)
         self._edit_timer.start()
@@ -24705,6 +26401,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
+            # a new covering's meshes first (undoable), then the live rebuild
+            roof_ensure_parts({r: c["covering"] for r, c in changes.items() if "covering" in c})
             report = update_thatch_roofs(changes)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -24712,10 +26410,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             self._watch_box()
         msg = "%s %d roof(s) in %.2fs: %s faces" % (verb, len(report["done"]), time.time() - t0,
                                                    "{:,}".format(report["faces"]))
-        if report["pieces"]:
-            msg += ", %s pieces" % "{:,}".format(report["pieces"])
-        msg += "."
-        if self.f["detail"].value() == "Proxy" and self.f["style"].value() != "Surface":
+        metal = self.f["covering"].value() == "Corrugated"
+        msg += _roof_counts(report) + "."
+        if self.f["detail"].value() == "Proxy" and metal:
+            msg += " Proxy: flat sheets. Raise Detail for the corrugations (screws from High)."
+        elif self.f["detail"].value() == "Proxy" and self.f["style"].value() != "Surface":
             msg += " Proxy: just the shell. Raise Detail for the thatch once the shape is right."
         level = "info"
         if report["capped"]:
@@ -24766,8 +26465,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self._pin(report["root"])
         msg = "Made %s in %.2fs: %s faces" % (short_name(report["root"]), time.time() - t0,
                                              "{:,}".format(report["faces"]))
-        if report["pieces"]:
-            msg += ", %s pieces" % "{:,}".format(report["pieces"])
+        msg += _roof_counts(report)
         self.set_status(msg + ". One Ctrl+Z undoes it.", level="warn" if report["capped"] else "fixed")
         self._sync_from_selection()
 

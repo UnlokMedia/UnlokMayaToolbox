@@ -582,6 +582,66 @@
     `UV_STACKED_ATTR` (True for planes / pieces). `_mark_tool_uvs` marks
     stacked meshes Hands off, the rest Keep UVs; `set_uv_status(..., "auto")`
     deletes both tags.
+  - **Corrugated metal** (the user, 2026-11-01: same setup as thatch,
+    clean big sheets or makeshift smaller panels on top of each other, all
+    fitting properly, the real frame, nice UVs with variations or all laid
+    out). The panel's tool is now **Roof** (`TOOL_NAME`); `covering`
+    (`ROOF_COVERINGS`) picks the engine in `make_thatch_roof` /
+    `update_thatch_roofs` (`metal_build` vs `thatch_build`). Metal settings
+    are `m_*` keys (`METAL_DEFAULTS`, merged into `THATCH_DEFAULTS`, all
+    look keys), sizes in **metres** (not span fractions), scaled with
+    `scene_m_per_unit()` in `_mt_sizes`. Parts `METAL_PART_MATERIALS`
+    (sheets, trim, fixings, frame); `roof_ensure_parts({root: covering})`
+    adds the missing ones in one UndoChunk ("Roof covering") before a
+    rebuild; the other covering's meshes stay, hidden. Old roofs (no
+    `covering` stored) are thatch and rebuild exactly as before.
+    - **Faces** (`_mt_faces` -> `_MtFace`): each roof plane's footprint
+      clipped by half-planes (`_mt_clip`) against its neighbours (0.01 m
+      gap at hips), in plane coords a (along) / s (up the slope). A cone is
+      one wrapping face with tapered sheets.
+    - **Sheets** (`_mt_sheet_mesh`): profile columns (`_mt_profile`,
+      Sine / Box), each column clipped to the face (`_mt_span`), closed
+      solids from `_mt_solid` (top, mitred underside, edge walls whose UVs
+      run as one strip per side; per-quad shells made thousands of UV
+      shells).
+    - **Clean** (`_mt_layout_clean`): columns of sheets from the weather end,
+      laps lifted analytically by `tg` (`_mt_sizes`: 1.1 thickness x the
+      profile's steepest slope factor, so a lap over a steep flank never
+      touches; a flat lift collided on cone flanks).
+    - **Makeshift** (`_mt_layout_makeshift`): panels per face, widened until
+      the overlap is under 40% of a panel (narrow panels ratcheted up in
+      stacks). `_MtRaster` (0.06 m cells: height + owner) records what is
+      laid; each new panel rests on it through `_mt_rest`: a dilated
+      lattice (step 0.08 k) slope-limited by two sweeps along u and v, so
+      one tall spot can't tilt a whole panel up (the first version stacked
+      ~3 units high). Lifts and dents only go up.
+    - **Trim** (`_mt_trim`): `emit_line` samples stations along a crest and
+      lifts each section over the sheets there (`_mt_lift_near`); makeshift
+      runs take `stiff` (the lowest line over the station lifts), since a
+      capping can't follow each panel. Ridge cap extends past hipped ends
+      by 0.1 k + half a wing and the hip caps start lower, so the hip /
+      ridge junction is closed; the cone cap is closed over the apex.
+      `_mt_under_cap` keeps screws out from under cappings and barges.
+    - **Frame**: `_th_frame_members` with purlins (`_mt_purlins`) in place
+      of battens; hip rafters are dropped along their normals (square tops
+      poked through the sheets at the hip); fascia / barge boards from
+      `_mt_extra_members`.
+    - **UVs** (`_mt_uv_layout`): one density, `m_uv_tile` metres a tile.
+      Variations: per-sheet random offset within its stack's tile / column
+      (`UV_STACKED_ATTR` True). All laid out: rows of shells, long side up
+      V, as many UDIM tiles as needed (not stacked). Trim is packed in
+      0..1 (`_mt_pack_trim`).
+    - Panel: rows carry a group ("thatch" / "metal" / "both", `self._group`)
+      and `_update_rows` shows them by covering; metal hides the under /
+      more / makeshift-thatch / levels / cap / blocker sections and shows
+      `mmk_sec` (Makeshift panels, Makeshift only) and `trim_sec`. Picking
+      a profile sets its pitch / depth (`METAL_PROFILE_SIZES`). Look
+      presets with `covering` apply `METAL_DEFAULTS` first; thatch look
+      presets set covering back to Thatch.
+    - Not done: levels and blockers for metal (sections hidden).
+    - Tests: `tests/test_corrugated_roof.py` (gap rays, closed solids, ray
+      enter / leave order for interpenetration, frame under metal, UVs),
+      metal block in `tests/gui_thatch_roof.py`.
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -1467,3 +1527,7 @@ with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
 the output folder. Thatch Roof's GUI test is `tests/run_gui_thatch_roof.mel`
 (pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
+Corrugated metal: `tests/test_corrugated_roof.py`.
+- **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
+  `cat > file` without a heredoc, hang. Write patch scripts to files and
+  run `python script.py`.

@@ -293,9 +293,11 @@ tube, 0.5 s twisted and 0.8 s in 3 strands. A frame of 8 joints takes about
 
 ### Modeling > Thatch Roof
 
-Thatched roofs from a box: the right shape for a cottage, barn, shed,
-roundhouse or palm hut, built the way thatch is laid, with stacked UVs for
-straw and leaf textures. Work rough to fine: block the roof in on **Proxy**
+(The tool's tab is called **Roof**.) Roofs from a box: the right shape for
+a cottage, barn, shed, roundhouse or palm hut, covered in **Thatch**, built
+the way thatch is laid, with stacked UVs for straw and leaf textures, or in
+**Corrugated metal** (step 4's *Covering*; see
+[Corrugated metal](#corrugated-metal) below). Work rough to fine: block the roof in on **Proxy**
 detail (just its shell, instant), get the shape right, then raise
 **Detail** a step at a time; the layout stays put while detail is added.
 
@@ -335,7 +337,7 @@ detail (just its shell, instant), get the shape right, then raise
 2. **Make Roof** (one Ctrl+Z) thatches the selected box. From then on the
    roof **follows its box**: move, scale or deform the box and the roof
    rebuilds a moment after you stop (undoing it puts it back). Vertex edits
-   are picked up while the Thatch Roof panel is on screen; otherwise press
+   are picked up while the Roof panel is on screen; otherwise press
    **Rebuild** (or select the roof: a box that changed is caught then). Selecting the
    roof or its box puts the roof on the panel (the banner says
    **EDITING**); it stays there when you deselect it, so you can look at it
@@ -430,7 +432,10 @@ detail (just its shell, instant), get the shape right, then raise
    - Sizes are fractions of the roof's span (its width across the ridge), so
      settings and presets suit any roof size; tooltips give real-world
      figures for a 5 m span.
-4. **Thatch:**
+4. **Covering:** **Thatch** (below) or **Corrugated metal** (step 4's
+   controls change to the metal ones; see [Corrugated metal](#corrugated-metal)).
+   Switching keeps both sets of settings, so you can go back and forth.
+   Thatch:
    - **Surface:** one closed, displaced mesh with straw grooves running down
      every face (fanning round the hips), lightest to render. *Strands* and
      *Strand width* set the grooves; *Resolution* (grid points across the
@@ -596,6 +601,65 @@ faces); the leaf-panel shack about 0.7 s (250 panels). The palm presets take
 about 0.1 s on Proxy, 0.7 s on Rough, 1.3-1.6 s on Medium (65,000-100,000
 faces), about 2 s on High and 2.3 s on Hero. Shape the roof on
 Proxy (or lower *Resolution*) if edits feel slow.
+
+#### Corrugated metal
+
+Same box, shapes, overhang, Detail, live rebuild, Bake and Upgrade as
+thatch; step 4's **Covering: Corrugated** swaps the straw for sheets of
+corrugated iron on a timber frame. Sheet sizes are real ones (metres),
+not fractions of the span, and work in decimetre scenes. Presets set the
+whole look: **Metal: clean corrugated (gable)**, **Metal: box profile
+(hipped)**, **Metal: lean-to shed** (rows of 2.4 m sheets) and **Metal:
+makeshift shanty**; a thatch look preset switches back to thatch.
+
+- **Clean** (one neat roof): sheets laid side by side from the eave to the
+  ridge, each lapping over its neighbour by *Side lap* corrugations, laid
+  away from the weather (*Laid from*: the end the laying starts; the laps
+  face away from it). *Sheets run eave to ridge in one length* (on), or
+  rows of *Sheet length* sheets, each lapping over the one below by *End
+  lap* with the join on a purlin. The upper sheet is lifted exactly over
+  the lower one's corrugations, so laps never cut through each other.
+  *Into gutter* runs the sheets past the eave. *Profile*: **Sine** (classic
+  round corrugated iron, 76 mm pitch, 18 mm deep) or **Box** (trapezoidal
+  rib, 190 mm, 29 mm); picking one sets its usual *Pitch* and *Depth*.
+  *Cover width* (0.762 m = 10 corrugations), *Thickness* (0.5 mm): every
+  sheet is a closed solid, both sides.
+- **Makeshift** (shacks: lots of smaller, odd panels on top of each
+  other): panels of mixed sizes (*Panel size*), turned and offset
+  (*Messiness*), with offcut *Patches* thrown over the joins, crushed
+  crests (*Dents*), corners and ends bent up (*Lifted edges*, always
+  upwards) and a crooked old frame (*Sag*, which works on clean roofs
+  too). Each panel rests on whatever is under it (the purlins or the
+  panels below), so there are no gaps and nothing passes through anything.
+- **Hips and cones:** sheets are cut along the hip line under the hip
+  capping. A cone gets honest tapered sheets round the apex under a cap.
+- **Trim and fixings:** ridge capping (a roll-top lapping along the ridge;
+  a cap on a cone), hip cappings, barge flashings over the gable verges (a
+  lean-to's top), and roofing screws with washers through the crests into
+  every purlin (*Screw every* n-th crest; High and Hero only; none under
+  the cappings), each on the sheet that's on top there.
+- **Frame:** purlins across the rafters (*Purlin spacing* / *size*),
+  rafters (*Rafter spacing* / *size*; hip rafters and jacks on a hip,
+  radial on a cone), a ridge beam and wall plates, *Style* Sawn / Poles /
+  Bamboo, *Crookedness*, and *Fascia and barge boards* under the sheets'
+  edges. Sub-D topology works as for thatch.
+- **UVs**, at one real-world density (*Tile size*: metres of sheet per UV
+  tile): **Variations** puts every sheet on one of *Stacks* stacks (UDIM
+  tiles or atlas columns), each cut from a random place in the texture so
+  neighbours differ: one corrugated texture per stack. **All laid out**
+  gives every sheet (top and underside) its own place in neat rows, long
+  sides up V, over as many UDIM tiles as it takes, for painting each
+  sheet. Trim and frame are laid out in 0..1.
+
+Roofs hold `metalCorrugated_C_..._GEP` (sheets), `metalFlashing_C_..._GEP`
+(trim), `metalFixings_C_..._GEP` (screws) and the frame next to the thatch
+meshes (hidden while the covering is metal). Switching a roof to metal adds
+its meshes (one Ctrl+Z); older roofs get them the same way. **With Smart
+UDIM:** stacked sheets and screws are Hands off, all-laid-out sheets and the
+trim Keep UVs. Levels and blockers are thatch only for now.
+
+**Speed:** a clean 16 x 9 m roof takes about 0.9 s, a makeshift one about
+3.5 s (about 460 panels).
 
 ### UV > Smart UDIM (in progress)
 
@@ -1356,9 +1420,20 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   Sub-D (UVs packed in 0..1 and the right way round, closed members, Sub-D
   all quads), under the thatch, rafter spacing, off on Proxy, cones and
   hipped surface roofs.
-- `tests/gui_thatch_roof.py`: drives the Thatch Roof panel in a real Maya
+- `tests/test_corrugated_roof.py`: headless corrugated metal tests. Every
+  roof shape, Clean and Makeshift: no gaps (rays up from inside all hit
+  metal), every sheet a closed solid with thickness, nothing passing through
+  anything (rays enter and leave each solid in turn), the frame under the
+  sheets, laps and purlins, laying from the weather end, decimetre sizes,
+  the gutter, both UV modes (stacks in their tiles / columns; all laid out
+  without overlaps, upright, at the set density), trim UVs, switching an old
+  thatch roof to metal and back (the old roof rebuilds exactly as before),
+  undo / redo, live edits, following the box, save / reopen, bake and speed.
+- `tests/gui_thatch_roof.py`: drives the Roof panel in a real Maya
   session (box on a house, Make Roof, live edits, following the box, presets,
-  the palm presets and Detail levels, the frame, blockers, undo / redo, bake) and saves pictures
+  the palm presets and Detail levels, the frame, blockers, undo / redo, bake;
+  corrugated metal: switching the covering, the rows it shows, profile,
+  sheet rows, Makeshift, All laid out, the metal presets) and saves pictures
   of every shape and style (palm close-ups, eaves, gables, hips, the roof
   seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with
