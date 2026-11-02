@@ -577,6 +577,10 @@ def main():
     scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
     scroll.ensureWidgetVisible(panel.f["covering"], 0, 0)
     window.grab().save(os.path.join(OUT, "33_panel_metal.png"))
+    inner = scroll.widget()
+    check("the panel fits the window with metal rows (no sideways scroll)",
+          inner.minimumSizeHint().width() <= scroll.viewport().width(),
+          "needs %d px of %d" % (inner.minimumSizeHint().width(), scroll.viewport().width()))
     panel.f["m_profile"].setValue("Box")
     panel._queue("m_profile")
     panel._apply_pending()
@@ -614,6 +618,10 @@ def main():
     check("a thatch look preset switches back to thatch", ns["thatch_data"](root3)["covering"] == "Thatch" and
           cmds.getAttr(ns["thatch_parts"](root3)["straw"] + ".visibility") and
           not cmds.getAttr(ns["thatch_parts"](root3)["sheets"] + ".visibility"), panel.status.text())
+    pump()
+    check("the panel fits the window with thatch rows (no sideways scroll)",
+          inner.minimumSizeHint().width() <= scroll.viewport().width(),
+          "needs %d px of %d" % (inner.minimumSizeHint().width(), scroll.viewport().width()))
     cmds.delete(house3)
 
     # --- bake

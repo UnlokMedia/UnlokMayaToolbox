@@ -25998,6 +25998,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         plabel.setMinimumWidth(92)
         self.preset_combo = _Combo()
         _guard_focus(self.preset_combo)
+        # sized by the panel, not its longest name (long preset names pushed the panel wider than the window)
+        self.preset_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.setMinimumContentsLength(10)
+        self.preset_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.preset_combo.setToolTip("Pick a preset to load it. Shape presets set the roof's shape; the "
                                      "covering (step 4) stays. Look presets (Cambodian shack, Grass hut, "
                                      "Palm, Metal) set the whole look, step 4 included (Detail stays). Your "
@@ -26306,7 +26310,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
             "Bamboo: round, a node every ~35 cm.\nPoles: round timber, tapering, a little out of round.\nSawn: "
             "rectangular timber (rafters deeper than wide, battens flat).")
-        row(sec, "battens", "Battens", SegmentField(THATCH_BATTENS),
+        row(sec, "battens", "Battens", SegmentField(THATCH_BATTENS, columns=2),
             "Every course: a batten under every course (each tile tied to one).\nEvery 2nd / 3rd: fewer horizontal "
             "lines (the tiles in between are tied to the rafters).\nPer level: a purlin where each level starts "
             "(Levels in step 3), the way tiered roofs are built.")
