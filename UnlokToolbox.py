@@ -20196,6 +20196,7 @@ METAL_DEFAULTS = {
     "m_side_lap": 1, "m_full_length": True, "m_sheet_length": 2.4, "m_end_lap": 0.15, "m_thickness": 0.0005,
     "m_single": False,
     "m_gutter": 0.05, "m_weather": "End A", "m_ridge_cap": True, "m_hip_cap": True, "m_barge": True,
+    "m_trim_gap": 0.0, "m_trim_drape": 1.0,
     "m_fixings": True, "m_fix_every": 3, "m_purlin_spacing": 0.9, "m_purlin_size": 0.075,
     "m_rafter_spacing": 0.9, "m_rafter_size": 0.15, "m_frame_style": "Sawn", "m_frame_wobble": 0.15,
     "m_fascia": True, "m_mess": 1.0, "m_panel_size": 1.0, "m_patches": 0.3, "m_dents": 0.4, "m_lift": 0.4,
@@ -23008,6 +23009,8 @@ def _mt_sizes(s, F, mpu, level):
         "mess": clamp(float(s["m_mess"]), 0.0, 2.0), "size": clamp(float(s["m_panel_size"]), 0.3, 3.0),
         "patches": clamp(float(s["m_patches"]), 0.0, 2.0), "dents": clamp(float(s["m_dents"]), 0.0, 2.0),
         "lift": clamp(float(s["m_lift"]), 0.0, 2.0), "fix_every": max(1, int(s["m_fix_every"])),
+        "trim_gap": clamp(float(s.get("m_trim_gap", 0.0)), 0.0, 0.05) * k,
+        "trim_drape": clamp(float(s.get("m_trim_drape", 1.0)), 0.0, 1.0),
         "uv_tile": max(0.5, float(s["m_uv_tile"])) * k,
     }
 
@@ -23690,14 +23693,19 @@ def _mt_under_cap(face, a, s, sz, settings):
     return False
 
 
-def _mt_lift_near(rasters, faces, x, z, sz):
+def _mt_lift_near(rasters, faces, x, z, sz, r=None):
     """Highest sheet top near a plan point over the faces (makeshift caps sit on it)."""
     best = 0.0
-    r = sz["cap_w"]
+    own = r is not None  # a draped point: only the faces it's over (not the far slope's ends past the ridge)
+    r = sz["cap_w"] if r is None else r
     for f, ras in zip(faces, rasters):
         if ras is None:
             continue
         a, s = f.coords(x, z)
+        if own and not f.cone:
+            e = 0.2 * r
+            if not (f.a_range[0] - e <= a <= f.a_range[1] + e and f.s_range[0] - e <= s <= f.s_range[1] + e):
+                continue
         for da in (-r, 0.0, r):
             for ds in (-r, 0.0, r):
                 best = max(best, ras.at(a + da, s + ds)[0])
@@ -23711,9 +23719,13 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
     sheets' crests (makeshift: on the highest sheet under it)."""
     k = sz["k"]
     t = sz["t"]
-    base_lift = sz["depth"] + 3.0 * sz["tg"] + 0.001 * k
+    gap = sz["trim_gap"]
+    clear = 0.0003 * k  # never touching
+    base_lift = sz["depth"] + 2.0 * t + 2.0 * sz["tg"] + gap + clear
     makeshift = sz["mode"] == "Makeshift"
+    drape = sz["trim_drape"] if makeshift and rasters else 0.0
     wing = sz["cap_w"]
+    over = 1.2 * t  # a length lapping over the last, a ridge cap over the hip caps
     caps = 0
 
     def h_at(x, z):
@@ -23728,8 +23740,20 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
     def lift_at(x, z, extra):
         up = base_lift + extra
         if makeshift and rasters:
-            up = max(up, _mt_lift_near(rasters, faces, x, z, sz) + 2.0 * sz["tg"] + 0.002 * k + extra)
+            up = max(up, _mt_lift_near(rasters, faces, x, z, sz) + t + sz["tg"] + gap + clear + extra)
         return up
+
+    def draped(up, extra):
+        """Makeshift: each point of a section bent down (Trim follows sheets) from the straight length onto
+        the highest panel right under it."""
+        if drape <= 0.0:
+            return up
+
+        def at(px, pz):
+            own = max(base_lift + extra, _mt_lift_near(rasters, faces, px, pz, sz, r=0.04 * k) + t + sz["tg"] +
+                      gap + clear + extra)
+            return up + (own - up) * drape
+        return at
 
     def stiff(fs, ups):
         """A capping length is straight: the lowest line over every station's
@@ -23773,14 +23797,14 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
             return 0
         n = 0
         for a, b, i in pieces(total_plan * 1.0):
-            ex_ = extra + (i % 2) * 2.0 * sz["tg"]
-            ns = max(2, int(math.ceil((b - a) / (0.4 * k))) + 1)
+            ex_ = extra + (i % 2) * over
+            ns = max(2, int(math.ceil((b - a) / ((0.2 if drape else 0.4) * k))) + 1)
             secs, nrms = [], []
             fs = [(a + (b - a) * q / float(ns - 1)) / total_plan for q in range(ns)]
             xz = [(xa + (xb - xa) * f, za + (zb - za) * f) for f in fs]
             ups = stiff(fs, [lift_at(x, z, ex_) for x, z in xz])
             for (x, z), up in zip(xz, ups):
-                pts, nn = section_fn(x, z, up)
+                pts, nn = section_fn(x, z, draped(up, ex_))
                 secs.append(pts)
                 nrms.append(nn)
             _mt_strip(M, secs, nrms, sz, (0.0, 1.0, 0.0), info)
@@ -23790,24 +23814,27 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
     def wing_pts(x, z, dirs, up, roll):
         """Cross-section over a crest at plan (x, z), up off the roof: out
         along each plan direction in dirs (one per face) on that face,
-        meeting over the crest."""
+        meeting over the crest. up: a lift, or a lift per plan point (draped)."""
+        upf = up if callable(up) else (lambda px, pz, u=up: u)
         h0 = h_at(x, z)
         pts, nrms = [], []
         sides = []
         for dx, dz in dirs:
             side = []
-            for f in (1.0, 0.55, 0.15):
+            for f in (1.0, 0.6, 0.25):  # the inner point outside the roll
                 px, pz = x + dx * wing * f, z + dz * wing * f
                 nn = nrm_at(px, pz)
                 hp = h_at(px, pz)
-                side.append(((px + nn[0] * up, hp + nn[1] * up, pz + nn[2] * up), nn))
+                u_ = upf(px, pz)
+                side.append(((px + nn[0] * u_, hp + nn[1] * u_, pz + nn[2] * u_), nn, u_))
             sides.append(side)
         n1, n2 = sides[0][0][1], sides[1][0][1]
         bis = _rl_add(n1, n2)
         cosh = max(0.3, _rl_len(bis) * 0.5)
         bis = _rl_norm(bis)
-        apex = (x + bis[0] * up / cosh, h0 + bis[1] * up / cosh, z + bis[2] * up / cosh)
-        for p, nn in sides[0]:
+        upc = 0.5 * (sides[0][2][2] + sides[1][2][2])
+        apex = (x + bis[0] * upc / cosh, h0 + bis[1] * upc / cosh, z + bis[2] * upc / cosh)
+        for p, nn, _ in sides[0]:
             pts.append(p)
             nrms.append(nn)
         if roll:  # the roll over the crest
@@ -23824,7 +23851,7 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
         else:
             pts.append(apex)
             nrms.append(bis)
-        for p, nn in reversed(sides[1]):
+        for p, nn, _ in reversed(sides[1]):
             pts.append(p)
             nrms.append(nn)
         return pts, nrms
@@ -23861,7 +23888,7 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
         hi += 0.1 * k + 0.5 * wing if ends[0] else 0.0
         caps += emit_line(((lo, 0.0), (hi, 0.0)), lambda x, z, up: wing_pts(x, z, ((0.0, -1.0), (0.0, 1.0)), up,
                                                                             True),
-                          {"kind": "trim"}, extra=2.0 * sz["tg"])
+                          {"kind": "trim"}, extra=over)
     if s["m_hip_cap"]:
         for e, end in enumerate(ends):
             if end is None:
@@ -23902,19 +23929,21 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
             total = math.hypot(xb - xa, zb - za)
             n = 0
             for a, b, i in pieces(total):
-                ex_ = extra + (i % 2) * 2.0 * sz["tg"]
-                ns = max(2, int(math.ceil((b - a) / (0.4 * k))) + 1)
+                ex_ = extra + (i % 2) * over
+                ns = max(2, int(math.ceil((b - a) / ((0.2 if drape else 0.4) * k))) + 1)
                 secs, nrms = [], []
                 fs = [(a + (b - a) * q / float(ns - 1)) / total for q in range(ns)]
                 xz = [(xa + (xb - xa) * f, za + (zb - za) * f) for f in fs]
                 ups = stiff(fs, [lift_at(x, z, ex_) for x, z in xz])
                 for (x, z), up in zip(xz, ups):
                     sec, nn_ = [], []
+                    upf = draped(up, ex_)
                     for g in (1.0, 0.5, 0.0):
                         px, pz = x + inward[0] * sz["barge_w"] * g, z + inward[1] * sz["barge_w"] * g
                         nn = nrm_at(px, pz)
                         hp = h_at(px, pz)
-                        sec.append((px + nn[0] * up, hp + nn[1] * up, pz + nn[2] * up))
+                        u_ = upf(px, pz) if callable(upf) else upf
+                        sec.append((px + nn[0] * u_, hp + nn[1] * u_, pz + nn[2] * u_))
                         nn_.append(nn)
                     edge = sec[-1]
                     out = (edge[0] + outward[0] * 0.012 * k, edge[1] + 0.004 * k, edge[2] + outward[1] * 0.012 * k)
@@ -23949,7 +23978,7 @@ def _mt_trim(M, F, faces, sz, s, rasters, seed):
         if F.shape == "Lean-to":
             lo = F.x0 - sz["verge"] if not ends[1] else F.x0
             hi = F.x1 + sz["verge"] if not ends[0] else F.x1
-            caps += barge(((lo, F.z0), (hi, F.z0)), (0.0, 1.0), (0.0, -1.0), extra=2.0 * sz["tg"])
+            caps += barge(((lo, F.z0), (hi, F.z0)), (0.0, 1.0), (0.0, -1.0), extra=over)
     return caps
 
 
@@ -25870,6 +25899,58 @@ def unlink_thatch_roofs(roots):
     return done
 
 
+def remake_thatch_boxes(roots):
+    """Give roofs whose box is gone (deleted, say, to keep it out of a
+    publish) a box again, exactly where the old one was, from the frame
+    each roof keeps (its 8 corners: tapered, skewed or mirrored too), and
+    link it: dragging it reshapes the roof again. One Ctrl+Z; the new boxes
+    are selected. Returns [(root, box)] (roofs that still have a box are
+    left alone)."""
+    roots = [r for r in roots if is_thatch_roof(r) and not thatch_box(r) and thatch_data(r).get("box_frame")]
+    made = []
+    if not roots:
+        return made
+    with UndoChunk("Roof box"):
+        for root in roots:
+            data = thatch_data(root)
+            f = data["box_frame"]
+            C = f.get("corners")
+            if C:  # the old box's own axes (from its edges), its corners in them
+                ex = _rl_mul(reduce_add(_rl_sub(C[b], C[a]) for a, b in ((0, 1), (2, 3), (4, 5), (6, 7))), 0.25)
+                ey = _rl_mul(reduce_add(_rl_sub(C[b], C[a]) for a, b in ((0, 2), (1, 3), (4, 6), (5, 7))), 0.25)
+                X = _rl_norm(ex)
+                Y = _rl_norm(_rl_perp(X, ey))
+                Z = _rl_cross(X, Y)
+                if f.get("flip"):  # a mirrored box stays mirrored
+                    Z = _rl_mul(Z, -1.0)
+                mid = _rl_mul(reduce_add(C), 0.125)
+            else:  # a non-box mesh's frame: a plain box with the ridge where it was
+                a, y, c = f["a"], f["y"], f["c"]
+                ridge_z = data.get("ridge") == "Z"
+                X, Y, Z = (_rl_mul(c, -1.0), y, a) if ridge_z else (a, y, c)
+                lx, lz = (f["W"], f["L"]) if ridge_z else (f["L"], f["W"])
+                mid = _rl_add(f["o"], _rl_mul(y, 0.5 * f["H"]))
+                C = [_rl_add(mid, reduce_add((_rl_mul(X, (2 * ix - 1) * lx), _rl_mul(Y, (iy - 0.5) * f["H"]),
+                                              _rl_mul(Z, (2 * iz - 1) * lz))))
+                     for iz in (0, 1) for iy in (0, 1) for ix in (0, 1)]
+            name = "roofBox%04d" % _th_free_number("roofBox%04d")
+            node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
+            _th_style_box(node)
+            cmds.xform(node, worldSpace=True, matrix=list(X) + [0.0] + list(Y) + [0.0] + list(Z) + [0.0] +
+                       list(mid) + [1.0])
+            obj =cmds.xform(node + ".vtx[*]", q=True, objectSpace=True, translation=True)
+            for v in range(len(obj) // 3):
+                ix, iy, iz = int(obj[3 * v] > 0.0), int(obj[3 * v + 1] > 0.0), int(obj[3 * v + 2] > 0.0)
+                d = _rl_sub(C[ix + 2 * iy + 4 * iz], mid)
+                cmds.xform("%s.vtx[%d]" % (node, v), objectSpace=True,
+                           translation=(_rl_dot(d, X), _rl_dot(d, Y), _rl_dot(d, Z)))
+            data["box"] = cmds.ls(node, uuid=True)[0]
+            cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+            made.append((root, node))
+        cmds.select([b for _, b in made], replace=True)
+    return made
+
+
 def duplicate_thatch_roof(root, link=False, offset=None):
     """A copy of a roof as a roof of its own (one Ctrl+Z): a new box beside
     the original's (offset: a world move; default the roof's width along X
@@ -26067,6 +26148,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.dup_link.setValue(True)
         self.dup_link.setToolTip("On: the copy and the original are linked (they share their look, see Link).")
         card.add(button_row(dup, self.dup_link))
+        remake = secondary_button("Make Box Again", "The selected roofs (or the one you're editing) whose box was "
+                                                    "deleted, say to keep it out of a publish: a new box exactly "
+                                                    "where the old one was, linked, so dragging it reshapes the "
+                                                    "roof again. A roof without its box keeps its shape and still "
+                                                    "takes every other edit. One Ctrl+Z.")
+        remake.clicked.connect(lambda *_: self.remake_boxes())
+        card.add(button_row(remake))
         link = secondary_button("Link", "Link the selected roofs so they share their look: a change to any of "
                                         "them rebuilds the rest. Shared: everything in steps 3 and 4 but each "
                                         "roof's own Shape, Ridge along, ends, Hip pitch, Half-hip, Overhang and "
@@ -26340,6 +26428,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         check(sec, "m_hip_cap", "Hip cappings", "Capping down each hip, over the sheets cut along the hip line.")
         check(sec, "m_barge", "Barge flashings (gable verges, a lean-to's top)",
               "Flashing over the sheets' edge at each gable verge, its leg down the barge board.")
+        row(sec, "m_trim_gap", "Trim gap", FloatField(0.0, 0.05, 0.0, 0.02, decimals=4, step=0.0005),
+            "Space left between the cappings / flashings and the sheets' crests (metres; 0 = sitting on them).")
+        row(sec, "m_trim_drape", "Trim follows sheets", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Makeshift: 1 = each capping bent down onto the panel right under it, 0 = straight lengths resting "
+            "on the highest panel anywhere under them (they float over the low ones).")
         check(sec, "m_fixings", "Screws", "A roofing screw and washer through a crest into each purlin (Medium "
                                           "and up), on the sheet that's on top there; none under the cappings.")
         row(sec, "m_fix_every", "Screw every", IntField(1, 8, 1, 6),
@@ -26589,6 +26682,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         shown["m_sheet_length"] = not s["m_full_length"]
         shown["m_end_lap"] = not s["m_full_length"]
         shown["m_fix_every"] = s["m_fixings"]
+        shown["m_trim_drape"] = s["m_mode"] == "Makeshift"
         shown["m_weather"] = not cone
         shown["stack_layout"] = not metal or s["m_uv_mode"] == "Variations"
         if not metal and surface:  # one surface: nothing to stack
@@ -26749,7 +26843,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                 msg += " Capped at %s vertices: lower Density or raise Width / Length." % "{:,}".format(THATCH_MAX_VERTS)
             level = "warn"
         if report["lost"]:
-            msg += " %d lost their box (deleted?): they stay where they are." % len(report["lost"])
+            msg += " %d lost their box (deleted?): they stay where they are (Make Box Again brings it back)." % \
+                len(report["lost"])
             level = "warn"
         if report["errors"]:
             msg += " %s." % report["errors"][0][1]
@@ -26842,6 +26937,27 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         if thatch_delete_preset(name):
             self._fill_presets()
             self.set_status("Deleted preset '%s'." % name)
+
+    @ui_safe
+    def remake_boxes(self):
+        roofs = self._edit_roofs()
+        if not roofs:
+            self.set_status("Select a roof whose box was deleted.", level="warn")
+            return
+        made = remake_thatch_boxes(roofs)
+        if not made:
+            self.set_status("%s still %s a box: nothing to make." % (
+                short_name(roofs[0]) if len(roofs) == 1 else "These roofs", "has" if len(roofs) == 1 else "have"),
+                level="warn")
+            return
+        report = update_thatch_roofs({r: {} for r, _ in made}, split=False)
+        self._pin(made[0][0])
+        self.set_status("Made %s again for %s (selected): move or scale it to reshape the roof. One Ctrl+Z "
+                        "undoes it.%s" % (", ".join(short_name(b) for _, b in made),
+                                          ", ".join(short_name(r) for r, _ in made),
+                                          "" if not report["errors"] else " %s." % report["errors"][0][1]),
+                        level="fixed")
+        self._sync_from_selection()
 
     @ui_safe
     def duplicate_roof(self):

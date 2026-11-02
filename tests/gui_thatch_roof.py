@@ -556,7 +556,19 @@ def main():
         panel.delete_preset()
         check("Delete removes your preset", combo.findText("gui hut") < 0 and "Deleted" in panel.status.text(),
               panel.status.text())
-        cmds.delete(dup, dbox)
+        cmds.delete(dbox)  # kept out of a publish
+        cmds.select(dup)
+        panel._sync_from_selection()
+        panel.remake_boxes()
+        pump()
+        nbox = ns["thatch_box"](dup)
+        check("Make Box Again: the roof gets a linked box again, selected", nbox and
+              cmds.ls(selection=True, long=True) == [nbox] and "again" in panel.status.text() and
+              not ns["thatch_box_moved"](dup), panel.status.text())
+        panel.remake_boxes()
+        check("Make Box Again on a roof that has its box: nothing to make", "nothing to make" in
+              panel.status.text(), panel.status.text())
+        cmds.delete(dup, nbox)
     finally:
         QtWidgets.QInputDialog.getText = real_get
         if old is None:

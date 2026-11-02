@@ -395,6 +395,12 @@
       / uuid, and meshes are written through the shape's inclusive matrix,
       so the roof group and the box can live in any group. The part meshes
       must stay direct children of their roof group (`thatch_parts`).
+    - **Make Box Again** (`remake_thatch_boxes`, the panel button; the user
+      keeps boxes out of a publish, and their sanity check deletes all
+      history, which roofs survive): a roof whose box is gone keeps its
+      `box_frame`; a new polyCube is placed from its 8 corners (axes from
+      the averaged edges, mirrored when `flip`; a non-box mesh's frame
+      gives a plain box, ridge "Z" turned) and relinked, one UndoChunk.
     - **Caps** (`crest`): leaves from a crest point down each side with a
       fixed plan heading (`_th_walk(heading=)`: round a hip's apex the
       fall line swings along the ridge and cap leaves slid off down the
@@ -675,6 +681,16 @@
       by 0.1 k + half a wing and the hip caps start lower, so the hip /
       ridge junction is closed; the cone cap is closed over the apex.
       `_mt_under_cap` keeps screws out from under cappings and barges.
+      **Flush** (the user, 2026-11-02: flashing floated): base lift = depth
+      + 2t + 2tg + `m_trim_gap` (Trim gap, metres) + 0.3 mm; laps between
+      lengths and ridge-over-hip are 1.2 t. Makeshift `m_trim_drape`
+      (Trim follows sheets, default 1): `draped()` bends each section
+      point from the straight length onto the panel right under it
+      (`_mt_lift_near(r=0.04 k)`, only the faces it's over), stations every
+      0.2 k. Makeshift ridge caps went from ~14 cm to ~4 cm off the sheets
+      (troughs included). Measure with rays (`scratchpad` probe idea: cast
+      down from trim vertices; clean sheets only have vertex rows every
+      60 cm, so casting up from sheet vertices misreads the ridge).
     - **Frame**: `_th_frame_members` with purlins (`_mt_purlins`) in place
       of battens; hip rafters are dropped along their normals (square tops
       poked through the sheets at the hip); fascia / barge boards from

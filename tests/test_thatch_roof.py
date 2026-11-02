@@ -1093,6 +1093,56 @@ def run():
     check("an older roof's Ctrl+D copy: the original is the one Maya didn't renumber",
           tb["thatch_copies"]() == {cp: r3}, str(tb["thatch_copies"]()))
 
+    # --- Make Box Again: a roof whose box was deleted (kept out of a publish) gets it back where it was
+    for name, shape in (("tapered, turned", "taper"), ("mirrored", "mirror"), ("not a box, ridge Z", "cyl")):
+        cmds.file(new=True, force=True)
+        if shape == "cyl":
+            b = cmds.ls(cmds.polyCylinder(r=2, h=3, name="notABox", constructionHistory=False)[0], long=True)[0]
+            cmds.move(5, 4, -2, b)
+            s = {"resolution": 40, "ridge": "Z"}
+        else:
+            b = box("b", rot=(0.0, 35.0, 0.0))
+            if shape == "mirror":
+                cmds.scale(-6, 3, 4, b)
+            else:
+                cmds.move(0, 0.7, 0.4, ["%s.vtx[2]" % b, "%s.vtx[3]" % b], relative=True)
+            s = {"resolution": 40, "end_a": "Gable"}
+        root = tb["make_thatch_roof"](b, s)["root"]
+        stored = data(root)["box_frame"]
+        before = bbox(tb["thatch_parts"](root)["straw"])
+        check("Make Box Again (%s): leaves a roof that still has its box alone" % name,
+              tb["remake_thatch_boxes"]([root]) == [])
+        cmds.delete(b)
+        rep = tb["update_thatch_roofs"]({root: {}})
+        made = tb["remake_thatch_boxes"]([root])
+        nb = made[0][1] if made else None
+        new_f = tb["thatch_frame"](nb, data(root).get("ridge", "Auto")) if nb else None
+        if shape == "cyl":  # a plain box now, with the frame the cylinder had
+            same = new_f and tb["_th_same_frame"](dict(new_f, corners=None, axis=None), stored)
+        else:
+            same = tb["_th_same_frame"](new_f, stored) and new_f["flip"] == stored["flip"]
+        check("Make Box Again (%s): a linked box with the old box's exact frame, selected" % name,
+              rep["lost"] == [root] and made == [(root, nb)] and same and tb["thatch_box"](root) == nb and
+              cmds.ls(selection=True, long=True) == [nb] and
+              cmds.attributeQuery(tb["THATCH_BOX_ATTR"], node=nb, exists=True), "%s %s" % (rep["lost"], made))
+        tb["update_thatch_roofs"]({root: {}})
+        after = bbox(tb["thatch_parts"](root)["straw"])
+        check("Make Box Again (%s): rebuilt on it, the roof doesn't move" % name,
+              max(abs(p - q) for p, q in zip(before, after)) < 1e-3 and not tb["thatch_box_moved"](root),
+              "%s %s" % (before, after))
+        if shape == "taper":
+            cmds.move(3, 0, 0, nb, relative=True)
+            rep = tb["update_thatch_roofs"]({root: {}})
+            moved = bbox(tb["thatch_parts"](root)["straw"])
+            check("Make Box Again: moving the new box moves the roof", rep["done"] == [root] and
+                  abs(moved[0] - after[0] - 3.0) < 1e-3, "%.3f" % (moved[0] - after[0]))
+            cmds.delete(nb)
+            made = tb["remake_thatch_boxes"]([root])
+            nb = made[0][1]
+            cmds.undo()
+            check("one Ctrl+Z undoes Make Box Again", not cmds.objExists(nb) and not tb["thatch_box"](root) and
+                  data(root).get("box_frame"))
+
     # --- speed (defaults)
     cmds.file(new=True, force=True)
     for style in ("Surface", "Planes", "3D Pieces"):

@@ -440,6 +440,20 @@ def run():
         check("a 16 x 9 m %s roof isn't reported as capped (its cappings aren't the vertex cap)" % mode,
               not rep["capped"])
 
+    # trim flush controls (the user: flashing floated over the sheets)
+    frame = tb["thatch_frame"](b)
+
+    def trim_y(**kw):
+        s = dict(tb["THATCH_DEFAULTS"], covering="Corrugated", end_a="Gable", end_b="Hip", **kw)
+        pts = tb["metal_build"](frame, s)["trim"][0]
+        return sum(p[1] for p in pts) / len(pts)
+    y0, y1 = trim_y(), trim_y(m_trim_gap=0.01)
+    check("Trim gap lifts the cappings / flashings off the sheets by about that much", 0.04 < y1 - y0 < 0.12,
+          "%.4f" % (y1 - y0))
+    stiff, bent = trim_y(m_mode="Makeshift", m_trim_drape=0.0), trim_y(m_mode="Makeshift", m_trim_drape=1.0)
+    check("Makeshift: Trim follows sheets bends the cappings down onto the panels", stiff - bent > 0.05,
+          "%.4f" % (stiff - bent))
+
 
 try:
     run()
