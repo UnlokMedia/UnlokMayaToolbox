@@ -128,7 +128,7 @@ def main():
     panel.create_box()
     pump()
     box = cmds.ls(selection=True, long=True)[0]
-    check("Create Box sits a box on the house and selects it", "thatchBox" in box and
+    check("Create Box sits a box on the house and selects it", "roofBox" in box and
           abs(cmds.exactWorldBoundingBox(box)[1] - 3.0) < 1e-4, box)
     panel._sync_from_selection()
     check("NEXT says Make Roof", "Make Roof" in panel.next_banner.text.text(), panel.next_banner.text.text())

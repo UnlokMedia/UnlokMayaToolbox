@@ -18,10 +18,11 @@ Modeling
     Log Noise     - turn cylinders into natural-looking logs.
     Rope Lashing  - tie logs together the way real lashings are tied
                     (square, diagonal, round, sheer), with clean UVs.
-    Thatch Roof   - thatched roofs from a box: gable / hip / half-hip ends,
-                    levels, a cut ridge cap, makeshift warp / sag / ragged
-                    eaves; a displaced surface, or straw planes, 3D pieces
-                    or leaf panels on stacked UVs.
+    Roof          - roofs from a box: gable / hip / half-hip ends, lean-to
+                    or cone, covered in thatch (a displaced surface, straw
+                    planes, 3D pieces, leaf panels or palm fronds on stacked
+                    UVs) or corrugated metal (clean sheets or makeshift
+                    panels), on a timber frame.
 UV
     Smart UDIM    - sort an asset into UDIM sections and material groups
                     (plain Maya sets, UnlokRenamer naming), clean geometry
@@ -20091,7 +20092,7 @@ class RopeLashingPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
-# Thatch Roof - thatched roofs from a box
+# Roof - roofs from a box (thatch or corrugated metal)
 # =============================================================================
 #
 # A box marks the roof: its footprint is the wall tops, its bottom the eaves
@@ -24462,8 +24463,8 @@ def create_thatch_blocker(root):
     L, W, H = frame["L"], frame["W"], frame["H"]
     sx, sy, sz = 0.15 * W, 1.6 * H, 2.6 * W
     mid = reduce_add((o, _rl_mul(a, L + 0.5 * sx), _rl_mul(y, 0.5 * sy - 0.3 * H)))
-    with UndoChunk("Thatch blocker"):
-        name = "thatchBlocker%04d" % _th_free_number("thatchBlocker%04d")
+    with UndoChunk("Roof blocker"):
+        name = "roofBlocker%04d" % _th_free_number("roofBlocker%04d")
         node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
         shape = _log_shape(node)
         cmds.addAttr(node, longName=THATCH_BLOCKER_ATTR, attributeType="bool", defaultValue=True)
@@ -24540,8 +24541,8 @@ def create_thatch_box(around=None):
     around: nodes to sit it on (footprint = their bounding box, bottom on
     their top); otherwise a 6 x 3 x 4 m box at the origin, eaves 2.5 m up
     (scene_m_per_unit: 60 x 30 x 40 units in a decimetre scene)."""
-    with UndoChunk("Thatch box"):
-        name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+    with UndoChunk("Roof box"):
+        name = "roofBox%04d" % _th_free_number("roofBox%04d")
         node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
         _th_style_box(node)
         if around:
@@ -24769,7 +24770,7 @@ def create_thatch_box_from_points(points):
     corners from thatch_shape_from_points, in the box's own frame (so the
     roof's ridge runs along its X). Returns (box, shape result)."""
     shape_info = thatch_shape_from_points(points)
-    name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+    name = "roofBox%04d" % _th_free_number("roofBox%04d")
     node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
     _th_style_box(node)
     a, y, c, o = shape_info["a"], shape_info["y"], shape_info["c"], shape_info["origin"]
@@ -24787,7 +24788,7 @@ def thatch_roof_from_points(points, settings=None, select=True):
     """Box and roof from points in one Ctrl+Z: the points' shape settings
     (shape, ends, hip pitch, ridge X) over the given settings. Returns
     (make_thatch_roof's report, box, shape result)."""
-    with UndoChunk("Thatch from points"):
+    with UndoChunk("Roof from points"):
         box, info = create_thatch_box_from_points(points)
         s = dict(THATCH_DEFAULTS)
         s.update(settings or {})
@@ -24977,7 +24978,7 @@ class ThatchPointPicker(object):
     def add_point(self, p):
         self.points.append(tuple(p))
         with NoUndo():
-            loc = cmds.spaceLocator(name="thatchPick%02d" % len(self.points))[0]
+            loc = cmds.spaceLocator(name="roofPick%02d" % len(self.points))[0]
             loc = long_name(loc)
             cmds.xform(loc, worldSpace=True, translation=p)
             size = 0.02 / scene_m_per_unit()
@@ -25192,7 +25193,7 @@ def upgrade_thatch_roofs(roots):
     roots = [r for r in roots if thatch_needs_upgrade(r)]
     if not roots:
         return [], {"done": [], "faces": 0}
-    with UndoChunk("Thatch upgrade"):
+    with UndoChunk("Roof upgrade"):
         for root in roots:
             data = thatch_data(root)
             _roof_add_parts(root, data.get("covering"))
@@ -25202,7 +25203,7 @@ def upgrade_thatch_roofs(roots):
 
 
 def make_thatch_roof(box, settings=None, select=False):
-    """Thatch the roof a box marks (one Ctrl+Z). The roof follows the box:
+    """Build the roof a box marks (one Ctrl+Z). The roof follows the box:
     rebuild it with update_thatch_roofs. Returns {"root", "pieces",
     "capped", "faces"}. Raises ValueError for a flat box."""
     s = dict(THATCH_DEFAULTS)
@@ -25210,7 +25211,7 @@ def make_thatch_roof(box, settings=None, select=False):
     frame = thatch_frame(box, s["ridge"])
     built = thatch_build(frame, s)
     parent = cmds.listRelatives(box, parent=True, fullPath=True)
-    with UndoChunk("Thatch Roof"):
+    with UndoChunk("Make Roof"):
         stem = _roof_stem(s["covering"])
         num = _th_free_number(stem + "%04d_GRP")
         if parent:
@@ -25347,7 +25348,7 @@ def bake_thatch(roofs):
     move to a hidden attribute only a redo uses. Blocker boxes the tool made
     go too when no other roof uses them. Returns (baked, boxes removed)."""
     done, gone = [], []
-    with UndoChunk("Thatch bake"):
+    with UndoChunk("Roof bake"):
         boxes, blockers = set(), set()
         for root in roofs:
             if not is_thatch_roof(root):
@@ -25466,7 +25467,7 @@ def _th_box_copy(box, delta):
         node = long_name(cmds.duplicate(box, returnRootsOnly=True)[0])
         cmds.xform(node, matrix=list(_th_world(box) * delta), worldSpace=True)
         return node
-    name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+    name = "roofBox%04d" % _th_free_number("roofBox%04d")
     node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
     _th_style_box(node)
     parent = cmds.listRelatives(box, parent=True, fullPath=True)
@@ -25495,7 +25496,7 @@ def thatch_split_copies(roots=None):
     done = []
     if not copies:
         return done
-    with UndoChunk("Thatch copy box"):
+    with UndoChunk("Roof copy box"):
         used = set(thatch_box(r) for r in thatch_roofs())
         spare = [n for n in cmds.ls(["*." + THATCH_BOX_ATTR, "*:*." + THATCH_BOX_ATTR], objectsOnly=True,
                                     long=True) or [] if n not in used]
@@ -26496,7 +26497,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     @ui_safe
     def save_preset(self):
         current = self.preset_combo.currentText()
-        name, ok = QtWidgets.QInputDialog.getText(self, "Save Thatch Preset", "Preset name (an existing one of "
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save Roof Preset", "Preset name (an existing one of "
                                                   "yours is overwritten):", QtWidgets.QLineEdit.Normal,
                                                   current if current in thatch_user_presets() else "")
         name = (name or "").strip()

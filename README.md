@@ -291,9 +291,9 @@ that fill 0..1 at one texel density, with no overlaps. Ropes are named
 tube, 0.5 s twisted and 0.8 s in 3 strands. A frame of 8 joints takes about
 2 to 5 s.
 
-### Modeling > Thatch Roof
+### Modeling > Roof
 
-(The tool's tab is called **Roof**.) Roofs from a box: the right shape for
+(Called Thatch Roof before corrugated metal was added.) Roofs from a box: the right shape for
 a cottage, barn, shed, roundhouse or palm hut, covered in **Thatch**, built
 the way thatch is laid, with stacked UVs for straw and leaf textures, or in
 **Corrugated metal** (step 4's *Covering*; see
@@ -1397,7 +1397,7 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/gui_rope_lashing.py`: drives the Rope Lashing panel in a real Maya
   session and saves close-ups to `tests/_out/rope_lashing`. Launch it like
   the smoke test below, with `tests/run_gui_rope_lashing.mel`.
-- `tests/test_thatch_roof.py`: headless Thatch Roof tests. Every roof shape
+- `tests/test_thatch_roof.py`: headless Roof tests (thatch). Every roof shape
   and end type in each style: closed shells facing out, the roof on its box,
   UVs (0..1 for the surface, stacks in their tiles / columns), undo / redo
   (with the rebuild), save / reopen, live edits, following the box, bake,

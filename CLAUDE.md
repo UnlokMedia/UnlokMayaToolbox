@@ -281,7 +281,12 @@
     rope near what moved (`dirty`).
   - **Presets:** user presets are JSON in the `unlokRopePresets` optionVar
     (Maya writes its prefs; the tool writes no files).
-- **Thatch Roof** (Modeling tab): a roof from a box. Engine `ThatchField`
+- **Roof** (Modeling tab; called Thatch Roof until corrugated metal, so the
+  code still says `thatch_*` / `THATCH_*` / `ThatchRoofPanel`: kept so old
+  scenes, the `unlokThatchPresets` optionVar and the other sessions' work
+  keep matching; user-facing text, undo names and new node names say Roof,
+  `roofBox####` / `roofBlocker####`, while roof groups keep the covering
+  in their name, `thatchRoof####` / `metalRoof####`). A roof from a box. Engine `ThatchField`
   (pure maths) -> `_th_grid` -> `_th_shell_mesh` / `_th_pieces_mesh` /
   `_th_panels_mesh` / `_th_fronds_mesh`, all in
   `thatch_build`; scene side `make_thatch_roof`, `update_thatch_roofs`,
@@ -1524,7 +1529,7 @@ Maya 2024 and 2025 are installed locally (no 2023). Run
 is `tests/run_gui_bevel_resolver.mel` (screenshots in
 `tests/_out/bevel_resolver`). For the UI, launch GUI Maya
 with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
-the output folder. Thatch Roof's GUI test is `tests/run_gui_thatch_roof.mel`
+the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 (pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
 Corrugated metal: `tests/test_corrugated_roof.py`.

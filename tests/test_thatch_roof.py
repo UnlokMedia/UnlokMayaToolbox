@@ -336,7 +336,7 @@ def run():
 
     # --- bake
     done, gone = tb["bake_thatch"]([root])
-    check("bake keeps the meshes, drops the settings and the box", done == [root] and gone == ["thatchBox0001"] and
+    check("bake keeps the meshes, drops the settings and the box", done == [root] and gone == ["roofBox0001"] and
           not tb["is_thatch_roof"](root) and not cmds.objExists(b) and cmds.objExists(root))
     cmds.undo()
     check("undo un-bakes it", tb["is_thatch_roof"](root) and cmds.objExists(b))
@@ -829,7 +829,7 @@ def run():
     tb["link_thatch_blockers"]([root], [low])
     done, gone = tb["bake_thatch"]([root])
     check("bake removes the blocker the tool made, keeps your own meshes",
-          not cmds.objExists(wall) and cmds.objExists(low) and "thatchBlocker0001" in gone, str(gone))
+          not cmds.objExists(wall) and cmds.objExists(low) and "roofBlocker0001" in gone, str(gone))
     # blockers through a deformed box: world -> roof space undoes the lattice
     cmds.file(new=True, force=True)
     b = box("warp")
