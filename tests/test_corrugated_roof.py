@@ -298,6 +298,24 @@ def run():
     check("trim UVs laid out in a tile of their own, after the sheets' tiles", max(tus) <= lo + 1.0 + 1e-6 and
           min(tvs) >= 0.0 and max(tvs) <= 1.0 and lo >= math.ceil(s_hi - 1e-6), "trim from %d, sheets to %.2f" % (
               lo, s_hi))
+    # Single-sided: sheets, cappings and flashings are their top surface only (about half the faces), facing up,
+    # still covering everything; laid out without undersides (fewer tiles)
+    sfn, stf = mesh_fn(tb, parts["sheets"]), mesh_fn(tb, parts["trim"])
+    nf0, nt0, su0 = sfn.numPolygons, stf.numPolygons, max(sfn.getUVs()[0])
+    tb["update_thatch_roofs"]({root: {"m_single": True}})
+    sfn, stf = mesh_fn(tb, parts["sheets"]), mesh_fn(tb, parts["trim"])
+    nrm = sfn.getNormals(om.MSpace.kWorld)
+    up = sum(1 for n_ in nrm if n_.y > 0.0) / float(max(1, len(nrm)))
+    bb_r = cmds.exactWorldBoundingBox(parts["sheets"])
+    miss = rays_up(tb, [parts["sheets"], parts["trim"]], bb_r[0] + 0.5, bb_r[3] - 0.5, bb_r[2] + 0.5, bb_r[5] - 0.5,
+                   bb_r[1] - 5.0)
+    check("Single-sided: sheets and trim one surface each (under 60% of the faces), facing up, no gaps",
+          boundary_edges(sfn) > 0 and sfn.numPolygons < 0.6 * nf0 and stf.numPolygons < 0.6 * nt0 and up > 0.9 and
+          not miss, "sheets %d -> %d faces, trim %d -> %d, %.1f%% up, %d rays miss" % (
+              nf0, sfn.numPolygons, nt0, stf.numPolygons, up * 100, len(miss)))
+    check("Single-sided: laid out in fewer tiles (no undersides)", max(sfn.getUVs()[0]) < su0 - 0.5,
+          "u up to %.2f -> %.2f" % (su0, max(sfn.getUVs()[0])))
+    tb["update_thatch_roofs"]({root: {"m_single": False}})
 
     # --- real sizes in decimetres: pitch, depth, the sheets' rise
     cmds.file(new=True, force=True)

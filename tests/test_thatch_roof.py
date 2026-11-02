@@ -540,6 +540,17 @@ def run():
           max(p[0] for p in fr) <= edge + 0.02, "underlay %.3f, frame %.3f" % (max(ux), max(p[0] for p in fr)))
     hf, hh = build(end_a="Hip", verge_a="Flush"), build(end_a="Hip")
     check("Gable edge only matters on a gable", hf["straw"][0] == hh["straw"][0])
+    # Start UDIM: the leaves from there, the other meshes after them, up a row past the 10th tile, none shared
+    ud = build(udim=1018, stacks=3)
+    tl = ud["udims"]
+    flat = [t for v in tl.values() for t in v]
+
+    def corner(mesh):
+        return int(math.floor(min(mesh[3]) + 1e-6)), int(math.floor(min(mesh[4]) + 1e-6))
+    check("Start UDIM 1018: leaves in 1018-1020, sticks up a row from the same column, then the rest; no tile shared",
+          tl.get("straw") == [1018, 1019, 1020] and tl.get("sticks") == [1028, 1029, 1030] and
+          corner(ud["straw"]) == (7, 1) and corner(ud["sticks"]) == (7, 2) and len(flat) == len(set(flat)) and
+          all(max(ud[p][3]) <= 10.0 + 1e-6 for p in tl), str(tl))
     # two layers at the edges: the limp under layer hangs, the stiff top layer holds its line
     limp, stiff = build(top_layer=0.0, edge_hang=1.5), build(top_layer=0.0, edge_hang=0.0)
     out_limp, out_stiff = max(abs(p[2]) for p in limp["straw"][0]), max(abs(p[2]) for p in stiff["straw"][0])

@@ -379,10 +379,22 @@
     - **One roof, no shared UV space** (the user, 2026-11-02: "this tool
       shouldn't output under one roof any overlapping UVs, other than ...
       stacked"): `_roof_udims` (end of `thatch_build`, metal too) moves
-      each part along U into the tile columns after the previous parts',
-      in `ROOF_UDIM_ORDER` (straw / sheets, sticks, underlay, trim,
-      fixings, frame); `out["udims"]` = {part: (first, last) column}. Only
-      a part's own stacked variations overlap.
+      each part into the tiles after the previous parts', in
+      `ROOF_UDIM_ORDER` (straw / sheets, sticks, underlay, trim, fixings,
+      frame), from the roof's **Start UDIM** (`udim`, default 1001: an own
+      key, a look key so shape presets keep it, skipped by saved presets);
+      a part that won't fit before the 10th column goes up a row (above
+      everything so far, from the start's column if it fits). `out["udims"]`
+      = {part: [UDIM numbers]}. Only a part's own stacked variations
+      overlap. The UVs section shows for every style now.
+    - **Single-sided metal** (`m_single`): `_MtMesh.single` makes
+      `_mt_solid` emit the top surface only (empty "bot" / "walls" UV
+      ranges) for sheets and trim; All laid out skips the underside tiles,
+      `_mt_pack_trim` skips empty shells. Laps keep the Thickness gap.
+    - **Grouping** (the user asked): roofs and boxes are found by attribute
+      / uuid, and meshes are written through the shape's inclusive matrix,
+      so the roof group and the box can live in any group. The part meshes
+      must stay direct children of their roof group (`thatch_parts`).
     - **Caps** (`crest`): leaves from a crest point down each side with a
       fixed plan heading (`_th_walk(heading=)`: round a hip's apex the
       fall line swings along the ridge and cap leaves slid off down the

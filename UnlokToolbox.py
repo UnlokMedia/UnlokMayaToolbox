@@ -20194,6 +20194,7 @@ METAL_PART_MATERIALS = (("sheets", "metalCorrugated"), ("trim", "metalFlashing")
 METAL_DEFAULTS = {
     "m_mode": "Clean", "m_profile": "Sine", "m_pitch": 0.076, "m_depth": 0.018, "m_cover": 0.762,
     "m_side_lap": 1, "m_full_length": True, "m_sheet_length": 2.4, "m_end_lap": 0.15, "m_thickness": 0.0005,
+    "m_single": False,
     "m_gutter": 0.05, "m_weather": "End A", "m_ridge_cap": True, "m_hip_cap": True, "m_barge": True,
     "m_fixings": True, "m_fix_every": 3, "m_purlin_spacing": 0.9, "m_purlin_size": 0.075,
     "m_rafter_spacing": 0.9, "m_rafter_size": 0.15, "m_frame_style": "Sawn", "m_frame_wobble": 0.15,
@@ -20218,6 +20219,7 @@ THATCH_DEFAULTS = {
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
     "curl": 0.0, "curl_var": 0.5, "dried": 0.0, "dried_var": 0.6,
+    "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
 THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
@@ -20230,7 +20232,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
-                    "dried_var", "covering") + tuple(sorted(METAL_DEFAULTS))
+                    "dried_var", "covering", "udim") + tuple(sorted(METAL_DEFAULTS))
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -20302,9 +20304,9 @@ THATCH_PRESETS = {
         "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.3, "underlay": False},
 }
 THATCH_PRESET_VAR = "unlokThatchPresets"  # optionVar (Maya's own prefs): the user's presets as JSON
-THATCH_PRESET_SKIP = ("seed", "ridge", "detail")  # each roof's own: a saved preset leaves them out
+THATCH_PRESET_SKIP = ("seed", "ridge", "detail", "udim")  # each roof's own: a saved preset leaves them out
 # Linked roofs share every setting but these (each keeps its own shape, ends, overhang and seed).
-THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "verge_a", "verge_b", "hip_pitch", "half_hip", "overhang", "seed")
+THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "verge_a", "verge_b", "udim", "hip_pitch", "half_hip", "overhang", "seed")
 THATCH_LINKED_KEYS = tuple(k for k in THATCH_KEYS if k not in THATCH_OWN_KEYS)
 THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
 THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
@@ -23330,6 +23332,7 @@ class _MtMesh(object):
     def __init__(self):
         self.pts, self.counts, self.conn, self.us, self.vs, self.uvi = [], [], [], [], [], []
         self.shells = []  # {"top": (uv0, uv1), "bot": (...), "walls": (...), "w", "h", "stack", "pa"}
+        self.single = False  # Single-sided: pieces are their top surface only (no underside, no edges)
 
     def mesh(self):
         if not self.counts:
@@ -23341,15 +23344,18 @@ def _mt_solid(M, top, bot, U, V, tw, nhint, info):
     """A closed sheet from a grid of top points (rows along it, columns
     across) and the underside under each; UVs U (across), V (along) per
     grid point, the underside on its own UVs (same values), thin edge
-    strips tw wide just outside the shell."""
+    strips tw wide just outside the shell. M.single: the top surface only
+    (the "bot" and "walls" UV ranges empty)."""
     nr, nc = len(top), len(top[0])
     if nr < 2 or nc < 2:
         return
+    single = M.single
     base = len(M.pts)
     for row in top:
         M.pts.extend(row)
-    for row in bot:
-        M.pts.extend(row)
+    if not single:
+        for row in bot:
+            M.pts.extend(row)
     nb = nr * nc
     # winding: the first good quad against the outward hint
     flip = False
@@ -23367,9 +23373,10 @@ def _mt_solid(M, top, bot, U, V, tw, nhint, info):
         M.us.extend(U[j])
         M.vs.extend(V[j])
     uvb = len(M.us)
-    for j in range(nr):
-        M.us.extend(U[j])
-        M.vs.extend(V[j])
+    if not single:
+        for j in range(nr):
+            M.us.extend(U[j])
+            M.vs.extend(V[j])
     uvw = len(M.us)
     counts, conn, uvi = M.counts, M.conn, M.uvi
     for j in range(nr - 1):
@@ -23380,6 +23387,8 @@ def _mt_solid(M, top, bot, U, V, tw, nhint, info):
             counts.append(4)
             conn.extend((base + q[0], base + q[1], base + q[2], base + q[3]))
             uvi.extend((uv0 + q[0], uv0 + q[1], uv0 + q[2], uv0 + q[3]))
+            if single:
+                continue
             q = (a, d, c, b) if not flip else (a, b, c, d)
             counts.append(4)
             conn.extend((base + nb + q[0], base + nb + q[1], base + nb + q[2], base + nb + q[3]))
@@ -23387,7 +23396,7 @@ def _mt_solid(M, top, bot, U, V, tw, nhint, info):
     # the edges: round the boundary (counter-clockwise on the top when not flipped)
     loop = [(0, i) for i in range(nc)] + [(j, nc - 1) for j in range(1, nr)] + \
            [(nr - 1, i) for i in range(nc - 2, -1, -1)] + [(j, 0) for j in range(nr - 2, 0, -1)]
-    n_loop = len(loop)
+    n_loop = 0 if single else len(loop)
     # strip side per boundary edge: bottom row -V, right +U, top +V, left -U;
     # each side's edges share their UVs (one strip a side)
     prev = None
@@ -24054,7 +24063,7 @@ def _mt_uv_layout(M, sz, s, seed):
     order = sorted(range(len(M.shells)), key=lambda i: -(M.shells[i]["v1"] - M.shells[i]["v0"]))
     tile, x, y, row = 0, pad, pad, 0.0
     placed = {}
-    for part in ("top", "bot"):
+    for part in ("top",) if M.single else ("top", "bot"):
         if part == "bot" and placed:  # undersides start on a fresh tile, laid out the same way
             tile, x, y, row = tile + 1, pad, pad, 0.0
         for i in order:
@@ -24086,7 +24095,8 @@ def _mt_pack_trim(M):
     shells = []
     for sh in M.shells:
         shells.append(list(range(sh["top"][0], sh["top"][1])) + list(range(sh["walls"][0], sh["walls"][1])))
-        shells.append(list(range(sh["bot"][0], sh["bot"][1])))
+        if sh["bot"][1] > sh["bot"][0]:
+            shells.append(list(range(sh["bot"][0], sh["bot"][1])))
     _th_pack(shells, M.us, M.vs)
 
 
@@ -24118,6 +24128,7 @@ def metal_build(frame, s, blockers=None):
     # lay them in order (rows up the slope, columns in laying order, patches last), each resting on what's there
     rasters = [_MtRaster(f, 0.06 * sz["k"], 0.5 * sz["k"]) for f in faces]
     M = _MtMesh()
+    M.single = bool(s["m_single"])
     makeshift = sz["mode"] == "Makeshift" and level > 0
     built = []
     over = False  # stopped at METAL_MAX_VERTS
@@ -24189,6 +24200,7 @@ def metal_build(frame, s, blockers=None):
                     _mt_fixing(FX, p, n, sz, tilt)
                     n_fix += 1
     TR = _MtMesh()
+    TR.single = M.single
     caps = _mt_trim(TR, F, faces, sz, s, rasters if makeshift else None, seed)
     uv = _mt_uv_layout(M, sz, s, seed)
     _mt_pack_trim(TR)
@@ -24232,7 +24244,7 @@ def thatch_build(frame, settings, blockers=None):
     s = dict(THATCH_DEFAULTS)
     s.update(settings or {})
     if s["covering"] == "Corrugated":
-        return _roof_udims(metal_build(frame, s, blockers))
+        return _roof_udims(metal_build(frame, s, blockers), s["udim"])
     s, level, under_res = _th_detail(s)
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
     F.blockers = _th_blockers_in_roof(frame, blockers)
@@ -24274,30 +24286,41 @@ def thatch_build(frame, settings, blockers=None):
         depth = 1.02 * F.T if shelled else 0.02 * F.T * (s["style"] != "Palm Fronds")
         fm = _th_frame_mesh(F, _th_frame_members(F, G, s, depth) + getattr(F, "frame_extra", []), s)
         out["frame"] = _th_to_world(frame, _th_flush_cut(F, fm)) if fm else None
-    return _roof_udims(out)
+    return _roof_udims(out, s["udim"])
 
 
 ROOF_UDIM_ORDER = ("straw", "sheets", "sticks", "underlay", "trim", "fixings", "frame")
 
 
-def _roof_udims(out):
+def _roof_udims(out, start=1001):
     """No two of a roof's meshes share UV space: each part, in
-    ROOF_UDIM_ORDER, moves along U to start in the tile column after the
-    last one the parts before it use (a part's own stacked variations still
-    share their tiles). out["udims"]: {part: (first, last) tile column}."""
-    at, cols = 0, {}
+    ROOF_UDIM_ORDER, moves into the UDIM tiles after the ones the parts
+    before it use (a part's own stacked variations still share their
+    tiles), from the Start UDIM along the row; a part that won't fit before
+    the row's 10th tile goes on up a row (above every part so far, from the
+    start's column if it fits there, else the first). out["udims"]: {part:
+    [UDIM numbers]}."""
+    d = max(0, int(start or 1001) - 1001)
+    c0, r0 = d % 10, d // 10
+    c, r, band = c0, r0, 1
+    tiles = {}
     for part in ROOF_UDIM_ORDER:
         mesh = out.get(part)
         if not mesh or not mesh[1]:
             continue
-        us = mesh[3]
-        lo = int(math.floor(min(us) + 1e-6))
-        width = max(1, int(math.ceil(max(us) - 1e-6)) - lo)
-        if at != lo:
-            out[part] = tuple(mesh[:3]) + ([u + (at - lo) for u in us],) + tuple(mesh[4:])
-        cols[part] = (at, at + width - 1)
-        at += width
-    out["udims"] = cols
+        us, vs = mesh[3], mesh[4]
+        lo, vlo = int(math.floor(min(us) + 1e-6)), int(math.floor(min(vs) + 1e-6))
+        width = min(10, max(1, int(math.ceil(max(us) - 1e-6)) - lo))
+        height = max(1, int(math.ceil(max(vs) - 1e-6)) - vlo)
+        if c + width > 10:
+            c, r, band = (c0 if c0 + width <= 10 else 0), r + band, 1
+        if c != lo or r != vlo:
+            out[part] = tuple(mesh[:3]) + ([u + (c - lo) for u in us], [v + (r - vlo) for v in vs]) + \
+                tuple(mesh[5:])
+        tiles[part] = [1001 + c + i + 10 * (r + j) for j in range(height) for i in range(width)]
+        c += width
+        band = max(band, height)
+    out["udims"] = tiles
     return out
 
 
@@ -26248,7 +26271,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Which end the laying starts from: each sheet laps over the one before, so the laps face away "
             "from the weather on that side. End A: the box's - end.")
         row(sec, "m_thickness", "Thickness", FloatField(0.0002, 0.003, 0.0003, 0.0015, decimals=4, step=0.0001),
-            "Sheet thickness (metres; 0.0005 = 0.5 mm). Every sheet is a closed solid, both sides.")
+            "Sheet thickness (metres; 0.0005 = 0.5 mm). Every sheet is a closed solid, both sides (Single-sided: "
+            "the gap left between lapping sheets).")
+        check(sec, "m_single", "Single-sided sheets",
+              "On: every sheet, capping and flashing is its top surface only (no underside, no edges): about half "
+              "the faces, for a thin-walled / two-sided shader. Laps keep a Thickness gap, so they don't "
+              "flicker. Off: closed solids.")
         group[0] = "thatch"
         row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
             "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
@@ -26434,6 +26462,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sec.add_full(self.f["frame_subd"])
         card.add(sec)
         sec = self.stack_sec = Section("UVs", expanded=False)
+        row(sec, "udim", "Start UDIM", IntField(1001, 1999, 1001, 1030),
+            "The tile this roof's UVs start in (1001 = 0..1; 1011 = a row up). Its meshes follow on from there "
+            "in tiles of their own (covering, sticks, underlay, trim, fixings, frame), on up a row when one "
+            "runs past the 10th tile: move a roof's UVs out of the way of other assets'. This roof's own "
+            "(not shared by linked roofs, not saved in presets).")
         group[0] = "metal"
         row(sec, "m_uv_mode", "Sheets", SegmentField(METAL_UV_MODES),
             "Variations: every sheet on one of the stacks below (each from a random corrugation and height, so "
@@ -26558,13 +26591,15 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         shown["m_fix_every"] = s["m_fixings"]
         shown["m_weather"] = not cone
         shown["stack_layout"] = not metal or s["m_uv_mode"] == "Variations"
+        if not metal and surface:  # one surface: nothing to stack
+            shown["stack_layout"] = False
         shown["stacks"] = shown["stack_layout"]
         for key, (label, widget) in self._rows.items():
             grp = self._group.get(key, "both")
             on = shown.get(key, True) and (grp == "both" or (grp == "metal") == metal)
             label.setVisible(on)
             widget.setVisible(on)
-        for key in ("m_full_length", "m_ridge_cap", "m_fixings", "m_fascia", "m_mode"):
+        for key in ("m_full_length", "m_ridge_cap", "m_fixings", "m_fascia", "m_mode", "m_single"):
             self.f[key].setVisible(metal)
         self.f["m_hip_cap"].setVisible(metal and not cone and ends != ("Gable", "Gable"))
         self.f["m_barge"].setVisible(metal and not cone)
@@ -26572,7 +26607,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.f["mirror"].setVisible(not metal)
         surface = s["style"] == "Surface"
         self.under_sec.setVisible(not metal and not surface)
-        self.stack_sec.setVisible(metal or not surface)
+        self.stack_sec.setVisible(True)
         self.more_sec.setVisible(not metal)
         self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
         self.trim_sec.setVisible(metal)
