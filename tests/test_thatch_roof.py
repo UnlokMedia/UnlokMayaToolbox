@@ -612,6 +612,15 @@ def run():
     check("Proxy: no frame (just the shape)", not cmds.getAttr(fr + ".visibility"))
     tb["update_thatch_roofs"]({root: {"detail": "Medium", "frame": False}})
     check("Frame off hides it", not cmds.getAttr(fr + ".visibility"))
+    tb["update_thatch_roofs"]({root: {}})
+    d = tb["thatch_data"](root)
+    check("Frame off stays off through a rebuild (the box's frame is stored apart)",
+          not cmds.getAttr(fr + ".visibility") and d["frame"] is False and isinstance(d["box_frame"], dict))
+    d["frame"] = d.pop("box_frame")  # how roofs were saved before
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], __import__("json").dumps(d), type="string")
+    d = tb["thatch_data"](root)
+    check("an older roof: its box frame moves across, Frame is read off its hidden frame mesh",
+          d["frame"] is False and isinstance(d["box_frame"], dict) and not tb["thatch_box_moved"](root))
     tb["update_thatch_roofs"]({root: {"frame": True, "shape": "Cone"}})
     check("a cone gets a frame (radial rafters, ring battens)", cmds.getAttr(fr + ".visibility") and
           mesh_fn(tb, fr).numPolygons > 1000)
@@ -963,7 +972,7 @@ def run():
           tb["thatch_box"](r2) == b2 and tb["thatch_box"](r1) == tbox and bbox(r2)[0] > bbox(r1)[3] and
           not tb["thatch_box_moved"](r2), "%s %s" % (r2, b2))
     diff = [(k, data(r1)[k], data(r2)[k]) for k in tb["THATCH_KEYS"]
-            if k != "frame" and data(r1)[k] != data(r2)[k]]  # "frame" holds the box's frame once built
+            if data(r1)[k] != data(r2)[k]]
     check("the copy has the same settings and a new seed", [d[0] for d in diff] == ["seed"], str(diff))
     check("the new box is selected, a tool box", cmds.ls(selection=True, long=True) == [b2] and
           cmds.attributeQuery(tb["THATCH_BOX_ATTR"], node=b2, exists=True))
@@ -980,7 +989,7 @@ def run():
     check("a shared setting changed on one linked roof rebuilds the other", sorted(rep["done"]) == sorted([r1, r2])
           and data(r2)["levels"] == 3 and data(r2)["lumps"] == 0.9, str(rep["done"]))
     check("each keeps its own ends and box size", data(r1)["end_a"] == "Gable" and data(r2)["end_a"] == "Hip" and
-          data(r2)["frame"]["L"] < 0.7 * data(r1)["frame"]["L"])
+          data(r2)["box_frame"]["L"] < 0.7 * data(r1)["box_frame"]["L"])
     rep = tb["update_thatch_roofs"]({r1: {"seed": 5}})
     check("the seed is each roof's own", rep["done"] == [r1] and data(r2)["seed"] != 5)
     rep = tb["update_thatch_roofs"]({r1: {}})

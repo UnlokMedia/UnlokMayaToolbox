@@ -567,6 +567,12 @@
     seed; `_th_box_copy` duplicates a tool box, or fits a tool box to
     another mesh's bounding box. `link_thatch_roofs` / `unlink_thatch_roofs`
     write in NoUndo like live edits.
+  - **`box_frame`, not `frame`:** the box's frame at the last build is
+    stored as `box_frame`. It used to be `frame`, the same key as the Frame
+    on/off setting, so every build overwrote Frame off with the frame dict
+    (truthy: Frame came back on at the next rebuild). `thatch_data` moves an
+    old dict across and reads Frame off the frame mesh (hidden at a Detail
+    above Proxy = off).
   - **Deformed boxes:** `_th_box_corners` sorts an 8-vertex mesh's corners
     by which side of the box's middle (object space) each is on; the frame
     keeps them (world space) with `axis` and `flip` (mirrored box). The

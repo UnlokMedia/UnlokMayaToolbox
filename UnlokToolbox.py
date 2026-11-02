@@ -24369,7 +24369,10 @@ def _th_attr(root):
 
 
 def thatch_data(root):
-    """{settings..., "box": uuid, "frame": the box's frame at the last build}"""
+    """{settings..., "box": uuid, "box_frame": the box's frame at the last
+    build}. Roofs saved before box_frame kept it under "frame", over the
+    Frame setting: it moves across, and Frame is read off the frame mesh
+    (hidden at a Detail above Proxy = it was off)."""
     data = dict(THATCH_DEFAULTS)
     attr = _th_attr(root)
     if attr:
@@ -24377,6 +24380,10 @@ def thatch_data(root):
             data.update(json.loads(cmds.getAttr(root + "." + attr) or "{}"))
         except ValueError:
             pass
+    if isinstance(data.get("frame"), dict):
+        data.setdefault("box_frame", data["frame"])
+        node = thatch_parts(root).get("frame")
+        data["frame"] = not node or data.get("detail") == "Proxy" or bool(cmds.getAttr(node + ".visibility"))
     return data
 
 
@@ -24498,7 +24505,7 @@ def create_thatch_blocker(root):
     rotate and scale it to the wall, lower roof or beam it stands for). It's
     linked to the roof straight away (a live edit). Returns the node."""
     data = thatch_data(root)
-    frame = data.get("frame")
+    frame = data.get("box_frame")
     if not frame:
         raise ValueError("the roof has no frame to place a blocker by")
     o, a, y, c = frame["o"], frame["a"], frame["y"], frame["c"]
@@ -25264,7 +25271,7 @@ def make_thatch_roof(box, settings=None, select=False):
         data = dict(s)
         data["box"] = cmds.ls(box, uuid=True)[0]
         data["self"] = _th_uuid(root)  # a Ctrl+D copy of the group won't match: see thatch_copies
-        data["frame"] = frame
+        data["box_frame"] = frame
         data["blockers"], data["blocker_boxes"] = [], []
         data["version"] = THATCH_VERSION
         cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
@@ -25299,7 +25306,7 @@ def update_thatch_roofs(changes, split=True):
         data.update(change)
         s = thatch_settings_only(data)
         box = thatch_box(root)
-        frame = data.get("frame")
+        frame = data.get("box_frame")
         if box:
             try:
                 frame = thatch_frame(box, s["ridge"])
@@ -25314,7 +25321,7 @@ def update_thatch_roofs(changes, split=True):
         boxes = _th_blocker_boxes(data)
         built = thatch_build(frame, s, boxes)
         data.update(s)
-        data["frame"] = frame
+        data["box_frame"] = frame
         data["blocker_boxes"] = boxes
         data["self"] = _th_uuid(root)
         with NoUndo():
@@ -25336,7 +25343,7 @@ def thatch_state(root):
     """What a roof is built from, as it is in the scene now: (its box's
     frame or the stored one, its blockers' world boxes)."""
     data = thatch_data(root)
-    frame = data.get("frame")
+    frame = data.get("box_frame")
     box = thatch_box(root)
     if box:
         try:
@@ -25354,7 +25361,7 @@ def thatch_box_moved(root):
     """True when the roof's box (or a blocker) has moved, changed size or
     gone since the last build."""
     data = thatch_data(root)
-    return not _th_same_state(thatch_state(root), (data.get("frame"), data.get("blocker_boxes") or []))
+    return not _th_same_state(thatch_state(root), (data.get("box_frame"), data.get("blocker_boxes") or []))
 
 
 def rebuild_stale_thatch():
@@ -25377,7 +25384,7 @@ def rebuild_stale_thatch():
             if root in live:
                 continue
             data = thatch_data(root)
-            frame = data.get("frame")
+            frame = data.get("box_frame")
             if frame:
                 s = thatch_settings_only(data)
                 _th_write(root, frame, s, thatch_build(frame, s, data.get("blocker_boxes")))
@@ -26841,7 +26848,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                 return
             data = thatch_data(root)
             state = thatch_state(root)
-            if _th_same_state(state, (data.get("frame"), data.get("blocker_boxes") or [])):
+            if _th_same_state(state, (data.get("box_frame"), data.get("blocker_boxes") or [])):
                 self._seen = None
             elif self._seen is not None and _th_same_state(state, self._seen):
                 self._seen = None
