@@ -89,6 +89,18 @@ def uv_stats(fn):
     return list(us), list(vs), good / float(max(1, total))
 
 
+def in_one_tile(us, vs):
+    """UVs inside one UDIM tile column (a roof's parts each have their own), V in 0..1."""
+    lo = math.floor(min(us) + 1e-6)
+    return max(us) <= lo + 1.0 + 1e-6 and min(vs) >= -1e-6 and max(vs) <= 1.0 + 1e-6
+
+
+def tile_columns(tb, node):
+    """The UDIM tile columns a mesh's UVs span (a UV on a tile's edge counts for the tile it's inside)."""
+    us = uv_stats(mesh_fn(tb, node))[0]
+    return set(range(int(math.floor(min(us) + 1e-6)), int(math.ceil(max(us) - 1e-6))))
+
+
 def bbox(node):
     return cmds.exactWorldBoundingBox(node)
 
@@ -514,6 +526,20 @@ def run():
     check("gable fringe and reach: leaves hang down past the verge", hanging(g1) > 3 * max(10, hanging(g0)),
           "%d vs %d points" % (hanging(g1), hanging(g0)))
     check("a hipped end has no gable fringe", hanging(h1) < hanging(g1) * 0.05, "%d points" % hanging(h1))
+    # Gable edge Flush (a wall at that end): nothing past the verge, fringe and reach or not; leaves still reach it
+    fl = build(end_a="Gable", end_b="Gable", verge_a="Flush", end_fronds=1.5, end_reach=0.5, edge_hang=1.5,
+               top_layer=1.0)
+    fx = [p[0] for p in fl["straw"][0]]
+    at_edge = sum(1 for x in fx if x > edge - 0.03)
+    check("Gable edge Flush: the + end stops dead at the verge, the - end still hangs",
+          max(fx) <= edge + 1e-6 and min(fx) < -edge - 0.15 and at_edge > 500,
+          "x %.3f .. %.3f, %d points on the cut" % (min(fx), max(fx), at_edge))
+    ux = [p[0] for p in fl["underlay"][0]]
+    fr = fl["frame"][0] if fl["frame"] else [(0.0, 0.0, 0.0)]
+    check("Gable edge Flush: the underlay and frame stop there too", max(ux) <= edge + 1e-6 and
+          max(p[0] for p in fr) <= edge + 0.02, "underlay %.3f, frame %.3f" % (max(ux), max(p[0] for p in fr)))
+    hf, hh = build(end_a="Hip", verge_a="Flush"), build(end_a="Hip")
+    check("Gable edge only matters on a gable", hf["straw"][0] == hh["straw"][0])
     # two layers at the edges: the limp under layer hangs, the stiff top layer holds its line
     limp, stiff = build(top_layer=0.0, edge_hang=1.5), build(top_layer=0.0, edge_hang=0.0)
     out_limp, out_stiff = max(abs(p[2]) for p in limp["straw"][0]), max(abs(p[2]) for p in stiff["straw"][0])
@@ -552,8 +578,8 @@ def run():
     tb["update_thatch_roofs"]({root: {"underlay": True, "underlay_relief": 2.0, "resolution": 120}})
     under = mesh_fn(tb, tb["thatch_parts"](root)["underlay"])
     us, vs, good = uv_stats(under)
-    check("relief underlay: closed, facing out, UVs in 0..1 the right way round",
-          boundary_edges(under) == 0 and signed_volume(under) > 0.0 and min(us) >= 0.0 and max(us) <= 1.0 and
+    check("relief underlay: closed, facing out, UVs in a tile of its own the right way round",
+          boundary_edges(under) == 0 and signed_volume(under) > 0.0 and in_one_tile(us, vs) and
           good > 0.995, "%.2f%% upright" % (good * 100))
     o = build(shape="Cone")
     check("a palm cone (no gables, no hips) builds", o["pieces"] > 50 and o["straw"] and o["underlay"])
@@ -582,8 +608,8 @@ def run():
             us, vs, good = uv_stats(fn)
             sizes = face_sizes(fn)
             label = "%s frame%s" % (style, " (Sub-D)" if subd else "")
-            check("%s: UVs packed in 0..1, every face the right way round (%.2fs)" % (label, dt),
-                  min(us) >= 0.0 and max(us) <= 1.0 and min(vs) >= 0.0 and max(vs) <= 1.0 and good > 0.999,
+            check("%s: UVs packed in a tile of its own, every face the right way round (%.2fs)" % (label, dt),
+                  in_one_tile(us, vs) and good > 0.999,
                   "%.2f%% upright, %d faces" % (good * 100, fn.numPolygons))
             if subd:
                 check("%s: all quads, every member closed" % label, sizes == {4} and boundary_edges(fn) == 0,
@@ -660,16 +686,33 @@ def run():
     tb["update_thatch_roofs"]({root: {"levels": 1, "lip": 0.0, "battens": "Every 2nd", "frond_form": "3D Leaflets",
                                       "end_fronds": 0.0}})
     fn = mesh_fn(tb, parts["straw"])
-    check("3D Leaflets with a thickness: every leaflet a closed solid facing out (and every stick capped)",
+    check("3D Leaflets with a thickness: every leaflet a closed solid facing out",
           boundary_edges(fn) == 0 and signed_volume(fn) > 0.0, "%d open edges" % boundary_edges(fn))
+    # the sticks and rachis are wood: a mesh of their own (woodStick), not on the leaves' mesh
+    sk = parts.get("sticks")
+    sfn = mesh_fn(tb, sk) if sk else None
+    s_us, s_vs, _ = uv_stats(sfn) if sfn else ([0.0], [0.0], 0)
+    l_us = uv_stats(fn)[0]
+    check("sticks and rachis: their own mesh (woodStick, stacked UVs u 0..1), every one capped, none on the leaves",
+          sk and "woodStick" in tb["short_name"](sk) and cmds.getAttr(sk + ".visibility") and
+          boundary_edges(sfn) == 0 and sfn.numPolygons > 500 and max(s_us) - math.floor(min(s_us) + 1e-6) <= tb["thatch_data"](root)["stacks"] + 1e-6 and
+          cmds.getAttr(tb["_log_shape"](sk) + "." + tb["UV_STACKED_ATTR"]) and
+          not any(0.875 < (u - math.floor(u)) < 1.0 for u in l_us),
+          "%s, %d faces, u %.2f..%.2f" % (sk, sfn.numPolygons if sfn else 0, min(s_us), max(s_us)))
+    shown = [p for p in ("straw", "sticks", "underlay", "frame") if p in parts and
+             cmds.getAttr(parts[p] + ".visibility")]
+    cols = dict((p, tile_columns(tb, parts[p])) for p in shown)
+    clash = [(a, b_) for i, a in enumerate(shown) for b_ in shown[i + 1:] if cols[a] & cols[b_]]
+    check("each of the roof's meshes in UDIM tiles of its own (no UVs overlap across them)",
+          len(shown) >= 3 and not clash, "%s, clashes %s" % (dict((p, sorted(c)) for p, c in cols.items()), clash))
     tb["update_thatch_roofs"]({root: {"leaf_thickness": 0.0}})
     check("thickness 0: single-sided leaflets again", boundary_edges(mesh_fn(tb, parts["straw"])) > 0)
     tb["update_thatch_roofs"]({root: {"frond_form": "Leaflets", "leaf_thickness": 0.0006}})
-    with_frame = mesh_fn(tb, parts["straw"]).numPolygons
+    with_frame = mesh_fn(tb, parts["sticks"]).numPolygons
     tb["update_thatch_roofs"]({root: {"frame": False}})
-    check("ridge / hip poles sit in the frame's mesh (in the straw without a frame)",
-          mesh_fn(tb, parts["straw"]).numPolygons > with_frame,
-          "%d -> %d straw faces" % (with_frame, mesh_fn(tb, parts["straw"]).numPolygons))
+    check("ridge / hip poles sit in the frame's mesh (with the sticks without a frame)",
+          mesh_fn(tb, parts["sticks"]).numPolygons > with_frame,
+          "%d -> %d stick faces" % (with_frame, mesh_fn(tb, parts["sticks"]).numPolygons))
     tb["update_thatch_roofs"]({root: {"frame": True}})
     # upgrade an old roof in place
     cmds.undoInfo(state=True, infinity=True)

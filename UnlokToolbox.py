@@ -20157,10 +20157,12 @@ THATCH_BLOCKER_ATTR = "unlokThatchBlocker"  # bool on a blocker box the tool mad
 THATCH_MATERIAL = "strawThatch"      # material tokens in the mesh names (UnlokRenamer convention)
 THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_FRAME_MATERIAL = "woodFrame"
-THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"))
-THATCH_VERSION = 4  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
+THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"),
+                         ("sticks", "woodStick"))  # sticks: palm fronds' laths, rachis (and poles without a frame)
+THATCH_VERSION = 5  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
+THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it, or cut flush (against a wall)
 THATCH_AXES = ("Auto", "X", "Z")
 THATCH_STYLES = ("Surface", "Planes", "3D Pieces", "Leaf Panels", "Palm Fronds")
 THATCH_FROND_FORMS = ("Cards", "Leaflets", "3D Leaflets")
@@ -20199,7 +20201,8 @@ METAL_DEFAULTS = {
     "m_sag": 0.0, "m_uv_mode": "Variations", "m_uv_tile": 4.0,
 }
 THATCH_DEFAULTS = {
-    "covering": "Thatch", "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "half_hip": 0.55,
+    "covering": "Thatch", "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "verge_a": "Hanging",
+    "verge_b": "Hanging", "hip_pitch": 1.0, "half_hip": 0.55,
     "overhang": 0.0, "thickness": 0.07, "softness": 0.5, "sag": 0.15, "lumps": 0.3,
     "warp": 0.0, "ridge_sag": 0.0, "ragged": 0.0, "gaps": 0.0,
     "levels": 3, "lip": 0.35, "top": 0.16, "cap": 0.6, "pattern": "Scallops", "pattern_size": 0.07,
@@ -20301,7 +20304,7 @@ THATCH_PRESETS = {
 THATCH_PRESET_VAR = "unlokThatchPresets"  # optionVar (Maya's own prefs): the user's presets as JSON
 THATCH_PRESET_SKIP = ("seed", "ridge", "detail")  # each roof's own: a saved preset leaves them out
 # Linked roofs share every setting but these (each keeps its own shape, ends, overhang and seed).
-THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "hip_pitch", "half_hip", "overhang", "seed")
+THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "verge_a", "verge_b", "hip_pitch", "half_hip", "overhang", "seed")
 THATCH_LINKED_KEYS = tuple(k for k in THATCH_KEYS if k not in THATCH_OWN_KEYS)
 THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
 THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
@@ -20410,6 +20413,9 @@ class ThatchField(object):
         self.ridge_sag = 0.0 if self.cone else max(0.0, float(s["ridge_sag"])) * 0.06 * span
         self.ragged = max(0.0, float(s["ragged"]))
         self.gaps = clamp(float(s["gaps"]), 0.0, 1.0)
+        # gable ends cut flush (against a wall): nothing carried, hung or fringed past the verge
+        self.flush = [not self.cone and s[k] == "Gable" and s.get(v) == "Flush"
+                      for k, v in (("end_a", "verge_a"), ("end_b", "verge_b"))]
         self.seed = int(s["seed"])
         self.t_low = -o * self.ms / H  # height fraction at the eave edge
         top = clamp(float(s["top"]), 0.0, 0.8)
@@ -20769,7 +20775,8 @@ def _th_shell_mesh(F, G, strands=True, inset=0.0, relief=None):
     # than the thatch is thick; straight down cut the eaves into a tall upright band.
     gables = [] if cone else [(sign, edge) for e, (sign, edge) in enumerate(((1.0, F.x1), (-1.0, -F.x0)))
                               if F.ends[e] is None]
-    taper = relief.get("taper", 0.0) if relief else 0.0
+    flushed = [F.flush[e] for e in range(2) if not cone and F.ends[e] is None]  # per gable: cut flush, no fringe
+    taper =relief.get("taper", 0.0) if relief else 0.0
     inner = []
     for k, (q, n) in enumerate(zip(P, N)):
         d = _rl_norm((n[0], n[1] + 1.0, n[2]))
@@ -20795,8 +20802,10 @@ def _th_shell_mesh(F, G, strands=True, inset=0.0, relief=None):
                 q = PS[k] / w2
                 tip = (1.0 - abs(2.0 * (q - math.floor(q)) - 1.0)) * (0.6 + 0.4 * _th_noise(q, 3.3, F.seed + 45, wrap))
                 move = _rl_mul(down, reach * 0.8 * min(1.0, e) * tip)
-            for sign, edge in gables:  # gable verges: tips stick out past the end
-                ev = 1.0 - (edge - sign * G["X"][k]) / reach
+            for e, (sign, edge) in enumerate(gables):  # gable verges: tips stick out past the end (not flush)
+                if flushed[e]:
+                    continue
+                ev =1.0 - (edge - sign * G["X"][k]) / reach
                 if ev > 0.0:
                     q = D[k] / w2
                     tip = (1.0 - abs(2.0 * (q - math.floor(q)) - 1.0)) * (0.6 + 0.4 * _th_noise(q, 7.9, F.seed + 46))
@@ -21514,7 +21523,8 @@ def _th_fronds_mesh(F, G, s):
     caps stay leaflets), Leaflets (flat tapered strips) and 3D Leaflets
     (creased down the midrib, rounder sticks). Leaflets share one UV layout
     (a stack): the leaflet in true proportions in the left 85% of 0..1, the
-    sticks, rachis and poles in the strip on the right; cards fill 0..1.
+    edge walls of 3D leaflets in a sliver at 0.86; cards fill 0..1. Sticks,
+    rachis and poles go to F.stick_mesh (the "sticks" part, woodStick).
     Each leaflet walks the roof on its own (round hips too). Random values
     are keyed to course, tile and leaflet, never to segment counts, so
     raising Detail keeps the layout. Returns (mesh, tiles + fronds, capped)."""
@@ -21550,8 +21560,10 @@ def _th_fronds_mesh(F, G, s):
     rs = 0.1 * lw  # stick radius: leaves rest on it
     rp = max(2.0 * rs, 0.006 * span)  # ridge / hip pole radius
     gap = lw * (1.0 - overlap)  # spacing of the under layer's leaflets
-    gables = [] if F.cone else [(sign, edge) for e, (sign, edge) in enumerate(((1.0, F.x1), (-1.0, -F.x0)))
-                                if F.ends[e] is None]
+    verges = [] if F.cone else [(sign, edge, F.flush[e]) for e, (sign, edge) in
+                                enumerate(((1.0, F.x1), (-1.0, -F.x0))) if F.ends[e] is None]
+    gables = [(sign, edge) for sign, edge, flush in verges if not flush]  # hanging: leaves carried past, hung
+    flushes = [(sign, edge) for sign, edge, flush in verges if flush]  # flush: cut at the verge (thatch_build)
     three = form == "3D Leaflets"
     dried = clamp(float(s.get("dried", 0.0)), 0.0, 2.0) if form != "Cards" else 0.0
     thick = max(0.0, float(s["leaf_thickness"])) * span if three else 0.0  # 3D leaflets: a real thickness
@@ -21701,6 +21713,9 @@ def _th_fronds_mesh(F, G, s):
     def past_verge(x):
         return max([sign * x - edge for sign, edge in gables] or [0.0])
 
+    def past_flush(x):
+        return max([sign * x - edge for sign, edge in flushes] or [-1e9])
+
     def leaf_line(base, L, yaw, layer, curl, limp, heading=None, drop=True):
         """A leaf's centreline walking the roof from base ((x, z), ox, oz: on
         a course, or carried past its end) for length L, turned by yaw (pi:
@@ -21718,6 +21733,8 @@ def _th_fronds_mesh(F, G, s):
             if _th_blocked(F, a, far, 10):
                 return None
         ex0 = past_verge(x + ox) if (ox or oz) else 0.0
+        if flushes and past_flush(x + ox) > 0.25 * lw:  # starts past a flush verge: it would only be cut off
+            return None
         Q, Nn = [], []
         for k, (p, n) in enumerate(_th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall_under if limp else fall_top,
                                             heading)):
@@ -21793,7 +21810,7 @@ def _th_fronds_mesh(F, G, s):
             Q, Nn = along(point_at, start - 0.02 * width, start + 1.02 * width, rs,
                           max(3, int(math.ceil(width / (0.15 * ll)))) + 1)
             if Q:
-                keep = [i for i, q in enumerate(Q) if past_verge(q[0]) < 0.02 * ll]
+                keep = [i for i, q in enumerate(Q) if past_verge(q[0]) < 0.02 * ll and past_flush(q[0]) < -rs]
                 tube([Q[i] for i in keep], [Nn[i] for i in keep], [rs] * len(keep), stack)
         if form == "Cards":
             return card(point_at, start, width, yaw, layer, L0, key, stack, flip, True)
@@ -21867,6 +21884,10 @@ def _th_fronds_mesh(F, G, s):
                     Q = None
                 else:
                     Q, Nn, n_pts = [Q[k] for k in keep], [Nn[k] for k in keep], len(keep)
+            if Q and flushes:  # cut short of a flush verge
+                keep = [k for k, q in enumerate(Q) if past_flush(q[0]) < -0.3 * tlw]
+                Q, Nn = ([Q[k] for k in keep], [Nn[k] for k in keep]) if len(keep) > 1 else (None, None)
+                n_pts = len(keep)
             if Q:
                 ex = [past_verge(q[0]) for q in Q]
                 Q = [verge(q, n, 0.0, e, False)[0] for q, n, e in zip(Q, Nn, ex)]
@@ -21989,8 +22010,8 @@ def _th_fronds_mesh(F, G, s):
                        0.0, 0.0), (0.0, 0.0)) for i in range(n)]
             crest(pts_c, lambda b: [_th_unit2(b[0][0] / F.L ** 2, b[0][1] / F.W ** 2)], 0.9 * ll, 8800)
         else:
-            lo = -F.ends[1][3] if F.ends[1] else F.x0 - (0.05 + 0.15 * hang) * tile
-            hi = F.ends[0][3] if F.ends[0] else F.x1 + (0.05 + 0.15 * hang) * tile
+            lo = -F.ends[1][3] if F.ends[1] else F.x0 - (0.0 if F.flush[1] else (0.05 + 0.15 * hang) * tile)
+            hi = F.ends[0][3] if F.ends[0] else F.x1 + (0.0 if F.flush[0] else (0.05 + 0.15 * hang) * tile)
             n = max(2, int(math.ceil((hi - lo) / gap)))
             xs = [lo + (hi - lo) * (i + 0.5) / n for i in range(n)]
 
@@ -22073,19 +22094,15 @@ def _th_fronds_mesh(F, G, s):
                 emit(Q, Nn, [p * 0.5 * lw * (1.0 - 0.12 * r[4]) for p in prof_tile],
                      [(r[5] - 0.5) * 0.8 * v ** 1.2 for v in k_seg], uk_tile, min(stacks - 1, int(r[6] * stacks)),
                      mirror and r[7] < 0.5, 0.25 if three else 0.0)
-    # sticks and rachis (and the poles, without a frame mesh to go to) into the straw, on the strip
+    # sticks and rachis (and the poles, without a frame mesh to go to): wood, not leaf, so a mesh of their own
+    # (F.stick_mesh, the roof's "sticks" part) with stacked UVs like the leaves': skins round u 0..0.8, caps at 0.9
     F.frame_extra = poles if s["frame"] else []
+    F.stick_mesh = None
     members = sticks_out + ([] if s["frame"] else poles)
     if members and not state["capped"]:
-        geo = _th_frame_mesh(F, members, s, uv_strip=u_of)
-        if geo and len(pts) + len(geo[0]) <= THATCH_MAX_VERTS:
-            vb, ub = len(pts), len(us)
-            pts.extend(geo[0])
-            counts.extend(geo[1])
-            conn.extend(x_ + vb for x_ in geo[2])
-            us.extend(geo[3])
-            vs.extend(geo[4])
-            uvi.extend(x_ + ub for x_ in geo[5])
+        geo = _th_frame_mesh(F, members, s, uv_strip=u_of, strip=(0.0, 0.8, 0.9, 0.08))
+        if geo and len(geo[0]) <= THATCH_MAX_VERTS:
+            F.stick_mesh = geo
         elif geo:
             state["capped"] = True
     return (pts, counts, conn, us, vs, uvi), state["pieces"], state["capped"]
@@ -22371,7 +22388,7 @@ def _th_frame_members(F, G, s, depth):
     return members
 
 
-def _th_frame_mesh(F, members, s, uv_strip=None):
+def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
     """Members as natural timber (pure maths, roof space), light and with
     clean UVs: Bamboo (round, a node ring every ~35 cm), Poles (tapered,
     slightly out of round) or Sawn (rectangular). Crookedness bends each
@@ -22390,8 +22407,9 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
     packed into 0..1 with one scale. Members are cut where they go into a
     blocker (the longest run outside kept). A member may name its own
     "style" and "wob" (crookedness scale). uv_strip (u_of(u, stack), the
-    fronds' sticks): UVs go in the stacked leaf texture's right-hand strip
-    instead (u 0.88..1 round it, v 0..1 along; caps on the strip too)."""
+    fronds' sticks): stacked UVs instead, every member on the same spot:
+    strip (skin u0, u1, cap u, cap radius) says where (u0..u1 round it, v
+    0..1 along; caps centred on cap u, v 0.5)."""
     frame_style = s["frame_style"] if s["frame_style"] in THATCH_FRAME_STYLES else "Bamboo"
     subd = bool(s["frame_subd"])
     wob0 = clamp(float(s["frame_wobble"]), 0.0, 2.0)
@@ -22443,6 +22461,8 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
                 q = _rl_add(b, _rl_mul(_rl_norm(_rl_sub(b, a)), run))
                 if F.blockers and _th_push(F, q, clear)[1] is not None:
                     continue  # not into a blocker
+                if (F.flush[0] and q[0] > F.x1) or (F.flush[1] and q[0] < F.x0):
+                    continue  # nor past a flush gable (a wall there)
                 path, nrms = ([q] + path, [nrms[0]] + nrms) if end == 0 else (path + [q], nrms + [nrms[-1]])
         acc = [0.0]
         for a, b in zip(path, path[1:]):
@@ -22522,7 +22542,8 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
             sv = length if (closed and row == nr) else rings[row][5]
             for j in range(k + 1):
                 if uv_strip:
-                    us.append(uv_strip(0.88 + 0.12 * (perim[-1] - perim[j]) / perim[-1], m.get("stack", 0)))
+                    us.append(uv_strip(strip[0] + (strip[1] - strip[0]) * (perim[-1] - perim[j]) / perim[-1],
+                                       m.get("stack", 0)))
                     vs.append(sv / length)
                 else:
                     us.append((perim[-1] - perim[j]) * rad0)
@@ -22553,8 +22574,10 @@ def _th_frame_mesh(F, members, s, uv_strip=None):
             else:
                 ring_ids = [vid(row, j) for j in order]
             cap_uv0 = len(us)
-            cu = (lambda x, y: (uv_strip(0.94 + 0.05 * x, m.get("stack", 0)), 0.5 + 0.05 * y)) if uv_strip else \
-                (lambda x, y: (x * rad, y * rad))
+            if uv_strip:
+                cu = (lambda x, y: (uv_strip(strip[2] + strip[3] * x, m.get("stack", 0)), 0.5 + strip[3] * y))
+            else:
+                cu = (lambda x, y: (x * rad, y * rad))
             for j in order:
                 q = cu(mirror * prof[j][0] / max(1e-9, max(abs(v) for pr in prof for v in pr)), prof[j][1] /
                        max(1e-9, max(abs(v) for pr in prof for v in pr))) if uv_strip else cu(mirror * prof[j][0],
@@ -24078,7 +24101,7 @@ def metal_build(frame, s, blockers=None):
     sag = clamp(float(s["m_sag"]), 0.0, 2.0)
     fs.update({"softness": 0.0, "sag": 0.0, "lumps": 0.0, "warp": 0.35 * sag, "ridge_sag": 0.6 * sag,
                "ragged": 0.0, "gaps": 0.0, "levels": 1, "lip": 0.0, "top": 0.0, "thickness": 0.002,
-               "strands": 0.0, "pattern": "Straight"})
+               "strands": 0.0, "pattern": "Straight", "verge_a": "Hanging", "verge_b": "Hanging"})
     F = ThatchField(frame["L"], frame["W"], frame["H"], fs)
     F.blockers = _th_blockers_in_roof(frame, blockers)
     sz = _mt_sizes(s, F, mpu, level)
@@ -24209,7 +24232,7 @@ def thatch_build(frame, settings, blockers=None):
     s = dict(THATCH_DEFAULTS)
     s.update(settings or {})
     if s["covering"] == "Corrugated":
-        return metal_build(frame, s, blockers)
+        return _roof_udims(metal_build(frame, s, blockers))
     s, level, under_res = _th_detail(s)
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
     F.blockers = _th_blockers_in_roof(frame, blockers)
@@ -24238,17 +24261,59 @@ def thatch_build(frame, settings, blockers=None):
             if relief and s["style"] != "Palm Fronds":  # sink it by its relief: its courses poked through planes
                 inset += max(0.0, relief["step"] * (1.3 + relief.get("bias", 0.0)))
             GU = G if under_res == int(s["resolution"]) else _th_grid(F, under_res)
-            out["underlay"] = _th_to_world(frame, _th_shell_mesh(F, GU, strands=False, inset=inset, relief=relief))
+            out["underlay"] = _th_to_world(frame, _th_flush_cut(F, _th_shell_mesh(F, GU, strands=False, inset=inset,
+                                                                                  relief=relief)))
     else:
         straw = _th_shell_mesh(F, G, strands=True)
-    out["straw"] = _th_to_world(frame, straw) if straw else None
+    out["straw"] = _th_to_world(frame, _th_flush_cut(F, straw)) if straw else None
+    sticks = getattr(F, "stick_mesh", None)
+    out["sticks"] = _th_to_world(frame, _th_flush_cut(F, sticks)) if sticks else None
     out["frame"] = None
     if s["frame"] and level > 0:  # the roof's timber, under the thatch (and under an underlay or a shell)
         shelled = s["style"] == "Surface" or (s["underlay"] and s["style"] != "Surface")
         depth = 1.02 * F.T if shelled else 0.02 * F.T * (s["style"] != "Palm Fronds")
         fm = _th_frame_mesh(F, _th_frame_members(F, G, s, depth) + getattr(F, "frame_extra", []), s)
-        out["frame"] = _th_to_world(frame, fm) if fm else None
+        out["frame"] = _th_to_world(frame, _th_flush_cut(F, fm)) if fm else None
+    return _roof_udims(out)
+
+
+ROOF_UDIM_ORDER = ("straw", "sheets", "sticks", "underlay", "trim", "fixings", "frame")
+
+
+def _roof_udims(out):
+    """No two of a roof's meshes share UV space: each part, in
+    ROOF_UDIM_ORDER, moves along U to start in the tile column after the
+    last one the parts before it use (a part's own stacked variations still
+    share their tiles). out["udims"]: {part: (first, last) tile column}."""
+    at, cols = 0, {}
+    for part in ROOF_UDIM_ORDER:
+        mesh = out.get(part)
+        if not mesh or not mesh[1]:
+            continue
+        us = mesh[3]
+        lo = int(math.floor(min(us) + 1e-6))
+        width = max(1, int(math.ceil(max(us) - 1e-6)) - lo)
+        if at != lo:
+            out[part] = tuple(mesh[:3]) + ([u + (at - lo) for u in us],) + tuple(mesh[4:])
+        cols[part] = (at, at + width - 1)
+        at += width
+    out["udims"] = cols
     return out
+
+
+def _th_flush_cut(F, mesh):
+    """A flush gable end (Gable edge Flush): every point past its verge is
+    moved back onto the verge's plane (roof space), so the thatch stops in
+    a clean, upright cut, tight against a wall. What would only be cut off
+    is left out before this (nothing carried past, no fringe)."""
+    lo = F.x0 if F.flush[1] else None
+    hi = F.x1 if F.flush[0] else None
+    if lo is None and hi is None:
+        return mesh
+    lo = -1e30 if lo is None else lo
+    hi = 1e30 if hi is None else hi
+    pts = [p if lo <= p[0] <= hi else (min(max(p[0], lo), hi), p[1], p[2]) for p in mesh[0]]
+    return (pts,) + tuple(mesh[1:])
 
 
 def _th_to_world(frame, mesh):
@@ -25264,7 +25329,9 @@ def _th_write(root, frame, s, built):
     parts = thatch_parts(root)
     if "frame" in parts:
         _th_suffix(parts["frame"], bool(s["frame_subd"]))
-    for part, node in thatch_parts(root).items():
+    if built.get("sticks") and "sticks" not in parts and built.get("straw"):  # a roof from before the sticks
+        built = dict(built, straw=_th_join(built["straw"], built["sticks"]))  # part (Upgrade adds it)
+    for part, node in thatch_parts(root).items():  # again: the frame may have been renamed
         shape = _log_shape(node)
         mesh = built.get(part)
         used = bool(mesh and mesh[1])
@@ -25274,13 +25341,20 @@ def _th_write(root, frame, s, built):
             cmds.setAttr(node + ".visibility", used)
         if part in ROOF_STACKED_PARTS and cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True):
             cmds.setAttr(shape + "." + UV_STACKED_ATTR, s["style"] != "Surface" if part == "straw" else
-                         (part == "fixings" or s["m_uv_mode"] != "All laid out"))
+                         (part in ("fixings", "sticks") or s["m_uv_mode"] != "All laid out"))
         if used:
             faces += len(mesh[1])
     return faces
 
 
-ROOF_STACKED_PARTS = ("straw", "sheets", "fixings")  # parts whose UVs can be stacked (UV_STACKED_ATTR)
+def _th_join(a, b):
+    """Two meshes (points, counts, connects, us, vs, uv ids) as one."""
+    vb, ub = len(a[0]), len(a[3])
+    return (list(a[0]) + list(b[0]), list(a[1]) + list(b[1]), list(a[2]) + [i + vb for i in b[2]],
+            list(a[3]) + list(b[3]), list(a[4]) + list(b[4]), list(a[5]) + [i + ub for i in b[5]])
+
+
+ROOF_STACKED_PARTS = ("straw", "sheets", "fixings", "sticks")  # parts whose UVs can be stacked (UV_STACKED_ATTR)
 
 
 def roof_parts(covering):
@@ -26033,6 +26107,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "The end of the ridge on the box's + side. Gable: a flat, upright end. Hip: it slopes in too. "
             "Half-hip: upright below, hipped near the top.")
         row(grid, "end_b", "- end", SegmentField(THATCH_ENDS), "The end of the ridge on the box's - side.")
+        group[0] = "thatch"
+        verge_tip = ("Hanging: the thatch runs on past the gable and hangs down off it (palm leaves droop, the "
+                     "Gable fringe hangs). Flush: it stops in a clean cut at the box's end (plus Overhang), "
+                     "nothing past it: for a gable against a wall.")
+        row(grid, "verge_a", "+ gable edge", SegmentField(THATCH_VERGES), verge_tip)
+        row(grid, "verge_b", "- gable edge", SegmentField(THATCH_VERGES), verge_tip)
+        group[0] = "both"
         row(grid, "hip_pitch", "Hip pitch", FloatField(0.25, 4.0, 0.5, 2.5, decimals=2, step=0.05),
             "How steep the hipped ends are next to the sides (1 = the same, 2 = twice as steep: a longer ridge).")
         row(grid, "half_hip", "Half-hip at", FloatField(0.05, 0.95, 0.05, 0.95, decimals=2, step=0.05),
@@ -26182,7 +26263,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "frond_form", "Form", SegmentField(THATCH_FROND_FORMS),
             "Cards: one card per tile / frond, for an alpha-mapped texture (lightest; caps stay leaflets).\n"
             "Leaflets: every leaflet a flat tapered strip (UVs in true proportion in the left 85% of 0..1; "
-            "sticks, rachis and poles in the strip on the right).\n3D Leaflets: leaflets creased down the "
+            "the sticks, rachis and poles are a mesh of their own).\n3D Leaflets: leaflets creased down the "
             "midrib, rounder sticks (close-ups).")
         row(sec, "leaf_length", "Leaf length", FloatField(0.02, 0.6, 0.05, 0.3, decimals=3, step=0.005),
             "Length of a leaflet down the slope (fraction of the span: 0.16 = 80 cm on 5 m).")
@@ -26284,8 +26365,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sec.add_full(self.f["ridge_fronds"])
         self.f["sticks"] = CheckField("Sticks, rachis and ridge poles")
         self.f["sticks"].setToolTip("The stick each tile's leaves are folded over (seen from inside), the top "
-                                    "fronds' rachis and a pole along the ridge and hips. UVs in the strip on the "
-                                    "right of the stack.")
+                                    "fronds' rachis and a pole along the ridge and hips. A mesh of their own "
+                                    "(woodStick, poles go to the frame's when Frame is on), with stacked UVs: "
+                                    "the skin round 0..0.8, the cut ends at 0.9.")
         sec.add_full(self.f["sticks"])
         card.add(sec)
         sec = self.under_sec = Section("Underlay", expanded=False)
@@ -26456,10 +26538,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         palm = s["style"] == "Palm Fronds"
         surface = s["style"] == "Surface"
         shown = {"ridge": not cone, "end_a": not cone, "end_b": not cone,
+                 "verge_a": not cone and ends[0] == "Gable", "verge_b": not cone and ends[1] == "Gable",
                  "hip_pitch": not cone and ends != ("Gable", "Gable"), "half_hip": not cone and "Half-hip" in ends,
                  "sides": three, "flatness": three, "piece_width": three or s["style"] == "Planes",
                  "piece_length": three or s["style"] == "Planes", "panel_width": leaf, "panel_length": leaf,
-                 "underlay_relief": s["underlay"] or s["detail"] == "Proxy", "end_fronds": palm and not cone,
+                 "underlay_relief": s["underlay"] or s["detail"] == "Proxy",
+                 "end_fronds": palm and not cone and any(e == "Gable" and s[v] != "Flush" for e, v in
+                                                         zip(ends, ("verge_a", "verge_b"))),
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         for key in ("frond_form", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "top_leaf_width", "slant", "droop", "end_reach", "dried", "dried_var"):

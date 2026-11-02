@@ -209,6 +209,8 @@ def main():
     cmds.sets(house, e=True, forceElement=shader("testWall", (0.5, 0.5, 0.52)))
     if "frame" in parts:
         cmds.sets(parts["frame"], e=True, forceElement=shader("testWood", (0.42, 0.27, 0.15)))
+    if "sticks" in parts:
+        cmds.sets(parts["sticks"], e=True, forceElement=shader("testStick", (0.25, 0.32, 0.12)))
     cmds.select(clear=True)
     straw = parts["straw"]
     palm_shots = {
@@ -233,6 +235,29 @@ def main():
         for vname, direction, dist, target in views:
             frame_on(straw if target == "straw" else target, direction=direction, dist=dist)
             snap("17_palm%d_%s_%s.png" % (i + 1, name.split(": ")[1].split(" ")[0].lower(), vname))
+    # --- Gable edge: Hanging (leaves hang off the gable) or Flush (cut at the box's end, for a wall there)
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Palm: nipa shingles (neat)"))
+    panel.load_preset()
+    pump()
+    edit(end_b="Hip")
+    check("Gable edge shows for a gable end only", not panel._rows["verge_a"][1].isHidden() and
+          panel._rows["verge_b"][1].isHidden())
+    bb_box = cmds.exactWorldBoundingBox(ns["thatch_box"](root))
+    bb_hang = cmds.exactWorldBoundingBox(straw)
+    frame_on([root, house], direction=(1.0, 0.1, 0.5), dist=0.9)
+    snap("17b_gable_hanging.png")
+    edit(verge_a="Flush")
+    bb_flush = cmds.exactWorldBoundingBox(straw)
+    cut = [k for k in range(6) if abs(bb_flush[k] - bb_box[k]) < 0.01 and abs(bb_hang[k] - bb_box[k]) > 0.05]
+    check("Gable edge Flush: the leaves stop at the box's end (no curtain), the sticks are their own mesh",
+          cut and ns["thatch_data"](root)["verge_a"] == "Flush" and panel._rows["end_fronds"][1].isHidden() and
+          cmds.getAttr(parts["sticks"] + ".visibility"),
+          "box %s, hanging %s, flush %s" % ([round(v, 2) for v in bb_box], [round(v, 2) for v in bb_hang],
+                                            [round(v, 2) for v in bb_flush]))
+    snap("17b_gable_flush.png")
+    frame_on(straw, direction=(1.0, 0.25, 0.3), dist=0.35)
+    snap("17b_gable_flush_close.png")
+    edit(verge_a="Hanging", end_b="Gable")
     check("palm rows show (fronds section), straw piece sizes hide", not panel._rows["frond_form"][1].isHidden() and
           panel._rows["piece_width"][1].isHidden() and not panel._rows["detail"][1].isHidden())
     scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]

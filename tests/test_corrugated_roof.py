@@ -293,7 +293,11 @@ def run():
           "%.3f, want %.3f" % (heights_uv[-1], want))
     tfn = mesh_fn(tb, parts["trim"])
     tus, tvs = tfn.getUVs()
-    check("trim UVs laid out in 0..1", min(tus) >= 0.0 and max(tus) <= 1.0 and min(tvs) >= 0.0 and max(tvs) <= 1.0)
+    lo = math.floor(min(tus) + 1e-6)
+    s_hi = max(mesh_fn(tb, parts["sheets"]).getUVs()[0])
+    check("trim UVs laid out in a tile of their own, after the sheets' tiles", max(tus) <= lo + 1.0 + 1e-6 and
+          min(tvs) >= 0.0 and max(tvs) <= 1.0 and lo >= math.ceil(s_hi - 1e-6), "trim from %d, sheets to %.2f" % (
+              lo, s_hi))
 
     # --- real sizes in decimetres: pitch, depth, the sheets' rise
     cmds.file(new=True, force=True)
@@ -339,7 +343,7 @@ def run():
     same = len(before) == len(after) and all((p - q).length() < 1e-6 for p, q in zip(before, after))
     check("an old thatch roof (no covering stored) rebuilds exactly as before and needs no upgrade",
           same and not tb["thatch_needs_upgrade"](root) and set(tb["thatch_parts"](root)) ==
-          {"straw", "underlay", "frame"}, "%d -> %d points" % (len(before), len(after)))
+          {"straw", "underlay", "frame", "sticks"}, "%d -> %d points" % (len(before), len(after)))
     rep = tb["roof_set_covering"]([root], "Corrugated")
     parts = tb["thatch_parts"](root)
     check("switching it to corrugated adds the metal meshes and hides the thatch",

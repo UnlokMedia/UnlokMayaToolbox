@@ -361,6 +361,28 @@
       `verge()` turns limp leaves down more the further out, and only sags
       stiff ones. Sticks are cut at the verge (they showed as a row of
       pegs).
+    - **Gable edge** (`verge_a` / `verge_b`, `THATCH_VERGES` Hanging /
+      Flush; own keys, shown only on a Gable end; the user, 2026-11-02:
+      gable leaves hung like curtains and clipped a brick wall). Flush
+      (`F.flush`) drops that end from `gables` (no carry past the line end,
+      no droop, no fringe, no shell fringe tips, no ridge-cap carry, no
+      frame run-on), drops leaves starting past it, trims sticks / rachis,
+      and `_th_flush_cut` moves every straw / sticks / underlay / frame
+      point past the verge back onto its plane (all thatch styles).
+      Overhang sets where the cut is. Metal ignores it.
+    - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
+      sticks, rachis and (without a frame) poles are the roof's `sticks`
+      part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from
+      `_th_frame_mesh(uv_strip=u_of, strip=(0, 0.8, 0.9, 0.08))`: stacked
+      UVs, skin round u 0..0.8, caps at 0.9. A roof from before it (no part
+      yet) gets them joined back into the straw (`_th_join`) until Upgrade.
+    - **One roof, no shared UV space** (the user, 2026-11-02: "this tool
+      shouldn't output under one roof any overlapping UVs, other than ...
+      stacked"): `_roof_udims` (end of `thatch_build`, metal too) moves
+      each part along U into the tile columns after the previous parts',
+      in `ROOF_UDIM_ORDER` (straw / sheets, sticks, underlay, trim,
+      fixings, frame); `out["udims"]` = {part: (first, last) column}. Only
+      a part's own stacked variations overlap.
     - **Caps** (`crest`): leaves from a crest point down each side with a
       fixed plan heading (`_th_walk(heading=)`: round a hip's apex the
       fall line swings along the ridge and cap leaves slid off down the
@@ -471,8 +493,8 @@
     step). Wall plates sit 2.5 plate radii in from the wall line, level at
     the lowest rafter they carry (centred on the wall line they sank into
     the house with no overhang). Fronds' `tube()` hands sticks / rachis /
-    poles to `_th_frame_mesh(..., uv_strip=u_of)` (strip UVs u 0.86..1,
-    caps on it), poles to `F.frame_extra` -> the frame mesh. 3D Leaflets:
+    poles to `_th_frame_mesh(..., uv_strip=u_of)` (now their own mesh,
+    see Sticks mesh), poles to `F.frame_extra` -> the frame mesh. 3D Leaflets:
     `leaf_thickness` makes each leaflet a closed solid in `emit` (underside
     mirrored on the same UVs, side / tip / base walls on u 0.86..0.87).
     **Upgrade** (`THATCH_VERSION`, `thatch_needs_upgrade`,
