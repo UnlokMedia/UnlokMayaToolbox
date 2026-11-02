@@ -430,6 +430,73 @@ def main():
     snap("27_roof_from_points.png")
     cmds.delete("pickBlockout", "pickBlockout2")
 
+    # --- your own presets, Duplicate Roof, linked roofs
+    var = ns["THATCH_PRESET_VAR"]
+    old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None
+    real_get = QtWidgets.QInputDialog.getText
+    try:
+        cmds.select(root2)
+        panel._sync_from_selection()
+        QtWidgets.QInputDialog.getText = staticmethod(lambda *a, **k: ("gui hut", True))
+        panel.save_preset()
+        combo = panel.preset_combo
+        check("Save... keeps the look as a preset, listed under the built-in ones",
+              combo.currentText() == "gui hut" and combo.findText("gui hut") > combo.findText("Roundhouse") and
+              "Saved" in panel.status.text(), panel.status.text())
+        panel.save_preset()
+        check("saving under the same name overwrites it", "Overwrote" in panel.status.text() and
+              [combo.itemText(i) for i in range(combo.count())].count("gui hut") == 1, panel.status.text())
+        before = set(ns["thatch_roofs"]())
+        panel.dup_link.setValue(True)
+        panel.duplicate_roof()
+        pump()
+        made = [r for r in ns["thatch_roofs"]() if r not in before]
+        dup = made[0] if made else None
+        dbox = ns["thatch_box"](dup) if dup else None
+        check("Duplicate Roof: a linked copy on a new box beside it, the box selected", len(made) == 1 and
+              ns["thatch_linked"](root2) == made and cmds.ls(selection=True, long=True) == [dbox] and
+              cmds.exactWorldBoundingBox(dup)[0] > cmds.exactWorldBoundingBox(root2)[3] and
+              "linked" in panel.status.text(), panel.status.text())
+        check("the panel shows the link", "Linked with" in panel.link_label.text() and
+              "linked to it" in panel.next_banner.text.text(), panel.link_label.text())
+        cmds.setAttr(dbox + ".scaleX", cmds.getAttr(dbox + ".scaleX") * 0.6)
+        cmds.setAttr(dbox + ".scaleY", cmds.getAttr(dbox + ".scaleY") * 1.4)
+        check("the copy follows its own box (resized)", wait_until(lambda: not ns["thatch_box_moved"](dup)) and
+              not ns["thatch_box_moved"](root2), panel.status.text())
+        edit(levels=3, end_a="Gable", lumps=1.2)
+        d1, d2 = ns["thatch_data"](root2), ns["thatch_data"](dup)
+        check("a change on the copy rebuilds the original's look too, not its ends",
+              d1["levels"] == d2["levels"] == 3 and d1["lumps"] == 1.2 and d2["end_a"] == "Gable" and
+              d1["end_a"] != "Gable" and "2 roof(s)" in panel.status.text(), panel.status.text())
+        cmds.select(clear=True)
+        frame_on([root2, dup], direction=(0.4, 0.6, 1.0), dist=1.2)
+        snap("28_duplicate_linked.png")
+        panel.select_linked()
+        check("Select Linked selects both", sorted(cmds.ls(selection=True, long=True)) == sorted([root2, dup]),
+              panel.status.text())
+        window.grab().save(os.path.join(OUT, "29_panel_linked.png"))
+        cmds.select(dup)
+        panel._sync_from_selection()
+        panel.unlink_roofs()
+        check("Unlink: the copy stands alone again", not ns["thatch_linked"](root2) and
+              panel.link_label.text() == "Not linked.", panel.link_label.text())
+        combo.setCurrentIndex(combo.findText("gui hut"))
+        panel.load_preset()
+        pump()
+        check("your preset loads onto the roof (and no longer onto the unlinked original)",
+              ns["thatch_data"](dup)["levels"] == ns["thatch_preset"]("gui hut")["levels"] != 3 and
+              ns["thatch_data"](root2)["levels"] == 3 and "'gui hut' on" in panel.status.text(), panel.status.text())
+        panel.delete_preset()
+        check("Delete removes your preset", combo.findText("gui hut") < 0 and "Deleted" in panel.status.text(),
+              panel.status.text())
+        cmds.delete(dup, dbox)
+    finally:
+        QtWidgets.QInputDialog.getText = real_get
+        if old is None:
+            cmds.optionVar(remove=var)
+        else:
+            cmds.optionVar(stringValue=(var, old))
+
     # --- bake
     cmds.select(root2)
     panel._sync_from_selection()

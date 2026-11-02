@@ -10,6 +10,7 @@ rebuilds the seed planes), save / reopen, live edits, following the box,
 bake, the Smart UDIM tag and speed.
 """
 
+import json
 import math
 import os
 import sys
@@ -924,6 +925,110 @@ def run():
     asset.set_uv_status([meshes[1]], "auto")
     asset.scan()
     check("marking stacked planes Auto sticks through the next Scan", meshes[1] not in asset.uv_status())
+
+    # --- your own presets (an optionVar: Maya's prefs, every scene)
+    var = tb["THATCH_PRESET_VAR"]
+    old = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None
+    try:
+        mine = dict(D, style="Planes", levels=2, density=0.4, seed=77, ridge="X", detail="Hero")
+        tb["thatch_save_preset"]("test hut", mine)
+        p = tb["thatch_preset"]("test hut")
+        check("a saved preset keeps the look, not the seed, ridge or detail", p["style"] == "Planes" and
+              p["levels"] == 2 and p["density"] == 0.4 and not [k for k in ("seed", "ridge", "detail") if k in p],
+              str(sorted(p))[:120])
+        tb["thatch_save_preset"]("test hut", dict(mine, levels=3))
+        check("saving under the same name overwrites it", tb["thatch_preset"]("test hut")["levels"] == 3)
+        data = tb["thatch_user_presets"]()
+        del data["test hut"]["dried"]
+        cmds.optionVar(stringValue=(var, json.dumps(data)))
+        check("a preset saved before a setting existed gets its default",
+              tb["thatch_preset"]("test hut")["dried"] == D["dried"])
+        check("built-in presets still load", tb["thatch_preset"]("Tiered")["levels"] == 4)
+        check("delete removes it", tb["thatch_delete_preset"]("test hut") and
+              tb["thatch_preset"]("test hut") is None and not tb["thatch_delete_preset"]("test hut"))
+    finally:
+        if old is None:
+            cmds.optionVar(remove=var)
+        else:
+            cmds.optionVar(stringValue=(var, old))
+
+    # --- Duplicate Roof, linked roofs, Ctrl+D copies
+    cmds.file(new=True, force=True)
+    data = tb["thatch_data"]
+    tbox = tb["create_thatch_box"]()
+    r1 = tb["make_thatch_roof"](tbox, {"resolution": 40, "levels": 2})["root"]
+    rep = tb["duplicate_thatch_roof"](r1, link=True)
+    r2, b2 = rep["root"], rep["box"]
+    check("Duplicate Roof: a new roof on a new box beside the original", r2 != r1 and b2 != tbox and
+          tb["thatch_box"](r2) == b2 and tb["thatch_box"](r1) == tbox and bbox(r2)[0] > bbox(r1)[3] and
+          not tb["thatch_box_moved"](r2), "%s %s" % (r2, b2))
+    diff = [(k, data(r1)[k], data(r2)[k]) for k in tb["THATCH_KEYS"]
+            if k != "frame" and data(r1)[k] != data(r2)[k]]  # "frame" holds the box's frame once built
+    check("the copy has the same settings and a new seed", [d[0] for d in diff] == ["seed"], str(diff))
+    check("the new box is selected, a tool box", cmds.ls(selection=True, long=True) == [b2] and
+          cmds.attributeQuery(tb["THATCH_BOX_ATTR"], node=b2, exists=True))
+    check("Duplicate with link: the two are linked", tb["thatch_linked"](r1) == [r2] and
+          tb["thatch_linked"](r2) == [r1])
+    cmds.undo()
+    check("one Ctrl+Z undoes Duplicate Roof (and the link)", not cmds.objExists(r2) and not cmds.objExists(b2) and
+          "link" not in data(r1) and cmds.objExists(tbox))
+    rep = tb["duplicate_thatch_roof"](r1, link=True)
+    r2, b2 = rep["root"], rep["box"]
+    cmds.setAttr(b2 + ".scaleX", cmds.getAttr(b2 + ".scaleX") * 0.6)
+    tb["update_thatch_roofs"]({r2: {}})
+    rep = tb["update_thatch_roofs"]({r1: {"levels": 3, "lumps": 0.9, "end_a": "Gable"}})
+    check("a shared setting changed on one linked roof rebuilds the other", sorted(rep["done"]) == sorted([r1, r2])
+          and data(r2)["levels"] == 3 and data(r2)["lumps"] == 0.9, str(rep["done"]))
+    check("each keeps its own ends and box size", data(r1)["end_a"] == "Gable" and data(r2)["end_a"] == "Hip" and
+          data(r2)["frame"]["L"] < 0.7 * data(r1)["frame"]["L"])
+    rep = tb["update_thatch_roofs"]({r1: {"seed": 5}})
+    check("the seed is each roof's own", rep["done"] == [r1] and data(r2)["seed"] != 5)
+    rep = tb["update_thatch_roofs"]({r1: {}})
+    check("a plain rebuild leaves linked roofs alone", rep["done"] == [r1])
+    b3 = tb["create_thatch_box"]()
+    cmds.move(0, 0, 80, b3, relative=True)
+    r3 = tb["make_thatch_roof"](b3, {"resolution": 40, "levels": 1, "lumps": 0.1})["root"]
+    rep = tb["link_thatch_roofs"]([r3, r1])
+    check("Link: the first roof's look goes to the rest, and their links join in",
+          sorted(rep["linked"]) == sorted([r1, r2, r3]) and data(r1)["levels"] == data(r2)["levels"] == 1 and
+          data(r2)["lumps"] == 0.1 and sorted(tb["thatch_linked"](r3)) == sorted([r1, r2]) and
+          data(r1)["end_a"] == "Gable", str(rep["done"]))
+    check("Unlink takes a roof out; the rest stay linked", tb["unlink_thatch_roofs"]([r2]) == [r2] and
+          tb["thatch_linked"](r2) == [] and tb["thatch_linked"](r1) == [r3])
+    tb["update_thatch_roofs"]({r1: {"levels": 2}})
+    check("an unlinked roof keeps its settings", data(r2)["levels"] == 1 and data(r3)["levels"] == 2)
+
+    # Ctrl+D on a roof group copies its box uuid: the copy gets its own box where it's moved to
+    cp = cmds.ls(cmds.duplicate(r2)[0], long=True)[0]
+    check("a Ctrl+D copy is found", tb["thatch_copies"]() == {cp: r2}, str(tb["thatch_copies"]()))
+    cmds.move(0, 0, -80, cp, relative=True)
+    cmds.rotate(0, 30, 0, cp, relative=True)
+    before = bbox(tb["thatch_parts"](cp)["straw"])
+    tb["update_thatch_roofs"]({cp: {}})
+    after = bbox(tb["thatch_parts"](cp)["straw"])
+    nb = tb["thatch_box"](cp)
+    check("rebuilding a Ctrl+D copy gives it its own box; it stays where it was moved",
+          nb and nb != b2 and tb["thatch_box"](r2) == b2 and not tb["thatch_copies"]() and
+          max(abs(a - b) for a, b in zip(before, after)) < 0.05 and not tb["thatch_box_moved"](cp),
+          "%s %s" % (str(before), str(after)))
+    cmds.undo()  # the box it was given (the rebuild itself isn't undoable)
+    check("one Ctrl+Z takes that box back", not cmds.objExists(nb) and tb["thatch_copies"]() == {cp: r2})
+    cmds.delete(cp)
+    nboxes = len(cmds.ls("*." + tb["THATCH_BOX_ATTR"], objectsOnly=True))
+    cps = cmds.duplicate([r3, b3], returnRootsOnly=True)
+    cp, cb = [cmds.ls(n, long=True)[0] for n in cps]
+    cmds.move(60, 0, 0, cp, cb, relative=True)
+    tb["update_thatch_roofs"]({cp: {}})
+    check("Ctrl+D on a roof and its box together: the copy takes the copied box",
+          tb["thatch_box"](cp) == cb and tb["thatch_box"](r3) == b3 and
+          len(cmds.ls("*." + tb["THATCH_BOX_ATTR"], objectsOnly=True)) == nboxes + 1)
+    cmds.delete(cp, cb)
+    d = data(r3)
+    del d["self"]  # a roof made before roofs remembered their uuid
+    cmds.setAttr(r3 + "." + tb["THATCH_SETTINGS"], json.dumps(d), type="string")
+    cp = cmds.ls(cmds.duplicate(r3)[0], long=True)[0]
+    check("an older roof's Ctrl+D copy: the original is the one Maya didn't renumber",
+          tb["thatch_copies"]() == {cp: r3}, str(tb["thatch_copies"]()))
 
     # --- speed (defaults)
     cmds.file(new=True, force=True)

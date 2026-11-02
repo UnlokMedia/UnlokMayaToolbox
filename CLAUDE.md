@@ -538,7 +538,30 @@
     times); `gap_at` is clumped noise that pieces and panels skip.
   - **Presets:** `thatch_preset` resets every shape key and sets the look
     keys a preset names, so shape presets keep the style and look presets
-    (Cambodian shack, Grass hut) set it.
+    (Cambodian shack, Grass hut) set it. The user's own presets live in the
+    `unlokThatchPresets` optionVar (JSON, like Rope Lashing's; no file
+    I/O): every key but `THATCH_PRESET_SKIP` (seed, ridge, detail); on load
+    the rest get their defaults, so older saves pick up new settings.
+  - **Duplicate / links / Ctrl+D copies** (the user asked how to reuse a
+    roof at another size, linked): roofs store `"self"` (their own uuid,
+    stamped by make and every update) and optionally `"link"` (a group
+    id) in their JSON. `update_thatch_roofs` first runs
+    `thatch_split_copies` on the roofs it's given (a Ctrl+D copy keeps the
+    box uuid: `thatch_copies` finds roofs sharing a box, the original is
+    the one whose `self` matches, else the shortest name), which gives the
+    copy a box at box_world * inv(orig_world) * copy_world (or reuses an
+    orphan tool box already there: Ctrl+D on box + roof), in its own
+    UndoChunk; then `_th_spread_links` adds the `THATCH_LINKED_KEYS` of
+    each change to the other roofs with the same link (only differing
+    values, so a plain rebuild or an own-key change touches nothing else).
+    `THATCH_OWN_KEYS` (shape, ridge, ends, hip_pitch, half_hip, overhang,
+    seed) stay per roof. `rebuild_stale_thatch` passes split=False (no new
+    nodes while redoing). The split is not run on selection: an undoable
+    step there would make Ctrl+Z loop. `duplicate_thatch_roof` is one
+    UndoChunk (box copy, `make_thatch_roof` nested inside, link ids), new
+    seed; `_th_box_copy` duplicates a tool box, or fits a tool box to
+    another mesh's bounding box. `link_thatch_roofs` / `unlink_thatch_roofs`
+    write in NoUndo like live edits.
   - **Deformed boxes:** `_th_box_corners` sorts an 8-vertex mesh's corners
     by which side of the box's middle (object space) each is on; the frame
     keeps them (world space) with `axis` and `flip` (mirrored box). The

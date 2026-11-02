@@ -340,10 +340,34 @@ detail (just its shell, instant), get the shape right, then raise
    roof or its box puts the roof on the panel (the banner says
    **EDITING**); it stays there when you deselect it, so you can look at it
    and keep tweaking.
+   - **Duplicate Roof** copies the roof you're editing as a roof of its own
+     (one Ctrl+Z): a new box beside it, selected so you can move and scale
+     it straight away, and a roof on it with the same settings and a new
+     seed (so the straw isn't identical). Blockers stay with the original.
+     With **Link the copy** on (the default) the two are linked.
+   - **Linked roofs** share their look: change a setting on any of them and
+     the others rebuild to match. Each keeps its own box (so its size and
+     place), Shape, Ridge along, ends, Hip pitch, Half-hip, Overhang and
+     Seed; everything else in steps 3 and 4 is shared. **Link** links the
+     selected roofs (the first one you selected gives the others its look;
+     roofs already linked to any of them join in), **Unlink** takes the
+     selected ones out (they keep their settings), **Select Linked**
+     selects the whole group. The line under the buttons says what the
+     roof on the panel is linked with.
+   - **Ctrl+D on a roof** works too: the copy is noticed (it still points
+     at the original's box) and gets a box of its own, where you moved the
+     copy to, the next time it rebuilds (or when you press Select Box). If
+     you Ctrl+D the roof and its box together, the copied box is used. A
+     Ctrl+D copy stays linked to whatever the original was linked to.
 3. **Roof shape** (live):
    - **Preset:** shape presets (Cottage (hipped), Gabled cottage,
      Half-hipped, Tiered, Roundhouse, Lean-to shed) set the shape and keep
-     how the straw is made (step 4). Look presets set the whole look, step 4
+     how the straw is made (step 4). **Save...** keeps the panel's settings
+     as a preset of your own, listed under the line below the built-in
+     ones; it's kept in Maya's preferences, so it's there in every scene.
+     Saving under one of your names overwrites it; **Delete** removes the
+     chosen one (yours only). Your presets set everything but the Seed,
+     Ridge along and Detail. Look presets set the whole look, step 4
      included:
      - **Cambodian shack (leaf panels):** a thin roof of folded palm-leaf
        panels in ragged rows, sagging ridge, warped slopes, gaps, no
@@ -1313,7 +1337,11 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   and end type in each style: closed shells facing out, the roof on its box,
   UVs (0..1 for the surface, stacks in their tiles / columns), undo / redo
   (with the rebuild), save / reopen, live edits, following the box, bake,
-  the Smart UDIM marks and speed. Palm fronds: the presets (no underlay, and
+  the Smart UDIM marks and speed. Your own presets (save, overwrite,
+  delete, older ones), Duplicate Roof (new box, new seed, one Ctrl+Z),
+  linked roofs (shared and own settings, Link / Unlink) and Ctrl+D copies
+  (their own box where they were moved, the copied box when there is one).
+  Palm fronds: the presets (no underlay, and
   no gaps: rays cast up from inside over the whole footprint, the ridge line
   and hip ends included, must all hit a leaf), tapered leaflets and their
   UVs, the three forms, a neat under layer against a messy one, the top

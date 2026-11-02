@@ -20211,6 +20211,11 @@ THATCH_PRESETS = {
         "top_layer": 0.3, "mess": 0.4, "lift": 0.5, "bend": 0.25, "edge_hang": 0.9, "end_reach": 0.2,
         "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.3, "underlay": False},
 }
+THATCH_PRESET_VAR = "unlokThatchPresets"  # optionVar (Maya's own prefs): the user's presets as JSON
+THATCH_PRESET_SKIP = ("seed", "ridge", "detail")  # each roof's own: a saved preset leaves them out
+# Linked roofs share every setting but these (each keeps its own shape, ends, overhang and seed).
+THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "hip_pitch", "half_hip", "overhang", "seed")
+THATCH_LINKED_KEYS = tuple(k for k in THATCH_KEYS if k not in THATCH_OWN_KEYS)
 THATCH_MAX_GRID = 400000     # grid points (the surface, or the underlay the pieces sit on)
 THATCH_MAX_VERTS = 2500000   # vertices of planes / pieces in one roof
 
@@ -23680,6 +23685,7 @@ def make_thatch_roof(box, settings=None, select=False):
         cmds.addAttr(root, longName=THATCH_SETTINGS, dataType="string")
         data = dict(s)
         data["box"] = cmds.ls(box, uuid=True)[0]
+        data["self"] = _th_uuid(root)  # a Ctrl+D copy of the group won't match: see thatch_copies
         data["frame"] = frame
         data["blockers"], data["blocker_boxes"] = [], []
         data["version"] = THATCH_VERSION
@@ -23695,13 +23701,18 @@ def make_thatch_roof(box, settings=None, select=False):
     return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces}
 
 
-def update_thatch_roofs(changes):
+def update_thatch_roofs(changes, split=True):
     """Rebuild roofs with changed settings ({root: {key: value}}; {} just
     refits to the box as it is now). Like the other tools' live edits these
     stay out of the undo queue (API geometry can't be undone anyway). A roof
-    whose box is gone keeps its last frame. Returns {"done", "lost",
-    "errors", "pieces", "capped", "faces"}."""
+    whose box is gone keeps its last frame. Roofs linked to a changed one
+    get its shared settings too. With split, a Ctrl+D copy among them first
+    gets a box of its own (thatch_split_copies, one Ctrl+Z). Returns
+    {"done", "lost", "errors", "pieces", "capped", "faces"}."""
     report = {"done": [], "lost": [], "errors": [], "pieces": 0, "capped": False, "faces": 0, "no_frame": []}
+    if split:
+        thatch_split_copies([r for r in changes if is_thatch_roof(r)])
+    changes = _th_spread_links(changes)
     for root, change in changes.items():
         if not is_thatch_roof(root):
             continue
@@ -23726,6 +23737,7 @@ def update_thatch_roofs(changes):
         data.update(s)
         data["frame"] = frame
         data["blocker_boxes"] = boxes
+        data["self"] = _th_uuid(root)
         with NoUndo():
             cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
             report["faces"] += _th_write(root, frame, s, built)
@@ -23776,7 +23788,7 @@ def rebuild_stale_thatch():
                 break
     live = [r for r in stale if is_thatch_roof(r)]
     if live:
-        update_thatch_roofs({r: {} for r in live})
+        update_thatch_roofs({r: {} for r in live}, split=False)  # no new nodes while redoing
     with NoUndo():
         for root in stale:
             if root in live:
@@ -23824,13 +23836,249 @@ def bake_thatch(roofs):
 
 def thatch_preset(name):
     """Settings a preset sets, or None: every shape setting (defaults where it
-    names none), plus the thatch settings it names (a look preset)."""
+    names none), plus the thatch settings it names (a look preset). One of
+    the user's sets everything but the seed, Ridge along and Detail
+    (settings added since it was saved get their defaults)."""
     over = THATCH_PRESETS.get(name)
     if over is None:
-        return None
+        mine = thatch_user_presets().get(name)
+        if not isinstance(mine, dict):
+            return None
+        s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_PRESET_SKIP}
+        s.update((k, v) for k, v in mine.items() if k in s)
+        return s
     s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
     s.update(over)
     return s
+
+
+def thatch_user_presets():
+    """The user's own presets {name: settings}, kept in Maya's prefs."""
+    if not cmds.optionVar(exists=THATCH_PRESET_VAR):
+        return {}
+    try:
+        data = json.loads(cmds.optionVar(q=THATCH_PRESET_VAR) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def thatch_save_preset(name, settings):
+    """Keep settings as a preset of the user's (replacing one of the same
+    name) in an optionVar: Maya saves it with its prefs, for every scene; the
+    tool writes no files. The seed, Ridge along and Detail stay out."""
+    data = thatch_user_presets()
+    data[name] = {k: settings[k] for k in THATCH_KEYS if k in settings and k not in THATCH_PRESET_SKIP}
+    cmds.optionVar(stringValue=(THATCH_PRESET_VAR, json.dumps(data, sort_keys=True)))
+
+
+def thatch_delete_preset(name):
+    data = thatch_user_presets()
+    if data.pop(name, None) is None:
+        return False
+    cmds.optionVar(stringValue=(THATCH_PRESET_VAR, json.dumps(data, sort_keys=True)))
+    return True
+
+
+def _th_uuid(node):
+    return (cmds.ls(node, uuid=True) or [None])[0]
+
+
+def _th_set_data(root, data):
+    cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+
+
+def _th_world(node):
+    return om.MMatrix(cmds.xform(node, q=True, matrix=True, worldSpace=True))
+
+
+def thatch_copies():
+    """Roofs following another roof's box ({copy: the roof it was copied
+    from}): Ctrl+D on a roof group copies its settings, box uuid included.
+    The original is the one whose settings hold its own uuid; for roofs made
+    before roofs remembered it, the shortest name (Maya numbers a copy)."""
+    by_box = {}
+    for root in thatch_roofs():
+        uid = thatch_data(root).get("box")
+        if uid:
+            by_box.setdefault(uid, []).append(root)
+    out = {}
+    for group in by_box.values():
+        if len(group) < 2:
+            continue
+        own = [r for r in group if thatch_data(r).get("self") == _th_uuid(r)]
+        orig = own[0] if own else min(group, key=lambda r: (len(short_name(r)), r))
+        for r in group:
+            if r != orig:
+                out[r] = orig
+    return out
+
+
+def _th_box_copy(box, delta):
+    """A new box like box, moved by the world matrix delta (undoable: callers
+    wrap it): a copy of a box the tool made (vertex edits and all), or a
+    tool box over another mesh's bounding box."""
+    if cmds.attributeQuery(THATCH_BOX_ATTR, node=box, exists=True):
+        node = long_name(cmds.duplicate(box, returnRootsOnly=True)[0])
+        cmds.xform(node, matrix=list(_th_world(box) * delta), worldSpace=True)
+        return node
+    name = "thatchBox%04d" % _th_free_number("thatchBox%04d")
+    node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False, name=name)[0])
+    _th_style_box(node)
+    parent = cmds.listRelatives(box, parent=True, fullPath=True)
+    if parent:
+        node = long_name(cmds.parent(node, parent[0])[0])
+    lo, hi = (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)
+    shape = _log_shape(box)
+    if shape:
+        lo = cmds.getAttr(shape + ".boundingBoxMin")[0]
+        hi = cmds.getAttr(shape + ".boundingBoxMax")[0]
+    fit = om.MMatrix([hi[0] - lo[0], 0.0, 0.0, 0.0, 0.0, hi[1] - lo[1], 0.0, 0.0, 0.0, 0.0, hi[2] - lo[2], 0.0,
+                      (lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5, 1.0])
+    cmds.xform(node, matrix=list(fit * _th_world(box) * delta), worldSpace=True)
+    return node
+
+
+def thatch_split_copies(roots=None):
+    """Give each Ctrl+D copy among roots (default: every roof) a box of its
+    own (one Ctrl+Z), placed where the copy has been moved to, so it stops
+    following the original's box. A box copied along with it (Ctrl+D on the
+    box and the roof together) is used when it's there. Returns the copies
+    split."""
+    copies = thatch_copies()
+    if roots is not None:
+        copies = {c: o for c, o in copies.items() if c in roots}
+    done = []
+    if not copies:
+        return done
+    with UndoChunk("Thatch copy box"):
+        used = set(thatch_box(r) for r in thatch_roofs())
+        spare = [n for n in cmds.ls(["*." + THATCH_BOX_ATTR, "*:*." + THATCH_BOX_ATTR], objectsOnly=True,
+                                    long=True) or [] if n not in used]
+        for copy, orig in sorted(copies.items()):
+            box = thatch_box(orig)
+            if not box:
+                continue  # nothing to copy: it keeps its last frame
+            delta = _th_world(orig).inverse() * _th_world(copy)
+            want = _th_world(box) * delta
+            new = next((n for n in spare if _th_world(n).isEquivalent(want, 1e-4)), None)
+            if new:
+                spare.remove(new)
+            else:
+                new = _th_box_copy(box, delta)
+            data = thatch_data(copy)
+            data["box"] = _th_uuid(new)
+            data["self"] = _th_uuid(copy)
+            _th_set_data(copy, data)
+            done.append(copy)
+    return done
+
+
+def thatch_linked(root):
+    """The other live roofs linked to root (they share its look)."""
+    lid = thatch_data(root).get("link") if root else None
+    if not lid:
+        return []
+    return [r for r in thatch_roofs() if r != root and thatch_data(r).get("link") == lid]
+
+
+def _th_spread_links(changes):
+    """changes ({root: {key: value}}) plus, for every roof linked to a changed
+    one, the shared settings it doesn't have yet."""
+    shared = {}
+    for root, change in changes.items():
+        lid = thatch_data(root).get("link") if change and is_thatch_roof(root) else None
+        values = {k: v for k, v in change.items() if k in THATCH_LINKED_KEYS}
+        if lid and values:
+            shared.setdefault(lid, {}).update(values)
+    if not shared:
+        return changes
+    out = dict(changes)
+    for root in thatch_roofs():
+        if root in changes:
+            continue
+        data = thatch_data(root)
+        diff = {k: v for k, v in (shared.get(data.get("link")) or {}).items() if data.get(k) != v}
+        if diff:
+            out[root] = diff
+    return out
+
+
+def link_thatch_roofs(roots):
+    """Link roofs so they share their look: every setting but each roof's own
+    shape, ends, overhang and seed (THATCH_OWN_KEYS); a change to any of them
+    rebuilds the rest. The first roof's look goes to the others, and roofs
+    already linked to any of them join too. Like live edits, out of the undo
+    queue. Returns update_thatch_roofs' report."""
+    roots = [r for r in roots if is_thatch_roof(r)]
+    if len(roots) < 2:
+        raise ValueError("select two or more roofs to link")
+    lead = thatch_data(roots[0])
+    lid = lead.get("link") or "%08x" % random.getrandbits(32)
+    old = set(thatch_data(r).get("link") for r in roots) - set([None, ""])
+    members = roots + [r for r in thatch_roofs() if r not in roots and thatch_data(r).get("link") in old]
+    with NoUndo():
+        for root in members:
+            data = thatch_data(root)
+            data["link"] = lid
+            _th_set_data(root, data)
+    look = dict((k, lead.get(k, THATCH_DEFAULTS[k])) for k in THATCH_LINKED_KEYS)
+    changes = {}
+    for root in members[1:]:
+        data = thatch_data(root)
+        diff = dict((k, v) for k, v in look.items() if data.get(k) != v)
+        if diff:
+            changes[root] = diff
+    report = update_thatch_roofs(changes)
+    report["linked"] = members
+    return report
+
+
+def unlink_thatch_roofs(roots):
+    """Take roofs out of their links (they keep their settings). Returns the
+    roofs unlinked."""
+    done = []
+    with NoUndo():
+        for root in roots:
+            data = thatch_data(root) if is_thatch_roof(root) else {}
+            if data.get("link"):
+                del data["link"]
+                _th_set_data(root, data)
+                done.append(root)
+    return done
+
+
+def duplicate_thatch_roof(root, link=False, offset=None):
+    """A copy of a roof as a roof of its own (one Ctrl+Z): a new box beside
+    the original's (offset: a world move; default the roof's width along X
+    and a gap), selected, ready to move and scale, and a roof on it with the
+    same settings but a new seed (blockers stay with the original). link:
+    the two share their look (see link_thatch_roofs). Returns
+    make_thatch_roof's report plus "box"."""
+    thatch_split_copies([root])
+    box = thatch_box(root)
+    if not box:
+        raise ValueError("its box is gone (deleted?)")
+    data = thatch_data(root)
+    s = thatch_settings_only(data)
+    s["seed"] = (int(s["seed"]) + random.randint(1, 9997)) % 9999 + 1
+    if offset is None:
+        bb = cmds.exactWorldBoundingBox([root, box])
+        offset = ((bb[3] - bb[0]) * 1.15, 0.0, 0.0)
+    delta = om.MMatrix([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        offset[0], offset[1], offset[2], 1.0])
+    with UndoChunk("Duplicate Roof"):
+        new_box = _th_box_copy(box, delta)
+        report = make_thatch_roof(new_box, s)
+        if link:
+            lid = data.get("link") or "%08x" % random.getrandbits(32)
+            for r in (root, report["root"]):
+                d = thatch_data(r)
+                d["link"] = lid
+                _th_set_data(r, d)
+        cmds.select(new_box, replace=True)
+    report["box"] = new_box
+    return report
 
 
 class ThatchRoofPanel(QtWidgets.QWidget):
@@ -23935,7 +24183,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         # ---- 2. make
         card = self.step_make = StepCard(2, "Make roof", "Thatches the selected box with the settings below (one "
                                                          "Ctrl+Z). The roof follows the box when you move or scale "
-                                                         "it.")
+                                                         "it. Duplicate copies a roof onto a box of its own; linked "
+                                                         "roofs share their look.")
         self.make_btn = primary_button("Make Roof")
         self.make_btn.setMinimumHeight(28)
         self.make_btn.setToolTip("Build a thatched roof on the selected box (or mesh). Then every setting edits it "
@@ -23947,6 +24196,31 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.follow.setToolTip("On: the roof rebuilds a moment after the box stops moving. Off: press Rebuild.")
         self.follow.changed.connect(lambda: self._watch_box())
         card.add(self.follow)
+        dup = secondary_button("Duplicate Roof", "A copy of the roof you're editing as a roof of its own: a new box "
+                                                 "beside it (selected, ready to move and scale) and a roof on it "
+                                                 "with the same settings and a new seed. Blockers stay with the "
+                                                 "original. One Ctrl+Z.\n(Ctrl+D on a roof works too: the copy "
+                                                 "gets a box of its own when it next rebuilds.)")
+        dup.clicked.connect(lambda *_: self.duplicate_roof())
+        self.dup_link = CheckField("Link the copy")
+        self.dup_link.setValue(True)
+        self.dup_link.setToolTip("On: the copy and the original are linked (they share their look, see Link).")
+        card.add(button_row(dup, self.dup_link))
+        link = secondary_button("Link", "Link the selected roofs so they share their look: a change to any of "
+                                        "them rebuilds the rest. Shared: everything in steps 3 and 4 but each "
+                                        "roof's own Shape, Ridge along, ends, Hip pitch, Half-hip, Overhang and "
+                                        "Seed (and its box, so its size). The first roof you selected gives the "
+                                        "others its look; roofs already linked to any of them join in.")
+        link.clicked.connect(lambda *_: self.link_roofs())
+        unlink = secondary_button("Unlink", "Take the selected roofs (or the one you're editing) out of their "
+                                            "link. They keep their settings.")
+        unlink.clicked.connect(lambda *_: self.unlink_roofs())
+        sel_linked = secondary_button("Select Linked", "Select the roof you're editing and every roof linked to "
+                                                       "it.")
+        sel_linked.clicked.connect(lambda *_: self.select_linked())
+        card.add(button_row(link, unlink, sel_linked))
+        self.link_label = hint_label("")
+        card.add(self.link_label)
         col.addWidget(card)
 
         # ---- 3. shape
@@ -23960,14 +24234,24 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         plabel.setMinimumWidth(92)
         self.preset_combo = _Combo()
         _guard_focus(self.preset_combo)
-        self.preset_combo.addItems(list(THATCH_PRESETS))
         self.preset_combo.setToolTip("Pick a preset to load it. Shape presets set the roof's shape; how the straw "
                                      "is made (step 4) stays. Look presets (Cambodian shack, Grass hut, Palm) set "
-                                     "the whole look, step 4 included (Detail stays).")
+                                     "the whole look, step 4 included (Detail stays). Your own presets (under "
+                                     "the line) set everything but the Seed, Ridge along and Detail.")
         self.preset_combo.activated.connect(lambda *_: self.load_preset())
+        save = secondary_button("Save...", "Keep the panel's settings (steps 3 and 4) as a preset of your own, "
+                                           "listed under the built-in ones. It's kept in Maya's preferences, so "
+                                           "it's there in every scene. Save under an existing name of yours to "
+                                           "overwrite it. The Seed, Ridge along and Detail aren't saved.")
+        save.clicked.connect(lambda *_: self.save_preset())
+        delete = secondary_button("Delete", "Remove the chosen preset (your own presets only).")
+        delete.clicked.connect(lambda *_: self.delete_preset())
         pl.addWidget(plabel)
         pl.addWidget(self.preset_combo, 1)
+        pl.addWidget(save)
+        pl.addWidget(delete)
         card.add(prow)
+        self._fill_presets()
         self.f["shape"] = SegmentField(THATCH_SHAPES)
         self.f["shape"].setToolTip("Ridge: two slopes meeting at a ridge.\nLean-to: one slope, high along the "
                                    "box's -side (a shed against a wall).\nCone: a round roof (roundhouse), "
@@ -24268,6 +24552,20 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def _settings(self):
         return {k: w.value() for k, w in self.f.items()}
 
+    def _fill_presets(self, current=None):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItems(list(THATCH_PRESETS))
+        mine = sorted(n for n in thatch_user_presets() if n not in THATCH_PRESETS)
+        if mine:
+            self.preset_combo.insertSeparator(self.preset_combo.count())
+            self.preset_combo.addItems(mine)
+        if current:
+            i = self.preset_combo.findText(current)
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
+        self.preset_combo.blockSignals(False)
+
     def _show(self, settings):
         for key, widget in self.f.items():
             widget.setValue(settings.get(key, THATCH_DEFAULTS[key]))
@@ -24333,8 +24631,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             elif boxes:
                 self._pin(None)  # a new box: Make Roof uses it
             root = self.target()
+            linked = thatch_linked(root) if root else []
             if roofs:
                 text = "Editing %s." % short_name(roofs[0])
+                if roofs[0] in thatch_copies():
+                    text += " A Ctrl+D copy: it gets a box of its own when it next rebuilds."
                 if thatch_needs_upgrade(roofs[0]):
                     text += " Made by an older version: Upgrade (step 5) brings it up to date."
                 if len(roofs) > 1:
@@ -24349,6 +24650,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             else:
                 text = "Nothing selected."
             self.sel_label.setText(text)
+            self.link_label.setText(self._link_text(root, linked))
             self.block_label.setText(self._blocker_text(root))
             self.step_box.set_state("done" if boxes or root else "current")
             self.step_make.set_state("current" if boxes else ("done" if root else "todo"))
@@ -24360,8 +24662,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             self.make_btn.setProperty("unlokPrimary", tool_box)
             repolish(self.box_btn, self.make_btn)
             if root:
-                self.next_banner.set_text("Every change in steps 3 and 4 rebuilds <b>%s</b>. Move or scale its "
-                                          "box and it follows. <b>Bake</b> when you're done." % short_name(root),
+                also = " (and the look of the %d roof(s) linked to it)" % len(linked) if linked else ""
+                self.next_banner.set_text("Every change in steps 3 and 4 rebuilds <b>%s</b>%s. Move or scale its "
+                                          "box and it follows. <b>Bake</b> when you're done." % (short_name(root),
+                                                                                                also),
                                           tag="EDITING", tone="active")
             elif boxes and cmds.attributeQuery(THATCH_BOX_ATTR, node=boxes[0], exists=True):
                 self.next_banner.set_text("Scale the box to the roof's area (bottom at the eaves, top at the "
@@ -24486,8 +24790,107 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             self.set_status("Loaded '%s': Make Roof uses it." % name)
 
     @ui_safe
+    def save_preset(self):
+        current = self.preset_combo.currentText()
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save Thatch Preset", "Preset name (an existing one of "
+                                                  "yours is overwritten):", QtWidgets.QLineEdit.Normal,
+                                                  current if current in thatch_user_presets() else "")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in THATCH_PRESETS:
+            self.set_status("'%s' is a built-in preset: pick another name." % name, level="warn")
+            return
+        had = name in thatch_user_presets()
+        thatch_save_preset(name, self._settings())
+        self._fill_presets(name)
+        self.set_status("%s preset '%s' (in Maya's preferences: every scene has it)." % (
+            "Overwrote" if had else "Saved", name), level="fixed")
+
+    @ui_safe
+    def delete_preset(self):
+        name = self.preset_combo.currentText()
+        if name in THATCH_PRESETS:
+            self.set_status("Built-in presets can't be deleted.", level="warn")
+            return
+        if thatch_delete_preset(name):
+            self._fill_presets()
+            self.set_status("Deleted preset '%s'." % name)
+
+    @ui_safe
+    def duplicate_roof(self):
+        root = (self._edit_roofs() or [None])[0]
+        if not root:
+            self.set_status("Select a roof to duplicate.", level="warn")
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = duplicate_thatch_roof(root, link=self.dup_link.value())
+        except ValueError as exc:
+            self.set_status("Can't duplicate %s: %s." % (short_name(root), exc), level="warn")
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._pin(report["root"])
+        self.set_status("Made %s on %s in %.2fs%s: move and scale its box. One Ctrl+Z undoes it." % (
+            short_name(report["root"]), short_name(report["box"]), time.time() - t0,
+            ", linked to %s" % short_name(root) if self.dup_link.value() else ""), level="fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def link_roofs(self):
+        roofs = thatch_selection()[0]
+        if len(roofs) < 2:
+            self.set_status("Select two or more roofs to link (the first one gives the others its look).",
+                            level="warn")
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = link_thatch_roofs(roofs)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.set_status("Linked %d roofs to %s's look (%d rebuilt in %.2fs). A change to any of them now changes "
+                        "them all; each keeps its own box, shape, ends, overhang and seed." % (
+                            len(report["linked"]), short_name(roofs[0]), len(report["done"]), time.time() - t0),
+                        level="fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def unlink_roofs(self):
+        done = unlink_thatch_roofs(self._edit_roofs())
+        if done:
+            self.set_status("Unlinked %d roof(s): they keep their settings." % len(done), level="fixed")
+        else:
+            self.set_status("Nothing to unlink: these roofs aren't linked.")
+        self._sync_from_selection()
+
+    @ui_safe
+    def select_linked(self):
+        root = (self._edit_roofs() or [None])[0]
+        linked = thatch_linked(root) if root else []
+        if not linked:
+            self.set_status("%s isn't linked to any roof." % short_name(root) if root else "Select a roof.",
+                            level="warn")
+            return
+        cmds.select([root] + linked, replace=True)
+        self.set_status("Selected %s and its %d linked roof(s)." % (short_name(root), len(linked)))
+
+    def _link_text(self, root, linked):
+        if not root:
+            return ""
+        if not linked:
+            return "Not linked."
+        names = [short_name(r) for r in linked]
+        return "Linked with %s: they share the look; each keeps its own box, shape, ends, overhang and seed." % (
+            ", ".join(names[:4]) + (" (+%d)" % (len(names) - 4) if len(names) > 4 else ""))
+
+    @ui_safe
     def select_box(self):
         root = (self._edit_roofs() or [None])[0]
+        if root and thatch_split_copies([root]):  # a Ctrl+D copy: its own box, not the original's
+            self._watch_box()
         box = thatch_box(root) if root else None
         if box:
             cmds.select(box, replace=True)
