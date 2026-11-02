@@ -8929,6 +8929,40 @@ class LayoutShell(object):
 
 
 LONG_ASPECT = 1.4  # a piece this much longer than wide counts as long (beams, logs, planks, strips)
+SLAB_RATIO = 3.0  # a mesh whose main face is this much wider than its thinnest strip is a slab (wall, board)
+
+
+def _is_long(dims):
+    _, w0, h0 = dims
+    return min(w0, h0) > 0 and max(w0, h0) >= LONG_ASPECT * min(w0, h0)
+
+
+def _slab_edges(shells, out):
+    """{edge shell index: its mesh's main shell index} for the thin long
+    strips round a slab (a wall's ends, a board's edges). They're part of
+    the slab, not pieces of their own: they turn with its main face instead
+    of voting, so a brick wall's ends stay upright like the wall."""
+    by_mesh = {}
+    for i, sh in enumerate(shells):
+        by_mesh.setdefault(sh.mesh, []).append(i)
+
+    def short(i):  # a shell's short side in 3D units
+        sh, (_, w0, h0) = shells[i], out[i]
+        return min(w0, h0) * (math.sqrt(sh.area3d / sh.area_uv) if sh.area_uv > 0 else 1.0)
+
+    edges = {}
+    for idx in by_mesh.values():
+        main = max(idx, key=lambda i: shells[i].area3d)
+        strips = [i for i in idx if i != main and _is_long(out[i])]
+        if not strips:
+            continue
+        thin = min(short(i) for i in strips)
+        if short(main) < SLAB_RATIO * thin:
+            continue  # a stick (post, beam, log): every side is a piece of its own
+        for i in strips:
+            if short(i) <= 1.5 * thin:
+                edges[i] = main
+    return edges
 
 
 def _group_dims(shells, mode):
@@ -8938,23 +8972,31 @@ def _group_dims(shells, mode):
     pieces that disagree turn a quarter, so every woodBrown log or beam lies
     the same way and one texture wraps along them all (the user's rule; a
     diagonal beam would otherwise go whichever way its slope tipped it).
+    A slab's edge strips turn with its main face (_slab_edges).
     Pure maths on numbers already read: no lag."""
     out = [sh.dims.get(mode, sh.dims["axis"]) for sh in shells]
     if mode != "up":
         return out
+    edges = _slab_edges(shells, out)
     across = up = 0.0
     longs = []
-    for i, (a, w0, h0) in enumerate(out):
-        if min(w0, h0) > 0 and max(w0, h0) >= LONG_ASPECT * min(w0, h0):
+    for i, dims in enumerate(out):
+        if i not in edges and _is_long(dims):
             longs.append(i)
-            if w0 >= h0:
+            if dims[1] >= dims[2]:
                 across += shells[i].area3d
             else:
                 up += shells[i].area3d
     want_up = up > across
+    turned = set()
     for i in longs:
         a, w0, h0 = out[i]
         if (h0 > w0) != want_up:
+            out[i] = (a + math.pi / 2.0, h0, w0)
+            turned.add(i)
+    for i, main in edges.items():
+        if main in turned:
+            a, w0, h0 = out[i]
             out[i] = (a + math.pi / 2.0, h0, w0)
     return out
 

@@ -131,16 +131,32 @@ def run():
           all(h > w for _, w, h in dims) and not all(h > w for _, w, h in own),
           "own %s -> %s" % (["up" if h > w else "across" for _, w, h in own],
                             ["up" if h > w else "across" for _, w, h in dims]))
+    # a slab's edges turn with its main face: a wall's ends stay upright like the wall
+    wall = [LS("|wall", [0], 18.0, 18.0, [(0, 0), (6, 0), (6, 3), (0, 3)], up_dir=(0, 1))]
+    wall += [LS("|wall", [i], 0.9, 0.9, [(0, 0), (0.3, 0), (0.3, 3), (0, 3)], up_dir=(0, 1)) for i in (1, 2)]
+    wall += [LS("|wall", [3], 1.8, 1.8, [(0, 0), (6, 0), (6, 0.3), (0, 0.3)])]  # its top: flat
+    dims = tb["_group_dims"](wall + logs, "up")[:4]
+    check("a wall's thin ends stay upright (they turn with the wall, they don't vote)",
+          dims[0][1] > dims[0][2] and all(h > w for _, w, h in dims[1:3]), str([d[1:] for d in dims]))
+    board = [LS("|board", [0], 0.4, 0.4, [(0, 0), (0.2, 0), (0.2, 2), (0, 2)], up_dir=(0, 1))]
+    board += [LS("|board", [i], 0.04, 0.04, [(0, 0), (0.02, 0), (0.02, 2), (0, 2)], up_dir=(0, 1)) for i in (1, 2)]
+    flat = [LS("|beam%d" % i, [i], 4.0, 4.0, [(0, 0), (4, 0), (4, 1), (0, 1)], up_dir=(0, 1)) for i in range(3)]
+    dims = tb["_group_dims"](board + flat, "up")[:3]
+    check("...and a board outvoted by the beams turns whole, its edges with it",
+          all(w > h for _, w, h in dims), str([d[1:] for d in dims]))
     mixed = []
     for g in col["groups"]:
         ways = set()
-        for sh in g["shells"]:
+        edges = tb["_slab_edges"](g["shells"], [sh.dims["up"] for sh in g["shells"]])
+        for i, sh in enumerate(g["shells"]):
+            if i in edges:
+                continue
             pl = plan["placements"].get(id(sh))
             if pl and min(pl[6], pl[7]) > 0 and max(pl[6], pl[7]) >= 1.5 * min(pl[6], pl[7]):
                 ways.add(pl[7] > pl[6])
         if len(ways) > 1:
             mixed.append(g["key"])
-    check("...and in a real Upright plan no material mixes up and across long pieces", not mixed, str(mixed))
+    check("...and in a real Upright plan no material mixes up and across long pieces (a slab's edges aside)", not mixed, str(mixed))
 
     # --- left to right by material, and the row options
     sec_of_set = dict((g["set"], g["section"]) for g in col["groups"])
