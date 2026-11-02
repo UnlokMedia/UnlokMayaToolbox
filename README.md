@@ -636,7 +636,7 @@ makeshift shanty**; a thatch look preset switches back to thatch.
 - **Trim and fixings:** ridge capping (a roll-top lapping along the ridge;
   a cap on a cone), hip cappings, barge flashings over the gable verges (a
   lean-to's top), and roofing screws with washers through the crests into
-  every purlin (*Screw every* n-th crest; High and Hero only; none under
+  every purlin (*Screw every* n-th crest; Medium and up; none under
   the cappings), each on the sheet that's on top there.
 - **Frame:** purlins across the rafters (*Purlin spacing* / *size*),
   rafters (*Rafter spacing* / *size*; hip rafters and jacks on a hip,

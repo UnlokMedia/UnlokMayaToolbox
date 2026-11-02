@@ -400,6 +400,8 @@ def run():
         rep = tb["make_thatch_roof"](b, {"covering": "Corrugated", "m_mode": mode, "end_a": "Hip", "end_b": "Gable"})
         dt = time.time() - t0
         check("speed: a 16 x 9 m %s roof under 8 s" % mode, dt < 8.0, "%.2fs, %d sheets" % (dt, rep["pieces"]))
+        check("a 16 x 9 m %s roof isn't reported as capped (its cappings aren't the vertex cap)" % mode,
+              not rep["capped"])
 
 
 try:

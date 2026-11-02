@@ -520,7 +520,7 @@ def main():
     check("Covering: Corrugated adds the metal meshes, hides the thatch, and the status counts sheets",
           ns["thatch_data"](root3)["covering"] == "Corrugated" and {"sheets", "trim", "fixings"} <= set(parts) and
           cmds.getAttr(parts["sheets"] + ".visibility") and not cmds.getAttr(parts["straw"] + ".visibility") and
-          "sheets" in panel.status.text(), panel.status.text())
+          "sheets" in panel.status.text() and "Capped" not in panel.status.text(), panel.status.text())
     check("metal rows show, thatch rows hide", not panel._rows["m_pitch"][1].isHidden() and
           panel._rows["thickness"][1].isHidden() and panel._rows["density"][1].isHidden() and
           not panel.f["m_mode"].isHidden() and panel.f["style"].isHidden() and panel.levels_sec.isHidden() and

@@ -24054,6 +24054,7 @@ def metal_build(frame, s, blockers=None):
     M = _MtMesh()
     makeshift = sz["mode"] == "Makeshift" and level > 0
     built = []
+    over = False  # stopped at METAL_MAX_VERTS
     tops = sz["depth"] + sz["t"] + 0.002 * sz["k"]
     for idx, sh in enumerate(sheets):
         f = faces[sh["face"]]
@@ -24078,6 +24079,7 @@ def metal_build(frame, s, blockers=None):
             own[q] = idx
         built.append((idx, sh, b))
         if len(M.pts) > METAL_MAX_VERTS:
+            over = True
             break
     # fixings: through the crests into every purlin, on the sheet that's on top there
     FX = _MtMesh()
@@ -24124,7 +24126,7 @@ def metal_build(frame, s, blockers=None):
     caps = _mt_trim(TR, F, faces, sz, s, rasters if makeshift else None, seed)
     uv = _mt_uv_layout(M, sz, s, seed)
     _mt_pack_trim(TR)
-    out = {"pieces": len(built), "capped": caps > 0, "field": F, "level": level, "underlay": None, "straw": None,
+    out = {"pieces": len(built), "capped": over, "field": F, "level": level, "underlay": None, "straw": None,
            "metal": {"sheets": len(built), "fixings": n_fix, "tiles": uv.get("tiles", 0), "caps": caps,
                      "purlins": len(heights), "faces": len(faces)}}
     out["sheets"] = _th_to_world(frame, M.mesh()) if M.counts else None
@@ -25933,7 +25935,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "detail", "Detail", SegmentField(THATCH_DETAILS),
             "Proxy: just the roof's shell (metal: flat sheets), instant, for placing and shaping it.\nRough: "
             "cards / planes, 2 segments (metal: a coarse profile).\nMedium: as set.\nHigh / Hero: more "
-            "segments and a finer underlay (metal: rounder corrugations, screws from High) for close-ups.\n"
+            "segments and a finer underlay (metal: rounder corrugations) for close-ups. Metal screws from Medium.\n"
             "The layout stays the same at every level, so raise it bit by bit once the shape is right.")
         group[0] = "metal"
         row(sec, "m_profile", "Profile", SegmentField(METAL_PROFILES),
@@ -26026,8 +26028,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         check(sec, "m_hip_cap", "Hip cappings", "Capping down each hip, over the sheets cut along the hip line.")
         check(sec, "m_barge", "Barge flashings (gable verges, a lean-to's top)",
               "Flashing over the sheets' edge at each gable verge, its leg down the barge board.")
-        check(sec, "m_fixings", "Screws", "A roofing screw and washer through a crest into each purlin (High and "
-                                          "Hero), on the sheet that's on top there; none under the cappings.")
+        check(sec, "m_fixings", "Screws", "A roofing screw and washer through a crest into each purlin (Medium "
+                                          "and up), on the sheet that's on top there; none under the cappings.")
         row(sec, "m_fix_every", "Screw every", IntField(1, 8, 1, 6),
             "A screw in every n-th crest along each purlin (plus the side lap).")
         card.add(sec)
@@ -26413,12 +26415,15 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         metal = self.f["covering"].value() == "Corrugated"
         msg += _roof_counts(report) + "."
         if self.f["detail"].value() == "Proxy" and metal:
-            msg += " Proxy: flat sheets. Raise Detail for the corrugations (screws from High)."
+            msg += " Proxy: flat sheets. Raise Detail for the corrugations (screws from Medium)."
         elif self.f["detail"].value() == "Proxy" and self.f["style"].value() != "Surface":
             msg += " Proxy: just the shell. Raise Detail for the thatch once the shape is right."
         level = "info"
         if report["capped"]:
-            msg += " Capped at %s vertices: lower Density or raise Width / Length." % "{:,}".format(THATCH_MAX_VERTS)
+            if metal:
+                msg += " Capped at %s vertices: lower Detail or raise Panel size." % "{:,}".format(METAL_MAX_VERTS)
+            else:
+                msg += " Capped at %s vertices: lower Density or raise Width / Length." % "{:,}".format(THATCH_MAX_VERTS)
             level = "warn"
         if report["lost"]:
             msg += " %d lost their box (deleted?): they stay where they are." % len(report["lost"])
