@@ -416,6 +416,47 @@ def main():
     pump()
     check("each picked point is marked, and the status counts them", len(picker.markers) == 6 and
           "6 point(s)" in panel.status.text(), panel.status.text())
+    colours = [cmds.getAttr(m + ".overrideColor") for m in picker.markers]
+    check("markers: blue eaves, red peaks; the panel shows Undo Point / Clear and the split",
+          colours == [18, 18, 18, 18, 13, 13] and not panel.pick_row.isHidden() and
+          "4 eave" in panel.pick_label.text() and "2 peak" in panel.pick_label.text() and
+          "Ctrl+Z removes the last point" in panel.status.text(), "%s %s" % (colours, panel.pick_label.text()))
+    from PySide2.QtTest import QTest
+    probe = cmds.createNode("transform", name="undoProbe")  # an undoable step a stray Maya undo would take back
+    keys_to = QtWidgets.QApplication.activeWindow() or window
+    QTest.keyClick(keys_to, QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+    wait(0.3)
+    check("Ctrl+Z while picking removes the last point, never Maya's undo", len(picker.points) == 5 and
+          len([m for m in picker.markers if cmds.objExists(m)]) == 5 and cmds.objExists(probe),
+          "%d points, probe %s" % (len(picker.points), cmds.objExists(probe)))
+    QTest.keyClick(keys_to, QtCore.Qt.Key_Y, QtCore.Qt.ControlModifier)
+    wait(0.3)
+    check("Ctrl+Y puts it back", len(picker.points) == 6 and picker.points[5] == tuple(v[5]))
+    QTest.keyClick(keys_to, QtCore.Qt.Key_Delete)
+    wait(0.3)
+    n_del = len(picker.points)
+    panel.pick_row.findChildren(QtWidgets.QPushButton)[1].click()  # Redo Point
+    wait(0.1)
+    check("Delete removes it too; the Redo Point button brings it back", n_del == 5 and len(picker.points) == 6)
+    cmds.delete(probe)
+    sx2, sy2 = view.worldToView(ns["om"].MPoint(*v[1]))[:2]
+    picker.press_at(sx2, sy2, ctrl=True)
+    check("Ctrl+click on a marker removes that point", len(picker.points) == 5 and tuple(v[1]) not in picker.points)
+    picker.redo_point()
+    check("and Ctrl+Y puts it back in its place", picker.points[1] == tuple(v[1]))
+    picker.press_at(sx, sy)  # the first peak's marker: grabbed, not a new point
+    away = view.worldToView(ns["om"].MPoint(23.0, 4.1, 1.0))[:2]
+    picker.drag_to(away[0], away[1])
+    moved = picker.points[4]
+    picker.drag_to(sx, sy)
+    picker._release()
+    check("click a marker and drag: the point moves (and snaps back onto the vertex)",
+          len(picker.points) == 6 and abs(moved[0] - 23.0) < 0.3 and
+          max(abs(picker.points[4][i] - v[4][i]) for i in range(3)) < 1e-4 and
+          max(abs(a - b) for a, b in zip(cmds.xform(picker.markers[4], q=True, worldSpace=True, translation=True),
+                                         v[4])) < 1e-4, "%s %s" % (moved, picker.points[4]))
+    window.grab().save(os.path.join(OUT, "26_panel_picking.png"))
+    snap("26_picking.png")
     before = set(ns["thatch_roofs"]())
     win = QtWidgets.QApplication.activeWindow() or window
     QtWidgets.QApplication.sendEvent(win, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return,

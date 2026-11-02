@@ -527,8 +527,16 @@
     each end, shifted across (and along, for two hips) so the ridge passes
     through the peaks; ridge "X". Hip pitch = W / d (lean-to 2W / d), d the
     ridge end's distance from the box end; gable when d < 8% of L. Picker:
-    a draggerContext (press only) + `_ThatchPickKeys`, an app event filter
-    (Enter / Backspace / Esc, queued on a timer, ignored in text fields);
+    a draggerContext + `_ThatchPickKeys`, an app event filter (Enter, Esc;
+    Ctrl+Z / Backspace / Delete = remove last, Ctrl+Y / Ctrl+Shift+Z = put
+    back; queued on a timer, ignored in text fields). It also accepts
+    their ShortcutOverride events, which is what keeps Maya's undo hotkey
+    from running while picking (the user's Ctrl+Z undid scene work and left
+    the point). Press on a marker (`marker_at`, 14 px) grabs it for
+    dragging (`drag_to` re-picks), Ctrl+press removes it; removed points
+    go on `undone` (index, point) for redo. Markers are numbered and
+    coloured by `_th_point_roles` (the same 20% height split as
+    `thatch_shape_from_points`) through an annotationShape child;
     `pick` casts against visible non-roof meshes, snaps to the hit face's
     vertices within 14 px, and on a miss `_snap_near` takes the vertex
     nearest the ray within 14 px by the camera's pixel angle (a peak

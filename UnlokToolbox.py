@@ -24869,12 +24869,33 @@ def thatch_selected_points():
 THATCH_PICK_CTX = "unlokThatchPickCtx"
 
 
+def _th_point_roles(points):
+    """What each picked point counts as, split by height the way
+    thatch_shape_from_points splits them: "eave" (within 20% of the height
+    range of the lowest), "peak" (of the highest) or "mid" (left out). All
+    eaves while they're level."""
+    if not points:
+        return []
+    ys = [p[1] for p in points]
+    lo, hi = min(ys), max(ys)
+    if hi - lo < 1e-4:
+        return ["eave"] * len(points)
+    tol = 0.2 * (hi - lo)
+    return ["eave" if y <= lo + tol else ("peak" if y >= hi - tol else "mid") for y in ys]
+
+
+THATCH_PICK_COLORS = {"eave": 18, "peak": 13, "mid": 3}  # Maya index colours: light blue, red, grey
+
+
 class ThatchPointPicker(object):
     """Viewport tool for a quick roof shape: each click adds a point on the
     mesh under the cursor (snapped to the nearest vertex within 14 px), or
     on a level plane at the first point's height (the ground at first).
-    Enter builds the box and the roof, Backspace removes the last point,
-    Esc cancels. Little locators (not saved) mark the points."""
+    A click on a point's marker grabs it (drag to move it), Ctrl+click
+    removes it. Enter builds the box and the roof; Ctrl+Z, Backspace or
+    Delete removes the last point (Maya's own undo never sees it), Ctrl+Y /
+    Ctrl+Shift+Z puts it back; Esc cancels. Little numbered locators (not
+    saved) mark the points: blue eaves, red peaks, grey left out."""
 
     SNAP_PX = 14
 
@@ -24883,14 +24904,17 @@ class ThatchPointPicker(object):
         self.on_change = on_change
         self.points = []
         self.markers = []
+        self.undone = []  # (index, point) taken off, newest last: what Ctrl+Y puts back
+        self._grab = None  # the point being dragged
         self._filter = None
 
     def activate(self):
-        self.points, self.markers = [], []
+        self.points, self.markers, self.undone, self._grab = [], [], [], None
         if cmds.draggerContext(THATCH_PICK_CTX, exists=True):
             cmds.deleteUI(THATCH_PICK_CTX)
-        cmds.draggerContext(THATCH_PICK_CTX, pressCommand=self._press, space="screen", cursor="crossHair",
-                            undoMode="step", finalize=self._finalize)
+        cmds.draggerContext(THATCH_PICK_CTX, pressCommand=self._press, dragCommand=self._drag,
+                            releaseCommand=self._release, space="screen", cursor="crossHair", undoMode="step",
+                            finalize=self._finalize)
         cmds.setToolTo(THATCH_PICK_CTX)
         self._filter = _ThatchPickKeys(self)
         QtWidgets.QApplication.instance().installEventFilter(self._filter)
@@ -24929,11 +24953,58 @@ class ThatchPointPicker(object):
     def _press(self):
         try:
             x, y, _ = cmds.draggerContext(THATCH_PICK_CTX, q=True, anchorPoint=True)
+            mod = cmds.draggerContext(THATCH_PICK_CTX, q=True, modifier=True)
+            self.press_at(x, y, ctrl=mod == "ctrl")
+        except Exception:
+            traceback.print_exc()
+
+    def _drag(self):
+        try:
+            if self._grab is not None:
+                x, y, _ = cmds.draggerContext(THATCH_PICK_CTX, q=True, dragPoint=True)
+                self.drag_to(x, y)
+        except Exception:
+            traceback.print_exc()
+
+    def _release(self):
+        self._grab = None
+
+    def press_at(self, x, y, ctrl=False):
+        """A click at a screen position: on a marker, grab it (Ctrl: remove
+        that point); elsewhere add a point (Ctrl: nothing)."""
+        self._grab = None
+        i = self.marker_at(x, y)
+        if i is not None:
+            if ctrl:
+                self.remove_point(i)
+            else:
+                self._grab = i
+            return
+        if not ctrl:
             p = self.pick(x, y)
             if p is not None:
                 self.add_point(p)
-        except Exception:
-            traceback.print_exc()
+
+    def drag_to(self, x, y):
+        """Move the grabbed point to what's under the screen position."""
+        if self._grab is None or self._grab >= len(self.points):
+            return
+        p = self.pick(x, y)
+        if p is not None:
+            self.move_point(self._grab, p)
+
+    def marker_at(self, x, y):
+        """The point whose marker is nearest the screen position, within SNAP_PX, or None."""
+        if not self.points:
+            return None
+        view = omui.M3dView.active3dView()
+        best, best_d = None, self.SNAP_PX
+        for i, p in enumerate(self.points):
+            res = view.worldToView(om.MPoint(*p))
+            d = math.hypot(res[0] - x, res[1] - y)
+            if d < best_d:
+                best, best_d = i, d
+        return best
 
     def pick(self, x, y):
         """World point under the screen position (snapped to a vertex), or on the level plane."""
@@ -25024,35 +25095,78 @@ class ThatchPointPicker(object):
                     best, best_k = (w.x, w.y, w.z), k
         return best
 
-    def add_point(self, p):
-        self.points.append(tuple(p))
+    def _marker(self, p):
+        """A marker locator with a number label (NoUndo, not saved)."""
         with NoUndo():
-            loc = cmds.spaceLocator(name="roofPick%02d" % len(self.points))[0]
-            loc = long_name(loc)
+            loc = long_name(cmds.spaceLocator(name="roofPick01")[0])
             cmds.xform(loc, worldSpace=True, translation=p)
-            size = 0.02 / scene_m_per_unit()
+            size = 0.2 / scene_m_per_unit()
             for ax in "XYZ":
-                cmds.setAttr("%s.localScale%s" % (_log_shape(loc) or loc, ax), size * 10.0)
+                cmds.setAttr("%s.localScale%s" % (_log_shape(loc) or loc, ax), size)
             cmds.setAttr(loc + ".overrideEnabled", True)
-            cmds.setAttr(loc + ".overrideColor", 17)
-            try:
-                om.MFnDependencyNode(get_dag_path(loc).node()).setDoNotWrite(True)
-            except Exception:
-                pass
-        self.markers.append(loc)
+            label = cmds.createNode("annotationShape", parent=loc, name="roofPickLabel")
+            cmds.setAttr(label + ".displayArrow", False)
+            for node in (loc, label):
+                try:
+                    om.MFnDependencyNode(get_dag_path(node).node()).setDoNotWrite(True)
+                except Exception:
+                    pass
+        return loc
+
+    def _refresh(self):
+        """Number and colour the markers (blue eaves, red peaks, grey left
+        out), then tell the panel."""
+        with NoUndo():
+            for i, (loc, role) in enumerate(zip(self.markers, _th_point_roles(self.points))):
+                if not cmds.objExists(loc):
+                    continue
+                cmds.setAttr(loc + ".overrideColor", THATCH_PICK_COLORS[role])
+                for label in cmds.listRelatives(loc, type="annotationShape", fullPath=True) or []:
+                    cmds.setAttr(label + ".text", "%d %s" % (i + 1, role if role != "mid" else "left out"),
+                                 type="string")
+                    cmds.setAttr(label + ".overrideEnabled", True)
+                    cmds.setAttr(label + ".overrideColor", THATCH_PICK_COLORS[role])
         if self.on_change:
             self.on_change(self)
 
-    def remove_last(self):
-        if not self.points:
+    def add_point(self, p, index=None, keep_redo=False):
+        index = len(self.points) if index is None else index
+        self.points.insert(index, tuple(p))
+        self.markers.insert(index, self._marker(p))
+        if not keep_redo:
+            self.undone = []
+        self._refresh()
+
+    def move_point(self, i, p):
+        self.points[i] = tuple(p)
+        if cmds.objExists(self.markers[i]):
+            with NoUndo():
+                cmds.xform(self.markers[i], worldSpace=True, translation=p)
+        self._refresh()
+
+    def remove_point(self, i):
+        """Take point i off (Ctrl+Y puts it back)."""
+        if not 0 <= i < len(self.points):
             return
-        self.points.pop()
-        loc = self.markers.pop() if self.markers else None
-        if loc and cmds.objExists(loc):
+        self.undone.append((i, self.points.pop(i)))
+        loc = self.markers.pop(i)
+        if cmds.objExists(loc):
             with NoUndo():
                 cmds.delete(loc)
-        if self.on_change:
-            self.on_change(self)
+        self._refresh()
+
+    def remove_last(self):
+        self.remove_point(len(self.points) - 1)
+
+    def redo_point(self):
+        if self.undone:
+            i, p = self.undone.pop()
+            self.add_point(p, min(i, len(self.points)), keep_redo=True)
+
+    def clear_points(self):
+        """Take every point off and keep picking (Ctrl+Y brings them back one by one)."""
+        while self.points:
+            self.remove_point(len(self.points) - 1)
 
     def finish(self):
         points = list(self.points)
@@ -25067,32 +25181,49 @@ class ThatchPointPicker(object):
 
 
 class _ThatchPickKeys(QtCore.QObject):
-    """While picking: Enter builds, Backspace removes the last point, Esc
-    cancels (queued on a timer: nothing touches the scene inside the filter).
-    Keys typed into text fields are left alone."""
+    """While picking: Enter builds, Ctrl+Z / Backspace / Delete remove the
+    last point, Ctrl+Y / Ctrl+Shift+Z put it back, Esc cancels (queued on a
+    timer: nothing touches the scene inside the filter). Their shortcut
+    events are taken too, so Maya's own Ctrl+Z (undo) never runs while
+    picking. Keys typed into text fields are left alone."""
 
     def __init__(self, picker):
         super(_ThatchPickKeys, self).__init__()
         self.picker = picker
 
+    def action(self, event):
+        """What a key event does while picking, or None."""
+        key, mods = event.key(), event.modifiers()
+        ctrl = bool(mods & QtCore.Qt.ControlModifier)
+        shift = bool(mods & QtCore.Qt.ShiftModifier)
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            return self.picker.finish
+        if key == QtCore.Qt.Key_Escape:
+            return self.picker.cancel
+        if key in (QtCore.Qt.Key_Backspace, QtCore.Qt.Key_Delete) or (key == QtCore.Qt.Key_Z and ctrl and not shift):
+            return self.picker.remove_last
+        if ctrl and (key == QtCore.Qt.Key_Y or (key == QtCore.Qt.Key_Z and shift)):
+            return self.picker.redo_point
+        return None
+
     def eventFilter(self, obj, event):
         try:
-            if event.type() != QtCore.QEvent.KeyPress or not self.picker.is_active():
+            kind = event.type()
+            if kind not in (QtCore.QEvent.KeyPress, QtCore.QEvent.ShortcutOverride) or not self.picker.is_active():
                 return False
             focus = QtWidgets.QApplication.focusWidget()
             if isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit,
                                   QtWidgets.QAbstractSpinBox)):
                 return False
-            key = event.key()
-            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.finish))
+            fn = self.action(event)
+            if fn is None:
+                return False
+            if kind == QtCore.QEvent.ShortcutOverride:  # claim the key: no shortcut / hotkey (Maya's undo) runs
+                event.accept()
                 return True
-            if key == QtCore.Qt.Key_Backspace:
-                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.remove_last))
-                return True
-            if key == QtCore.Qt.Key_Escape:
-                QtCore.QTimer.singleShot(0, _guarded_call(self.picker.cancel))
-                return True
+            if not event.isAutoRepeat() or fn in (self.picker.remove_last, self.picker.redo_point):
+                QtCore.QTimer.singleShot(0, _guarded_call(fn))
+            return True
         except Exception:
             traceback.print_exc()
         return False
@@ -25786,14 +25917,31 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                                         "(one apex, or points along the ridge), on a blockout or in "
                                                         "the air (clicks snap to vertices). Enter builds the box "
                                                         "and the roof: footprint, ridge direction, gable or hip "
-                                                        "ends and the hip pitch worked out for you. Backspace "
-                                                        "removes the last point, Esc cancels.")
+                                                        "ends and the hip pitch worked out for you. Ctrl+Z "
+                                                        "removes the last point (Ctrl+Y puts it back), drag a "
+                                                        "marker to move it, Ctrl+click one to remove it, Esc "
+                                                        "cancels.")
         self.pick_btn.clicked.connect(lambda *_: self.pick_points())
         from_sel = secondary_button("From Selected", "The same from the selection: vertices (or edges / faces) "
                                                      "of a roof shape you already have, or locators. The lowest "
                                                      "points are the eaves, the highest the peak(s).")
         from_sel.clicked.connect(lambda *_: self.roof_from_selection())
         card.add(button_row(self.pick_btn, from_sel))
+        undo_pt = secondary_button("Undo Point", "Remove the last point (Ctrl+Z, Backspace or Delete in the "
+                                                 "viewport do the same; Ctrl+Y puts it back).")
+        undo_pt.clicked.connect(lambda *_: self.picker.remove_last())
+        redo_pt = secondary_button("Redo Point", "Put back the last point you removed (Ctrl+Y).")
+        redo_pt.clicked.connect(lambda *_: self.picker.redo_point())
+        clear_pt = secondary_button("Clear", "Remove every point and keep picking.")
+        clear_pt.clicked.connect(lambda *_: self.picker.clear_points())
+        cancel_pt = secondary_button("Cancel", "Stop picking (Esc).")
+        cancel_pt.clicked.connect(lambda *_: self.picker.cancel())
+        self.pick_row = button_row(undo_pt, redo_pt, clear_pt, cancel_pt)
+        self.pick_row.setVisible(False)
+        card.add(self.pick_row)
+        self.pick_label = hint_label("")
+        self.pick_label.setVisible(False)
+        card.add(self.pick_label)
         col.addWidget(card)
 
         # ---- 2. make
@@ -26738,22 +26886,36 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             return
         self.picker.activate()
         self.pick_btn.setText("Build (Enter)")
-        self.set_status("Click the eave corners, then the peak(s). Enter builds, Backspace undoes a point, Esc "
-                        "cancels.")
+        self._picked_changed(self.picker)
 
     def _picked_changed(self, picker):
-        if not picker.is_active():
+        on = picker.is_active()
+        self.pick_row.setVisible(on)
+        self.pick_label.setVisible(on)
+        if not on:
             self.pick_btn.setText("Pick Points")
             if not picker.points:
                 self.set_status("Picking cancelled.")
             return
+        roles = _th_point_roles(picker.points)
         n = len(picker.points)
-        self.set_status("%d point(s) picked. Enter builds the roof (eave corners + peaks), Backspace removes the "
-                        "last one, Esc cancels." % n)
+        parts = ["%d eave (blue)" % roles.count("eave")]
+        if roles.count("peak"):
+            parts.append("%d peak (red)" % roles.count("peak"))
+        if roles.count("mid"):
+            parts.append("%d halfway up, left out (grey)" % roles.count("mid"))
+        self.pick_label.setText("%d point(s): %s. Click a marker and drag to move it; Ctrl+click removes it."
+                                % (n, ", ".join(parts)) if n else
+                                "Click the eave corners, then the peak(s).")
+        self.set_status("%s Enter builds the roof. Ctrl+Z removes the last point (Ctrl+Y puts it back), Esc "
+                        "cancels." % ("%d point(s) picked." % n if n else "Click the eave corners, then the "
+                                                                          "peak(s)."))
 
     @ui_safe
     def _picked_done(self, points):
         self.pick_btn.setText("Pick Points")
+        self.pick_row.setVisible(False)
+        self.pick_label.setVisible(False)
         self._build_from_points(points, "the picked points")
 
     @ui_safe

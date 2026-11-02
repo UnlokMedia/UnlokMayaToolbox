@@ -319,8 +319,15 @@ detail (just its shell, instant), get the shape right, then raise
      reaches it, else Hip, with the hip pitch from where it stops; one apex
      makes a pyramid), a lean-to (peaks along one edge), a cone (5+ eave
      points round a circle), and an off-centre or sloping ridge (the box's
-     top moves so the ridge passes through the peaks). Backspace removes
-     the last point, Esc cancels. **From Selected** does the same from
+     top moves so the ridge passes through the peaks). A wrong point is
+     easy to fix before Enter: **Ctrl+Z** (or Backspace / Delete) removes
+     the last point and **Ctrl+Y** puts it back (Maya's own undo doesn't
+     run while you pick, so nothing else in the scene is undone); click a
+     marker and drag to move that point, Ctrl+click one to remove it. While
+     picking, step 1 shows **Undo Point**, **Redo Point**, **Clear** and
+     **Cancel** and counts the points. Markers are numbered and coloured
+     the way the build will read them: blue eaves, red peaks, grey for a
+     point halfway up (left out). Esc cancels. **From Selected** does the same from
      selected vertices / edges / faces of a roof shape you already have, or
      locators: the lowest points are the eaves, the highest the peaks.
      Half-hips aren't detected (set them after); two hips of different
