@@ -668,6 +668,72 @@ trim Keep UVs. Levels and blockers are thatch only for now.
 **Speed:** a clean 16 x 9 m roof takes about 0.9 s, a makeshift one about
 3.5 s (about 460 panels).
 
+### Modeling > Moss and Ivy
+
+Jungle moss that gathers where it would really grow, and ivy that climbs
+posts and walls, grown on your own meshes. No plugin, no nodes: plain
+meshes with clean UVs, live while you tune them.
+
+1. **Select surfaces:** the meshes to grow on, together (a roof's planks,
+   a ledge and the wall behind it, a post and the beam on it). For ivy you
+   can also pick vertices, edges or faces where vines start.
+2. **Grow** (one Ctrl+Z): pick **Moss** or **Ivy** (and a preset), then
+   **Grow Moss / Ivy on Selected**. The new patch is selected, so step 3
+   edits it straight away.
+3. **Look** (live, out of the undo queue like the other tools' sliders).
+   Selecting a moss patch or an ivy shows its settings, like the Channel Box.
+4. **Finish:** **Regrow** after moving or editing the meshes (picked seeds
+   follow the mesh they were picked on), **Bake** keeps plain meshes,
+   **Select All**.
+
+**Moss** scatters spots over the meshes and scores each one: up-facing
+(*Slope limit*, faded out over the next 15 degrees), sheltered (short rays
+round it that hit: inside corners, and gaps between boards count as cracks:
+*Crevices*), not exposed (the surface falling away round it: ridges, convex
+edges, thin rails: *Avoid edges*) and patchy noise (*Patchiness*, *Patch
+size*). *Coverage* sets where the patches are; their edges are ragged
+(*Messiness*) and thin out into stray tufts. Inside a patch the moss is a
+carpet of small packed cushions (*Clump size*), bigger and thicker in the
+middle and in sheltered spots, each a smooth lumpy bump snapped onto the
+surface (so it wraps into a corner or a crack), never into geometry above
+it. *Strands* adds thin fibres standing out of it (the fuzz, for
+close-ups), drooping (*Droop*) and hanging longer over an edge.
+Presets: Jungle roof, Crevices only, Thick carpet, Shaggy hanging.
+
+**Ivy** vines start from the picked points (*Vines* shared between them) or
+from automatic seeds at the bottom of the meshes. Each vine walks the
+surface: pulled up (*Climb*), meandering (*Wander*), kept apart from the
+other vines, climbing onto any wall it runs into and round convex edges
+(over the top of a post onto the beam). Going down over an edge, or under
+an overhang, a vine may let go and hang (*Gravity*). Branches (*Branching*,
+two levels) are thinner and shorter. Stems are tapered tubes (*Stem
+width*); leaves grow along them (*Leaf size*, *Leaves*, *Leaf
+variation*), bigger on old growth, smaller at the tips: a stalk from the
+stem to a leaf-shaped blade (heart-shaped base, pointed tip, cut in the
+geometry above Proxy) lying over the surface like shingles, cupped, its
+tip curled.
+Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
+
+**Detail** (Proxy / Normal / High / Hero) sets cushion rings and strands, or
+stem sides, walk steps and leaf rows.
+
+**UVs:** every part has its own UDIM tiles from *Start UDIM* on, so no two
+parts share UV space except stacked variations. Moss cushions each get a
+planar UV at *Tile size* metres a tile, at a random place in 0..1 (one moss
+texture for every clump); strands and leaves fill 0..1 (a leaf texture with
+its stalk at the bottom 20%). *Stacks* gives each clump / strand / leaf one
+of N stacks (UDIM tiles or atlas columns). Stems are laid out in neat
+columns at one density over *Stem tiles* tiles.
+
+Patches are `mossPatch0001_GRP` holding `mossGreen_C_mossPatch0001_GEP`
+(cushions) and `mossStrand_C_mossPatch0001_GEP`; ivy is `ivy0001_GRP` holding
+`ivyStem_C_ivy0001_GEP` and `ivyLeaf_C_ivy0001_GEP`. **With Smart UDIM:**
+cushions, strands and leaves are Hands off (stacked), stems Keep UVs.
+
+**Speed** (Normal): moss on a ledge and wall 0.7 s; a whole shack roof
+about 7 s (3,000 cushions), and a live edit rebuilds it all, so use Proxy
+while tuning big patches. Ivy 0.1 - 0.3 s.
+
 ### UV > Smart UDIM (in progress)
 
 **Finding your way:** only the step you're on stays open (plus any step
@@ -1445,6 +1511,21 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with
   `tests/run_gui_thatch_roof.mel`.
+- `tests/test_moss_ivy.py`: headless Moss and Ivy tests. Moss on a slab of
+  two boards with a crack between them, a wall behind (inside corner) and a
+  thin rail: more moss per area in the corner and the crack than in the
+  open, none on the rail, the open wall or undersides, bigger clumps where
+  sheltered, no point inside geometry, UDIMs per part (stacks, Start UDIM),
+  live edits out of the undo queue, cached re-scoring, undo / redo (the
+  redo regrows the seed planes), save / reopen, bake. Ivy on a post: vines
+  climb it, stems and leaves stay out of it, UVs inside their tiles, picked
+  seeds (and Regrow following the post), presets, speed.
+- `tests/gui_moss_ivy.py`: drives the Moss and Ivy panel in a real Maya
+  session (grow moss on a plank roof, live edit, undo / redo, presets, moss
+  in a stone wall's crevices, ivy up a post onto its beam and from picked
+  seeds on a wall, Randomize, bake) and saves pictures to
+  `tests/_out/moss_ivy`. Launch it like the smoke test below, with
+  `tests/run_gui_moss_ivy.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

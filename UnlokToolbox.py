@@ -24321,19 +24321,20 @@ def thatch_build(frame, settings, blockers=None):
 ROOF_UDIM_ORDER = ("straw", "sheets", "sticks", "underlay", "trim", "fixings", "frame")
 
 
-def _roof_udims(out, start=1001):
+def _roof_udims(out, start=1001, order=None):
     """No two of a roof's meshes share UV space: each part, in
     ROOF_UDIM_ORDER, moves into the UDIM tiles after the ones the parts
     before it use (a part's own stacked variations still share their
     tiles), from the Start UDIM along the row; a part that won't fit before
     the row's 10th tile goes on up a row (above every part so far, from the
     start's column if it fits there, else the first). out["udims"]: {part:
-    [UDIM numbers]}."""
+    [UDIM numbers]}. order: the parts in order (default ROOF_UDIM_ORDER; Moss and
+    Ivy pass its own)."""
     d = max(0, int(start or 1001) - 1001)
     c0, r0 = d % 10, d // 10
     c, r, band = c0, r0, 1
     tiles = {}
-    for part in ROOF_UDIM_ORDER:
+    for part in order or ROOF_UDIM_ORDER:
         mesh = out.get(part)
         if not mesh or not mesh[1]:
             continue
@@ -27296,12 +27297,2104 @@ class ThatchRoofPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Moss and Ivy - engine
+# =============================================================================
+# Jungle moss that gathers on ledges, roofs and in crevices, and ivy that
+# climbs posts and walls, grown on the user's own meshes (the user,
+# 2026-11-03). One group per patch / plant (mossPatch####_GRP / ivy####_GRP)
+# holds the settings JSON, the meshes it grows on (uuids) and, for ivy, its
+# seeds; its part meshes are seed planes filled through the API, like Rope
+# Lashing and Roof. Sizes are metres (scene_m_per_unit()).
+
+MI_SETTINGS = "unlokMossIvy"     # string on the group: JSON (kind, settings, targets, seeds)
+MI_BAKED = "unlokMossIvyBaked"   # the same after Bake (only a redo of Grow reads it)
+MI_PART = "unlokMossIvyPart"     # string on each part mesh: "moss", "strands", "stems" or "leaves"
+MI_VERTS = "unlokMossIvyVerts"   # long on each part mesh: vertex count of the last build
+MI_VERSION = 1
+MI_KINDS = ("Moss", "Ivy")
+MI_PARTS = {"Moss": (("moss", "mossGreen"), ("strands", "mossStrand")),
+            "Ivy": (("stems", "ivyStem"), ("leaves", "ivyLeaf"))}
+MI_STEMS = {"Moss": "mossPatch", "Ivy": "ivy"}
+MI_UDIM_ORDER = ("moss", "strands", "stems", "leaves")  # each part in its own tiles, from Start UDIM
+MI_STACKED_PARTS = ("moss", "strands", "leaves")  # same UVs on every clump / card / leaf (UV_STACKED_ATTR)
+MI_DETAILS = ("Proxy", "Normal", "High", "Hero")
+MI_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
+MI_MAX_VERTS = 900000  # per part; past it clumps / leaves are dropped (reported as capped)
+MI_MAX_SEEDS = 64
+
+MOSS_DEFAULTS = {
+    "coverage": 0.55, "clump_size": 0.06, "size_var": 0.5, "thickness": 0.025, "mess": 0.6,
+    "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8,
+    "strands": 0.6, "strand_length": 0.012, "droop": 0.5,
+    "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles"}
+IVY_DEFAULTS = {
+    "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
+    "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
+    "detail": "Normal", "seed": 1, "udim": 1001, "stem_tiles": 1, "stacks": 1, "stack_layout": "UDIM tiles"}
+MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS}
+MI_PRESET_SKIP = ("seed", "udim")
+_MI_UP = (0.0, 1.0, 0.0)
+
+
+def _mi_kind(kind):
+    return kind if kind in MI_DEFAULTS else "Moss"
+
+
+def mi_settings_only(kind, data):
+    """Just the settings of a kind (defaults for what data lacks)."""
+    d = MI_DEFAULTS[_mi_kind(kind)]
+    return {k: (data or {}).get(k, v) for k, v in d.items()}
+
+
+def _mi_noise(p, scale, seed):
+    """Smooth 3D-ish value noise, about -1..1 (three 2D slices averaged)."""
+    x, y, z = p[0] / scale, p[1] / scale, p[2] / scale
+    v = (_th_noise(x, y, seed) + _th_noise(y + 17.3, z - 3.1, seed + 1) + _th_noise(z + 5.1, x + 9.7, seed + 2))
+    return clamp(v * 0.75, -1.0, 1.0)
+
+
+def _mi_rotate(v, axis, ang):
+    """v turned by ang about unit axis (Rodrigues)."""
+    c, s = math.cos(ang), math.sin(ang)
+    k = _rl_cross(axis, v)
+    d = _rl_dot(axis, v) * (1.0 - c)
+    return (v[0] * c + k[0] * s + axis[0] * d, v[1] * c + k[1] * s + axis[1] * d, v[2] * c + k[2] * s + axis[2] * d)
+
+
+def _mi_stack_uv(u, v, k, stacks, columns):
+    """A 0..1 UV moved onto stack k: its own UDIM tile, or its column of 0..1."""
+    if stacks <= 1:
+        return u, v
+    if columns:
+        return (k + u) / float(stacks), v
+    return u + k, v
+
+
+class _MiSurface(object):
+    """The meshes moss and ivy grow on, in world space: closest point and
+    normal (_SurfaceQuery, ~3 us) and nearest ray hit over all of them.
+    Each mesh's world box culls it first: a roof of 40 planks costs a
+    plank or two per query, not 40."""
+
+    def __init__(self, nodes):
+        self.nodes, self.items = [], []
+        lo, hi = [1e30] * 3, [-1e30] * 3
+        for node in nodes:
+            shape = _log_shape(node)
+            dag = get_dag_path(shape) if shape else None
+            if dag is None:
+                continue
+            fn = om.MFnMesh(dag)
+            if not fn.numPolygons:
+                continue
+            bb = cmds.exactWorldBoundingBox(node)
+            pad = 1e-4 * max(1e-6, bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2])
+            box = (bb[0] - pad, bb[1] - pad, bb[2] - pad, bb[3] + pad, bb[4] + pad, bb[5] + pad)
+            self.items.append((_SurfaceQuery(dag), fn, fn.autoUniformGridParams(), box))
+            self.nodes.append(node)
+            for i in range(3):
+                lo[i], hi[i] = min(lo[i], bb[i]), max(hi[i], bb[i + 3])
+        self.lo, self.hi = lo, hi
+        self.size = _rl_len(_rl_sub(hi, lo)) if self.items else 0.0
+        self._grid()
+
+    def _grid(self):
+        """Cells (about the median mesh's size) listing the meshes whose box
+        touches them; a mesh spanning too many cells (a ground plane) is
+        always looked at. Python loops over every mesh's box cost more than
+        the queries on a wall of 60 stones."""
+        self.cell, self.cells, self.big = None, {}, []
+        if len(self.items) < 6:
+            return
+        sizes = sorted(max(b[3] - b[0], b[4] - b[1], b[5] - b[2]) for b in (it[3] for it in self.items))
+        cell = max(sizes[len(sizes) // 2], 1e-6 * self.size, 1e-9)
+        for idx, it in enumerate(self.items):
+            b = it[3]
+            lo = [int(math.floor(b[k] / cell)) for k in range(3)]
+            hi = [int(math.floor(b[k + 3] / cell)) for k in range(3)]
+            if (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1) > 512:
+                self.big.append(idx)
+                continue
+            for i in range(lo[0], hi[0] + 1):
+                for j in range(lo[1], hi[1] + 1):
+                    for k in range(lo[2], hi[2] + 1):
+                        self.cells.setdefault((i, j, k), []).append(idx)
+        self.cell = cell
+
+    def _near(self, lo, hi):
+        """The meshes whose cells touch the box lo..hi (None: look at all)."""
+        c = self.cell
+        if c is None:
+            return None
+        a = [int(math.floor(lo[k] / c)) for k in range(3)]
+        b = [int(math.floor(hi[k] / c)) for k in range(3)]
+        if (b[0] - a[0] + 1) * (b[1] - a[1] + 1) * (b[2] - a[2] + 1) > 64:
+            return None
+        found = set(self.big)
+        cells = self.cells
+        for i in range(a[0], b[0] + 1):
+            for j in range(a[1], b[1] + 1):
+                for k in range(a[2], b[2] + 1):
+                    found.update(cells.get((i, j, k), ()))
+        return [self.items[i] for i in found]
+
+    def closest(self, p):
+        """(distance, point, unit normal) of the nearest surface point, or None."""
+        c = self.cell
+        if c is not None:  # the meshes within a cell first: anything else is further than a cell away
+            near = self._near((p[0] - c, p[1] - c, p[2] - c), (p[0] + c, p[1] + c, p[2] + c))
+            if near is not None:
+                best = self._closest(p, near)
+                if best is not None and best[0] <= c:
+                    return best
+        return self._closest(p, self.items)
+
+    def _closest(self, p, items):
+        x, y, z = p
+        order = []
+        for item in items:
+            b = item[3]
+            dx = b[0] - x if x < b[0] else (x - b[3] if x > b[3] else 0.0)
+            dy = b[1] - y if y < b[1] else (y - b[4] if y > b[4] else 0.0)
+            dz = b[2] - z if z < b[2] else (z - b[5] if z > b[5] else 0.0)
+            order.append((dx * dx + dy * dy + dz * dz, item[0]))
+        if len(order) > 1:
+            order.sort(key=lambda o: o[0])
+        mp = om.MPoint(x, y, z)
+        best = None
+        for d2, q in order:
+            if best is not None and d2 > best[0] * best[0]:
+                break
+            r = q.closest(mp)
+            if r and (best is None or r[0] < best[0]):
+                best = r
+        if best is None:
+            return None
+        d, pt, n = best
+        return d, (pt.x, pt.y, pt.z), (n.x, n.y, n.z)
+
+    def ray(self, p, d, far):
+        """(distance, point, face normal) of the first hit along unit d within far, or None."""
+        if far <= 0.0:
+            return None
+        e = (p[0] + d[0] * far, p[1] + d[1] * far, p[2] + d[2] * far)
+        items = self._near((min(p[0], e[0]), min(p[1], e[1]), min(p[2], e[2])),
+                           (max(p[0], e[0]), max(p[1], e[1]), max(p[2], e[2])))
+        cands = []
+        for item in self.items if items is None else items:  # slab test of the segment against the mesh's box
+            b = item[3]
+            t0, t1 = 0.0, far
+            for k in range(3):
+                if abs(d[k]) < 1e-12:
+                    if p[k] < b[k] or p[k] > b[k + 3]:
+                        t0 = 1.0
+                        t1 = 0.0
+                        break
+                    continue
+                inv = 1.0 / d[k]
+                ta, tb = (b[k] - p[k]) * inv, (b[k + 3] - p[k]) * inv
+                if ta > tb:
+                    ta, tb = tb, ta
+                t0, t1 = max(t0, ta), min(t1, tb)
+                if t0 > t1:
+                    break
+            if t0 <= t1:
+                cands.append((t0, item))
+        if not cands:
+            return None
+        if len(cands) > 1:
+            cands.sort(key=lambda c: c[0])
+        src = om.MFloatPoint(p[0], p[1], p[2])
+        dv = om.MFloatVector(d[0], d[1], d[2])
+        best = None
+        for t_in, (_, fn, accel, _) in cands:
+            if best is not None and t_in > best[0]:
+                break
+            try:
+                hit = fn.closestIntersection(src, dv, om.MSpace.kWorld, far, False, accelParams=accel)
+            except RuntimeError:
+                continue
+            if not hit or hit[2] < 0:
+                continue
+            if best is None or hit[1] < best[0]:
+                best = (hit[1], hit[0], fn, hit[2])
+        if best is None:
+            return None
+        t, hp, fn, face = best
+        try:
+            n = fn.getPolygonNormal(face, om.MSpace.kWorld)
+            nrm = _rl_norm((n.x, n.y, n.z))
+        except RuntimeError:
+            nrm = _rl_mul(d, -1.0)
+        return t, (hp.x, hp.y, hp.z), nrm
+
+
+_MI_TRIS = collections.OrderedDict()  # mesh state -> (running areas, triangles): reused while a mesh is unchanged
+
+
+def _mi_mesh_key(node):
+    shape = _log_shape(node)
+    dag = get_dag_path(shape)
+    fn = om.MFnMesh(dag)
+    bb = fn.boundingBox
+    return (shape, fn.numVertices, fn.numPolygons, tuple(round(v, 7) for v in dag.inclusiveMatrix()),
+            tuple(round(v, 6) for v in (bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z)))
+
+
+def _mi_triangles(node):
+    """World triangles of a mesh [(a, b, c, unit normal)] and their running
+    area (cached while the mesh is unchanged)."""
+    key = _mi_mesh_key(node)
+    hit = _MI_TRIS.get(key)
+    if hit is not None:
+        return hit
+    fn = om.MFnMesh(get_dag_path(key[0]))
+    P = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    ids = fn.getTriangles()[1]
+    tris, acc, total = [], [], 0.0
+    for k in range(0, len(ids), 3):
+        a, b, c = P[ids[k]], P[ids[k + 1]], P[ids[k + 2]]
+        cr = _rl_cross(_rl_sub(b, a), _rl_sub(c, a))
+        area = 0.5 * _rl_len(cr)
+        if area <= 1e-14:
+            continue
+        total += area
+        acc.append(total)
+        tris.append((a, b, c, _rl_norm(cr)))
+    _MI_TRIS[key] = (acc, tris)
+    while len(_MI_TRIS) > 24:
+        _MI_TRIS.popitem(last=False)
+    return acc, tris
+
+
+class _MiSampler(object):
+    """Area-weighted random points over several meshes."""
+
+    def __init__(self, nodes):
+        self.parts, self.total = [], 0.0
+        for node in nodes:
+            acc, tris = _mi_triangles(node)
+            if tris:
+                self.parts.append((self.total, acc, tris))
+                self.total += acc[-1]
+        self.starts = [p[0] for p in self.parts]
+
+    def point(self, r0, r1, r2):
+        """(point, triangle normal) for three uniforms."""
+        x = r0 * self.total
+        i = max(0, bisect.bisect_right(self.starts, x) - 1)
+        base, acc, tris = self.parts[i]
+        k = min(len(tris) - 1, bisect.bisect_left(acc, x - base))
+        a, b, c, n = tris[k]
+        if r1 + r2 > 1.0:
+            r1, r2 = 1.0 - r1, 1.0 - r2
+        return (a[0] + (b[0] - a[0]) * r1 + (c[0] - a[0]) * r2, a[1] + (b[1] - a[1]) * r1 + (c[1] - a[1]) * r2,
+                a[2] + (b[2] - a[2]) * r1 + (c[2] - a[2]) * r2), n
+
+
+def _mi_frame(n, ang=0.0):
+    """Two unit tangents (t1, t2 = n x t1) of a normal, turned by ang."""
+    t1 = _rl_any_perp(n)
+    if ang:
+        t1 = _mi_rotate(t1, n, ang)
+    return t1, _rl_cross(n, t1)
+
+
+def _mi_mesh():
+    return [], [], [], [], [], []  # points, counts, connects, us, vs, uv ids
+
+
+# ------------------------------------------------------------------- moss
+MOSS_RINGS = {"Proxy": (2, 7), "Normal": (4, 12), "High": (6, 16), "Hero": (8, 22)}
+MOSS_RAYS = {"Proxy": 5, "Normal": 7, "High": 9, "Hero": 12}
+MOSS_STRANDS = {"Proxy": 0.0, "Normal": 1.0, "High": 1.8, "Hero": 2.4}
+MOSS_MAX_CANDIDATES = 9000
+MOSS_MAX_CUSHIONS = 120000  # cushion candidates
+_MI_MOSS_CACHE = collections.OrderedDict()  # (meshes, seed, sizes, detail) -> analysed spots
+
+
+def _moss_spots(surf, sampler, s, R):
+    """Candidate spots, each analysed once: (point, normal, up, shelter,
+    edge, noise, randoms). Shelter is how closed in a spot is (short rays
+    round its hemisphere that hit: corners, crevices); edge is how much the
+    surface falls away round it (ridges, convex edges, thin rails). Cached:
+    coverage, slope, crevices and the other weights only re-score them."""
+    seed = int(s["seed"])
+    detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
+    key = (tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9), round(float(s["patch_size"]), 6), detail)
+    hit = _MI_MOSS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    m = scene_m_per_unit()
+    patch = max(1e-3, float(s["patch_size"]) / m)
+    n = int(min(MOSS_MAX_CANDIDATES, max(8, sampler.total / (math.pi * R * R) * 3.0)))
+    K = MOSS_RAYS[detail]
+    dirs = []  # round the hemisphere, low first: walls and floors next to a spot are what shelter it
+    for k in range(K):
+        el = 0.18 + 0.62 * k / max(1, K - 1)
+        az = k * 2.39996
+        ce = math.sqrt(1.0 - el * el)
+        dirs.append((ce * math.cos(az), ce * math.sin(az), el))
+    reach = 2.5 * R
+    spots = []
+    for i in range(n):
+        r = _rand12(seed, i, 17, 5)
+        p, tn = sampler.point(r[0], r[1], r[2])
+        c = surf.closest(p)
+        nrm = c[2] if c else tn
+        if _rl_dot(nrm, tn) < 0.0:  # a face flipped against its neighbours: trust the triangle
+            nrm = tn
+        up = nrm[1]
+        if up < -0.35:  # ceilings and undersides: no moss
+            continue
+        t1, t2 = _mi_frame(nrm, r[3] * 6.2832)
+        src = _rl_add(p, _rl_mul(nrm, 0.03 * R))
+        occ = 0.0
+        for dx, dy, dz in dirs:
+            d = (t1[0] * dx + t2[0] * dy + nrm[0] * dz, t1[1] * dx + t2[1] * dy + nrm[1] * dz,
+                 t1[2] * dx + t2[2] * dy + nrm[2] * dz)
+            h = surf.ray(src, d, reach)
+            if h:
+                occ += 1.0 - 0.6 * h[0] / reach
+        occ /= float(K)
+        # six ways round: walk out (0.2, 0.45, 0.9 R) casting down; where the surface first falls away,
+        # it either comes back further on (a gap between boards, a crack: sheltered, more so the closer)
+        # or doesn't (an edge: exposed)
+        edge = crack = 0.0
+        down = _rl_mul(nrm, -1.0)
+        lift = _rl_mul(nrm, 0.5 * R)
+        for k in range(6):
+            a = 1.0472 * k + r[4]
+            t = _rl_add(_rl_mul(t1, math.cos(a)), _rl_mul(t2, math.sin(a)))
+            for dist in (0.2, 0.45, 0.9):
+                q = _rl_add(p, _rl_add(_rl_mul(t, dist * R), lift))
+                if surf.ray(q, down, 1.15 * R) is None:  # the surface falls away this way
+                    far = _rl_add(p, _rl_add(_rl_mul(t, (dist + 0.9) * R), lift))
+                    if surf.ray(far, down, 1.15 * R) is None:
+                        edge += 1.0 / 6.0
+                    else:
+                        crack = max(crack, 1.1 - dist)
+                    break
+        occ = min(1.0, occ + 0.8 * crack)
+        spots.append((p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r))
+    _MI_MOSS_CACHE[key] = spots
+    while len(_MI_MOSS_CACHE) > 6:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return spots
+
+
+def moss_score(spot, s):
+    """How much a spot wants moss: up-facing (Slope limit fades it out over
+    15 degrees), sheltered (Crevices), not on an exposed edge (Avoid edges),
+    patchy noise (Patchiness). Coverage keeps spots scoring over 1 - coverage."""
+    _, _, up, occ, edge, noise, r = spot
+    a = math.degrees(math.acos(clamp(up, -1.0, 1.0)))
+    upw = clamp(1.0 - (a - float(s["slope"])) / 15.0, 0.0, 1.0)
+    crev = float(s["crevices"])
+    shelter = clamp(occ * 1.7, 0.0, 1.0)
+    base = 0.5 * upw * (1.0 - float(s["edges"]) * edge) + crev * 0.62 * shelter * (0.6 + 0.4 * upw)
+    return base + float(s["patchiness"]) * 0.55 * noise + (r[5] - 0.5) * 0.12
+
+
+def _moss_reach(R):
+    """The analysis radius: shelter and edges are judged at this scale,
+    never finer than 10 cm (crack probes need room either side of a gap)."""
+    return max(2.0 * R, 0.1 / scene_m_per_unit())
+
+
+def _moss_field(surf, sampler, s, R):
+    """(spots, candidates): cushion candidates scattered over the meshes,
+    each tied to the analysed spots round it, [(point, normal, randoms,
+    [(spot index, weight)], fine noise)]. Cached like the spots: Coverage
+    and the weights only re-score."""
+    seed = int(s["seed"])
+    detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
+    RA = _moss_reach(R)
+    spots = _moss_spots(surf, sampler, s, RA)
+    key = ("field", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
+           round(float(s["patch_size"]), 6), detail)
+    hit = _MI_MOSS_CACHE.get(key)
+    if hit is not None:
+        return spots, hit
+    patch = max(1e-3, float(s["patch_size"]) / scene_m_per_unit())
+    reach = 1.6 * RA
+    grid = {}
+    for j, sp in enumerate(spots):
+        q = sp[0]
+        grid.setdefault((int(math.floor(q[0] / reach)), int(math.floor(q[1] / reach)),
+                         int(math.floor(q[2] / reach))), []).append(j)
+    n = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * R * R) * 4.5)))
+    cands = []
+    for i in range(n):
+        r = _rand12(seed, i, 29, 3)
+        p, tn = sampler.point(r[0], r[1], r[2])
+        if tn[1] < -0.35:
+            continue
+        kx, ky, kz = int(math.floor(p[0] / reach)), int(math.floor(p[1] / reach)), int(math.floor(p[2] / reach))
+        near = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for j in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                        q, qn = spots[j][0], spots[j][1]
+                        pq = _rl_sub(q, p)
+                        d = _rl_len(pq)
+                        dn = _rl_dot(qn, tn)
+                        lvl = 1.0 - abs(_rl_dot(pq, tn)) / (0.3 * RA)  # a rail's top doesn't read the board under it
+                        if d < reach and dn > 0.2 and lvl > 0.0:  # a corner still mixes its floor's spots
+                            near.append((j, (1.0 - d / reach) ** 2 * (0.3 + 0.7 * dn) * lvl))
+        if not near:
+            continue
+        a, b = (p[0] + p[1] * 0.71) / patch, (p[2] - p[1] * 0.53) / patch  # 2D is enough for a ragged edge
+        fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
+        cands.append((p, tn, r, near, fine, {}))  # the last: is it covered (worked out when first kept)
+    _MI_MOSS_CACHE[key] = cands
+    while len(_MI_MOSS_CACHE) > 8:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return spots, cands
+
+
+def moss_clumps(surf, sampler, s):
+    """The cushions a patch has: [(centre, normal, radius, height, shelter,
+    edge, randoms)]. Real moss is a carpet of small packed cushions with a
+    ragged edge, not round pads: each candidate reads a coverage field
+    (the analysed spots' scores round it plus fine noise for the ragged
+    edge); inside a patch cushions are big, thick and packed (overlapping),
+    towards its edge smaller and thinner, past it a few scattered tufts."""
+    m = scene_m_per_unit()
+    R = max(1e-4, float(s["clump_size"]) / m)
+    H = max(0.0, float(s["thickness"]) / m)
+    cov = clamp(float(s["coverage"]), 0.0, 1.0)
+    if cov <= 0.0 or not sampler.total:
+        return []
+    thr = 1.0 - cov
+    var = clamp(float(s["size_var"]), 0.0, 1.0)
+    rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
+    spots, cands = _moss_field(surf, sampler, s, R)
+    scores = [moss_score(sp, s) for sp in spots]
+    picked = []
+    for p, n, r, near, fine, memo in cands:
+        tw = sc = occ = edge = 0.0
+        for j, w in near:
+            tw += w
+            sc += scores[j] * w
+            occ += spots[j][3] * w
+            edge += spots[j][4] * w
+        margin = sc / tw + rag * fine - thr
+        if margin < 0.0 and (margin < -0.15 or edge > 0.25 * tw or r[4] > 0.3 * (1.0 + margin / 0.15)):
+            continue  # past the patch's edge: a few stray tufts, thinning out (none on exposed edges)
+        picked.append((margin + 0.05 * r[5], p, n, occ / tw, edge / tw, margin, r, memo))
+    picked.sort(key=lambda x: -x[0])  # the patches' middles first: big cushions pack, small ones fill in
+    cell = 2.6 * R
+    cover = 0.05 / m
+    grid = {}
+    out = []
+    for _, p, n, occ, edge, margin, r, memo in picked:
+        core = clamp(margin / 0.3, 0.0, 1.0)
+        core = core * core * (3.0 - 2.0 * core)
+        shelter = clamp(occ * 1.7, 0.0, 1.0)
+        rad = R * (0.3 + 0.55 * core + 0.2 * shelter) * (1.0 + var * (r[6] - 0.5) * 1.2)
+        key = (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
+        if any(_rl_len(_rl_sub(p, q)) < 0.5 * (rad + rq)
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+               for q, rq in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ())):
+            continue  # packed and overlapping, never piled up
+        if "c" not in memo:
+            memo["c"] = bool(surf.ray(_rl_add(p, _rl_mul(n, 1e-3 * R)), n, cover))
+        if memo["c"]:
+            continue  # under something resting on the surface (a rail on a board): no light, no moss
+        grid.setdefault(key, []).append((p, rad))
+        h = H * (0.3 + 0.7 * core) * (0.75 + 0.6 * shelter) * (1.0 + var * (r[7] - 0.5) * 0.8)
+        out.append((p, n, rad, h, occ, edge, r))
+    return out
+
+
+class _MossCushion(object):
+    """One cushion: a disc with a ragged edge, each point snapped onto the
+    surface (so it wraps into an inside corner and follows bumps) and lifted
+    by a dome profile with lumps, never into geometry above it. Most
+    cushions sit on one flat face with nothing above (`flat`): those skip
+    the per-point snaps and rays."""
+
+    def __init__(self, surf, clump, s, seed, index):
+        self.surf = surf
+        self.c, self.n, self.r, self.h, self.occ, self.edge, rnd = clump
+        self.rnd = rnd
+        self.mess = clamp(float(s["mess"]), 0.0, 2.0)
+        self.t1, self.t2 = _mi_frame(self.n, rnd[8] * 6.2832)
+        self.seed = seed * 31 + index
+        self.lump = max(1e-6, 0.3 * self.r)
+        self.phase = (rnd[9] * 50.0, rnd[10] * 50.0)
+        self.flat, self.clear = self._flat()
+
+    def _flat(self):
+        """(flat, clear): the cushion lies on one flat face (no snaps
+        needed), nothing is above it (no rays needed). Sampled on two rings:
+        a thin rail resting on the board must land on a sample."""
+        c, n = self.c, self.n
+        rr = self.r * (1.1 + 0.55 * self.mess)
+        tol = 1e-3 * rr
+        pts = [c]
+        flat = True
+        for k in range(12):
+            a = 0.5236 * k
+            rk = rr if k % 2 == 0 else 0.55 * rr
+            q = _rl_add(c, _rl_add(_rl_mul(self.t1, math.cos(a) * rk), _rl_mul(self.t2, math.sin(a) * rk)))
+            pts.append(q)
+            if flat:
+                cl = self.surf.closest(q)
+                if not cl or _rl_dot(cl[2], n) < 0.999 or _rl_len(_rl_sub(cl[1], q)) > tol:
+                    flat = False  # off the face's edge, into a corner, or a curved surface
+        far = 2.5 * self.h + rr * (0.0 if flat else 0.5)
+        for q in pts:
+            if self.surf.ray(_rl_add(q, _rl_mul(n, tol)), n, far):
+                return False, False  # something above it
+        return flat, True
+
+    def radius(self, th):
+        """Edge radius at angle th: ragged and lobed with Messiness."""
+        x, y = math.cos(th) * 1.4 + self.phase[0], math.sin(th) * 1.4 + self.phase[1]
+        rag = (_th_noise(x, y, self.seed) * 0.3 + _th_noise(x * 2.7, y * 2.7, self.seed + 3) * 0.14 +
+               _th_noise(x * 6.1, y * 6.1, self.seed + 5) * 0.07)
+        return self.r * max(0.35, 1.0 + self.mess * rag)
+
+    def at(self, f, th, rad=None):
+        """(point, lift direction, height there, tangent-plane x, y) at
+        fraction f of the way out along angle th."""
+        rad = self.radius(th) if rad is None else rad
+        x, y = math.cos(th) * rad * f, math.sin(th) * rad * f
+        q = _rl_add(self.c, _rl_add(_rl_mul(self.t1, x), _rl_mul(self.t2, y)))
+        sp, sn = q, self.n
+        if not self.flat and f > 0.0:
+            cl = self.surf.closest(q)
+            if cl and _rl_dot(cl[2], self.n) >= -0.2:  # not the back of a thin board
+                sp, sn = cl[1], cl[2]
+        lift = sn if sn is self.n else _rl_norm(_rl_add(_rl_mul(sn, 0.7), _rl_mul(self.n, 0.3)), self.n)
+        g = max(0.0, 1.0 - f * f)
+        prof = g * g  # a smooth bump, flat where it meets the surface: overlapping cushions blend into a carpet
+        lx, ly = x / self.lump + self.phase[0], y / self.lump + self.phase[1]
+        bumps = 1.0 + self.mess * (0.5 * _th_noise(lx, ly, self.seed) +
+                                   0.4 * _th_noise(lx * 2.3, ly * 2.3, self.seed + 7))
+        return sp, lift, self.h * prof * max(0.2, bumps), x, y
+
+    def place(self, sp, lift, hh):
+        """The point hh above sp along lift, kept clear of geometry above."""
+        if hh > 0.0 and not self.clear:
+            hit = self.surf.ray(_rl_add(sp, _rl_mul(lift, 1e-3 * self.r)), lift, hh * 1.6)
+            if hit:  # a back face: this spot is under something resting on it (a rail on a board): stay flat
+                hh = 0.0 if _rl_dot(hit[2], lift) > 0.0 else min(hh, 0.6 * hit[0])
+        return _rl_add(sp, _rl_mul(lift, hh))
+
+    def clip(self, origin, v):
+        """v pulled back to just in front of any surface between the cushion's
+        top and it (a corner can snap a point through the other wall)."""
+        if self.flat:
+            return v
+        d = _rl_sub(v, origin)
+        ln = _rl_len(d)
+        if ln < 1e-9:
+            return v
+        d = _rl_mul(d, 1.0 / ln)
+        hit = self.surf.ray(origin, d, ln)
+        if hit is None:
+            return v
+        return _rl_add(origin, _rl_mul(d, max(0.0, hit[0] - 0.02 * self.h)))
+
+
+def moss_build(nodes, s, surf=None):
+    """Grow a moss patch on meshes: {"moss": mesh, "strands": mesh,
+    "clumps", "capped"} (world space). Cushions take one planar UV each, at
+    Tile size metres a tile, randomly offset inside 0..1 (stacked: the same
+    texture on every cushion); strands are thin fibre cards filling 0..1."""
+    s = mi_settings_only("Moss", s)
+    surf = surf or _MiSurface(nodes)
+    sampler = _MiSampler(surf.nodes)
+    seed = int(s["seed"])
+    m = scene_m_per_unit()
+    detail = s["detail"] if s["detail"] in MOSS_RINGS else "Normal"
+    stacks = max(1, int(s["stacks"]))
+    columns = s["stack_layout"] == "Atlas columns"
+    tile = max(1e-4, float(s["uv_tile"]) / m)
+    strand_rate = clamp(float(s["strands"]), 0.0, 3.0) * MOSS_STRANDS[detail]
+    cards = 2 if detail == "Hero" else 1
+    slen = max(1e-5, float(s["strand_length"]) / m)
+    droop = clamp(float(s["droop"]), 0.0, 2.0)
+    mess = clamp(float(s["mess"]), 0.0, 2.0)
+    R = max(1e-9, float(s["clump_size"]) / m)
+    clumps = moss_clumps(surf, sampler, s) if surf.items else []
+    M, S = _mi_mesh(), _mi_mesh()
+    capped = False
+    for ci, clump in enumerate(clumps):
+        small = min(1.0, clump[2] / R)
+        rings, segs = MOSS_RINGS[detail]
+        rings, segs = max(2, int(round(rings * small ** 0.5))), max(7, int(round(segs * small ** 0.5)))
+        if len(M[0]) + 1 + rings * segs > MI_MAX_VERTS:
+            capped = True
+            break
+        cu = _MossCushion(surf, clump, s, seed, ci)
+        rnd = cu.rnd
+        pts, counts, conn, us, vs, uvi = M
+        base = len(pts)
+        rads = [cu.radius(6.2832 * j / segs) for j in range(segs)]
+        rmax = max(rads)
+        sc = min(1.0 / tile, 0.96 / (2.0 * rmax))
+        free = max(0.0, 1.0 - 2.0 * rmax * sc)
+        u0, v0 = 0.5 + (rnd[11] - 0.5) * free, 0.5 + (rnd[0] * 0.999 - 0.5) * free
+        stack = min(stacks - 1, int(rnd[1] * stacks))
+        centre = cu.c
+        if not cu.flat:
+            cp = surf.closest(cu.c)
+            centre = cp[1] if cp else cu.c
+        top = cu.place(centre, cu.n, cu.at(0.0, 0.0, rads[0])[2])
+        pts.append(top)
+        us_, vs_ = _mi_stack_uv(u0, v0, stack, stacks, columns)
+        us.append(us_)
+        vs.append(vs_)
+        for k in range(1, rings + 1):
+            f = k / float(rings)
+            for j in range(segs):
+                th = 6.2832 * j / segs
+                sp, lift, hh, x, y = cu.at(f, th, rads[j])
+                if k == rings:
+                    hh = -0.04 * cu.h  # the edge tucks just under the surface: no gap under it
+                pts.append(cu.clip(top, cu.place(sp, lift, hh) if hh > 0.0 else _rl_add(sp, _rl_mul(lift, hh))))
+                uu, vv = _mi_stack_uv(u0 + x * sc, v0 + y * sc, stack, stacks, columns)
+                us.append(uu)
+                vs.append(vv)
+        for j in range(segs):
+            j1 = (j + 1) % segs
+            counts.append(3)
+            conn.extend((base, base + 1 + j, base + 1 + j1))
+            uvi.extend((base, base + 1 + j, base + 1 + j1))
+        for k in range(rings - 1):
+            a0, b0 = base + 1 + k * segs, base + 1 + (k + 1) * segs
+            for j in range(segs):
+                j1 = (j + 1) % segs
+                counts.append(4)
+                conn.extend((a0 + j, b0 + j, b0 + j1, a0 + j1))
+                uvi.extend((a0 + j, b0 + j, b0 + j1, a0 + j1))
+        # strands: thin fibres standing out of the cushion (the fuzz that makes moss read at a close-up),
+        # leaning every way, drooping and longer where the moss reaches over an edge
+        if strand_rate <= 0.0:
+            continue
+        count = int(strand_rate * 45.0 * small * small + rnd[2])
+        spts, scounts, sconn, sus, svs, suvi = S
+        for t in range(count):
+            if len(spts) + 6 * cards > MI_MAX_VERTS:
+                capped = True
+                break
+            q = _rand12(seed, ci, t, 23)
+            f = math.sqrt(q[0]) * 0.97
+            th = q[1] * 6.2832
+            sp, lift, hh, _, _ = cu.at(f, th)
+            root = cu.place(sp, lift, max(0.0, hh * 0.7))
+            ln = slen * (0.5 + q[2]) * (1.0 + droop * 2.0 * cu.edge * f * f)
+            tilt = 0.3 + mess * 0.35
+            d = _rl_norm(_rl_add(lift, _rl_add(_rl_mul(cu.t1, (q[3] - 0.5) * 2.0 * tilt),
+                                                _rl_mul(cu.t2, (q[4] - 0.5) * 2.0 * tilt))), lift)
+            sag = droop * (0.2 + 0.8 * f * f) * (1.0 + 2.0 * cu.edge)
+            d2 = _rl_norm(_rl_add(d, (0.0, -sag, 0.0)), d)
+            mid = _rl_add(root, _rl_mul(d, ln * 0.5))
+            tip = _rl_add(mid, _rl_mul(d2, ln * 0.5))
+            spine = (_rl_add(root, _rl_mul(lift, -0.15 * cu.h)), mid, tip)
+            side = _rl_norm(_rl_cross(d, lift), cu.t1)
+            side = _mi_rotate(side, d, q[5] * 3.1416)
+            stack = min(stacks - 1, int(q[6] * stacks))
+            for card in range(cards):
+                sv = side if card == 0 else _rl_norm(_rl_cross(d, side), cu.t2)
+                b = len(spts)
+                for row, (cp_, wf) in enumerate(zip(spine, (1.0, 0.75, 0.4))):
+                    w = 0.05 * ln * wf  # a fibre, not a blade
+                    spts.append(_rl_add(cp_, _rl_mul(sv, -w)))
+                    spts.append(_rl_add(cp_, _rl_mul(sv, w)))
+                    for side_u in (0.0, 1.0):
+                        uu, vv = _mi_stack_uv(0.5 + (side_u - 0.5) * wf, row * 0.5, stack, stacks, columns)
+                        sus.append(uu)
+                        svs.append(vv)
+                for row in range(2):
+                    a = b + row * 2
+                    scounts.append(4)
+                    sconn.extend((a, a + 1, a + 3, a + 2))
+                    suvi.extend((a, a + 1, a + 3, a + 2))
+    return {"moss": tuple(M), "strands": tuple(S), "clumps": len(clumps), "capped": capped}
+
+
+# -------------------------------------------------------------------- ivy
+IVY_SIDES = {"Proxy": 3, "Normal": 5, "High": 6, "Hero": 8}
+IVY_STEP = {"Proxy": 0.6, "Normal": 0.4, "High": 0.3, "Hero": 0.22}  # walk step, in leaf sizes
+IVY_LEAF_ROWS = {"Proxy": 1, "Normal": 5, "High": 7, "Hero": 9}
+# a heart-shaped (cordate, pointed) blade: (fraction up the blade, half width as a fraction of the widest)
+IVY_OUTLINE = ((0.0, 0.5), (0.1, 0.84), (0.25, 0.98), (0.4, 1.0), (0.55, 0.92), (0.7, 0.72), (0.85, 0.42),
+               (1.0, 0.05))
+IVY_MAX_POINTS = 60000
+
+
+def _ivy_auto_seeds(surf, sampler, count, seed, spacing):
+    """count seed points at the bottom of the meshes, spread apart (farthest
+    first among the lowest 12% of random points)."""
+    if not sampler.total or count <= 0:
+        return []
+    pool = []
+    for i in range(max(60, count * 30)):
+        r = _rand12(seed, i, 41, 9)
+        p, tn = sampler.point(r[0], r[1], r[2])
+        if tn[1] > 0.9 or tn[1] < -0.5:  # tops and undersides: vines start on the sides
+            continue
+        pool.append((p, tn))
+    if not pool:
+        pool = [sampler.point(*_rand12(seed, i, 43, 9)[:3]) for i in range(count * 10)]
+    pool.sort(key=lambda x: x[0][1])
+    low = pool[:max(count, int(len(pool) * 0.12))]
+    out = [low[0]]
+    while len(out) < count and len(out) < len(low):
+        best = max(low, key=lambda c: min(_rl_len(_rl_sub(c[0], o[0])) for o in out))
+        if min(_rl_len(_rl_sub(best[0], o[0])) for o in out) < 0.2 * spacing:
+            break
+        out.append(best)
+    return [p for p, _ in out]
+
+
+def ivy_walk(surf, seeds, s):
+    """Grow the vines: [{"pts", "nrm", "rad", "gen", "free"}], each a
+    polyline of stem centres with surface normals and radii. A vine is a
+    walker on the surface: each step goes along its tangent plane, pulled up
+    (Climb), meandering (Wander), pushed away from stems near it, snapped
+    back onto the surface; a wall in the way is climbed onto (ray cast), a
+    convex edge is wrapped round (the snap). Going down over an edge, a vine
+    may let go and hang (Gravity). Branches start along the way (Branching)."""
+    m = scene_m_per_unit()
+    seed = int(s["seed"])
+    detail = s["detail"] if s["detail"] in IVY_SIDES else "Normal"
+    leaf = max(1e-5, float(s["leaf_size"]) / m)
+    length = max(0.0, float(s["length"]) / m)
+    step = max(leaf * IVY_STEP[detail], length / 600.0)
+    r0 = max(1e-6, 0.5 * float(s["stem_width"]) / m)
+    climb = clamp(float(s["climb"]), 0.0, 2.0)
+    wander = clamp(float(s["wander"]), 0.0, 2.0)
+    branching = clamp(float(s["branching"]), 0.0, 2.0)
+    gravity = clamp(float(s["gravity"]), 0.0, 1.0)
+    vines_n = max(1, int(s["vines"]))
+    crowd = 1.4 * leaf
+    cell = crowd
+    grid = {}
+
+    def cell_of(p):
+        return (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
+
+    queue = []
+    per_seed = max(1, int(round(vines_n / float(max(1, len(seeds))))))
+    for si, p in enumerate(seeds[:MI_MAX_SEEDS]):
+        c = surf.closest(p)
+        if not c:
+            continue
+        sp, sn = c[1], c[2]
+        upt = _rl_perp(sn, _MI_UP)
+        for k in range(per_seed):
+            r = _rand12(seed, si, k, 51)
+            base = _rl_norm(upt, None) if _rl_len(upt) > 0.2 else _mi_frame(sn, r[0] * 6.2832)[0]
+            ang = (k - (per_seed - 1) * 0.5) * 0.55 + (r[1] - 0.5) * 0.5
+            d = _mi_rotate(base, sn, ang)
+            queue.append((sp, sn, d, length * (0.8 + 0.4 * r[2]), r0, 0, si * 64 + k, 0.0))
+    vines = []
+    total = 0
+    qi = 0
+    while qi < len(queue) and total < IVY_MAX_POINTS:
+        p, n, d, vlen, rad0, gen, vkey, a0 = queue[qi]
+        qi += 1
+        pts, nrm, free = [p], [n], [False]
+        arc = 0.0
+        next_branch = leaf * (2.0 + 2.0 * _rand12(seed, vkey, 0, 52)[0])
+        stuck = 0
+        over = 99  # steps since rounding a convex edge
+        hanging = False
+        hang_left = 0.0
+        own = []
+        i = 0
+        while arc < vlen and total < IVY_MAX_POINTS:
+            i += 1
+            r = _rand12(seed, vkey, i, 53)
+            if hanging:
+                sway = _th_noise(arc / (leaf * 3.0), vkey * 1.7, seed + 9) * 0.6
+                side = _rl_norm(_rl_cross(d, _MI_UP), (1.0, 0.0, 0.0))
+                d = _rl_norm(_rl_add(_rl_mul(d, 0.6), _rl_add((0.0, -gravity - 0.2, 0.0), _rl_mul(side, sway * 0.3))))
+                q = _rl_add(p, _rl_mul(d, step))
+                hit = surf.ray(_rl_add(p, _rl_mul(d, 0.05 * step)), d, step)
+                if hit:  # hanging onto something below: cling again
+                    hanging = False
+                    q, n = hit[1], hit[2]
+                p = q
+                pts.append(p)
+                nrm.append(n)
+                free.append(hanging)
+                arc += step
+                hang_left -= step
+                total += 1
+                if hang_left <= 0.0:
+                    break
+                continue
+            # steer towards "up the surface", swung left and right by a slow meander (Wander)
+            upt = _rl_perp(n, _MI_UP)
+            ut = _rl_len(upt)
+            want = d
+            if ut > 0.15:
+                aim = _mi_rotate(_rl_mul(upt, 1.0 / ut), n, wander * 1.1 * _th_noise(arc / (leaf * 5.0), vkey * 3.7,
+                                                                                   seed))
+                want = _rl_add(d, _rl_mul(aim, climb * 0.6 * min(1.0, 1.5 * ut)))
+            want = _mi_rotate(want, n, wander * 0.2 * _th_noise(arc / (leaf * 1.5), vkey * 5.3 + 11.0, seed + 5) +
+                              (r[0] - 0.5) * wander * 0.12)
+            # make room: other stems close by push this one away
+            push = (0.0, 0.0, 0.0)
+            ck = cell_of(p)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for q, owner in grid.get((ck[0] + dx, ck[1] + dy, ck[2] + dz), ()):
+                            if owner == vkey:
+                                continue
+                            off = _rl_sub(p, q)
+                            dist = _rl_len(off)
+                            if 1e-9 < dist < crowd:
+                                push = _rl_add(push, _rl_mul(off, (crowd - dist) / (crowd * dist)))
+            want = _rl_add(want, _rl_mul(push, 0.8))
+            want = _rl_norm(_rl_perp(n, want), None)
+            if want is None:
+                want = _mi_frame(n, r[1] * 6.2832)[0]
+            src = _rl_add(p, _rl_mul(n, 0.25 * r0))
+            hit = surf.ray(src, want, step * 1.1)
+            if hit and _rl_dot(hit[2], want) < 0.0:  # a wall ahead: climb onto it
+                q, nq = hit[1], hit[2]
+                newd = _rl_perp(nq, _rl_add(want, _rl_mul(_MI_UP, 0.5)))
+            else:
+                q0 = _rl_add(p, _rl_mul(want, step))
+                c = surf.closest(q0)
+                if not c:
+                    break
+                q, nq = c[1], c[2]
+                if c[0] > 0.35 * step:  # stepped off the surface: round a convex edge
+                    nq = _rl_norm(_rl_sub(q0, q), nq)
+                    over = 0
+                newd = _rl_sub(q, p)
+            moved = _rl_len(_rl_sub(q, p))
+            if moved < 0.15 * step:
+                stuck += 1
+                if stuck > 3:
+                    break
+            else:
+                stuck = 0
+            d = _rl_norm(_rl_perp(nq, newd), want)
+            over += 1
+            if gravity > 0.0 and arc > 2.0 * leaf and (
+                    (over < 5 and d[1] < -0.5 and r[2] < gravity * 0.5) or (nq[1] < -0.6 and r[2] < gravity * 0.2)):
+                hanging = True  # over the top and heading down, or under an overhang: let go and hang
+                hang_left = (vlen - arc) * (0.3 + 0.4 * r[3])
+                d = _rl_norm(_rl_add(d, _rl_mul(nq, 0.5)), d)
+            p, n = q, nq
+            pts.append(p)
+            nrm.append(n)
+            free.append(False)
+            own.append(p)
+            arc += max(moved, 0.5 * step)
+            total += 1
+            # branches: thinner, shorter, at an angle
+            if gen < 2 and branching > 0.0 and arc > next_branch:
+                rb = _rand12(seed, vkey, i, 54)
+                next_branch = arc + leaf * (3.0 + 3.0 * rb[0]) / branching
+                if rb[1] < min(1.0, 0.5 + 0.4 * branching) and vlen - arc > 3.0 * leaf:
+                    sgn = 1.0 if rb[2] < 0.5 else -1.0
+                    bd = _mi_rotate(d, n, sgn * (0.55 + 0.5 * rb[3]))
+                    blen = (vlen - arc) * (0.35 + 0.45 * rb[4])
+                    queue.append((p, n, bd, blen, max(1e-6, rad0 * (1.0 - 0.6 * arc / max(vlen, 1e-9)) * 0.7),
+                                  gen + 1, 100000 + len(queue), 0.0))
+        for q in own:
+            grid.setdefault(cell_of(q), []).append((q, vkey))
+        if len(pts) >= 3:
+            vines.append({"pts": pts, "nrm": nrm, "free": free, "r0": rad0, "gen": gen})
+    for v in vines:  # radius: thick at the base, thin at the tip
+        n_ = len(v["pts"])
+        v["rad"] = [v["r0"] * (1.0 - 0.65 * i / float(n_ - 1)) for i in range(n_)]
+    return vines
+
+
+def _ivy_finish(surf, vine):
+    """Stem centres: smoothed, lifted a radius off the surface, never in it."""
+    P, N, F, Rr = vine["pts"], vine["nrm"], vine["free"], vine["rad"]
+    for _ in range(2):
+        P = [P[0]] + [_rl_add(_rl_mul(P[i], 0.5), _rl_mul(_rl_add(P[i - 1], P[i + 1]), 0.25))
+                      for i in range(1, len(P) - 1)] + [P[-1]]
+    X = []
+    for p, n, f, r in zip(P, N, F, Rr):
+        x = p if f else _rl_add(p, _rl_mul(n, r * 1.05))
+        c = surf.closest(x)
+        if c and c[0] < r:
+            x = _rl_add(c[1], _rl_mul(c[2], r * 1.02))
+        X.append(x)
+    return X
+
+
+def _ivy_columns(strips, tiles, pad=0.004):
+    """Neat columns for the stem strips (width, length in scene units) in
+    `tiles` UDIM tiles along U at one density: each strip cut into pieces
+    no taller than a tile, columns left to right, short pieces stacked in a
+    column. Returns (k, [[(tile, u, v, l0, l1)] per strip])."""
+    area = sum(w * l for w, l in strips)
+    if not area:
+        return 1.0, [[] for _ in strips]
+    hmax = 1.0 - 2.0 * pad
+    order = sorted(range(len(strips)), key=lambda i: (-strips[i][0], -strips[i][1]))
+
+    def fit(k):
+        out = [None] * len(strips)
+        tile, u, colw, v = 0, pad, 0.0, pad
+        for i in order:
+            w, ln = strips[i]
+            wk = w * k
+            if wk > 1.0 - 2.0 * pad:
+                return None
+            n = max(1, int(math.ceil(ln * k / hmax - 1e-9)))
+            pieces = []
+            for c in range(n):
+                l0, l1 = ln * c / n, ln * (c + 1) / n
+                hk = (l1 - l0) * k
+                if colw and wk <= colw + 1e-12 and v + hk <= 1.0 - pad:
+                    pass  # on top of the column so far
+                else:
+                    if colw:
+                        u += colw + pad
+                    if u + wk > 1.0 - pad:
+                        tile, u = tile + 1, pad
+                        if tile >= tiles:
+                            return None
+                    colw, v = wk, pad
+                pieces.append((tile, u, v, l0, l1))
+                v += hk + pad
+            out[i] = pieces
+        return out
+
+    hi = math.sqrt(tiles / area)  # no layout can be denser than the area allows
+    lo = hi
+    best = fit(lo)
+    while best is None and lo > 1e-12:  # down until it fits, then halve the gap to the last miss
+        hi, lo = lo, lo * 0.8
+        best = fit(lo)
+    if best is None:
+        return 1e-12, [[(0, pad, pad, 0.0, ln)] for _, ln in strips]
+    for _ in range(10):
+        mid = 0.5 * (lo + hi)
+        res = fit(mid)
+        if res is None:
+            hi = mid
+        else:
+            lo, best = mid, res
+    return lo, best
+
+
+def ivy_stem_mesh(vines, X_list, s, sides):
+    """Tubes for the vines (U round, V along, in neat columns at one
+    density over Stem tiles tiles)."""
+    M = _mi_mesh()
+    pts, counts, conn, us, vs, uvi = M
+    strips, accs = [], []
+    for v, X in zip(vines, X_list):
+        acc = [0.0]
+        for a, b in zip(X, X[1:]):
+            acc.append(acc[-1] + _rl_len(_rl_sub(b, a)))
+        accs.append(acc)
+        strips.append((2.0 * math.pi * v["rad"][0], max(acc[-1], 1e-9)))
+    k, place = _ivy_columns(strips, max(1, int(s["stem_tiles"])))
+    for vine, X, acc, pieces in zip(vines, X_list, accs, place):
+        T, N, B = _rl_frames(X, vine["nrm"][0])
+        base = len(pts)
+        for i, x in enumerate(X):
+            rr = vine["rad"][i]
+            for j in range(sides):
+                th = math.pi + 2.0 * math.pi * j / sides  # the seam faces the wall
+                pts.append(_rl_add(x, _rl_add(_rl_mul(N[i], rr * math.cos(th)), _rl_mul(B[i], rr * math.sin(th)))))
+        tip = len(pts)
+        pts.append(_rl_add(X[-1], _rl_mul(T[-1], vine["rad"][-1] * 1.5)))
+        w = 2.0 * math.pi * vine["rad"][0]
+        nr = len(X)
+        last_uv = None
+        for tile, u0, v0, l0, l1 in pieces:
+            r0 = max(0, bisect.bisect_left(acc, l0 - 1e-9))
+            r1 = min(nr - 1, bisect.bisect_left(acc, l1 - 1e-9)) if l1 < acc[-1] - 1e-9 else nr - 1
+            if r1 <= r0:
+                r1 = min(nr - 1, r0 + 1)
+            uvb = len(us)
+            for ri in range(r0, r1 + 1):
+                vv = v0 + (acc[ri] - acc[r0]) * k
+                for j in range(sides + 1):
+                    us.append(tile + u0 + w * k * j / sides)
+                    vs.append(vv)
+            row = sides + 1
+            for ri in range(r0, r1):
+                a0 = base + ri * sides
+                ub = uvb + (ri - r0) * row
+                for j in range(sides):
+                    j1 = (j + 1) % sides
+                    counts.append(4)
+                    conn.extend((a0 + j, a0 + j1, a0 + sides + j1, a0 + sides + j))
+                    uvi.extend((ub + j, ub + j + 1, ub + row + j + 1, ub + row + j))
+            last_uv = (uvb + (r1 - r0) * row, tile + u0, v0 + (acc[r1] - acc[r0]) * k)
+        if last_uv:  # a point at the tip
+            ub, uu, vtop = last_uv
+            cu = len(us)
+            us.append(uu + 0.5 * w * k)
+            vs.append(vtop + min(0.003, 0.5 * w * k / sides))
+            a0 = base + (nr - 1) * sides
+            for j in range(sides):
+                j1 = (j + 1) % sides
+                counts.append(3)
+                conn.extend((tip, a0 + j, a0 + j1))
+                uvi.extend((cu, ub + j, ub + j + 1))
+    return tuple(M)
+
+
+def _ivy_outline(f):
+    for (f0, w0), (f1, w1) in zip(IVY_OUTLINE, IVY_OUTLINE[1:]):
+        if f <= f1:
+            return w0 + (w1 - w0) * (f - f0) / (f1 - f0)
+    return IVY_OUTLINE[-1][1]
+
+
+def ivy_leaf_mesh(surf, vines, X_list, s, rows):
+    """Leaves along the stems: a stalk (petiole) from the stem to a blade
+    standing off the surface, facing out and up to the light, tip hanging,
+    folded at the midrib, cupped and waved. Above Proxy the blade is cut to
+    a leaf's outline (heart-shaped base, pointed tip; no alpha needed),
+    UVs following it undistorted: the stalk in v 0..0.2, the blade above,
+    u 0.14..0.86. Leaves are bigger on old growth, smaller towards the
+    tips. Every leaf has the same UVs (one leaf texture per stack)."""
+    m = scene_m_per_unit()
+    seed = int(s["seed"])
+    leaf = max(1e-5, float(s["leaf_size"]) / m)
+    var = clamp(float(s["leaf_var"]), 0.0, 1.0)
+    dens = clamp(float(s["leaf_density"]), 0.0, 3.0)
+    stacks = max(1, int(s["stacks"]))
+    columns = s["stack_layout"] == "Atlas columns"
+    M = _mi_mesh()
+    pts, counts, conn, us, vs, uvi = M
+    if dens <= 0.0:
+        return tuple(M), 0, False
+    spacing = leaf * 0.5 / dens
+    leaves, capped = 0, False
+    shaped = rows >= 3
+    xs = (-1.0, 1.0) if rows < 2 else ((-1.0, 0.0, 1.0) if rows < 4 else (-1.0, -0.5, 0.0, 0.5, 1.0))
+    cols = len(xs)
+    for vi, (vine, X) in enumerate(zip(vines, X_list)):
+        acc = [0.0]
+        for a, b in zip(X, X[1:]):
+            acc.append(acc[-1] + _rl_len(_rl_sub(b, a)))
+        total = acc[-1]
+        T, _, _ = _rl_frames(X)
+        a = leaf * (1.5 if vine["gen"] == 0 else 0.4)
+        li = 0
+        while a < total:
+            if len(pts) + (rows + 2) * cols > MI_MAX_VERTS:
+                capped = True
+                break
+            r = _rand12(seed, vi * 4096 + li, 7, 61)
+            i = min(len(X) - 1, bisect.bisect_left(acc, a))
+            x, n, t = X[i], vine["nrm"][i], T[i]
+            if vine["free"][i]:
+                n = _rl_norm(_rl_cross(t, _rl_any_perp(t)))
+            side = 1.0 if li % 2 == 0 else -1.0
+            b = _rl_norm(_rl_cross(n, t), _rl_any_perp(n))
+            young = 0.5 + 0.5 * min(1.0, (total - a) / (leaf * 4.0))
+            age = 1.0 - a / max(1e-9, total)  # old growth near the start of a vine has the big leaves
+            sz = leaf * (1.0 + var * (r[0] - 0.5) * 1.6) * young * (0.7 + 0.6 * age)
+            upt = _rl_perp(n, _MI_UP)
+            # blades lie over the surface like shingles (a little out from it), tips down and to the side
+            ax = _rl_norm(_rl_add(_rl_add(_rl_mul(b, side * 0.6), _rl_mul(upt, -0.5)),
+                                  _rl_add(_rl_mul(n, 0.12 + 0.2 * r[1]), _rl_mul(t, (r[2] - 0.5) * 0.6))), n)
+            ax = _mi_rotate(ax, n, (r[3] - 0.5) * 0.9)
+            stalk_len = sz * (0.18 + 0.4 * r[8])  # petioles of all lengths layer the leaves
+            stalk = _rl_norm(_rl_add(_rl_add(_rl_mul(n, 0.75), _rl_mul(b, side * 0.45)), _rl_mul(_MI_UP, 0.25)), n)
+            blade0 = _rl_add(x, _rl_mul(stalk, stalk_len))
+            hit = surf.ray(blade0, ax, sz)
+            if hit:  # the blade would go into the wall: tilt it out
+                ax = _rl_norm(_rl_add(ax, _rl_mul(n, 1.3)), n)
+            face = _rl_norm(_rl_perp(ax, _rl_add(n, _rl_mul(_MI_UP, 0.45))), n)
+            sv = _rl_cross(face, ax)
+            fold = 0.08 + 0.1 * r[4]
+            curl = 0.08 + 0.14 * r[5]
+            stack = min(stacks - 1, int(r[6] * stacks))
+            base = len(pts)
+            uvb = len(us)
+            # row 0: the stalk at the stem (narrow), rows 1..: the blade
+            for j, xx in enumerate(xs):
+                pts.append(_rl_add(x, _rl_mul(sv, xx * sz * 0.03)))
+                uu, vv = _mi_stack_uv(0.5 + 0.03 * xx, 0.0, stack, stacks, columns)
+                us.append(uu)
+                vs.append(vv)
+            wave = (0.015 + 0.02 * r[9]) * sz if shaped else 0.0
+            for row in range(rows + 1):
+                f = row / float(rows)
+                w = _ivy_outline(f) if shaped else 1.0
+                for xx in xs:
+                    back = 0.12 * abs(xx) if shaped and row == 0 else 0.0  # the heart's lobes reach back
+                    p = _rl_add(blade0, _rl_mul(ax, (f - back) * sz))
+                    p = _rl_add(p, _rl_mul(sv, xx * w * sz * 0.45))
+                    off = (fold * (0.25 * abs(xx) + 0.75 * xx * xx) * sz - curl * f * f * sz +
+                           wave * xx * xx * math.sin(f * 7.0 + r[10] * 6.2832 + xx))  # cupped, not creased
+                    pts.append(_rl_add(p, _rl_mul(face, off)))
+                    uu, vv = _mi_stack_uv(0.5 + 0.36 * xx * w if shaped else 0.5 + 0.5 * xx,
+                                          0.2 + 0.8 * (f - back), stack, stacks, columns)
+                    us.append(uu)
+                    vs.append(vv)
+            nr = rows + 2
+            for row in range(nr - 1):
+                for j in range(cols - 1):
+                    a0 = row * cols + j
+                    counts.append(4)  # this way round the blade faces out (face)
+                    conn.extend((base + a0, base + a0 + cols, base + a0 + cols + 1, base + a0 + 1))
+                    uvi.extend((uvb + a0, uvb + a0 + cols, uvb + a0 + cols + 1, uvb + a0 + 1))
+            leaves += 1
+            li += 1
+            a += spacing * (0.7 + 0.6 * r[7])
+    return tuple(M), leaves, capped
+
+
+def ivy_build(nodes, s, seeds=None, surf=None):
+    """Grow ivy on meshes from seeds (world points; none: Vines automatic
+    seeds at the bottom of the meshes): {"stems": mesh, "leaves": mesh,
+    "vines", "leaves_n", "capped"} (world space)."""
+    s = mi_settings_only("Ivy", s)
+    surf = surf or _MiSurface(nodes)
+    detail = s["detail"] if s["detail"] in IVY_SIDES else "Normal"
+    empty = {"stems": _mi_mesh(), "leaves": _mi_mesh(), "vines": 0, "leaves_n": 0, "capped": False}
+    if not surf.items:
+        return empty
+    if not seeds:
+        sampler = _MiSampler(surf.nodes)
+        seeds = _ivy_auto_seeds(surf, sampler, max(1, int(s["vines"])), int(s["seed"]),
+                                math.sqrt(sampler.total / max(1, int(s["vines"]))) if sampler.total else 1.0)
+        s = dict(s, vines=len(seeds))  # one vine per automatic seed
+    vines = ivy_walk(surf, seeds, s)
+    if not vines:
+        return empty
+    X_list = [_ivy_finish(surf, v) for v in vines]
+    stems = ivy_stem_mesh(vines, X_list, s, IVY_SIDES[detail])
+    leaves, n_leaves, capped = ivy_leaf_mesh(surf, vines, X_list, s, IVY_LEAF_ROWS[detail])
+    return {"stems": stems, "leaves": leaves, "vines": len(vines), "leaves_n": n_leaves, "capped": capped}
+
+
+def mi_build(kind, nodes, s, seeds=None):
+    """Build a moss patch or an ivy plant: {part: mesh, ..., "udims": {part:
+    [UDIM]}} with each part in its own tiles from Start UDIM."""
+    kind = _mi_kind(kind)
+    s = mi_settings_only(kind, s)
+    out = moss_build(nodes, s) if kind == "Moss" else ivy_build(nodes, s, seeds)
+    return _roof_udims(out, int(s["udim"] or 1001), order=MI_UDIM_ORDER)
+
+
+# ------------------------------------------------------------ scene side
+def is_mi_system(node):
+    """A live moss patch / ivy group (not baked)."""
+    return bool(node) and cmds.objExists(node) and cmds.attributeQuery(MI_SETTINGS, node=node, exists=True)
+
+
+def _mi_attr(root):
+    for attr in (MI_SETTINGS, MI_BAKED):
+        if cmds.attributeQuery(attr, node=root, exists=True):
+            return attr
+    return None
+
+
+def mi_data(root):
+    """{"kind", settings..., "targets": [uuid], "seeds": [{"t": uuid, "p": local xyz}]}."""
+    attr = _mi_attr(root)
+    stored = {}
+    if attr:
+        try:
+            stored = json.loads(cmds.getAttr(root + "." + attr) or "{}")
+        except ValueError:
+            pass
+    kind = _mi_kind(stored.get("kind"))
+    data = dict(MI_DEFAULTS[kind])
+    data.update(stored)
+    data["kind"] = kind
+    return data
+
+
+def mi_systems(baked=False, kind=None):
+    """Every moss patch / ivy group in the scene (with baked=True, baked ones too)."""
+    attrs = (MI_SETTINGS, MI_BAKED) if baked else (MI_SETTINGS,)
+    found = []
+    for attr in attrs:
+        for node in cmds.ls(["*." + attr, "*:*." + attr], objectsOnly=True, long=True) or []:
+            if node not in found and cmds.objectType(node, isAType="transform"):
+                if kind is None or mi_data(node)["kind"] == kind:
+                    found.append(node)
+    return found
+
+
+def mi_parts(root):
+    """{part: transform} under a moss / ivy group."""
+    parts = {}
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        shape = _log_shape(child)
+        if shape and cmds.attributeQuery(MI_PART, node=shape, exists=True):
+            parts[cmds.getAttr(shape + "." + MI_PART)] = child
+    return parts
+
+
+def _mi_part_of(node):
+    """The moss / ivy group a part mesh (or the group itself) belongs to, else None."""
+    if not node or not cmds.objExists(node):
+        return None
+    if cmds.attributeQuery(MI_SETTINGS, node=node, exists=True) or \
+            cmds.attributeQuery(MI_BAKED, node=node, exists=True):
+        return long_name(node)
+    shape = _log_shape(node)
+    if shape and cmds.attributeQuery(MI_PART, node=shape, exists=True):
+        parent = cmds.listRelatives(node, parent=True, fullPath=True)
+        if parent and _mi_attr(parent[0]):
+            return long_name(parent[0])
+    return None
+
+
+def mi_targets(data):
+    """The meshes a patch / plant grows on that still exist."""
+    out = []
+    for uid in data.get("targets") or []:
+        found = cmds.ls(uid, long=True) or []
+        if found and _log_shape(found[0]):
+            out.append(found[0])
+    return out
+
+
+def mi_seed_points(data):
+    """An ivy's seeds in world space (they follow the mesh they were picked on)."""
+    out = []
+    for sd in data.get("seeds") or []:
+        found = cmds.ls(sd.get("t"), long=True) or [] if sd.get("t") else []
+        p = sd.get("p")
+        if not p:
+            continue
+        if found:
+            dag = get_dag_path(found[0])
+            w = om.MPoint(p[0], p[1], p[2]) * dag.inclusiveMatrix()
+            out.append((w.x, w.y, w.z))
+        elif sd.get("w"):
+            out.append(tuple(sd["w"]))
+    return out
+
+
+def _mi_store_seeds(points, targets):
+    """Seeds as {"t": the nearest target's uuid, "p": its local point, "w": world}."""
+    if not points:
+        return []
+    surf_items = []
+    for node in targets:
+        shape = _log_shape(node)
+        dag = get_dag_path(shape) if shape else None
+        if dag is not None:
+            surf_items.append((node, _SurfaceQuery(dag), get_dag_path(node)))
+    out = []
+    for p in points[:MI_MAX_SEEDS]:
+        mp = om.MPoint(p[0], p[1], p[2])
+        best = None
+        for node, q, dag in surf_items:
+            r = q.closest(mp)
+            if r and (best is None or r[0] < best[0]):
+                best = (r[0], node, dag)
+        if best:
+            lp = mp * best[2].inclusiveMatrixInverse()
+            out.append({"t": cmds.ls(best[1], uuid=True)[0], "p": [lp.x, lp.y, lp.z], "w": list(p)})
+        else:
+            out.append({"t": None, "p": list(p), "w": list(p)})
+    return out
+
+
+def mi_selection():
+    """(systems, targets, seeds): moss / ivy groups selected (or their parts),
+    meshes to grow on, and seed points (world) from selected vertices,
+    edges or faces (merged when closer than 1 cm)."""
+    systems, targets, seeds = [], [], []
+    for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        root = _mi_part_of(node)
+        if root:
+            if root not in systems:
+                systems.append(root)
+            continue
+        if _log_shape(node) and node not in targets:
+            targets.append(node)
+    comps = cmds.filterExpand(cmds.ls(selection=True, long=True) or [], selectionMask=(31, 32, 34),
+                              fullPath=True) or []
+    if comps:
+        merge = 0.01 / scene_m_per_unit()
+        for comp in comps[:2000]:
+            try:
+                xyz = cmds.xform(comp, q=True, worldSpace=True, translation=True)
+            except RuntimeError:
+                continue
+            n = len(xyz) // 3
+            if not n:
+                continue
+            p = (sum(xyz[0::3]) / n, sum(xyz[1::3]) / n, sum(xyz[2::3]) / n)
+            if all(_rl_len(_rl_sub(p, q)) > merge for q in seeds):
+                seeds.append(p)
+            if len(seeds) >= MI_MAX_SEEDS:
+                break
+    return systems, targets, seeds
+
+
+def _mi_write(root, built, kind):
+    """Put built geometry on a group's part meshes (API, not undoable:
+    callers run it in NoUndo). Returns the face count."""
+    faces = 0
+    for part, node in mi_parts(root).items():
+        shape = _log_shape(node)
+        mesh = built.get(part)
+        used = bool(mesh and mesh[1])
+        count = _rope_fill(shape, mesh if used else _mi_placeholder(root))
+        cmds.setAttr(shape + "." + MI_VERTS, count)
+        if cmds.getAttr(node + ".visibility") != used:
+            cmds.setAttr(node + ".visibility", used)
+        if used:
+            faces += len(mesh[1])
+    return faces
+
+
+def _mi_placeholder(root):
+    """A tiny hidden quad for a part with nothing in it (4 vertices: not stale)."""
+    bb = cmds.exactWorldBoundingBox(root) if cmds.listRelatives(root, children=True) else [0.0] * 6
+    c = ((bb[0] + bb[3]) * 0.5, (bb[1] + bb[4]) * 0.5, (bb[2] + bb[5]) * 0.5)
+    e = 1e-3
+    pts = [(c[0] - e, c[1], c[2] - e), (c[0] + e, c[1], c[2] - e), (c[0] + e, c[1], c[2] + e),
+           (c[0] - e, c[1], c[2] + e)]
+    return (pts, [4], [0, 3, 2, 1], [0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0], [0, 3, 2, 1])
+
+
+def _mi_make_part(root, num, part, material, stem):
+    """One part mesh: a seed plane (filled through the API afterwards), tagged
+    with its part and the UV hand-off tags. Undoable: callers are in an UndoChunk."""
+    node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1, constructionHistory=False,
+                                    name="%s_C_%s%04d_GEP" % (material, stem, num))[0])
+    node = long_name(cmds.parent(node, root)[0])
+    shape = _log_shape(node)
+    cmds.addAttr(shape, longName=MI_PART, dataType="string")
+    cmds.setAttr(shape + "." + MI_PART, part, type="string")
+    cmds.addAttr(shape, longName=MI_VERTS, attributeType="long", defaultValue=0)
+    cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
+    if part in MI_STACKED_PARTS:
+        cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=True)
+    return node
+
+
+def _mi_report(kind, built, faces):
+    rep = {"faces": faces, "capped": bool(built.get("capped")), "udims": built.get("udims", {})}
+    if kind == "Moss":
+        rep["clumps"] = built.get("clumps", 0)
+    else:
+        rep["vines"] = built.get("vines", 0)
+        rep["leaves"] = built.get("leaves_n", 0)
+    return rep
+
+
+def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False):
+    """Grow moss or ivy on meshes (one Ctrl+Z). seeds: ivy start points
+    (world; none = Vines automatic seeds at the bottom). Returns {"root",
+    "faces", "clumps" / "vines" + "leaves", "capped", "udims"}. Raises
+    ValueError without a mesh to grow on."""
+    kind = _mi_kind(kind)
+    targets = [long_name(t) for t in targets if t and cmds.objExists(t) and _log_shape(t) and not _mi_part_of(t)]
+    if not targets:
+        raise ValueError("select the meshes to grow on")
+    s = mi_settings_only(kind, settings)
+    seeds = list(seeds or [])[:MI_MAX_SEEDS] if kind == "Ivy" else []
+    built = mi_build(kind, targets, s, seeds)
+    stem = MI_STEMS[kind]
+    with UndoChunk("Grow %s" % kind):
+        num = _th_free_number(stem + "%04d_GRP")
+        root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (stem, num)))
+        cmds.addAttr(root, longName=MI_SETTINGS, dataType="string")
+        data = dict(s)
+        data["kind"] = kind
+        data["version"] = MI_VERSION
+        data["targets"] = [cmds.ls(t, uuid=True)[0] for t in targets]
+        data["seeds"] = _mi_store_seeds(seeds, targets)
+        cmds.setAttr(root + "." + MI_SETTINGS, json.dumps(data, sort_keys=True), type="string")
+        for part, material in MI_PARTS[kind]:
+            _mi_make_part(root, num, part, material, stem)
+        if select:
+            cmds.select(root, replace=True)
+    with NoUndo():
+        faces = _mi_write(root, built, kind)
+        for node in mi_parts(root).values():
+            cmds.xform(node, centerPivots=True)
+    rep = _mi_report(kind, built, faces)
+    rep["root"] = root
+    return rep
+
+
+def update_moss_ivy(changes, attr=MI_SETTINGS):
+    """Re-grow groups with changed settings ({root: {key: value}}; {} just
+    regrows on the meshes as they are now). Live edits like the other tools':
+    out of the undo queue (API geometry can't be undone anyway). Returns
+    {"done", "lost", "errors", "faces", ...}."""
+    report = {"done": [], "lost": [], "errors": [], "faces": 0, "capped": False, "clumps": 0, "vines": 0,
+              "leaves": 0}
+    for root, change in changes.items():
+        if not root or not cmds.objExists(root) or not cmds.attributeQuery(attr, node=root, exists=True):
+            continue
+        data = mi_data(root)
+        data.update(change or {})
+        kind = data["kind"]
+        targets = mi_targets(data)
+        if not targets:
+            report["lost"].append(root)
+            continue
+        if len(targets) < len(data.get("targets") or []):
+            report["lost"].append(root)
+        s = mi_settings_only(kind, data)
+        try:
+            built = mi_build(kind, targets, s, mi_seed_points(data) if kind == "Ivy" else None)
+        except (ValueError, RuntimeError) as exc:
+            report["errors"].append((root, str(exc)))
+            continue
+        data.update(s)
+        with NoUndo():
+            cmds.setAttr(root + "." + attr, json.dumps(data, sort_keys=True), type="string")
+            report["faces"] += _mi_write(root, built, kind)
+        rep = _mi_report(kind, built, 0)
+        report["capped"] = report["capped"] or rep["capped"]
+        for key in ("clumps", "vines", "leaves"):
+            report[key] += rep.get(key, 0)
+        report["done"].append(root)
+    return report
+
+
+def rebuild_stale_moss_ivy():
+    """Groups (baked ones too) whose meshes are back to their 1-face seed
+    planes (a redo of Grow re-creates them without the API-built geometry):
+    grow them again. Returns the groups rebuilt."""
+    stale = []
+    for root in mi_systems(baked=True):
+        for node in mi_parts(root).values():
+            shape = _log_shape(node)
+            fn = om.MFnMesh(get_dag_path(shape))
+            if fn.numVertices == 4 and fn.numPolygons == 1 and cmds.getAttr(shape + "." + MI_VERTS) != 4:
+                stale.append(root)
+                break
+    for root in stale:
+        update_moss_ivy({root: {}}, attr=_mi_attr(root))
+    return stale
+
+
+def bake_moss_ivy(roots):
+    """Keep the meshes as plain meshes (one Ctrl+Z): the tool stops treating
+    them as live. The settings move to a hidden attribute only a redo uses."""
+    done = []
+    with UndoChunk("Moss and Ivy bake"):
+        for root in roots:
+            if is_mi_system(root):
+                if cmds.attributeQuery(MI_BAKED, node=root, exists=True):
+                    cmds.deleteAttr(root + "." + MI_BAKED)
+                cmds.renameAttr(root + "." + MI_SETTINGS, MI_BAKED)
+                done.append(root)
+    return done
+
+
+def mi_user_presets(kind):
+    var = "unlok%sPresets" % _mi_kind(kind)
+    if not cmds.optionVar(exists=var):
+        return {}
+    try:
+        data = json.loads(cmds.optionVar(q=var) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def mi_save_preset(kind, name, settings):
+    """Keep a preset in Maya's prefs (an optionVar: the tool writes no files)."""
+    kind = _mi_kind(kind)
+    data = mi_user_presets(kind)
+    data[name] = {k: v for k, v in mi_settings_only(kind, settings).items() if k not in MI_PRESET_SKIP}
+    cmds.optionVar(stringValue=("unlok%sPresets" % kind, json.dumps(data, sort_keys=True)))
+
+
+def mi_delete_preset(kind, name):
+    kind = _mi_kind(kind)
+    data = mi_user_presets(kind)
+    if data.pop(name, None) is not None:
+        cmds.optionVar(stringValue=("unlok%sPresets" % kind, json.dumps(data, sort_keys=True)))
+        return True
+    return False
+
+
+MI_PRESETS = {
+    "Moss": collections.OrderedDict([
+        ("Jungle roof", {}),
+        ("Crevices only", {"coverage": 0.35, "crevices": 1.0, "patchiness": 0.3, "clump_size": 0.035,
+                           "thickness": 0.015, "edges": 0.8}),
+        ("Thick carpet", {"coverage": 0.85, "clump_size": 0.07, "thickness": 0.035, "patchiness": 0.3,
+                          "mess": 0.4, "strands": 0.4}),
+        ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.4, "strand_length": 0.035, "droop": 1.3,
+                            "edges": 0.2})]),
+    "Ivy": collections.OrderedDict([
+        ("Climbing ivy", {}),
+        ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
+                          "stem_width": 0.006}),
+        ("Overgrown", {"vines": 10, "length": 4.0, "branching": 1.0, "leaf_density": 1.1, "wander": 0.6,
+                       "gravity": 0.6}),
+        ("Hanging vines", {"climb": 0.4, "gravity": 1.0, "wander": 0.25, "branching": 0.3})])}
+
+
+def mi_preset(kind, name):
+    """Full settings for a preset (built in or the user's), or None."""
+    kind = _mi_kind(kind)
+    over = MI_PRESETS[kind].get(name)
+    if over is None:
+        over = mi_user_presets(kind).get(name)
+    if over is None:
+        return None
+    s = dict(MI_DEFAULTS[kind])
+    s.update(over)
+    return s
+
+
+# =============================================================================
+# Moss and Ivy - panel
+# =============================================================================
+
+class MossIvyPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Moss and Ivy"
+    TOOL_TIP = "Grow jungle moss on roofs, ledges and in crevices, and ivy up posts and walls."
+
+    def __init__(self, parent=None):
+        super(MossIvyPanel, self).__init__(parent)
+        self._jobs = []
+        self._pending = set()
+        self._kind = "Moss"
+        self._mode = "new"  # new (fields are for the next Grow) / edit (selected groups follow the fields)
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._sync_from_selection))
+        self._edit_timer = QtCore.QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(60)
+        self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
+        self._redo_timer = QtCore.QTimer(self)
+        self._redo_timer.setSingleShot(True)
+        self._redo_timer.setInterval(50)
+        self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
+        self._build()
+        self._install_jobs()
+        self._rebuild_stale()
+
+    def showEvent(self, event):
+        super(MossIvyPanel, self).showEvent(event)
+        self._sel_timer.start()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Moss and Ivy", "Jungle moss that gathers where it would really grow (up-facing, "
+                                                "sheltered corners and crevices, off exposed edges) and ivy that "
+                                                "climbs posts and walls. Grown on your meshes; no plugin, no nodes."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+        self.f = {"Moss": {}, "Ivy": {}}
+
+        # ---- 1. select
+        card = self.step_select = StepCard(1, "Select surfaces", "Select the meshes to grow on together (a roof "
+                                                                 "and the wall under it, a post and the floor). "
+                                                                 "For ivy, also pick vertices or faces where vines "
+                                                                 "start (optional). Select moss or ivy to edit it.")
+        self.sel_label = hint_label("")
+        card.add(self.sel_label)
+        col.addWidget(card)
+
+        # ---- 2. grow
+        card = self.step_grow = StepCard(2, "Grow", "One Ctrl+Z undoes it. The new moss or ivy is selected, so "
+                                                    "step 3 edits it straight away.")
+        self.kind = SegmentField(MI_KINDS)
+        self.kind.setToolTip("Moss: clumps on up-facing, sheltered spots.\nIvy: vines with leaves that climb.")
+        self.kind.changed.connect(lambda: self._kind_changed())
+        card.add(self.kind)
+        prow = QtWidgets.QWidget()
+        pl = QtWidgets.QHBoxLayout(prow)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(4)
+        plabel = QtWidgets.QLabel("Preset")
+        plabel.setMinimumWidth(92)
+        self.preset_combo = _Combo()
+        _guard_focus(self.preset_combo)
+        self.preset_combo.setToolTip("Pick a preset to load it (onto the selected moss / ivy, or for the next Grow).")
+        self.preset_combo.activated.connect(lambda *_: self.load_preset())
+        save = secondary_button("Save...", "Keep the current settings as a preset of your own (kept in Maya's "
+                                           "preferences, for every scene).")
+        save.clicked.connect(lambda *_: self.save_preset())
+        delete = secondary_button("Delete", "Remove the chosen preset (your own presets only).")
+        delete.clicked.connect(lambda *_: self.delete_preset())
+        pl.addWidget(plabel)
+        pl.addWidget(self.preset_combo, 1)
+        pl.addWidget(save)
+        pl.addWidget(delete)
+        card.add(prow)
+        self.grow_btn = primary_button("Grow Moss on Selected")
+        self.grow_btn.setMinimumHeight(28)
+        self.grow_btn.clicked.connect(lambda *_: self.grow())
+        card.add(self.grow_btn)
+        col.addWidget(card)
+
+        # ---- 3. look
+        card = self.step_look = StepCard(3, "Look", "Every change shows straight away on the selected moss or ivy.")
+        self.box = {"Moss": self._moss_box(), "Ivy": self._ivy_box()}
+        for kind, box in self.box.items():
+            card.add(box)
+            for key, widget in self.f[kind].items():
+                widget.setValue(MI_DEFAULTS[kind][key])
+                widget.changed.connect(lambda k=key, kd=kind: self._queue(kd, k))
+        col.addWidget(card)
+
+        # ---- 4. finish
+        card = self.step_finish = StepCard(4, "Finish", "Regrow after moving or editing the meshes (each keeps its "
+                                                        "own settings). Bake keeps the meshes and forgets the "
+                                                        "settings.")
+        pick = secondary_button("Select All", "Select every moss patch (or ivy) in the scene.")
+        pick.clicked.connect(lambda *_: self.select_all())
+        regrow = secondary_button("Regrow", "Grow the selected moss / ivy (or all of it) again on its meshes as they "
+                                            "are now.")
+        regrow.clicked.connect(lambda *_: self.regrow())
+        bake = secondary_button("Bake", "Turn the selected moss / ivy (or all of it) into plain meshes (one Ctrl+Z).")
+        bake.clicked.connect(lambda *_: self.bake())
+        card.add(button_row(pick, regrow, bake))
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+        self._kind_changed()
+
+    def _row(self, kind, sec, key, label, widget, tip):
+        self.f[kind][key] = widget
+        sec.add_row(label, widget, tip)
+        return widget
+
+    def _seed_row(self, kind):
+        w = QtWidgets.QWidget()
+        sl = QtWidgets.QHBoxLayout(w)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        lbl = QtWidgets.QLabel("Seed")
+        lbl.setMinimumWidth(92)
+        self.f[kind]["seed"] = IntField(1, 99999, 1, 9999)
+        self.f[kind]["seed"].setToolTip("The random seed: another one grows a different patch with the same look.")
+        rand = secondary_button("Randomize", "A new seed (each selected moss / ivy gets its own).")
+        rand.clicked.connect(lambda *_: self.randomize())
+        sl.addWidget(lbl)
+        sl.addWidget(self.f[kind]["seed"], 1)
+        sl.addWidget(rand)
+        return w
+
+    def _moss_box(self):
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        k = "Moss"
+        main = Section("", header=False)
+        self._row(k, main, "coverage", "Coverage", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How much of the surface gets moss: low = only the best spots (sheltered corners, crevices), "
+                  "high = most up-facing surfaces.")
+        self._row(k, main, "clump_size", "Clump size", FloatField(0.005, 3.0, 0.02, 0.4, decimals=3, step=0.01),
+                  "Radius of a clump in metres (sheltered spots grow bigger ones).")
+        self._row(k, main, "thickness", "Thickness", FloatField(0.0, 0.5, 0.0, 0.12, decimals=3, step=0.005),
+                  "How high a cushion stands, in metres (thicker in sheltered spots, never into geometry above).")
+        self._row(k, main, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "Ragged edges, lumps and wilder strands.")
+        self._row(k, main, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "Little tufts standing out of the moss (crossed cards, for close-ups). 0 = cushions only.")
+        lay.addWidget(main)
+        where = Section("Where it grows", expanded=True)
+        self._row(k, where, "slope", "Slope limit", FloatField(0.0, 90.0, 0.0, 90.0, decimals=1, step=1.0),
+                  "Steepest slope (degrees) moss grows on in the open; it fades out over the next 15 degrees. "
+                  "Sheltered spots on walls still get some (Crevices).")
+        self._row(k, where, "crevices", "Crevices", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How strongly moss gathers in corners, crevices and gaps (also up walls there).")
+        self._row(k, where, "edges", "Avoid edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Keeps moss off exposed spots: ridges, convex edges, thin rails.")
+        self._row(k, where, "patchiness", "Patchiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Breaks the cover into patches (0 = even).")
+        self._row(k, where, "patch_size", "Patch size", FloatField(0.02, 50.0, 0.1, 4.0, decimals=2, step=0.05),
+                  "How big the patches are, in metres.")
+        lay.addWidget(where)
+        more = Section("More", expanded=False)
+        self._row(k, more, "size_var", "Size variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How much clumps differ in size and height.")
+        self._row(k, more, "strand_length", "Strand length",
+                  FloatField(0.002, 0.5, 0.005, 0.15, decimals=3, step=0.005),
+                  "Length of a strand in metres (longer where moss hangs over an edge).")
+        self._row(k, more, "droop", "Droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How much strands bend down, most at the edges and over edges.")
+        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
+                  "Proxy: light cushions, no strands. Normal / High / Hero: rounder cushions, more strands.")
+        lay.addWidget(more)
+        lay.addWidget(self._uv_section(k, "Tile size", "uv_tile", FloatField(0.05, 20.0, 0.1, 2.0, decimals=2,
+                                                                                step=0.05),
+                                       "How many metres of moss one UV tile holds (both ways). Each clump has its "
+                                       "own place in 0..1, at random: one moss texture for every clump."))
+        lay.addWidget(self._seed_row(k))
+        return box
+
+    def _ivy_box(self):
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        k = "Ivy"
+        main = Section("", header=False)
+        self._row(k, main, "vines", "Vines", IntField(1, 64, 1, 20),
+                  "How many vines: automatic seeds at the bottom of the meshes, or shared between the picked seeds.")
+        self._row(k, main, "length", "Length", FloatField(0.05, 40.0, 0.2, 8.0, decimals=2, step=0.1),
+                  "How far each vine grows, in metres.")
+        self._row(k, main, "climb", "Climb", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+                  "How strongly vines grow upwards (0 = they wander anywhere).")
+        self._row(k, main, "wander", "Wander", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+                  "How much the vines meander.")
+        self._row(k, main, "branching", "Branching", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How often vines branch (two levels of thinner, shorter branches).")
+        self._row(k, main, "leaf_size", "Leaf size", FloatField(0.005, 1.0, 0.02, 0.25, decimals=3, step=0.005),
+                  "Leaf length in metres (smaller towards the tips).")
+        self._row(k, main, "leaf_density", "Leaves", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How many leaves along the stems (0 = bare stems).")
+        lay.addWidget(main)
+        more = Section("More", expanded=False)
+        self._row(k, more, "gravity", "Gravity", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Chance that a vine going over an edge (or under an overhang) lets go and hangs.")
+        self._row(k, more, "stem_width", "Stem width", FloatField(0.001, 0.3, 0.002, 0.05, decimals=3, step=0.001),
+                  "Stem diameter at the base, in metres (thinner along the vine and on branches).")
+        self._row(k, more, "leaf_var", "Leaf variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How much leaves differ in size.")
+        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
+                  "Proxy: 3-sided stems, flat leaves. Normal / High / Hero: rounder stems, smoother, bent leaves.")
+        lay.addWidget(more)
+        lay.addWidget(self._uv_section(k, "Stem tiles", "stem_tiles", IntField(1, 16, 1, 8),
+                                       "UDIM tiles the stems are laid out in (neat columns at one density)."))
+        lay.addWidget(self._seed_row(k))
+        return box
+
+    def _uv_section(self, k, label, key, widget, tip):
+        sec = Section("UVs", expanded=False)
+        self._row(k, sec, "udim", "Start UDIM", IntField(1001, 1999, 1001, 1100),
+                  "The first UDIM tile. Each part takes its own tiles from here on, so no two parts share UV space "
+                  "(only stacked variations do).")
+        self._row(k, sec, key, label, widget, tip)
+        self._row(k, sec, "stacks", "Stacks" if k == "Moss" else "Leaf stacks", IntField(1, 16, 1, 8),
+                  "With 2+ stacks each %s picks one at random: one texture per stack." %
+                  ("clump and strand" if k == "Moss" else "leaf"))
+        self._row(k, sec, "stack_layout", "Layout", SegmentField(MI_STACK_LAYOUTS),
+                  "UDIM tiles: stack 1 in the first tile, stack 2 in the next...\nAtlas columns: the stacks share "
+                  "0..1, side by side.")
+        return sec
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def _settings(self, kind=None):
+        kind = kind or self._kind
+        return {k: w.value() for k, w in self.f[kind].items()}
+
+    def _show(self, kind, settings):
+        for key, widget in self.f[kind].items():
+            widget.setValue(settings.get(key, MI_DEFAULTS[kind][key]))
+
+    def _fill_presets(self, current=None):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItems(list(MI_PRESETS[self._kind]))
+        user = sorted(mi_user_presets(self._kind))
+        if user:
+            self.preset_combo.insertSeparator(self.preset_combo.count())
+            self.preset_combo.addItems(user)
+        if current:
+            i = self.preset_combo.findText(current)
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
+        self.preset_combo.blockSignals(False)
+
+    def _kind_changed(self, kind=None):
+        kind = _mi_kind(kind or self.kind.value())
+        if kind != self.kind.value():
+            self.kind.setValue(kind)
+        self._kind = kind
+        for k, box in self.box.items():
+            box.setVisible(k == kind)
+        self.grow_btn.setText("Grow %s on Selected" % kind)
+        self.grow_btn.setToolTip("Grow %s on the selected meshes with the settings in step 3%s. One Ctrl+Z undoes "
+                                 "it." % (kind.lower(), " (from the picked vertices / faces, else automatic seeds "
+                                                         "at the bottom)" if kind == "Ivy" else ""))
+        self._fill_presets()
+        self._mode = "edit" if self._editing() else "new"
+        self._update_states()
+
+    def _editing(self):
+        """The selected moss / ivy groups of the kind on show."""
+        systems = mi_selection()[0]
+        return [r for r in systems if is_mi_system(r) and mi_data(r)["kind"] == self._kind]
+
+    def _sync_from_selection(self):
+        if not self.isVisible():
+            return
+        try:
+            systems, targets, seeds = mi_selection()
+            live = [r for r in systems if is_mi_system(r)]
+            if live:
+                data = mi_data(live[0])  # show the first selected group's settings, like the Channel Box
+                if data["kind"] != self._kind:
+                    self._kind_changed(data["kind"])
+                self._show(data["kind"], data)
+            parts = []
+            if targets:
+                parts.append("%d mesh(es) to grow on" % len(targets))
+            if seeds:
+                parts.append("%d seed point(s)" % len(seeds))
+            if live:
+                kinds = sorted(set(mi_data(r)["kind"].lower() for r in live))
+                parts.append("%d %s selected" % (len(live), " and ".join(kinds)))
+            if len(systems) > len(live):
+                parts.append("%d baked" % (len(systems) - len(live)))
+            self.sel_label.setText((", ".join(parts) + ".") if parts else "Nothing selected.")
+            self._mode = "edit" if self._editing() else "new"
+            self._update_states()
+        except Exception:
+            traceback.print_exc()
+
+    def _update_states(self):
+        try:
+            systems, targets, seeds = mi_selection()
+        except Exception:
+            systems, targets, seeds = [], [], []
+        editing = self._mode == "edit"
+        self.step_select.set_state("done" if targets or editing else "current")
+        self.step_grow.set_state("current" if targets else ("done" if editing else "todo"))
+        self.step_look.set_state("current" if editing else "todo")
+        self.step_finish.set_state("todo")
+        noun = self._kind.lower()
+        if editing:
+            n = len(self._editing())
+            self.next_banner.set_text("Changes in step 3 apply straight away to the %d selected %s. <b>Regrow</b> "
+                                      "after moving or editing its meshes." % (n, noun), tag="EDITING", tone="active")
+        elif targets:
+            extra = ""
+            if self._kind == "Ivy":
+                extra = (" from the %d picked seed(s)" % len(seeds)) if seeds else \
+                    " (pick vertices or faces to say where vines start)"
+            self.next_banner.set_text("Press <b>Grow %s on Selected</b>%s." % (self._kind, extra))
+        else:
+            self.next_banner.set_text("Select the meshes to grow %s on (or a %s to edit it)." %
+                                      (noun, "moss patch" if self._kind == "Moss" else "ivy"))
+
+    # ============================================================= actions
+    def _queue(self, kind, key):
+        if kind != self._kind:
+            return
+        self._pending.add(key)
+        self._edit_timer.start()
+
+    @ui_safe
+    def _apply_pending(self):
+        keys, self._pending = self._pending, set()
+        if not keys or self._mode != "edit":
+            return
+        roots = self._editing()
+        if not roots:
+            return
+        values = self._settings()
+        change = {k: values[k] for k in keys}
+        self._update(dict((r, change) for r in roots), "Updated")
+
+    def _update(self, changes, verb):
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            report = update_moss_ivy(changes)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        msg = "%s %d in %.2fs: %s." % (verb, len(report["done"]), time.time() - t0, self._counts(report))
+        level = "info"
+        if report["capped"]:
+            msg += " Capped at %s vertices per part: lower the density or the Detail." % format(MI_MAX_VERTS, ",")
+            level = "warn"
+        if report["lost"]:
+            msg += " %d lost a mesh it grew on (deleted?)." % len(report["lost"])
+            level = "warn"
+        if report["errors"]:
+            msg += " %s" % report["errors"][0][1]
+            level = "warn"
+        self.set_status(msg, level)
+        return report
+
+    @staticmethod
+    def _counts(rep):
+        bits = []
+        if rep.get("clumps"):
+            bits.append("%d clumps" % rep["clumps"])
+        if rep.get("vines"):
+            bits.append("%d vines, %d leaves" % (rep["vines"], rep.get("leaves", 0)))
+        bits.append("%s faces" % format(rep.get("faces", 0), ","))
+        return ", ".join(bits)
+
+    @ui_safe
+    def grow(self):
+        systems, targets, seeds = mi_selection()
+        if not targets:
+            self.set_status("Select the meshes to grow %s on first." % self._kind.lower(), level="warn")
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            rep = grow_moss_ivy(self._kind, targets, self._settings(), seeds if self._kind == "Ivy" else None,
+                                select=True)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        level = "fixed"
+        msg = "Grew %s in %.2fs: %s. One Ctrl+Z undoes it." % (short_name(rep["root"]), time.time() - t0,
+                                                               self._counts(rep))
+        if not rep["faces"]:
+            msg = "Nothing grew on the selected meshes: raise Coverage, Slope limit or Crevices." \
+                if self._kind == "Moss" else "No vines grew: check the meshes and the Length."
+            level = "warn"
+        elif rep["capped"]:
+            msg += " Capped at %s vertices per part." % format(MI_MAX_VERTS, ",")
+            level = "warn"
+        self.set_status(msg, level)
+        self._sync_from_selection()
+
+    @ui_safe
+    def randomize(self):
+        roots = self._editing() if self._mode == "edit" else []
+        if not roots:
+            self.f[self._kind]["seed"].setValue(random.randint(1, 9999))
+            self.set_status("New seed for the next Grow.")
+            return
+        changes = dict((r, {"seed": random.randint(1, 9999)}) for r in roots)
+        self._update(changes, "New seed for")
+        self._show(self._kind, mi_data(roots[0]))
+
+    @ui_safe
+    def regrow(self):
+        roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
+        if not roots:
+            self.set_status("No moss or ivy to regrow.", level="warn")
+            return
+        self._update(dict((r, {}) for r in roots), "Regrew")
+
+    @ui_safe
+    def select_all(self):
+        found = mi_systems(kind=self._kind)
+        if found:
+            cmds.select(found, replace=True)
+        self.set_status("Selected %d %s." % (len(found), self._kind.lower()) if found else
+                        "No %s in the scene." % self._kind.lower())
+
+    @ui_safe
+    def bake(self):
+        roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
+        if not roots:
+            self.set_status("No moss or ivy to bake.", level="warn")
+            return
+        done = bake_moss_ivy(roots)
+        self.set_status("Baked %d: plain meshes now. One Ctrl+Z undoes it." % len(done), level="fixed")
+        self._sync_from_selection()
+
+    @ui_safe
+    def load_preset(self):
+        name = self.preset_combo.currentText()
+        s = mi_preset(self._kind, name)
+        if s is None:
+            return
+        for key in MI_PRESET_SKIP:
+            s[key] = self.f[self._kind][key].value()
+        self._show(self._kind, s)
+        roots = self._editing() if self._mode == "edit" else []
+        if roots:
+            keys = [k for k in MI_DEFAULTS[self._kind] if k not in MI_PRESET_SKIP]
+            self._update(dict((r, {k: s[k] for k in keys}) for r in roots), "'%s' on" % name)
+        else:
+            self.set_status("Loaded '%s' for the next Grow." % name)
+
+    @ui_safe
+    def save_preset(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save %s Preset" % self._kind, "Preset name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in MI_PRESETS[self._kind]:
+            self.set_status("'%s' is a built-in preset: pick another name." % name, level="warn")
+            return
+        mi_save_preset(self._kind, name, self._settings())
+        self._fill_presets(name)
+        self.set_status("Saved preset '%s'." % name, level="fixed")
+
+    @ui_safe
+    def delete_preset(self):
+        name = self.preset_combo.currentText()
+        if name in MI_PRESETS[self._kind]:
+            self.set_status("Built-in presets can't be deleted.", level="warn")
+            return
+        if mi_delete_preset(self._kind, name):
+            self._fill_presets()
+            self.set_status("Deleted preset '%s'." % name)
+
+    def _rebuild_stale(self):
+        try:
+            stale = rebuild_stale_moss_ivy()
+            if stale:
+                self.set_status("Regrew %d moss / ivy brought back by a redo." % len(stale))
+        except Exception:
+            traceback.print_exc()
+
+    # ======================================================= scene events
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def shutdown(self):
+        for timer in (self._sel_timer, self._edit_timer, self._redo_timer):
+            timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
-    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel]),
+    ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel,
+                  MossIvyPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

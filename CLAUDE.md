@@ -711,6 +711,107 @@
     - Tests: `tests/test_corrugated_roof.py` (gap rays, closed solids, ray
       enter / leave order for interpenetration, frame under metal, UVs),
       metal block in `tests/gui_thatch_roof.py`.
+- **Moss and Ivy** (Modeling tab; the user, 2026-11-03: "nice clumps of
+  jungle moss ... on top of rooftops, or growing up in little crevices
+  interacting with geo, or ivy growing up columns of shacks"). Engine
+  `moss_build` / `ivy_build` (via `mi_build`, which runs `_roof_udims(...,
+  order=MI_UDIM_ORDER)`); scene side `grow_moss_ivy`, `update_moss_ivy`,
+  `rebuild_stale_moss_ivy`, `bake_moss_ivy`, `mi_selection`; panel
+  `MossIvyPanel`.
+  - **Scene:** one group per patch / plant, `mossPatch####_GRP` /
+    `ivy####_GRP`, with `unlokMossIvy` JSON (kind, settings, version,
+    `targets` uuids, ivy `seeds` as {"t": target uuid, "p": its local
+    point, "w": world}, so Regrow follows a moved post). Parts are direct
+    children tagged `unlokMossIvyPart` / `unlokMossIvyVerts`
+    (`MI_PARTS`: moss `mossGreen` + strands `mossStrand`, ivy `ivyStem` +
+    `ivyLeaf`), all with `unlokUvReady`, the stacked ones (`MI_STACKED_PARTS`)
+    with `UV_STACKED_ATTR`. Grow = UndoChunk (group, JSON, seed planes),
+    fill in NoUndo (`_rope_fill`); live edits NoUndo; a redo's seed planes
+    are regrown by the panel's Redo job (`rebuild_stale_moss_ivy`, baked too:
+    Bake renames the attr to `unlokMossIvyBaked`). An empty part gets a
+    hidden 4-vertex placeholder (not stale). Sizes are metres
+    (`scene_m_per_unit()`).
+  - **Surfaces:** `_MiSurface` = closest point over all targets
+    (`_SurfaceQuery`) + nearest ray hit (`closestIntersection` with accel
+    params, flat face normal). With 6+ meshes a grid of their world boxes
+    (cell = the median mesh's size; `_near`) picks the meshes a query
+    looks at: Python loops over every box cost more than the queries on a
+    wall of 60 stones. `_MiSampler` samples area-weighted points from
+    `_mi_triangles` (world triangles, cached in `_MI_TRIS` by
+    `_mi_mesh_key`: shape, counts, matrix, bbox).
+  - **Moss spots** (`_moss_spots`, at `_moss_reach(R)` = max(2 R, 10 cm):
+    crack probes need room): per spot shelter = hemisphere rays (low first)
+    that hit within 2.5 RA; six ways round, probes at 0.2 / 0.45 / 0.9 RA
+    cast down: where the surface first falls away, a far probe that hits
+    again = a crack (between boards: adds to shelter), else an edge.
+    Without the crack test a gap between planks read as two exposed edges.
+    `moss_score`: 0.5 x up-weight x (1 - edges x edge) + crevices x 0.62 x
+    shelter x (0.6 + 0.4 up) + patchiness x 0.55 x noise.
+  - **Field and packing** (the user, 2026-11-03: "way more realism"; round
+    25 cm pads read as gumdrops): `_moss_field` scatters cushion
+    candidates (4.5 per cushion area: packing needs several) each tied to
+    the spots within 1.6 RA (weighted by distance, normal agreement and
+    being on the same level: a rail's top must not read the board under
+    it) plus a fine 2D noise for a ragged edge; both cached in
+    `_MI_MOSS_CACHE`, so Coverage and the weights only re-score.
+    `moss_clumps`: margin = field + 0.3 x Messiness x noise - (1 -
+    coverage); inside a patch cushions are bigger (`core`) and thicker,
+    packed 0.5 (ri + rj) apart, middles first; past the edge a few stray
+    tufts (none on exposed edges). A candidate covered within 5 cm above
+    (a rail on a board) is dropped, tested once when first kept (`memo`).
+  - **Cushions** (`_MossCushion`): rings x segments by Detail
+    (`MOSS_RINGS`, fewer on small cushions); profile (1 - f^2)^2, a smooth
+    bump flat where it meets the surface, so overlapping cushions blend
+    into a lumpy carpet (a domed profile showed every rim); lumps at 0.3 r.
+    `flat` (12 samples on two rings all on one face) skips per-point snaps;
+    `clear` (rays up from them) skips the per-point place rays; most roof
+    cushions are both. Otherwise each point is snapped by closest point
+    (wraps into corners and cracks; the back of a thin board is ignored),
+    lifted along 0.7 snapped + 0.3 clump normal; `place` caps the lift by a
+    ray; `clip` pulls points back in front of any surface between the top
+    and them. The edge ring tucks 0.04 h under. UV: planar, one scale
+    min(1 / Tile size, fit), random offset inside 0..1. Strands are thin
+    fibre cards (45 x rate per full cushion, one card, two crossed at Hero).
+  - **Ivy walk** (`ivy_walk`): step = leaf x `IVY_STEP` (Detail); steer
+    towards "up the surface" swung by a slow noise (Wander) with weight
+    Climb x 0.6 (a per-step turn made vines spiral round posts), plus a
+    small fast meander, plus a push from other vines' points (grid, cell
+    1.4 leaf); a forward ray that hits a front face climbs onto it, else
+    snap by closest point; a snap farther than 0.35 step = rounding a
+    convex edge (normal = from the surface to the stepped point). Gravity:
+    within 5 steps of an edge heading down, or under an overhang, a vine
+    may let go and hang (free points, swaying, re-cling on a hit). Branches
+    two levels deep, thinner (0.7) and shorter. Auto seeds: farthest-point
+    pick among the lowest 12% of side-facing samples.
+  - **Ivy mesh:** `_ivy_finish` smooths and lifts centres a radius off the
+    surface (pushed out when closer). Stems `ivy_stem_mesh`: tapered tubes,
+    seam towards the wall, tip cone; UVs via `_ivy_columns` (pieces no
+    taller than a tile in columns, short ones stacked, one density
+    bisected to fit Stem tiles). Leaves `ivy_leaf_mesh`: a narrow stalk row
+    at the stem (v 0..0.2) then the blade rows; above Proxy the blade is cut
+    to `IVY_OUTLINE` (heart-shaped base whose lobes reach back, pointed
+    tip; no alpha needed), 5 columns from Normal, UVs following the outline
+    undistorted (u 0.14..0.86); cupped (mostly x^2, a soft midrib), tip
+    curled back, a little wave. Blades lie over the surface like shingles
+    (small outward component), petioles 0.18..0.58 leaf long, leaves 0.7..1.3x
+    from tip to old growth. The blade tilts out if a ray along it hits the
+    wall; quads wound so the blade faces out.
+  - **Panel:** steps Select surfaces / Grow (Moss | Ivy segment, presets,
+    Grow button) / Look (one box of fields per kind) / Finish (Select All,
+    Regrow, Bake). Selecting a group shows its settings and switches the
+    kind; `_editing()` = selected live groups of the kind on show.
+    Presets: `MI_PRESETS` + `unlokMossPresets` / `unlokIvyPresets`
+    optionVars (seed and Start UDIM skipped).
+  - Speed (GUI test, Normal): a whole shack roof (44 planks) ~7 s, 3,000
+    cushions, 220k faces; a live Coverage edit rebuilds them all (~7 s);
+    the ledge 0.7 s; ivy 0.25 s. Too slow for live roof-sized edits yet.
+  - Not done (ideas): following the meshes live (Regrow is manual), a
+    click-to-plant picker, rootlets on the stems, moss on the ivy. The
+    user wants much more realism than cushions give: next options are a
+    continuous carpet shell (displacement-ready UVs), fur-like alpha fuzz
+    cards, or scattering scanned moss / ivy assets.
+  - Tests: `tests/test_moss_ivy.py`, `tests/gui_moss_ivy.py` (pictures in
+    `tests/_out/moss_ivy`).
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -1597,6 +1698,7 @@ the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 (pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
 Corrugated metal: `tests/test_corrugated_roof.py`.
+Moss and Ivy: `tests/test_moss_ivy.py`, GUI `tests/run_gui_moss_ivy.mel`.
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
   `cat > file` without a heredoc, hang. Write patch scripts to files and
   run `python script.py`.
