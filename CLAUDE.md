@@ -759,6 +759,16 @@
     packed 0.5 (ri + rj) apart, middles first; past the edge a few stray
     tufts (none on exposed edges). A candidate covered within 5 cm above
     (a rail on a board) is dropped, tested once when first kept (`memo`).
+  - **Directed moss** (the user, 2026-11-03: "more controlled / directed
+    clumps in certain areas instead of overall coverage"): `mi_moss_picks`
+    reads the selection: vertices / edges = clump centres (stored as
+    `seeds`, like ivy's, following the mesh), faces = `faces` {mesh uuid:
+    [face ids]} (`mi_face_mask` on Regrow; ids, so a topology change
+    breaks it). Triangles carry their face id (`_mi_triangles`), the
+    sampler's `pick` says which mesh / face, candidates keep both, so
+    masking is a re-score (cached field). Seeds: margin = 0.7 (1 - d /
+    Spread) + 0.3 (score - 0.5) + noise - (1 - coverage) + 0.3, d to the
+    nearest seed (grid); shelter still stretches a clump along a crack.
   - **Cushions** (`_MossCushion`): rings x segments by Detail
     (`MOSS_RINGS`, fewer on small cushions); profile (1 - f^2)^2, a smooth
     bump flat where it meets the surface, so overlapping cushions blend
@@ -806,7 +816,8 @@
     cushions, 220k faces; a live Coverage edit rebuilds them all (~7 s);
     the ledge 0.7 s; ivy 0.25 s. Too slow for live roof-sized edits yet.
   - Not done (ideas): following the meshes live (Regrow is manual), a
-    click-to-plant picker, rootlets on the stems, moss on the ivy. The
+    click-to-plant picker (or changing a grown patch's picks: today picks
+    are set at Grow), rootlets on the stems, moss on the ivy. The
     user wants much more realism than cushions give: next options are a
     continuous carpet shell (displacement-ready UVs), fur-like alpha fuzz
     cards, or scattering scanned moss / ivy assets.

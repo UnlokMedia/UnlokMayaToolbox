@@ -675,8 +675,12 @@ posts and walls, grown on your own meshes. No plugin, no nodes: plain
 meshes with clean UVs, live while you tune them.
 
 1. **Select surfaces:** the meshes to grow on, together (a roof's planks,
-   a ledge and the wall behind it, a post and the beam on it). For ivy you
-   can also pick vertices, edges or faces where vines start.
+   a ledge and the wall behind it, a post and the beam on it). To direct
+   moss, pick components instead of whole meshes: **faces** = moss only
+   on those faces (Coverage decides how full); **vertices or edges** = a
+   clump round each picked point, out to *Spread* (further into sheltered
+   corners and cracks). Both are remembered, so Regrow keeps them. For ivy,
+   picked vertices, edges or faces are where vines start.
 2. **Grow** (one Ctrl+Z): pick **Moss** or **Ivy** (and a preset), then
    **Grow Moss / Ivy on Selected**. The new patch is selected, so step 3
    edits it straight away.
@@ -1517,7 +1521,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   open, none on the rail, the open wall or undersides, bigger clumps where
   sheltered, no point inside geometry, UDIMs per part (stacks, Start UDIM),
   live edits out of the undo queue, cached re-scoring, undo / redo (the
-  redo regrows the seed planes), save / reopen, bake. Ivy on a post: vines
+  redo regrows the seed planes), save / reopen, bake, directed moss (a
+  clump round a picked point within Spread, moss kept to picked faces,
+  Regrow keeping them). Ivy on a post: vines
   climb it, stems and leaves stay out of it, UVs inside their tiles, picked
   seeds (and Regrow following the post), presets, speed.
 - `tests/gui_moss_ivy.py`: drives the Moss and Ivy panel in a real Maya

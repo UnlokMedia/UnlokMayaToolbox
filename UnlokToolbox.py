@@ -27325,7 +27325,7 @@ MI_MAX_SEEDS = 64
 MOSS_DEFAULTS = {
     "coverage": 0.55, "clump_size": 0.06, "size_var": 0.5, "thickness": 0.025, "mess": 0.6,
     "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8,
-    "strands": 0.6, "strand_length": 0.012, "droop": 0.5,
+    "strands": 0.6, "strand_length": 0.012, "droop": 0.5, "spread": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles"}
 IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
@@ -27542,15 +27542,16 @@ def _mi_mesh_key(node):
 
 
 def _mi_triangles(node):
-    """World triangles of a mesh [(a, b, c, unit normal)] and their running
-    area (cached while the mesh is unchanged)."""
+    """World triangles of a mesh [(a, b, c, unit normal, face id)] and their
+    running area (cached while the mesh is unchanged)."""
     key = _mi_mesh_key(node)
     hit = _MI_TRIS.get(key)
     if hit is not None:
         return hit
     fn = om.MFnMesh(get_dag_path(key[0]))
     P = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
-    ids = fn.getTriangles()[1]
+    per, ids = fn.getTriangles()
+    face_of = [f for f, nt in enumerate(per) for _ in range(nt)]
     tris, acc, total = [], [], 0.0
     for k in range(0, len(ids), 3):
         a, b, c = P[ids[k]], P[ids[k + 1]], P[ids[k + 2]]
@@ -27560,7 +27561,7 @@ def _mi_triangles(node):
             continue
         total += area
         acc.append(total)
-        tris.append((a, b, c, _rl_norm(cr)))
+        tris.append((a, b, c, _rl_norm(cr), face_of[k // 3]))
     _MI_TRIS[key] = (acc, tris)
     while len(_MI_TRIS) > 24:
         _MI_TRIS.popitem(last=False)
@@ -27575,21 +27576,25 @@ class _MiSampler(object):
         for node in nodes:
             acc, tris = _mi_triangles(node)
             if tris:
-                self.parts.append((self.total, acc, tris))
+                self.parts.append((self.total, acc, tris, node))
                 self.total += acc[-1]
         self.starts = [p[0] for p in self.parts]
 
     def point(self, r0, r1, r2):
         """(point, triangle normal) for three uniforms."""
+        return self.pick(r0, r1, r2)[:2]
+
+    def pick(self, r0, r1, r2):
+        """(point, triangle normal, mesh, face id) for three uniforms."""
         x = r0 * self.total
         i = max(0, bisect.bisect_right(self.starts, x) - 1)
-        base, acc, tris = self.parts[i]
+        base, acc, tris, node = self.parts[i]
         k = min(len(tris) - 1, bisect.bisect_left(acc, x - base))
-        a, b, c, n = tris[k]
+        a, b, c, n, f = tris[k]
         if r1 + r2 > 1.0:
             r1, r2 = 1.0 - r1, 1.0 - r2
         return (a[0] + (b[0] - a[0]) * r1 + (c[0] - a[0]) * r2, a[1] + (b[1] - a[1]) * r1 + (c[1] - a[1]) * r2,
-                a[2] + (b[2] - a[2]) * r1 + (c[2] - a[2]) * r2), n
+                a[2] + (b[2] - a[2]) * r1 + (c[2] - a[2]) * r2), n, node, f
 
 
 def _mi_frame(n, ang=0.0):
@@ -27705,8 +27710,8 @@ def _moss_reach(R):
 def _moss_field(surf, sampler, s, R):
     """(spots, candidates): cushion candidates scattered over the meshes,
     each tied to the analysed spots round it, [(point, normal, randoms,
-    [(spot index, weight)], fine noise)]. Cached like the spots: Coverage
-    and the weights only re-score."""
+    [(spot index, weight)], fine noise, memo, mesh, face id)]. Cached like
+    the spots: Coverage, the weights and the picked areas only re-score."""
     seed = int(s["seed"])
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
     RA = _moss_reach(R)
@@ -27727,7 +27732,7 @@ def _moss_field(surf, sampler, s, R):
     cands = []
     for i in range(n):
         r = _rand12(seed, i, 29, 3)
-        p, tn = sampler.point(r[0], r[1], r[2])
+        p, tn, node, face = sampler.pick(r[0], r[1], r[2])
         if tn[1] < -0.35:
             continue
         kx, ky, kz = int(math.floor(p[0] / reach)), int(math.floor(p[1] / reach)), int(math.floor(p[2] / reach))
@@ -27747,20 +27752,24 @@ def _moss_field(surf, sampler, s, R):
             continue
         a, b = (p[0] + p[1] * 0.71) / patch, (p[2] - p[1] * 0.53) / patch  # 2D is enough for a ragged edge
         fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
-        cands.append((p, tn, r, near, fine, {}))  # the last: is it covered (worked out when first kept)
+        cands.append((p, tn, r, near, fine, {}, node, face))  # memo: is it covered (worked out when first kept)
     _MI_MOSS_CACHE[key] = cands
     while len(_MI_MOSS_CACHE) > 8:
         _MI_MOSS_CACHE.popitem(last=False)
     return spots, cands
 
 
-def moss_clumps(surf, sampler, s):
+def moss_clumps(surf, sampler, s, seeds=None, faces=None):
     """The cushions a patch has: [(centre, normal, radius, height, shelter,
     edge, randoms)]. Real moss is a carpet of small packed cushions with a
     ragged edge, not round pads: each candidate reads a coverage field
     (the analysed spots' scores round it plus fine noise for the ragged
     edge); inside a patch cushions are big, thick and packed (overlapping),
-    towards its edge smaller and thinner, past it a few scattered tufts."""
+    towards its edge smaller and thinner, past it a few scattered tufts.
+    Directed (the user: "controlled / directed clumps in certain areas
+    instead of overall coverage"): faces ({mesh: set of face ids}) keeps
+    moss to those faces; seeds (world points) grow a clump round each, out
+    to Spread, still reading shelter (it reaches further into a crevice)."""
     m = scene_m_per_unit()
     R = max(1e-4, float(s["clump_size"]) / m)
     H = max(0.0, float(s["thickness"]) / m)
@@ -27772,8 +27781,15 @@ def moss_clumps(surf, sampler, s):
     rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
     spots, cands = _moss_field(surf, sampler, s, R)
     scores = [moss_score(sp, s) for sp in spots]
+    spread = max(1e-4, float(s["spread"]) / m)
+    sgrid = {}
+    for q in seeds or ():
+        sgrid.setdefault((int(math.floor(q[0] / spread)), int(math.floor(q[1] / spread)),
+                          int(math.floor(q[2] / spread))), []).append(q)
     picked = []
-    for p, n, r, near, fine, memo in cands:
+    for p, n, r, near, fine, memo, node, face in cands:
+        if faces is not None and face not in faces.get(node, ()):
+            continue
         tw = sc = occ = edge = 0.0
         for j, w in near:
             tw += w
@@ -27781,6 +27797,11 @@ def moss_clumps(surf, sampler, s):
             occ += spots[j][3] * w
             edge += spots[j][4] * w
         margin = sc / tw + rag * fine - thr
+        if seeds:  # nearness to a picked point leads; the spot's own score still shapes the clump
+            kx, ky, kz = int(math.floor(p[0] / spread)), int(math.floor(p[1] / spread)), int(math.floor(p[2] / spread))
+            d = min([_rl_len(_rl_sub(p, q)) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                     for q in sgrid.get((kx + dx, ky + dy, kz + dz), ())] or [spread * 2.0])
+            margin = 0.7 * (1.0 - d / spread) + 0.3 * (sc / tw - 0.5) + rag * fine - thr + 0.3
         if margin < 0.0 and (margin < -0.15 or edge > 0.25 * tw or r[4] > 0.3 * (1.0 + margin / 0.15)):
             continue  # past the patch's edge: a few stray tufts, thinning out (none on exposed edges)
         picked.append((margin + 0.05 * r[5], p, n, occ / tw, edge / tw, margin, r, memo))
@@ -27901,7 +27922,7 @@ class _MossCushion(object):
         return _rl_add(origin, _rl_mul(d, max(0.0, hit[0] - 0.02 * self.h)))
 
 
-def moss_build(nodes, s, surf=None):
+def moss_build(nodes, s, surf=None, seeds=None, faces=None):
     """Grow a moss patch on meshes: {"moss": mesh, "strands": mesh,
     "clumps", "capped"} (world space). Cushions take one planar UV each, at
     Tile size metres a tile, randomly offset inside 0..1 (stacked: the same
@@ -27921,7 +27942,7 @@ def moss_build(nodes, s, surf=None):
     droop = clamp(float(s["droop"]), 0.0, 2.0)
     mess = clamp(float(s["mess"]), 0.0, 2.0)
     R = max(1e-9, float(s["clump_size"]) / m)
-    clumps = moss_clumps(surf, sampler, s) if surf.items else []
+    clumps = moss_clumps(surf, sampler, s, seeds, faces) if surf.items else []
     M, S = _mi_mesh(), _mi_mesh()
     capped = False
     for ci, clump in enumerate(clumps):
@@ -28478,12 +28499,13 @@ def ivy_build(nodes, s, seeds=None, surf=None):
     return {"stems": stems, "leaves": leaves, "vines": len(vines), "leaves_n": n_leaves, "capped": capped}
 
 
-def mi_build(kind, nodes, s, seeds=None):
+def mi_build(kind, nodes, s, seeds=None, faces=None):
     """Build a moss patch or an ivy plant: {part: mesh, ..., "udims": {part:
-    [UDIM]}} with each part in its own tiles from Start UDIM."""
+    [UDIM]}} with each part in its own tiles from Start UDIM. Moss: seeds /
+    faces direct it (moss_clumps); ivy: seeds start the vines."""
     kind = _mi_kind(kind)
     s = mi_settings_only(kind, s)
-    out = moss_build(nodes, s) if kind == "Moss" else ivy_build(nodes, s, seeds)
+    out = moss_build(nodes, s, seeds=seeds, faces=faces) if kind == "Moss" else ivy_build(nodes, s, seeds)
     return _roof_udims(out, int(s["udim"] or 1001), order=MI_UDIM_ORDER)
 
 
@@ -28606,6 +28628,61 @@ def _mi_store_seeds(points, targets):
     return out
 
 
+def mi_moss_picks():
+    """(points, faces) the user picked for directed moss: picked vertices /
+    edges as clump centres (world, merged closer than 1 cm), picked faces as
+    {mesh: [face ids]} the moss keeps to."""
+    sel = cmds.ls(selection=True, long=True) or []
+    points = []
+    comps = cmds.filterExpand(sel, selectionMask=(31, 32), fullPath=True) or []
+    merge = 0.01 / scene_m_per_unit()
+    for comp in comps[:4000]:
+        try:
+            xyz = cmds.xform(comp, q=True, worldSpace=True, translation=True)
+        except RuntimeError:
+            continue
+        n = len(xyz) // 3
+        if not n:
+            continue
+        p = (sum(xyz[0::3]) / n, sum(xyz[1::3]) / n, sum(xyz[2::3]) / n)
+        if all(_rl_len(_rl_sub(p, q)) > merge for q in points):
+            points.append(p)
+        if len(points) >= MI_MAX_SEEDS:
+            break
+    faces = {}
+    for comp in cmds.filterExpand(sel, selectionMask=34, fullPath=True) or []:
+        node, _, idx = comp.rpartition(".f[")
+        if cmds.objectType(node, isAType="shape"):
+            node = cmds.listRelatives(node, parent=True, fullPath=True)[0]
+        try:
+            faces.setdefault(long_name(node), []).append(int(idx.rstrip("]")))
+        except ValueError:
+            continue
+    return points, faces
+
+
+def _mi_store_faces(faces):
+    out = {}
+    for node, ids in (faces or {}).items():
+        uid = cmds.ls(node, uuid=True)
+        if uid:
+            out[uid[0]] = sorted(set(ids))
+    return out
+
+
+def mi_face_mask(data):
+    """A moss patch's picked faces {mesh: set of face ids} (None: every face)."""
+    stored = data.get("faces")
+    if not stored:
+        return None
+    out = {}
+    for uid, ids in stored.items():
+        found = cmds.ls(uid, long=True) or []
+        if found:
+            out[found[0]] = set(ids)
+    return out
+
+
 def mi_selection():
     """(systems, targets, seeds): moss / ivy groups selected (or their parts),
     meshes to grow on, and seed points (world) from selected vertices,
@@ -28694,9 +28771,10 @@ def _mi_report(kind, built, faces):
     return rep
 
 
-def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False):
+def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False, faces=None):
     """Grow moss or ivy on meshes (one Ctrl+Z). seeds: ivy start points
-    (world; none = Vines automatic seeds at the bottom). Returns {"root",
+    (world; none = Vines automatic seeds at the bottom) or moss clump
+    centres; faces: {mesh: [face ids]} moss keeps to. Returns {"root",
     "faces", "clumps" / "vines" + "leaves", "capped", "udims"}. Raises
     ValueError without a mesh to grow on."""
     kind = _mi_kind(kind)
@@ -28704,8 +28782,9 @@ def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False):
     if not targets:
         raise ValueError("select the meshes to grow on")
     s = mi_settings_only(kind, settings)
-    seeds = list(seeds or [])[:MI_MAX_SEEDS] if kind == "Ivy" else []
-    built = mi_build(kind, targets, s, seeds)
+    seeds = list(seeds or [])[:MI_MAX_SEEDS]
+    faces = {long_name(k): v for k, v in (faces or {}).items() if v} if kind == "Moss" else {}
+    built = mi_build(kind, targets, s, seeds, {k: set(v) for k, v in faces.items()} if faces else None)
     stem = MI_STEMS[kind]
     with UndoChunk("Grow %s" % kind):
         num = _th_free_number(stem + "%04d_GRP")
@@ -28716,6 +28795,7 @@ def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False):
         data["version"] = MI_VERSION
         data["targets"] = [cmds.ls(t, uuid=True)[0] for t in targets]
         data["seeds"] = _mi_store_seeds(seeds, targets)
+        data["faces"] = _mi_store_faces(faces)
         cmds.setAttr(root + "." + MI_SETTINGS, json.dumps(data, sort_keys=True), type="string")
         for part, material in MI_PARTS[kind]:
             _mi_make_part(root, num, part, material, stem)
@@ -28751,7 +28831,7 @@ def update_moss_ivy(changes, attr=MI_SETTINGS):
             report["lost"].append(root)
         s = mi_settings_only(kind, data)
         try:
-            built = mi_build(kind, targets, s, mi_seed_points(data) if kind == "Ivy" else None)
+            built = mi_build(kind, targets, s, mi_seed_points(data), mi_face_mask(data) if kind == "Moss" else None)
         except (ValueError, RuntimeError) as exc:
             report["errors"].append((root, str(exc)))
             continue
@@ -28913,8 +28993,10 @@ class MossIvyPanel(QtWidgets.QWidget):
         # ---- 1. select
         card = self.step_select = StepCard(1, "Select surfaces", "Select the meshes to grow on together (a roof "
                                                                  "and the wall under it, a post and the floor). "
-                                                                 "For ivy, also pick vertices or faces where vines "
-                                                                 "start (optional). Select moss or ivy to edit it.")
+                                                                 "To say where moss grows, pick faces (moss stays on "
+                                                                 "them) or vertices (a clump round each); for ivy, "
+                                                                 "vertices or faces where vines start. Select moss or "
+                                                                 "ivy to edit it.")
         self.sel_label = hint_label("")
         card.add(self.sel_label)
         col.addWidget(card)
@@ -29013,7 +29095,10 @@ class MossIvyPanel(QtWidgets.QWidget):
         main = Section("", header=False)
         self._row(k, main, "coverage", "Coverage", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
                   "How much of the surface gets moss: low = only the best spots (sheltered corners, crevices), "
-                  "high = most up-facing surfaces.")
+                  "high = most up-facing surfaces. With picked vertices: how full each clump is.")
+        self._row(k, main, "spread", "Spread", FloatField(0.01, 20.0, 0.05, 1.5, decimals=2, step=0.05),
+                  "With picked vertices: how far each clump reaches from its point, in metres (further into "
+                  "sheltered corners and cracks).")
         self._row(k, main, "clump_size", "Clump size", FloatField(0.005, 3.0, 0.02, 0.4, decimals=3, step=0.01),
                   "Radius of a clump in metres (sheltered spots grow bigger ones).")
         self._row(k, main, "thickness", "Thickness", FloatField(0.0, 0.5, 0.0, 0.12, decimals=3, step=0.005),
@@ -29199,6 +29284,15 @@ class MossIvyPanel(QtWidgets.QWidget):
             if self._kind == "Ivy":
                 extra = (" from the %d picked seed(s)" % len(seeds)) if seeds else \
                     " (pick vertices or faces to say where vines start)"
+            else:
+                points, faces = mi_moss_picks()
+                bits = []
+                if points:
+                    bits.append("a clump at each of the %d picked point(s)" % len(points))
+                if faces:
+                    bits.append("only on the %d picked face(s)" % sum(len(v) for v in faces.values()))
+                extra = (": " + ", ".join(bits)) if bits else \
+                    " (or pick vertices for clumps / faces for areas, to say where it goes)"
             self.next_banner.set_text("Press <b>Grow %s on Selected</b>%s." % (self._kind, extra))
         else:
             self.next_banner.set_text("Select the meshes to grow %s on (or a %s to edit it)." %
@@ -29263,8 +29357,11 @@ class MossIvyPanel(QtWidgets.QWidget):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            rep = grow_moss_ivy(self._kind, targets, self._settings(), seeds if self._kind == "Ivy" else None,
-                                select=True)
+            if self._kind == "Moss":
+                points, faces = mi_moss_picks()
+                rep = grow_moss_ivy("Moss", targets, self._settings(), points, select=True, faces=faces)
+            else:
+                rep = grow_moss_ivy("Ivy", targets, self._settings(), seeds, select=True)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         level = "fixed"

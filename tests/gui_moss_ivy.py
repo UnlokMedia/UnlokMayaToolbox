@@ -254,6 +254,36 @@ def main():
     snap("04_roof_moss_eave.png")
     cmds.delete(ns["mi_systems"]())
 
+    # --- directed: a clump round each picked point (top edges' middles), then moss only on picked faces
+    cmds.select(["%s.e[1]" % planks[3], "%s.e[2]" % planks[8], "%s.e[1]" % planks[16]])
+    panel._sync_from_selection()
+    check("NEXT says where the clumps go", "picked point" in panel.next_banner.text.text(),
+          panel.next_banner.text.text())
+    panel.grow()
+    roots = ns["mi_systems"]()
+    check("Grow Moss grows a clump at each picked point", len(roots) == 1 and
+          len(ns["mi_data"](roots[0])["seeds"]) == 3, panel.status.text())
+    for r in roots:
+        shade_parts(ns, r)
+    deselect()
+    look((0, 24, 6), (34, 46, 52))
+    snap("05a_roof_moss_clumps.png")
+    cmds.delete(roots)
+    cmds.select(["%s.f[1]" % planks[i] for i in (2, 3, 4, 13, 14)])
+    panel._sync_from_selection()
+    check("NEXT says the moss keeps to the picked faces", "picked face" in panel.next_banner.text.text(),
+          panel.next_banner.text.text())
+    panel.grow()
+    roots = ns["mi_systems"]()
+    check("Grow Moss keeps to the picked faces", len(roots) == 1 and ns["mi_data"](roots[0])["faces"],
+          panel.status.text())
+    for r in roots:
+        shade_parts(ns, r)
+    deselect()
+    look((0, 24, 6), (34, 46, 52))
+    snap("05b_roof_moss_faces.png")
+    cmds.delete(roots)
+
     # --- a thick carpet preset on the roof, shaggy over the eaves
     cmds.select(planks)
     panel._sync_from_selection()

@@ -204,6 +204,36 @@ def run():
     cmds.undo()
     check("one Ctrl+Z undoes the bake", tb["mi_systems"]() == [root])
 
+    # --- directed moss: a clump round each picked point, or only on picked faces
+    cmds.file(new=True, force=True)
+    nodes = ledge_scene()
+    a, b = nodes[0], nodes[1]
+    fn = om.MFnMesh(om.MSelectionList().add(a).getDagPath(0))
+    tops = [f for f in range(fn.numPolygons) if fn.getPolygonNormal(f, om.MSpace.kWorld).y > 0.9]
+    cmds.select(["%s.f[%d]" % (a, f) for f in tops])
+    picks = tb["mi_moss_picks"]()
+    check("picked faces are an area", picks[0] == [] and picks[1] == {a: tops}, str(picks)[:200])
+    cmds.select(b + ".vtx[2:3]")
+    check("picked vertices are clump centres", len(tb["mi_moss_picks"]()[0]) == 2)
+    cmds.select(clear=True)
+    surf = tb["_MiSurface"](nodes)
+    sampler = tb["_MiSampler"](surf.nodes)
+    s = tb["mi_settings_only"]("Moss", {"spread": 0.3})
+    seed_pt = (0.0, 10.5, 3.15)  # the open middle of board B, where little grows on its own
+    clumps = tb["moss_clumps"](surf, sampler, s, seeds=[seed_pt])
+    far = max([math.sqrt(sum((c[0][k] - seed_pt[k]) ** 2 for k in range(3))) for c in clumps] or [0.0])
+    near = [c for c in clumps if math.sqrt(sum((c[0][k] - seed_pt[k]) ** 2 for k in range(3))) < 1.0]
+    check("a picked point grows a clump round it, out to Spread", len(clumps) > 10 and near and far < 4.5,
+          "%d cushions, %d within 10 cm, furthest %.2f (Spread 3.0)" % (len(clumps), len(near), far))
+    clumps = tb["moss_clumps"](surf, sampler, tb["mi_settings_only"]("Moss", {"coverage": 0.8}), faces={a: set(tops)})
+    check("picked faces keep the moss to them", len(clumps) > 10 and
+          all(c[0][1] > 10.45 and -6.2 < c[0][2] < -0.1 for c in clumps), "%d cushions" % len(clumps))
+    rep = tb["grow_moss_ivy"]("Moss", nodes, {"coverage": 0.8}, faces={a: tops})
+    root = rep["root"]
+    again = tb["update_moss_ivy"]({root: {}})
+    check("Regrow keeps the picked faces", again["clumps"] == rep["clumps"] and
+          list(tb["mi_data"](root)["faces"].values()) == [tops], "%d / %d" % (rep["clumps"], again["clumps"]))
+
     # --- ivy on a post
     cmds.file(new=True, force=True)
     post = cmds.ls(cmds.polyCylinder(r=1.0, h=25, sx=16, sy=10, name="post", constructionHistory=False)[0],
