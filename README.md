@@ -696,13 +696,17 @@ round it that hit: inside corners, and gaps between boards count as cracks:
 *Crevices*), not exposed (the surface falling away round it: ridges, convex
 edges, thin rails: *Avoid edges*) and patchy noise (*Patchiness*, *Patch
 size*). *Coverage* sets where the patches are; their edges are ragged
-(*Messiness*) and thin out into stray tufts. Inside a patch the moss is a
-carpet of small packed cushions (*Clump size*), bigger and thicker in the
-middle and in sheltered spots, each a smooth lumpy bump snapped onto the
-surface (so it wraps into a corner or a crack), never into geometry above
-it. *Strands* adds thin fibres standing out of it (the fuzz, for
-close-ups), drooping (*Droop*) and hanging longer over an edge.
-Presets: Jungle roof, Crevices only, Thick carpet, Shaggy hanging.
+(*Messiness*). The moss is one continuous bed over the meshes, like jungle
+moss: thicker inside a patch and in sheltered spots (*Thickness*), packed
+cushions with creases between them (*Lumps*), rolling over plank edges and
+filling inside corners, tucking under at its edges, never into geometry
+above it or pressed against it. Out of the bed stand *Shoots* (how tall:
+*Shoot length*), *Capsules* (thin stalks with nodding spore capsules, in
+fruiting clusters) and, where the moss faces sideways or down (over an
+eave, down a wall), hanging strands (*Hanging*). All real geometry, no
+alpha cards.
+Presets: Jungle roof, Crevices only, Thick carpet, Fruiting cushions,
+Shaggy hanging.
 
 **Ivy** vines start from the picked points (*Vines* shared between them) or
 from automatic seeds at the bottom of the meshes. Each vine walks the
@@ -718,59 +722,37 @@ geometry above Proxy) lying over the surface like shingles, cupped, its
 tip curled.
 Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
 
-**Detail** (Proxy / Normal / High / Hero) sets cushion rings and strands, or
-stem sides, walk steps and leaf rows.
+**Detail** is how close the camera gets, and how heavy the moss is:
+
+| Detail | Bed | Standing out of it | For |
+|---|---|---|---|
+| Proxy | coarse (one cell per Clump size) | nothing | layout, big areas |
+| Normal | 0.3 x Clump size cells, lumpy | little tufts, capsules, hanging strands | mid shots and out |
+| High | 0.14 x | shoots with a star of leaves | close-ups |
+| Hero | 0.09 x | leafy shoots (two whorls), rounder capsules | extreme close-ups: keep the patch small |
+
+For ivy it sets stem sides, walk steps and leaf rows.
 
 **UVs:** every part has its own UDIM tiles from *Start UDIM* on, so no two
-parts share UV space except stacked variations. Moss cushions each get a
-planar UV at *Tile size* metres a tile, at a random place in 0..1 (one moss
-texture for every clump); strands and leaves fill 0..1 (a leaf texture with
-its stalk at the bottom 20%). *Stacks* gives each clump / strand / leaf one
-of N stacks (UDIM tiles or atlas columns). Stems are laid out in neat
+parts share UV space except stacked variations. The moss bed is laid out
+flat on each face at *Tile size* metres a tile, cut at the tile lines and
+stacked into 0..1: give it a tiling moss texture and displacement. Shoots,
+strands, capsules and leaves fill 0..1 (one texture each: leaves have their
+stalk at the bottom 20%). *Stacks* gives each shoot / strand / leaf one of
+N stacks (UDIM tiles or atlas columns). Stems are laid out in neat
 columns at one density over *Stem tiles* tiles.
 
 Patches are `mossPatch0001_GRP` holding `mossGreen_C_mossPatch0001_GEP`
-(cushions) and `mossStrand_C_mossPatch0001_GEP`; ivy is `ivy0001_GRP` holding
+(the bed), `mossStrand_C_mossPatch0001_GEP` (shoots and hanging strands)
+and `mossSpore_C_mossPatch0001_GEP` (capsules); ivy is `ivy0001_GRP` holding
 `ivyStem_C_ivy0001_GEP` and `ivyLeaf_C_ivy0001_GEP`. **With Smart UDIM:**
-cushions, strands and leaves are Hands off (stacked), stems Keep UVs.
+the bed, strands, capsules and leaves are Hands off (stacked), stems Keep UVs.
 
-**Speed** (Normal): moss on a ledge and wall 0.7 s; a whole shack roof
-about 7 s (3,000 cushions), and a live edit rebuilds it all, so use Proxy
-while tuning big patches. Ivy 0.1 - 0.3 s.
-
-### Modeling > Quad Fill
-
-Fills a hole with clean quads instead of Maya's one n-gon: the edge loops
-carry across to the other side, and the patch follows the surface round it
-(a hole in a sphere fills round, an open tube end closes flat).
-
-1. **Pick the hole:** select one edge on its border (or the whole border,
-   a border vertex, or a face next to it). Pick an edge on each hole to fill
-   several at once.
-2. **Shape:** a teal wireframe previews the fill and follows the settings
-   live.
-   - **Smooth** relaxes the inside so the quads even out; 0 keeps the lines
-     straight between opposite border points.
-   - **Follow surface:** 1 carries the surrounding curvature across, 0 fills
-     with straight lines from side to side, above 1 bulges more.
-   - **Rings:** loops that follow the border before the grid starts. Auto
-     gives round and concave holes one, holes with corners none.
-   - **Offset** turns the grid round the hole (on an odd hole it moves the
-     triangle); **Span** makes it longer one way and shorter the other.
-   - **Smooth shading** softens the new edges, and the old border where the
-     surface carries on (a tube's rim stays hard).
-3. **Fill Hole.** One Ctrl+Z undoes it.
-
-The border is split into four sides at its best corners, so a hole cut out
-of a grid gets that grid back exactly. An even number of border edges always
-fills as a grid with no poles; an odd number can't be all quads, so one
-triangle closes the sharpest corner. Folded or knife-thin corners (concave
-holes) are opened up automatically.
-
-It fills the mesh itself with Maya's own poly edits: no new mesh, and the
-same node, name, attributes, sets and materials (per-face materials take the
-one round the hole). A mesh without construction history doesn't get any. A
-96-edge hole fills in about 0.2 s.
+**Speed:** a whole shack roof at Normal about 13 s to grow, then about 5 s
+per live edit (the bed's layout is kept between edits); use Proxy while
+tuning big patches and save High / Hero for the patches the camera gets
+close to (three planks: Normal ~30k vertices, High ~320k, Hero ~1M).
+Ivy 0.1 - 0.3 s.
 
 ### UV > Smart UDIM (in progress)
 
@@ -1550,37 +1532,25 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   the smoke test below, with
   `tests/run_gui_thatch_roof.mel`.
 - `tests/test_moss_ivy.py`: headless Moss and Ivy tests. Moss on a slab of
-  two boards with a crack between them, a wall behind (inside corner) and a
-  thin rail: more moss per area in the corner and the crack than in the
-  open, none on the rail, the open wall or undersides, bigger clumps where
-  sheltered, no point inside geometry, UDIMs per part (stacks, Start UDIM),
-  live edits out of the undo queue, cached re-scoring, undo / redo (the
-  redo regrows the seed planes), save / reopen, bake, directed moss (a
-  clump round a picked point within Spread, moss kept to picked faces,
-  Regrow keeping them). Ivy on a post: vines
-  climb it, stems and leaves stay out of it, UVs inside their tiles, picked
-  seeds (and Regrow following the post), presets, speed.
+  two boards with a crack between them, a wall behind (inside corner, a
+  board's back pressed against it) and a thin rail across a board: more
+  moss in the corner and the crack than in the open, none on the rail, the
+  open wall or undersides, no bed point inside geometry, the bed rolling
+  over the boards' edges into the crack, lumpy and about Thickness thick,
+  Detail tiers getting heavier, Capsules 0 hiding the capsules, strands
+  hanging where Hanging is up, UDIMs per part (stacks, Start UDIM), live
+  edits out of the undo queue, cached re-scoring, undo / redo (the redo
+  regrows the seed planes), save / reopen, bake, directed moss (a clump
+  round a picked point within Spread, moss kept to picked faces, Regrow
+  keeping them). Ivy on a post: vines climb it, stems and leaves stay out
+  of it, UVs inside their tiles, picked seeds (and Regrow following the
+  post), presets, speed.
 - `tests/gui_moss_ivy.py`: drives the Moss and Ivy panel in a real Maya
-  session (grow moss on a plank roof, live edit, undo / redo, presets, moss
-  in a stone wall's crevices, ivy up a post onto its beam and from picked
-  seeds on a wall, Randomize, bake) and saves pictures to
-  `tests/_out/moss_ivy`. Launch it like the smoke test below, with
-  `tests/run_gui_moss_ivy.mel`.
-- `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular
-  (the lost grid comes back exactly), uneven, L-shaped and odd holes in a
-  grid, Offset / Span / Rings variations, a hole in a sphere (within 0.2% of
-  its radius; Follow 0 is flat) and round its pole (a ring), a cylinder's
-  open end (flat, rim stays hard) and side (round); every fill all quads,
-  manifold, wound like the mesh, no folded corners; same node, name, uuid
-  and attributes, no history added, one Ctrl+Z; per-face materials; picking
-  by vertex, face or whole mesh; the preview out of the undo queue and never
-  saved; speed.
-- `tests/gui_quad_fill.py`: drives the Quad Fill panel in a real Maya
-  session (a sphere, a tube end and an uneven grid hole: preview, Offset,
-  Fill Hole, undo / redo, the preview going when you leave the panel) and
-  saves before / preview / after pictures beside Maya's own Fill Hole to
-  `tests/_out/quad_fill`. Launch it like the smoke test below, with
-  `tests/run_gui_quad_fill.mel`.
+  session (grow moss on a plank roof, live edit, undo / redo, presets, each
+  Detail tier on three planks with a close-up, moss in a stone wall's
+  crevices, ivy up a post onto its beam and from picked seeds on a wall,
+  Randomize, bake) and saves pictures to `tests/_out/moss_ivy`. Launch it
+  like the smoke test below, with `tests/run_gui_moss_ivy.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

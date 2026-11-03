@@ -27308,15 +27308,15 @@ class ThatchRoofPanel(QtWidgets.QWidget):
 
 MI_SETTINGS = "unlokMossIvy"     # string on the group: JSON (kind, settings, targets, seeds)
 MI_BAKED = "unlokMossIvyBaked"   # the same after Bake (only a redo of Grow reads it)
-MI_PART = "unlokMossIvyPart"     # string on each part mesh: "moss", "strands", "stems" or "leaves"
+MI_PART = "unlokMossIvyPart"     # string on each part mesh: "moss", "strands", "capsules", "stems", "leaves"
 MI_VERTS = "unlokMossIvyVerts"   # long on each part mesh: vertex count of the last build
 MI_VERSION = 1
 MI_KINDS = ("Moss", "Ivy")
-MI_PARTS = {"Moss": (("moss", "mossGreen"), ("strands", "mossStrand")),
+MI_PARTS = {"Moss": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
             "Ivy": (("stems", "ivyStem"), ("leaves", "ivyLeaf"))}
 MI_STEMS = {"Moss": "mossPatch", "Ivy": "ivy"}
-MI_UDIM_ORDER = ("moss", "strands", "stems", "leaves")  # each part in its own tiles, from Start UDIM
-MI_STACKED_PARTS = ("moss", "strands", "leaves")  # same UVs on every clump / card / leaf (UV_STACKED_ATTR)
+MI_UDIM_ORDER = ("moss", "strands", "capsules", "stems", "leaves")  # each part in its own tiles, from Start UDIM
+MI_STACKED_PARTS = ("moss", "strands", "capsules", "leaves")  # same UVs on every clump / card / leaf (UV_STACKED_ATTR)
 MI_DETAILS = ("Proxy", "Normal", "High", "Hero")
 MI_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
 MI_MAX_VERTS = 900000  # per part; past it clumps / leaves are dropped (reported as capped)
@@ -27325,7 +27325,7 @@ MI_MAX_SEEDS = 64
 MOSS_DEFAULTS = {
     "coverage": 0.55, "clump_size": 0.06, "size_var": 0.5, "thickness": 0.025, "mess": 0.6,
     "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8,
-    "strands": 0.6, "strand_length": 0.012, "droop": 0.5, "spread": 0.3,
+    "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles"}
 IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
@@ -27610,9 +27610,7 @@ def _mi_mesh():
 
 
 # ------------------------------------------------------------------- moss
-MOSS_RINGS = {"Proxy": (2, 7), "Normal": (4, 12), "High": (6, 16), "Hero": (8, 22)}
 MOSS_RAYS = {"Proxy": 5, "Normal": 7, "High": 9, "Hero": 12}
-MOSS_STRANDS = {"Proxy": 0.0, "Normal": 1.0, "High": 1.8, "Hero": 2.4}
 MOSS_MAX_CANDIDATES = 9000
 MOSS_MAX_CUSHIONS = 120000  # cushion candidates
 _MI_MOSS_CACHE = collections.OrderedDict()  # (meshes, seed, sizes, detail) -> analysed spots
@@ -27759,25 +27757,69 @@ def _moss_field(surf, sampler, s, R):
     return spots, cands
 
 
-def moss_clumps(surf, sampler, s, seeds=None, faces=None):
-    """The cushions a patch has: [(centre, normal, radius, height, shelter,
-    edge, randoms)]. Real moss is a carpet of small packed cushions with a
-    ragged edge, not round pads: each candidate reads a coverage field
-    (the analysed spots' scores round it plus fine noise for the ragged
-    edge); inside a patch cushions are big, thick and packed (overlapping),
-    towards its edge smaller and thinner, past it a few scattered tufts.
-    Directed (the user: "controlled / directed clumps in certain areas
-    instead of overall coverage"): faces ({mesh: set of face ids}) keeps
-    moss to those faces; seeds (world points) grow a clump round each, out
-    to Spread, still reading shelter (it reaches further into a crevice)."""
+def _moss_noise3(x, y, z, seed):
+    """Smooth 3D value noise, about -1..1 (8 hashed lattice corners, eased
+    trilinear): about half the cost of _mi_noise's three 2D slices, and the
+    moss bed calls it a few hundred thousand times."""
+    fx, fy, fz = math.floor(x), math.floor(y), math.floor(z)
+    tx, ty, tz = x - fx, y - fy, z - fz
+    tx = tx * tx * (3.0 - 2.0 * tx)
+    ty = ty * ty * (3.0 - 2.0 * ty)
+    tz = tz * tz * (3.0 - 2.0 * tz)
+    a = int(fx) * 374761393 + int(fy) * 668265263 + int(fz) * 1440662683 + seed * 982451653
+    k = 2.0 / 65535.0
+    n = a & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c000 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 374761393) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c100 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 668265263) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c010 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 1043026656) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c110 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 1440662683) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c001 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 1815424076) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c101 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 2108927946) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c011 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    n = (a + 2483689339) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 1274126177) & 0xFFFFFFFF
+    c111 = ((n ^ (n >> 16)) & 0xFFFF) * k - 1.0
+    x00 = c000 + (c100 - c000) * tx
+    x10 = c010 + (c110 - c010) * tx
+    x01 = c001 + (c101 - c001) * tx
+    x11 = c011 + (c111 - c011) * tx
+    y0 = x00 + (x10 - x00) * ty
+    y1 = x01 + (x11 - x01) * ty
+    return y0 + (y1 - y0) * tz
+
+
+def _moss_obstacle(surf, p, n, memo, R):
+    """How far out from a candidate the first surface is (within 15 cm), or
+    None; cast once per candidate (memo): a rail resting on a board covers
+    the moss under it, and the bed is kept clear of what is above it."""
+    if "o" not in memo:
+        hit = surf.ray(_rl_add(p, _rl_mul(n, 1e-3 * R)), n, 0.15 / scene_m_per_unit())
+        memo["o"] = hit[0] if hit else None
+    return memo["o"]
+
+
+def _moss_margins(surf, sampler, s, seeds=None, faces=None):
+    """(spots, candidates, rows): where each candidate sits in the coverage
+    field, rows[i] = (margin, shelter, edge), None when a picked-faces mask
+    leaves it out. margin > 0 is inside a patch (more = further in): the
+    analysed spots' scores round it, plus fine noise for a ragged edge, less
+    1 - Coverage. Seeds (picked points) lead with nearness, out to Spread."""
     m = scene_m_per_unit()
     R = max(1e-4, float(s["clump_size"]) / m)
-    H = max(0.0, float(s["thickness"]) / m)
-    cov = clamp(float(s["coverage"]), 0.0, 1.0)
-    if cov <= 0.0 or not sampler.total:
-        return []
-    thr = 1.0 - cov
-    var = clamp(float(s["size_var"]), 0.0, 1.0)
+    thr = 1.0 - clamp(float(s["coverage"]), 0.0, 1.0)
     rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
     spots, cands = _moss_field(surf, sampler, s, R)
     scores = [moss_score(sp, s) for sp in spots]
@@ -27786,9 +27828,10 @@ def moss_clumps(surf, sampler, s, seeds=None, faces=None):
     for q in seeds or ():
         sgrid.setdefault((int(math.floor(q[0] / spread)), int(math.floor(q[1] / spread)),
                           int(math.floor(q[2] / spread))), []).append(q)
-    picked = []
+    rows = []
     for p, n, r, near, fine, memo, node, face in cands:
         if faces is not None and face not in faces.get(node, ()):
+            rows.append(None)
             continue
         tw = sc = occ = edge = 0.0
         for j, w in near:
@@ -27802,10 +27845,33 @@ def moss_clumps(surf, sampler, s, seeds=None, faces=None):
             d = min([_rl_len(_rl_sub(p, q)) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                      for q in sgrid.get((kx + dx, ky + dy, kz + dz), ())] or [spread * 2.0])
             margin = 0.7 * (1.0 - d / spread) + 0.3 * (sc / tw - 0.5) + rag * fine - thr + 0.3
-        if margin < 0.0 and (margin < -0.15 or edge > 0.25 * tw or r[4] > 0.3 * (1.0 + margin / 0.15)):
+        rows.append((margin, occ / tw, edge / tw))
+    return spots, cands, rows
+
+
+def moss_clumps(surf, sampler, s, seeds=None, faces=None):
+    """Where a patch has moss, as cushions: [(centre, normal, radius,
+    height, shelter, edge, randoms)], packed 0.5 (ri + rj) apart, the
+    patches' middles first, bigger and thicker inside a patch and where
+    sheltered, a few stray tufts past its edge (none on exposed edges).
+    The bed (moss_build) reads the same field; this is its summary (counts,
+    tests) and what directed moss is checked against."""
+    m = scene_m_per_unit()
+    R = max(1e-4, float(s["clump_size"]) / m)
+    H = max(0.0, float(s["thickness"]) / m)
+    if float(s["coverage"]) <= 0.0 or not sampler.total:
+        return []
+    var = clamp(float(s["size_var"]), 0.0, 1.0)
+    spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces)
+    picked = []
+    for (p, n, r, near, fine, memo, node, face), row in zip(cands, rows):
+        if row is None:
+            continue
+        margin, occ, edge = row
+        if margin < 0.0 and (margin < -0.15 or edge > 0.25 or r[4] > 0.3 * (1.0 + margin / 0.15)):
             continue  # past the patch's edge: a few stray tufts, thinning out (none on exposed edges)
-        picked.append((margin + 0.05 * r[5], p, n, occ / tw, edge / tw, margin, r, memo))
-    picked.sort(key=lambda x: -x[0])  # the patches' middles first: big cushions pack, small ones fill in
+        picked.append((margin + 0.05 * r[5], p, n, occ, edge, margin, r, memo))
+    picked.sort(key=lambda x: -x[0])
     cell = 2.6 * R
     cover = 0.05 / m
     grid = {}
@@ -27819,10 +27885,9 @@ def moss_clumps(surf, sampler, s, seeds=None, faces=None):
         if any(_rl_len(_rl_sub(p, q)) < 0.5 * (rad + rq)
                for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                for q, rq in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ())):
-            continue  # packed and overlapping, never piled up
-        if "c" not in memo:
-            memo["c"] = bool(surf.ray(_rl_add(p, _rl_mul(n, 1e-3 * R)), n, cover))
-        if memo["c"]:
+            continue
+        o = _moss_obstacle(surf, p, n, memo, R)
+        if o is not None and o < cover:
             continue  # under something resting on the surface (a rail on a board): no light, no moss
         grid.setdefault(key, []).append((p, rad))
         h = H * (0.3 + 0.7 * core) * (0.75 + 0.6 * shelter) * (1.0 + var * (r[7] - 0.5) * 0.8)
@@ -27830,214 +27895,891 @@ def moss_clumps(surf, sampler, s, seeds=None, faces=None):
     return out
 
 
-class _MossCushion(object):
-    """One cushion: a disc with a ragged edge, each point snapped onto the
-    surface (so it wraps into an inside corner and follows bumps) and lifted
-    by a dome profile with lumps, never into geometry above it. Most
-    cushions sit on one flat face with nothing above (`flat`): those skip
-    the per-point snaps and rays."""
+# Detail tiers (the user, 2026-11-03: "obviously controllable tiers of detail ... sometimes really heavy
+# close-ups, sometimes not, but it still needs to look really good"): the bed's cell (in clump sizes),
+# lumps on, shoots per (shoot length)^2, the shoot kind, capsule sides, hanging strand segments.
+MOSS_DETAIL = {"Proxy": (1.0, False, 0.0, None, 0, 0),
+               "Normal": (0.3, True, 0.08, "tuft", 3, 4),
+               "High": (0.14, True, 1.6, "shoot", 4, 6),
+               "Hero": (0.09, True, 5.0, "leafy", 6, 9)}
+MOSS_SMOOTH = math.cos(math.radians(35.0))  # facets closer than this blend (a stone); sharper edges roll
+MOSS_MAX_CELLS = 2500000  # bed cells looked at; past it the cell grows (reported as capped)
+_MI_MOSS_TOPO = collections.OrderedDict()  # mesh state -> triangles with ids, corner normals, neighbours
 
-    def __init__(self, surf, clump, s, seed, index):
+
+def _moss_topology(node):
+    """A mesh's triangles for the moss bed, cached while it is unchanged:
+    (world points, [(ia, ib, ic, unit normal, face id)], each triangle's
+    corner normals smoothed over the faces within 35 degrees of it (a
+    stone's facets blend, a plank's sides stay apart), each triangle's
+    neighbour across its three edges (-1: none, or more than one))."""
+    key = _mi_mesh_key(node)
+    hit = _MI_MOSS_TOPO.get(key)
+    if hit is not None:
+        return hit
+    fn = om.MFnMesh(get_dag_path(key[0]))
+    P = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    per, ids = fn.getTriangles()
+    face_of = [f for f, nt in enumerate(per) for _ in range(nt)]
+    tris, areas = [], []
+    for k in range(0, len(ids), 3):
+        ia, ib, ic = ids[k], ids[k + 1], ids[k + 2]
+        cr = _rl_cross(_rl_sub(P[ib], P[ia]), _rl_sub(P[ic], P[ia]))
+        ar = _rl_len(cr)
+        if ar <= 1e-14:
+            continue
+        tris.append((ia, ib, ic, (cr[0] / ar, cr[1] / ar, cr[2] / ar), face_of[k // 3]))
+        areas.append(ar)
+    at_vert, edges = {}, {}
+    for t, tri in enumerate(tris):
+        for v in tri[:3]:
+            at_vert.setdefault(v, []).append(t)
+        for x, y in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+            edges.setdefault((x, y) if x < y else (y, x), []).append(t)
+    corners, nbrs = [], []
+    for t, tri in enumerate(tris):
+        n = tri[3]
+        cn = []
+        for v in tri[:3]:
+            sx = sy = sz = 0.0
+            for u in at_vert[v]:
+                nu = tris[u][3]
+                if nu[0] * n[0] + nu[1] * n[1] + nu[2] * n[2] >= MOSS_SMOOTH:
+                    a = areas[u]
+                    sx += nu[0] * a
+                    sy += nu[1] * a
+                    sz += nu[2] * a
+            cn.append(_rl_norm((sx, sy, sz), n))
+        corners.append(cn)
+        nb = []
+        for x, y in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+            ts = edges[(x, y) if x < y else (y, x)]
+            nb.append((ts[1] if ts[0] == t else ts[0]) if len(ts) == 2 else -1)
+        nbrs.append(nb)
+    out = (P, tris, corners, nbrs)
+    _MI_MOSS_TOPO[key] = out
+    while len(_MI_MOSS_TOPO) > 24:
+        _MI_MOSS_TOPO.popitem(last=False)
+    return out
+
+
+def _moss_axes(n):
+    """A plane's UV axes from its normal alone (so every face in one plane
+    shares one grid): u along the ground, v up a wall or a slope."""
+    if abs(n[1]) < 0.99:
+        t1 = _rl_norm(_rl_cross((0.0, 1.0, 0.0), n))
+    else:
+        t1 = _rl_norm((1.0 - n[0] * n[0], -n[0] * n[1], -n[0] * n[2]))
+    return t1, _rl_cross(n, t1)
+
+
+def _moss_clip(poly, lines, eps):
+    """A convex polygon [(u, v, key)] clipped to the inside of 2D lines
+    [(ax, ay, nx, ny)] (inside: (p - a) . n >= -eps). New points get key None."""
+    for ax, ay, nx, ny in lines:
+        out = []
+        cnt = len(poly)
+        for i in range(cnt):
+            P, Q = poly[i], poly[(i + 1) % cnt]
+            fp = (P[0] - ax) * nx + (P[1] - ay) * ny
+            fq = (Q[0] - ax) * nx + (Q[1] - ay) * ny
+            if fp >= -eps:
+                out.append(P)
+            if (fp >= -eps) != (fq >= -eps):
+                t = fp / (fp - fq)
+                out.append((P[0] + (Q[0] - P[0]) * t, P[1] + (Q[1] - P[1]) * t, None))
+        poly = out
+        if len(poly) < 3:
+            return []
+    return poly
+
+
+_MI_MOSS_BEDS = collections.OrderedDict()  # bed layout key -> (grid point records, block polygons)
+
+
+class _MossBed(object):
+    """The moss itself: one continuous shell over the meshes, grown from a
+    grid laid on each face's plane (cells Detail x Clump size, aligned to
+    the Tile size UV tiles, so each cell sits in one tile). Each grid point
+    reads the coverage field (the candidates' margins round it, weighted by
+    distance, facing and being on the same level) and is lifted along the
+    surface normal by Thickness: thicker inside a patch and where
+    sheltered, cushion lumps with creases between them (billowed noise),
+    a ragged edge that tucks just under the surface. At a sharp edge the
+    lift turns half way to the next face, so moss rolls over plank edges
+    and fills inside corners; where the bed's faces end (open edges, faces
+    left out) it tapers under.
+
+    What doesn't depend on the look (each grid point's place, lift
+    direction, taper, kernel weights and noise; each block's cells) is
+    cached per layout (`_MI_MOSS_BEDS`), so Coverage, Thickness, Lumps and
+    the where-it-grows weights only redo the sums (a roof: seconds down to
+    about one)."""
+
+    def __init__(self, surf, s, cands, rows, faces=None):
+        m = scene_m_per_unit()
         self.surf = surf
-        self.c, self.n, self.r, self.h, self.occ, self.edge, rnd = clump
-        self.rnd = rnd
+        self.R = R = max(1e-4, float(s["clump_size"]) / m)
+        self.H = H = max(1e-6, float(s["thickness"]) / m)
+        detail = s["detail"] if s["detail"] in MOSS_DETAIL else "Normal"
+        cell_f, lumps_on = MOSS_DETAIL[detail][:2]
+        self.tile = tile = max(1e-4, float(s["uv_tile"]) / m)
+        k = max(1, int(math.ceil(tile / (cell_f * R))))
+        self.seed = int(s["seed"])
         self.mess = clamp(float(s["mess"]), 0.0, 2.0)
-        self.t1, self.t2 = _mi_frame(self.n, rnd[8] * 6.2832)
-        self.seed = seed * 31 + index
-        self.lump = max(1e-6, 0.3 * self.r)
-        self.phase = (rnd[9] * 50.0, rnd[10] * 50.0)
-        self.flat, self.clear = self._flat()
+        self.lump = clamp(float(s.get("lumps", 0.6)), 0.0, 1.0) if lumps_on else 0.0
+        self.var = clamp(float(s["size_var"]), 0.0, 1.0)
+        self.rk = rk = 1.3 * R
+        self.delta = 0.6 * R  # how far the moss rolls over an edge (not Thickness: layouts stay cached)
+        self.tuck = 0.08 * H + 0.0005 / m
+        self.faces = faces
+        self.capped = False
+        cover = 0.05 / m
+        self.cq, self.cn, self.mg, self.oc, self.ob = [], [], [], [], []
+        buckets = {}
+        for c, row in zip(cands, rows):
+            i = len(self.cq)
+            self.cq.append(c[0])
+            self.cn.append(c[1])
+            if row is None:
+                self.mg.append(-1.0)
+                self.oc.append(0.0)
+                self.ob.append(None)
+                continue
+            mg = row[0]
+            o = None
+            if mg > -0.35:
+                o = _moss_obstacle(surf, c[0], c[1], c[5], R)
+                if o is not None and o < cover:
+                    mg = -1.0
+            self.mg.append(clamp(mg, -1.0, 1.0))
+            self.oc.append(row[1])
+            self.ob.append(o)
+            p = c[0]
+            buckets.setdefault((int(math.floor(p[0] / rk)), int(math.floor(p[1] / rk)),
+                                int(math.floor(p[2] / rk))), []).append(i)
+        self.buckets = buckets
+        # a grid point's margin is a weighted mean of the candidates round it plus the ragged-edge noise, so a
+        # block with no candidate above this can't show any moss: skipped without looking at its points
+        lo = -0.04 - 0.12 * self.mess
+        mgs = self.mg
+        self.hot = set(key for key, v in buckets.items() if any(mgs[i] > lo for i in v))
+        # the bed's own cells: one Tile size tile = k cells (grown if the patch would be too big)
+        area = sum(_mi_triangles(n)[0][-1] for n in surf.nodes if _mi_triangles(n)[0])
+        if area / ((tile / k) ** 2) > MOSS_MAX_CELLS:
+            k = max(1, int(tile / math.sqrt(area / MOSS_MAX_CELLS)))
+            self.capped = True
+        self.k = k
+        self.e = tile / k
+        self.near = 0.01 / scene_m_per_unit()
+        key = ("bed", tuple(_mi_mesh_key(x) for x in surf.nodes), self.seed, round(R, 9), round(tile, 9), k,
+               len(cands), id(cands),
+               None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
+        cache = _MI_MOSS_BEDS.get(key)
+        if cache is None:
+            cache = _MI_MOSS_BEDS[key] = ({}, {})
+            while len(_MI_MOSS_BEDS) > 3:
+                _MI_MOSS_BEDS.popitem(last=False)
+        else:
+            _MI_MOSS_BEDS.move_to_end(key)
+        self.recs, self.blocks = cache
+        self.pts, self.dirs, self.hf, self.core = [], [], [], []
+        self.vid = {}
+        self.faces_out = []  # (vertex ids, uv ids, stable key)
+        self.us, self.vs, self.uvid = [], [], {}
 
-    def _flat(self):
-        """(flat, clear): the cushion lies on one flat face (no snaps
-        needed), nothing is above it (no rays needed). Sampled on two rings:
-        a thin rail resting on the board must land on a sample."""
-        c, n = self.c, self.n
-        rr = self.r * (1.1 + 0.55 * self.mess)
-        tol = 1e-3 * rr
-        pts = [c]
-        flat = True
-        for k in range(12):
-            a = 0.5236 * k
-            rk = rr if k % 2 == 0 else 0.55 * rr
-            q = _rl_add(c, _rl_add(_rl_mul(self.t1, math.cos(a) * rk), _rl_mul(self.t2, math.sin(a) * rk)))
-            pts.append(q)
-            if flat:
-                cl = self.surf.closest(q)
-                if not cl or _rl_dot(cl[2], n) < 0.999 or _rl_len(_rl_sub(cl[1], q)) > tol:
-                    flat = False  # off the face's edge, into a corner, or a curved surface
-        far = 2.5 * self.h + rr * (0.0 if flat else 0.5)
-        for q in pts:
-            if self.surf.ray(_rl_add(q, _rl_mul(n, tol)), n, far):
-                return False, False  # something above it
-        return flat, True
+    # ---------------------------------------------------------------- field
+    def _local(self, c, rad, need):
+        """(hot, candidate indices) within reach of a ball: hot when one of them
+        can show moss; the indices only when need (a block seen for the first time)."""
+        rk = self.rk
+        reach = rad + rk
+        a = [int(math.floor((c[i] - reach) / rk)) for i in range(3)]
+        b = [int(math.floor((c[i] + reach) / rk)) for i in range(3)]
+        found, hot = [], False
+        buckets, hs = self.buckets, self.hot
+        if (b[0] - a[0] + 1) * (b[1] - a[1] + 1) * (b[2] - a[2] + 1) > 4096:  # huge next to the clumps: scan
+            keys = [key for key in buckets if all(a[i] <= key[i] <= b[i] for i in range(3))]
+        else:
+            keys = [(i, j, k) for i in range(a[0], b[0] + 1) for j in range(a[1], b[1] + 1)
+                    for k in range(a[2], b[2] + 1)]
+        for key in keys:
+            got = buckets.get(key)
+            if got:
+                hot = hot or key in hs
+                if need:
+                    found.extend(got)
+                elif hot:
+                    break
+        return hot, found
 
-    def radius(self, th):
-        """Edge radius at angle th: ragged and lobed with Messiness."""
-        x, y = math.cos(th) * 1.4 + self.phase[0], math.sin(th) * 1.4 + self.phase[1]
-        rag = (_th_noise(x, y, self.seed) * 0.3 + _th_noise(x * 2.7, y * 2.7, self.seed + 3) * 0.14 +
-               _th_noise(x * 6.1, y * 6.1, self.seed + 5) * 0.07)
-        return self.r * max(0.35, 1.0 + self.mess * rag)
+    def _record(self, u, v, ctx, local):
+        """What a grid point keeps between rebuilds: [x, y, z, lift direction,
+        taper, ((candidate, weight), ...), noise values (filled when needed),
+        room to lift (on a partly covered face only)]."""
+        t1, t2, n, dp, tri2, cn, specs, check = ctx
+        x = u * t1[0] + v * t2[0] + dp * n[0]
+        y = u * t1[1] + v * t2[1] + dp * n[1]
+        z = u * t1[2] + v * t2[2] + dp * n[2]
+        ax, ay, e1x, e1y, e2x, e2y, inv = tri2
+        px, py = u - ax, v - ay
+        l1 = clamp((px * e2y - py * e2x) * inv, 0.0, 1.0)
+        l2 = clamp((e1x * py - e1y * px) * inv, 0.0, 1.0)
+        l0 = max(0.0, 1.0 - l1 - l2)
+        c0, c1, c2 = cn
+        dx = l0 * c0[0] + l1 * c1[0] + l2 * c2[0]
+        dy = l0 * c0[1] + l1 * c1[1] + l2 * c2[1]
+        dz = l0 * c0[2] + l1 * c1[2] + l2 * c2[2]
+        taper = 1.0
+        delta = self.delta
+        for sax, say, sdx, sdy, sl2, nb in specs:
+            t = ((u - sax) * sdx + (v - say) * sdy) / sl2
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+            qx, qy = sax + sdx * t - u, say + sdy * t - v
+            d = math.sqrt(qx * qx + qy * qy)
+            if d < delta:
+                w = 1.0 - d / delta
+                w = w * w * (3.0 - 2.0 * w)
+                if nb is None:
+                    taper *= 1.0 - w  # the bed ends here: tuck under
+                else:  # a sharp edge: turn half way to the next face, so both sides meet over it
+                    ln = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+                    f = 0.5 * w
+                    dx, dy, dz = dx / ln * (1.0 - f) + nb[0] * f, dy / ln * (1.0 - f) + nb[1] * f, \
+                        dz / ln * (1.0 - f) + nb[2] * f
+        ln = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        dx, dy, dz = dx / ln, dy / ln, dz / ln
+        rk2 = self.rk * self.rk
+        lvmax = 0.5 * self.rk
+        cq, cnn = self.cq, self.cn
+        pairs = []
+        for i in local:
+            q = cq[i]
+            ex, ey, ez = q[0] - x, q[1] - y, q[2] - z
+            d2 = ex * ex + ey * ey + ez * ez
+            if d2 >= rk2:
+                continue
+            qn = cnn[i]
+            dn = qn[0] * dx + qn[1] * dy + qn[2] * dz
+            if dn < -0.15:
+                continue
+            lv = abs(ex * dx + ey * dy + ez * dz)
+            if lv >= lvmax:
+                continue  # a rail's top doesn't read the board under it
+            w = 1.0 - d2 / rk2
+            pairs.append((i, w * w * (0.25 + 0.75 * max(0.0, dn)) * (1.0 - lv / lvmax)))
+        room = None
+        if check:  # under the rail or the wall: no room at all; next to it: up to what's there
+            eps = 1e-3 * self.R
+            hit = self.surf.ray((x + dx * eps, y + dy * eps, z + dz * eps), (dx, dy, dz), self.surf.size)
+            if hit:
+                room = 0.0 if hit[0] < self.near or _rl_dot(hit[2], (dx, dy, dz)) > 0.0 else hit[0]
+        return [x, y, z, dx, dy, dz, taper, pairs, None, None, None, room]
 
-    def at(self, f, th, rad=None):
-        """(point, lift direction, height there, tangent-plane x, y) at
-        fraction f of the way out along angle th."""
-        rad = self.radius(th) if rad is None else rad
-        x, y = math.cos(th) * rad * f, math.sin(th) * rad * f
-        q = _rl_add(self.c, _rl_add(_rl_mul(self.t1, x), _rl_mul(self.t2, y)))
-        sp, sn = q, self.n
-        if not self.flat and f > 0.0:
-            cl = self.surf.closest(q)
-            if cl and _rl_dot(cl[2], self.n) >= -0.2:  # not the back of a thin board
-                sp, sn = cl[1], cl[2]
-        lift = sn if sn is self.n else _rl_norm(_rl_add(_rl_mul(sn, 0.7), _rl_mul(self.n, 0.3)), self.n)
-        g = max(0.0, 1.0 - f * f)
-        prof = g * g  # a smooth bump, flat where it meets the surface: overlapping cushions blend into a carpet
-        lx, ly = x / self.lump + self.phase[0], y / self.lump + self.phase[1]
-        bumps = 1.0 + self.mess * (0.5 * _th_noise(lx, ly, self.seed) +
-                                   0.4 * _th_noise(lx * 2.3, ly * 2.3, self.seed + 7))
-        return sp, lift, self.h * prof * max(0.2, bumps), x, y
+    def _value(self, rec):
+        """A grid point now: (position, lift direction, lift, core)."""
+        x, y, z, dx, dy, dz, taper, pairs = rec[:8]
+        mgs, ocs, obs = self.mg, self.oc, self.ob
+        tw, sm, so = 0.03, -0.015, 0.0
+        clear = 1e30 if rec[11] is None else rec[11]
+        for i, w in pairs:
+            tw += w
+            sm += w * mgs[i]
+            so += w * ocs[i]
+            ob = obs[i]
+            if ob is not None and ob < clear:
+                clear = ob
+        mg = sm / tw
+        if mg > -0.03 - 0.12 * self.mess:
+            if rec[8] is None:
+                s = 1.0 / (0.35 * self.R)
+                rec[8] = _moss_noise3(x * s, y * s, z * s, self.seed + 7)
+            mg += 0.12 * self.mess * rec[8]  # a ragged edge
+        c = clamp(mg / 0.3, 0.0, 1.0)
+        c = c * c * (3.0 - 2.0 * c)
+        pr = clamp((mg + 0.03) / 0.3, 0.0, 1.0)
+        pr = math.sqrt(pr * pr * (3.0 - 2.0 * pr))  # sloping up from the edge, rounding over: a rolled rim
+        h = self.H * pr * (0.5 + 0.5 * c) * (0.75 + 0.6 * clamp(so / tw * 1.7, 0.0, 1.0)) * taper
+        if h > 0.0:
+            if self.var:
+                if rec[10] is None:
+                    R = self.R
+                    rec[10] = _th_noise(x / (3.0 * R) + 0.37 * z / R, y / (3.0 * R) - 0.21 * z / R, self.seed + 29)
+                h *= 1.0 + self.var * 0.5 * rec[10]
+            if self.lump:  # packed cushions: rounded crowns, creases between them
+                if rec[9] is None:
+                    s = 1.0 / (0.7 * self.R)
+                    b = 0.65 * abs(_moss_noise3(x * s, y * s, z * s, self.seed + 21)) + \
+                        0.35 * abs(_moss_noise3(x * s * 2.2, y * s * 2.2, z * s * 2.2, self.seed + 23))
+                    rec[9] = min(1.25, b / 0.4) ** 0.7
+                h *= 1.0 - self.lump + self.lump * rec[9]
+        hf = h - self.tuck
+        if hf > 0.6 * clear:  # something just above (the candidates' rays out found it): stay clear of it
+            hf = 0.6 * clear
+        return (x + dx * hf, y + dy * hf, z + dz * hf), (dx, dy, dz), hf, c
 
-    def place(self, sp, lift, hh):
-        """The point hh above sp along lift, kept clear of geometry above."""
-        if hh > 0.0 and not self.clear:
-            hit = self.surf.ray(_rl_add(sp, _rl_mul(lift, 1e-3 * self.r)), lift, hh * 1.6)
-            if hit:  # a back face: this spot is under something resting on it (a rail on a board): stay flat
-                hh = 0.0 if _rl_dot(hit[2], lift) > 0.0 else min(hh, 0.6 * hit[0])
-        return _rl_add(sp, _rl_mul(lift, hh))
+    # ----------------------------------------------------------------- grid
+    def build(self):
+        faces = self.faces
+        planes = {}
+        for node in self.surf.nodes:
+            mask = faces.get(node) if faces is not None else None
+            if faces is not None and not mask:
+                continue
+            self._mesh(node, mask, planes)
+        return self
 
-    def clip(self, origin, v):
-        """v pulled back to just in front of any surface between the cushion's
-        top and it (a corner can snap a point through the other wall)."""
-        if self.flat:
-            return v
-        d = _rl_sub(v, origin)
-        ln = _rl_len(d)
-        if ln < 1e-9:
-            return v
-        d = _rl_mul(d, 1.0 / ln)
-        hit = self.surf.ray(origin, d, ln)
-        if hit is None:
-            return v
-        return _rl_add(origin, _rl_mul(d, max(0.0, hit[0] - 0.02 * self.h)))
+    def _mesh(self, node, mask, planes):
+        P, tris, corners, nbrs = _moss_topology(node)
+        ok = [tri[3][1] >= -0.35 and (mask is None or tri[4] in mask) for tri in tris]
+        # a face pressed against other geometry (a board's back against the wall) gets no moss, and moss
+        # doesn't roll over onto it: just in front of it is inside the other solid, or right up against it.
+        # A face only partly covered (half under the wall, a rail across a board) checks each of its points
+        buried = [False] * len(tris)
+        partial = [False] * len(tris)
+        for t, tri in enumerate(tris):
+            if ok[t]:
+                n = tri[3]
+                a, b, c = P[tri[0]], P[tri[1]], P[tri[2]]
+                m = [(a[i] + b[i] + c[i]) / 3.0 for i in range(3)]
+                got = [self._covered(m, n)]
+                for p, q in ((a, b), (b, c), (c, a)):  # near each corner and each edge's middle
+                    got.append(self._covered([0.88 * p[i] + 0.12 * m[i] for i in range(3)], n))
+                    got.append(self._covered([0.44 * (p[i] + q[i]) + 0.12 * m[i] for i in range(3)], n))
+                if all(got):
+                    buried[t] = True
+                    ok[t] = False
+                elif any(got):
+                    partial[t] = True
+        keys = []
+        for tri in tris:
+            n = tri[3]
+            nk = (round(n[0], 6), round(n[1], 6), round(n[2], 6))
+            a = P[tri[0]]
+            keys.append((nk, round(nk[0] * a[0] + nk[1] * a[1] + nk[2] * a[2], 6)))
+        for pk in set(keys):
+            if pk not in planes:
+                n = _rl_norm(pk[0])
+                t1, t2 = _moss_axes(n)
+                planes[pk] = (t1, t2, n, pk[1], {})
+        # sharp and open edges, per plane, in its 2D coordinates (bucketed)
+        D = 4.0 * self.delta
+        for t, tri in enumerate(tris):
+            if not ok[t]:
+                continue
+            n = tri[3]
+            t1, t2, _, _, specs = planes[keys[t]]
+            for j, (x, y) in enumerate(((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0]))):
+                o = nbrs[t][j]
+                if o >= 0 and (buried[o] or (partial[o] and self._edge_covered(P[x], P[y], tris[o], P))):
+                    continue  # runs straight on into the corner it makes with what covers that face
+                if o >= 0 and ok[o]:
+                    no = tris[o][3]
+                    if no[0] * n[0] + no[1] * n[1] + no[2] * n[2] >= MOSS_SMOOTH:
+                        continue  # flat or a soft fold: the corner normals carry it
+                    nb = no
+                else:
+                    nb = None
+                pa, pb = P[x], P[y]
+                ax, ay = _rl_dot(pa, t1), _rl_dot(pa, t2)
+                bx, by = _rl_dot(pb, t1), _rl_dot(pb, t2)
+                sdx, sdy = bx - ax, by - ay
+                sl2 = sdx * sdx + sdy * sdy
+                if sl2 < 1e-18:
+                    continue
+                item = (ax, ay, sdx, sdy, sl2, nb)
+                for i in range(int(math.floor(min(ax, bx) / D)), int(math.floor(max(ax, bx) / D)) + 1):
+                    for k in range(int(math.floor(min(ay, by) / D)), int(math.floor(max(ay, by) / D)) + 1):
+                        specs.setdefault((i, k), []).append(item)
+        shape = _mi_mesh_key(node)[0]
+        for t, tri in enumerate(tris):
+            if ok[t]:
+                check = partial[t] or any(o >= 0 and (buried[o] or partial[o]) for o in nbrs[t])
+                self._triangle((shape, t), tri, P, corners[t], planes[keys[t]], keys[t], D, check)
+
+    def _covered(self, p, n):
+        """Is a surface point pressed against something (other geometry right
+        in front of it, or it's inside another solid)?"""
+        eps = 1e-3 * self.R
+        hit = self.surf.ray((p[0] + n[0] * eps, p[1] + n[1] * eps, p[2] + n[2] * eps), n, self.surf.size)
+        return bool(hit and (hit[0] < self.near or _rl_dot(hit[2], n) > 0.0))
+
+    def _edge_covered(self, pa, pb, otri, P):
+        """Is the strip of a partly covered face along a shared edge covered?"""
+        n = otri[3]
+        m = [(P[otri[0]][i] + P[otri[1]][i] + P[otri[2]][i]) / 3.0 for i in range(3)]
+        for f in (0.2, 0.5, 0.8):
+            e = [pa[i] + (pb[i] - pa[i]) * f for i in range(3)]
+            if self._covered([0.97 * e[i] + 0.03 * m[i] for i in range(3)], n):
+                return True
+        return False
+
+    def _triangle(self, tkey, tri, P, cn, plane, pk, D, check):
+        t1, t2, n, dp, specs = plane
+        e = self.e
+        pts2 = [(_rl_dot(P[i], t1), _rl_dot(P[i], t2)) for i in tri[:3]]
+        (ax, ay), (bx, by), (cx, cy) = pts2
+        e1x, e1y, e2x, e2y = bx - ax, by - ay, cx - ax, cy - ay
+        det = e1x * e2y - e1y * e2x
+        if abs(det) < 1e-18:
+            return
+        if det < 0.0:  # wound against the normal (mirrored mesh): swap so the lines face in
+            (bx, by), (cx, cy) = (cx, cy), (bx, by)
+            cn = (cn[0], cn[2], cn[1])
+            e1x, e1y, e2x, e2y = bx - ax, by - ay, cx - ax, cy - ay
+            det = -det
+        lines = []
+        for (px, py), (qx, qy) in (((ax, ay), (bx, by)), ((bx, by), (cx, cy)), ((cx, cy), (ax, ay))):
+            lx, ly = qx - px, qy - py
+            ln = math.sqrt(lx * lx + ly * ly)
+            lines.append((px, py, -ly / ln, lx / ln))
+        lo_u, hi_u = min(ax, bx, cx), max(ax, bx, cx)
+        lo_v, hi_v = min(ay, by, cy), max(ay, by, cy)
+        i0, i1 = int(math.floor(lo_u / e)), int(math.floor(hi_u / e))
+        j0, j1 = int(math.floor(lo_v / e)), int(math.floor(hi_v / e))
+        eps = 1e-6 * e
+        B = max(1, int(round(0.6 * self.rk / e)))
+        ctx = None
+        inside = {}
+        blocks = self.blocks
+        for bi in range(i0, i1 + 1, B):
+            for bj in range(j0, j1 + 1, B):
+                bkey = (tkey, bi, bj)
+                polys = blocks.get(bkey)
+                if polys == ():
+                    continue  # misses the triangle
+                bu0, bv0 = bi * e, bj * e
+                bu1, bv1 = min(i1 + 1, bi + B) * e, min(j1 + 1, bj + B) * e
+                if polys is None and any(all((cu - lx) * nx + (cv - ly) * ny < -eps for cu, cv in
+                                              ((bu0, bv0), (bu1, bv0), (bu1, bv1), (bu0, bv1)))
+                                         for lx, ly, nx, ny in lines):
+                    blocks[bkey] = ()
+                    continue
+                cu, cv = 0.5 * (bu0 + bu1), 0.5 * (bv0 + bv1)
+                cen = (cu * t1[0] + cv * t2[0] + dp * n[0], cu * t1[1] + cv * t2[1] + dp * n[1],
+                       cu * t1[2] + cv * t2[2] + dp * n[2])
+                hot, local = self._local(cen, 0.5 * math.hypot(bu1 - bu0, bv1 - bv0), polys is None)
+                if not hot:
+                    continue  # no moss can reach here this time
+                if polys is None:
+                    if ctx is None:
+                        ctx = self._context(t1, t2, n, dp, ax, ay, e1x, e1y, e2x, e2y, det, cn, specs, D,
+                                            lo_u, hi_u, lo_v, hi_v, check)
+                    polys = []
+                    for i in range(bi, min(i1 + 1, bi + B)):
+                        for j in range(bj, min(j1 + 1, bj + B)):
+                            got = self._cell(i, j, tkey, pk, ctx, lines, eps, inside, local)
+                            if got:
+                                polys.append(got)
+                    blocks[bkey] = polys = tuple(polys)
+                self._emit(polys)
+
+    def _context(self, t1, t2, n, dp, ax, ay, e1x, e1y, e2x, e2y, det, cn, specs, D, lo_u, hi_u, lo_v, hi_v,
+                 check):
+        delta = self.delta
+        mine = {}
+        for i in range(int(math.floor((lo_u - delta) / D)), int(math.floor((hi_u + delta) / D)) + 1):
+            for j in range(int(math.floor((lo_v - delta) / D)), int(math.floor((hi_v + delta) / D)) + 1):
+                for it in specs.get((i, j), ()):
+                    mine[id(it)] = it
+        return (t1, t2, n, dp, (ax, ay, e1x, e1y, e2x, e2y, 1.0 / det), cn, list(mine.values()), check)
+
+    def _cell(self, i, j, tkey, pk, ctx, lines, eps, inside, local):
+        """One grid cell clipped to the triangle: (point keys, UVs, stable key), or None."""
+        e, k, tile = self.e, self.k, self.tile
+        cs = ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))
+        vals = []
+        for ci, cj in cs:
+            got = inside.get((ci, cj))
+            if got is None:
+                u, v = ci * e, cj * e
+                got = tuple((u - lx) * nx + (v - ly) * ny for lx, ly, nx, ny in lines)
+                inside[(ci, cj)] = got
+            vals.append(got)
+        for m in range(3):
+            if vals[0][m] < -eps and vals[1][m] < -eps and vals[2][m] < -eps and vals[3][m] < -eps:
+                return None
+        poly = [(ci * e, cj * e, (ci, cj)) for ci, cj in cs]
+        if not all(min(vv) >= -eps for vv in vals):
+            poly = _moss_clip(poly, lines, eps)
+            if len(poly) < 3:
+                return None
+            clean = [poly[0]]
+            for p in poly[1:]:
+                if abs(p[0] - clean[-1][0]) > eps or abs(p[1] - clean[-1][1]) > eps:
+                    clean.append(p)
+            if len(clean) > 2 and abs(clean[0][0] - clean[-1][0]) <= eps and abs(clean[0][1] - clean[-1][1]) <= eps:
+                clean.pop()
+            poly = clean
+            if len(poly) < 3:
+                return None
+            ar = 0.0
+            for a in range(len(poly)):
+                b = poly[(a + 1) % len(poly)]
+                ar += poly[a][0] * b[1] - b[0] * poly[a][1]
+            if ar < 1e-6 * e * e:
+                return None
+        ti, tj = i // k, j // k
+        ou, ov = ti * tile, tj * tile
+        t1, t2, n, dp = ctx[:4]
+        q = 1e-4 * e
+        keys, uvs = [], []
+        recs = self.recs
+        for u, v, gk in poly:
+            if gk is not None:
+                key = (pk, gk[0], gk[1])
+            else:
+                x = u * t1[0] + v * t2[0] + dp * n[0]
+                y = u * t1[1] + v * t2[1] + dp * n[1]
+                z = u * t1[2] + v * t2[2] + dp * n[2]
+                key = (int(round(x / q)), int(round(y / q)), int(round(z / q)))
+            if key not in recs:
+                recs[key] = self._record(u, v, ctx, local)
+            keys.append(key)
+            uvs.append((clamp((u - ou) / tile, 0.0, 1.0), clamp((v - ov) / tile, 0.0, 1.0), ti, tj))
+        return tuple(keys), tuple(uvs), hash((pk, i, j, tkey[1])) & 0x7FFFFFFF
+
+    def _emit(self, polys):
+        recs, vid, uvid = self.recs, self.vid, self.uvid
+        hf = self.hf
+        for keys, uvs, fkey in polys:
+            vids, uids, exposed = [], [], False
+            for key, (uu, vv, ti, tj) in zip(keys, uvs):
+                vi = vid.get(key)
+                if vi is None:
+                    pos, d, h, c = self._value(recs[key])
+                    vi = vid[key] = len(self.pts)
+                    self.pts.append(pos)
+                    self.dirs.append(d)
+                    hf.append(h)
+                    self.core.append(c)
+                exposed = exposed or hf[vi] > 0.0
+                vids.append(vi)
+                ukey = (vi, ti, tj)
+                ui = uvid.get(ukey)
+                if ui is None:
+                    ui = uvid[ukey] = len(self.us)
+                    self.us.append(uu)
+                    self.vs.append(vv)
+                uids.append(ui)
+            if exposed:
+                self.faces_out.append((vids, uids, fkey))
+
+    def mesh(self):
+        """The bed as (points, counts, connects, us, vs, uv ids), unused points dropped."""
+        remap, pts, counts, conn, uvi = {}, [], [], [], []
+        uremap, us, vs = {}, [], []
+        for vids, uvs, _ in self.faces_out:
+            counts.append(len(vids))
+            for vi, ui in zip(vids, uvs):
+                r = remap.get(vi)
+                if r is None:
+                    r = remap[vi] = len(pts)
+                    pts.append(self.pts[vi])
+                conn.append(r)
+                r = uremap.get(ui)
+                if r is None:
+                    r = uremap[ui] = len(us)
+                    us.append(self.us[ui])
+                    vs.append(self.vs[ui])
+                uvi.append(r)
+        return pts, counts, conn, us, vs, uvi
+
+
+class _MossDetail(object):
+    """What stands out of the bed, by Detail: tufts (Normal: little leaf
+    stars on the bed, the fuzz a mid shot sees), shoots (High: a stem with a
+    star of leaves at the tip), leafy shoots (Hero: two whorls), plus
+    sporophytes (a thin seta with a nodding capsule, in fruiting clusters:
+    the red haze over jungle moss) and hanging strands where the moss faces
+    sideways or down (pendant moss over edges and down walls). All real
+    geometry, no alpha; one stacked UV layout each (strands part: stems u
+    0..0.1, hanging strands u 0.12..0.22, leaf stars in the square from
+    0.25; capsules part: setae u 0..0.1, capsules round u 0.2..1)."""
+
+    def __init__(self, bed, s):
+        m = scene_m_per_unit()
+        self.bed = bed
+        self.s = s
+        detail = s["detail"] if s["detail"] in MOSS_DETAIL else "Normal"
+        _, _, self.rate, self.kind, self.csides, self.hsegs = MOSS_DETAIL[detail]
+        self.L = max(1e-5, float(s["strand_length"]) / m)
+        self.amount = clamp(float(s["strands"]), 0.0, 3.0)
+        self.droop = clamp(float(s["droop"]), 0.0, 2.0)
+        self.caps = clamp(float(s.get("capsules", 0.3)), 0.0, 1.0)
+        self.mess = clamp(float(s["mess"]), 0.0, 2.0)
+        self.seed = int(s["seed"])
+        self.stacks = max(1, int(s["stacks"]))
+        self.columns = s["stack_layout"] == "Atlas columns"
+        self.S, self.C = _mi_mesh(), _mi_mesh()
+        self.capped = False
+
+    def _uv(self, u, v, stack):
+        return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
+
+    def build(self):
+        bed = self.bed
+        if not self.kind and not self.hsegs:
+            return self
+        L = self.L
+        per = {"tuft": 11, "shoot": 15, "leafy": 32}.get(self.kind, 0)
+        dens = self.rate * self.amount / (L * L)
+        hang = (0.12 + 0.25 * self.droop) * self.amount / (L * L) if self.hsegs and self.droop > 0.0 else 0.0
+        caps = self.caps * (0.6 if self.kind != "tuft" else 0.15) / (L * L) if self.csides else 0.0
+        hverts = 2 * (self.hsegs + 1)
+        cverts = 8 + 2 + 3 * self.csides
+        # every exposed bed triangle (fanned faces): area, normal; then one pass to size the cap
+        tris = []
+        est_s = est_c = 0.0
+        P, HF, D, CORE = bed.pts, bed.hf, bed.dirs, bed.core
+        for vids, _, fkey in bed.faces_out:
+            a = vids[0]
+            for f in range(1, len(vids) - 1):
+                b, c = vids[f], vids[f + 1]
+                if HF[a] <= 0.0 or HF[b] <= 0.0 or HF[c] <= 0.0:
+                    continue
+                cr = _rl_cross(_rl_sub(P[b], P[a]), _rl_sub(P[c], P[a]))
+                ar = 0.5 * _rl_len(cr)
+                if ar <= 1e-14:
+                    continue
+                fn = _rl_mul(cr, 0.5 / ar)
+                side = fn[1] < 0.35
+                tris.append((a, b, c, ar, fn, fkey * 8 + f))
+                est_s += ar * (dens * per + (hang * hverts if side else 0.0))
+                est_c += ar * caps * cverts * 0.5
+        keep_s = min(1.0, MI_MAX_VERTS / max(1.0, est_s))
+        keep_c = min(1.0, MI_MAX_VERTS / max(1.0, est_c))
+        if keep_s < 1.0 or keep_c < 1.0:
+            self.capped = True
+        seed = self.seed
+        for a, b, c, ar, fn, key in tris:
+            side = fn[1] < 0.35
+            lam_s = ar * dens * keep_s
+            lam_h = 2.0 * ar * hang * keep_s if side else 0.0  # about half are gated out (curtains)
+            lam_c = ar * caps * keep_c
+            r0 = _rand12(seed, key, 0, 43)
+            ns, nh = int(lam_s + r0[0]), int(lam_h + r0[1])
+            nc = int(lam_c + r0[2]) if lam_c > 0.0 else 0
+            if not (ns or nh or nc):
+                continue
+            for kind, count in (("s", ns), ("h", nh), ("c", nc)):
+                for q in range(count):
+                    r = _rand12(seed, key, q * 4 + (1 if kind == "s" else (2 if kind == "h" else 3)), 47)
+                    w1, w2 = r[0], r[1]
+                    if w1 + w2 > 1.0:
+                        w1, w2 = 1.0 - w1, 1.0 - w2
+                    w0 = 1.0 - w1 - w2
+                    pos = tuple(P[a][i] * w0 + P[b][i] * w1 + P[c][i] * w2 for i in range(3))
+                    d = _rl_norm(tuple(D[a][i] * w0 + D[b][i] * w1 + D[c][i] * w2 for i in range(3)), fn)
+                    nrm = _rl_norm(_rl_add(_rl_mul(fn, 0.5), _rl_mul(d, 0.5)), fn)
+                    core = CORE[a] * w0 + CORE[b] * w1 + CORE[c] * w2
+                    if kind == "s":
+                        self._shoot(pos, nrm, core, r)
+                    elif kind == "h":
+                        cl = clamp((_mi_noise(pos, 4.0 * bed.R, seed + 37) + 0.05) / 0.35, 0.0, 1.0)
+                        if r[11] < cl:  # curtains, not an even fringe
+                            self._hang(pos, nrm, core, r, cl)
+                    elif core > 0.25 and nrm[1] > 0.3:
+                        cl = _mi_noise(pos, 3.0 * bed.R, seed + 31)
+                        if r[11] < clamp((cl + 0.7 * self.caps - 0.2) / 0.25, 0.0, 1.0):
+                            self._capsule(pos, nrm, r)
+        return self
+
+    def _full(self, mesh, n):
+        if len(mesh[0]) + n > MI_MAX_VERTS:
+            self.capped = True
+            return True
+        return False
+
+    def _ribbon(self, mesh, spine, widths, side, u0, u1, stack, v0=0.0, v1=1.0):
+        pts, counts, conn, us, vs, uvi = mesh
+        b = len(pts)
+        last = len(spine) - 1
+        for k, (p, w) in enumerate(zip(spine, widths)):
+            pts.append(_rl_add(p, _rl_mul(side, -w)))
+            pts.append(_rl_add(p, _rl_mul(side, w)))
+            vv = v0 + (v1 - v0) * k / float(last)
+            for uu in (u0, u1):
+                x, y = self._uv(uu, vv, stack)
+                us.append(x)
+                vs.append(y)
+        for k in range(last):
+            a = b + 2 * k
+            counts.append(4)
+            conn.extend((a, a + 1, a + 3, a + 2))
+            uvi.extend((a, a + 1, a + 3, a + 2))
+
+    def _star(self, mesh, c, d, leaves, leaf, lift, rot, stack):
+        """A rosette of leaves round axis d at c: the star a moss shoot shows from above."""
+        pts, counts, conn, us, vs, uvi = mesh
+        s1, s2 = _mi_frame(d, rot)
+        b = len(pts)
+        pts.append(c)
+        x, y = self._uv(0.625, 0.625, stack)
+        us.append(x)
+        vs.append(y)
+        cl, sl = math.cos(lift), math.sin(lift)
+        step = math.pi / leaves
+        for i in range(2 * leaves):
+            th = i * step
+            outer = i % 2 == 0
+            r = leaf * (cl if outer else 0.22)
+            up = leaf * (sl if outer else 0.04)
+            ct, st = math.cos(th), math.sin(th)
+            pts.append((c[0] + (s1[0] * ct + s2[0] * st) * r + d[0] * up,
+                        c[1] + (s1[1] * ct + s2[1] * st) * r + d[1] * up,
+                        c[2] + (s1[2] * ct + s2[2] * st) * r + d[2] * up))
+            rr = 0.37 if outer else 0.09
+            x, y = self._uv(0.625 + ct * rr, 0.625 + st * rr, stack)
+            us.append(x)
+            vs.append(y)
+        for i in range(2 * leaves):
+            j = (i + 1) % (2 * leaves)
+            counts.append(3)
+            conn.extend((b, b + 1 + i, b + 1 + j))
+            uvi.extend((b, b + 1 + i, b + 1 + j))
+
+    def _lean(self, nrm, r, amount):
+        t1, t2 = _mi_frame(nrm, r[9] * 6.2832)
+        d = _rl_add(nrm, _rl_add(_rl_mul(t1, (r[3] - 0.5) * 2.0 * amount), _rl_mul(t2, (r[4] - 0.5) * 2.0 * amount)))
+        sag = self.droop * 0.25 * (1.0 - nrm[1])
+        return _rl_norm((d[0], d[1] - sag, d[2]), nrm)
+
+    def _shoot(self, pos, nrm, core, r):
+        L = self.L * (0.6 + 0.8 * r[2]) * (0.55 + 0.45 * core)
+        stack = min(self.stacks - 1, int(r[10] * self.stacks))
+        mesh = self.S
+        d = self._lean(nrm, r, 0.18 + 0.12 * self.mess)
+        rot = r[5] * 6.2832
+        if self.kind == "tuft":
+            if not self._full(mesh, 11):
+                self._star(mesh, _rl_add(pos, _rl_mul(nrm, 0.12 * L)), d, 5, 0.45 * L, 0.45, rot, stack)
+            return
+        n = 32 if self.kind == "leafy" else 15
+        if self._full(mesh, n):
+            return
+        root = _rl_add(pos, _rl_mul(nrm, -0.35 * L))
+        bend = _rl_mul(_mi_frame(d, r[6] * 6.2832)[0], 0.08 * L)
+        segs = 3 if self.kind == "leafy" else 2
+        spine = [_rl_add(_rl_add(root, _rl_mul(d, L * f)), _rl_mul(bend, f * f))
+                 for f in (k / float(segs) for k in range(segs + 1))]
+        tip = spine[-1]
+        top = _rl_norm(_rl_sub(spine[-1], spine[-2]), d)
+        side = _mi_frame(d, rot)[0]
+        self._ribbon(mesh, spine, [0.05 * L * (1.0 - 0.5 * k / float(segs)) for k in range(segs + 1)], side,
+                     0.0, 0.1, stack)
+        if self.kind == "leafy":
+            mid = spine[2] if segs == 3 else spine[1]
+            self._star(mesh, mid, d, 5, 0.32 * L, 0.35, rot + 0.6, stack)
+            self._star(mesh, tip, top, 6, 0.42 * L, 0.7, rot, stack)
+        else:
+            self._star(mesh, tip, top, 4, 0.42 * L, 0.6, rot, stack)
+
+    def _hang(self, pos, nrm, core, r, clump=1.0):
+        """A pendant strand: out of the moss, then down under its own weight,
+        waving a little; longer in the middle of its curtain (clump 0..1)."""
+        segs = self.hsegs
+        if self._full(self.S, 2 * (segs + 1)):
+            return
+        L = self.L * (1.5 + 3.0 * self.droop) * (0.4 + 1.2 * r[2]) * (0.6 + 0.4 * core) * (0.5 + 0.7 * clump)
+        stack = min(self.stacks - 1, int(r[10] * self.stacks))
+        t1, t2 = _mi_frame(nrm, r[9] * 6.2832)
+        d = _rl_norm(_rl_add(nrm, _rl_add(_rl_mul(t1, (r[3] - 0.5) * 0.8), _rl_mul(t2, (r[4] - 0.5) * 0.8))), nrm)
+        p = _rl_add(pos, _rl_mul(nrm, -0.2 * self.L))
+        step = L / segs
+        spine = [p]
+        sway = (r[5] - 0.5) * 0.6
+        ph = r[7] * 6.2832
+        for k in range(segs):
+            g = 0.55 + 0.25 * self.droop
+            w = sway * 0.3 + 0.5 * math.sin(ph + 1.9 * k)  # a gentle wave down its length
+            d = _rl_norm((d[0] + w * t1[0], d[1] - g, d[2] + w * t1[2]), (0.0, -1.0, 0.0))
+            p = _rl_add(p, _rl_mul(d, step))
+            spine.append(p)
+        side = _rl_norm(_rl_cross(_rl_sub(spine[-1], spine[0]), nrm), t1)
+        side = _mi_rotate(side, _rl_norm(_rl_sub(spine[-1], spine[0]), (0.0, -1.0, 0.0)), (r[6] - 0.5) * 1.2)
+        self._ribbon(self.S, spine, [0.06 * self.L * (1.0 - 0.7 * k / float(segs)) for k in range(segs + 1)], side,
+                     0.12, 0.22, stack)
+
+    def _capsule(self, pos, nrm, r):
+        """A sporophyte: a thin seta standing up out of the moss, a capsule nodding at its tip."""
+        k = self.csides
+        if self._full(self.C, 10 + 3 * k):
+            return
+        Ls = self.L * (1.6 + 1.6 * r[2])
+        stack = min(self.stacks - 1, int(r[10] * self.stacks))
+        t1, t2 = _mi_frame(nrm, r[9] * 6.2832)
+        ds = _rl_norm(_rl_add(_rl_add(nrm, (0.0, 0.6, 0.0)), _rl_add(_rl_mul(t1, (r[3] - 0.5) * 0.7),
+                                                                      _rl_mul(t2, (r[4] - 0.5) * 0.7))), nrm)
+        root = _rl_add(pos, _rl_mul(nrm, -0.1 * self.L))
+        bend = _rl_mul(t1, 0.1 * Ls)
+        spine = [_rl_add(_rl_add(root, _rl_mul(ds, Ls * f)), _rl_mul(bend, f * f)) for f in (0.0, 0.34, 0.67, 1.0)]
+        side = _mi_frame(ds, r[5] * 6.2832)[0]
+        wd = 0.012 * self.L + 0.0001 / scene_m_per_unit()
+        self._ribbon(self.C, spine, [wd, wd, 0.9 * wd, 0.8 * wd], side, 0.0, 0.1, stack)
+        top = _rl_norm(_rl_sub(spine[-1], spine[-2]), ds)
+        nod = 0.5 + 1.1 * r[6]  # radians: capsules lean over and hang their heads
+        horiz = _rl_norm(_rl_sub(t1, _rl_mul(top, _rl_dot(t1, top))), t2)
+        axis = _rl_norm(_rl_add(_rl_mul(top, math.cos(nod)), _rl_mul(horiz, math.sin(nod))), top)
+        Lc = 0.13 * Ls
+        rc = 0.28 * Lc
+        s1, s2 = _mi_frame(axis, r[7] * 6.2832)
+        pts, counts, conn, us, vs, uvi = self.C
+        base = spine[-1]
+        b = len(pts)
+        pts.append(base)
+        x, y = self._uv(0.6, 0.0, stack)
+        us.append(x)
+        vs.append(y)
+        for f, rf in ((0.18, 0.7), (0.5, 1.0), (0.82, 0.75)):
+            c = _rl_add(base, _rl_mul(axis, Lc * f))
+            for j in range(k):
+                th = 6.2832 * j / k
+                ct, st = math.cos(th), math.sin(th)
+                pts.append((c[0] + (s1[0] * ct + s2[0] * st) * rc * rf, c[1] + (s1[1] * ct + s2[1] * st) * rc * rf,
+                            c[2] + (s1[2] * ct + s2[2] * st) * rc * rf))
+                x, y = self._uv(0.2 + 0.8 * j / k, f, stack)
+                us.append(x)
+                vs.append(y)
+        pts.append(_rl_add(base, _rl_mul(axis, Lc * 1.08)))
+        x, y = self._uv(0.6, 1.0, stack)
+        us.append(x)
+        vs.append(y)
+        top_i = b + 1 + 3 * k
+        for j in range(k):
+            j1 = (j + 1) % k
+            counts.append(3)
+            conn.extend((b, b + 1 + j1, b + 1 + j))
+            uvi.extend((b, b + 1 + j1, b + 1 + j))
+            for ring in range(2):
+                a0, a1 = b + 1 + ring * k, b + 1 + (ring + 1) * k
+                counts.append(4)
+                conn.extend((a0 + j, a0 + j1, a1 + j1, a1 + j))
+                uvi.extend((a0 + j, a0 + j1, a1 + j1, a1 + j))
+            counts.append(3)
+            a2 = b + 1 + 2 * k
+            conn.extend((top_i, a2 + j, a2 + j1))
+            uvi.extend((top_i, a2 + j, a2 + j1))
 
 
 def moss_build(nodes, s, surf=None, seeds=None, faces=None):
-    """Grow a moss patch on meshes: {"moss": mesh, "strands": mesh,
-    "clumps", "capped"} (world space). Cushions take one planar UV each, at
-    Tile size metres a tile, randomly offset inside 0..1 (stacked: the same
-    texture on every cushion); strands are thin fibre cards filling 0..1."""
+    """Grow a moss patch on meshes: {"moss": the bed, "strands": shoots and
+    hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
+    space). Detail sets how fine the bed is and what stands out of it."""
     s = mi_settings_only("Moss", s)
     surf = surf or _MiSurface(nodes)
+    empty = {"moss": _mi_mesh(), "strands": _mi_mesh(), "capsules": _mi_mesh(), "clumps": 0, "capped": False}
+    if not surf.items or float(s["coverage"]) <= 0.0:
+        return empty
     sampler = _MiSampler(surf.nodes)
-    seed = int(s["seed"])
-    m = scene_m_per_unit()
-    detail = s["detail"] if s["detail"] in MOSS_RINGS else "Normal"
-    stacks = max(1, int(s["stacks"]))
-    columns = s["stack_layout"] == "Atlas columns"
-    tile = max(1e-4, float(s["uv_tile"]) / m)
-    strand_rate = clamp(float(s["strands"]), 0.0, 3.0) * MOSS_STRANDS[detail]
-    cards = 2 if detail == "Hero" else 1
-    slen = max(1e-5, float(s["strand_length"]) / m)
-    droop = clamp(float(s["droop"]), 0.0, 2.0)
-    mess = clamp(float(s["mess"]), 0.0, 2.0)
-    R = max(1e-9, float(s["clump_size"]) / m)
-    clumps = moss_clumps(surf, sampler, s, seeds, faces) if surf.items else []
-    M, S = _mi_mesh(), _mi_mesh()
-    capped = False
-    for ci, clump in enumerate(clumps):
-        small = min(1.0, clump[2] / R)
-        rings, segs = MOSS_RINGS[detail]
-        rings, segs = max(2, int(round(rings * small ** 0.5))), max(7, int(round(segs * small ** 0.5)))
-        if len(M[0]) + 1 + rings * segs > MI_MAX_VERTS:
-            capped = True
-            break
-        cu = _MossCushion(surf, clump, s, seed, ci)
-        rnd = cu.rnd
-        pts, counts, conn, us, vs, uvi = M
-        base = len(pts)
-        rads = [cu.radius(6.2832 * j / segs) for j in range(segs)]
-        rmax = max(rads)
-        sc = min(1.0 / tile, 0.96 / (2.0 * rmax))
-        free = max(0.0, 1.0 - 2.0 * rmax * sc)
-        u0, v0 = 0.5 + (rnd[11] - 0.5) * free, 0.5 + (rnd[0] * 0.999 - 0.5) * free
-        stack = min(stacks - 1, int(rnd[1] * stacks))
-        centre = cu.c
-        if not cu.flat:
-            cp = surf.closest(cu.c)
-            centre = cp[1] if cp else cu.c
-        top = cu.place(centre, cu.n, cu.at(0.0, 0.0, rads[0])[2])
-        pts.append(top)
-        us_, vs_ = _mi_stack_uv(u0, v0, stack, stacks, columns)
-        us.append(us_)
-        vs.append(vs_)
-        for k in range(1, rings + 1):
-            f = k / float(rings)
-            for j in range(segs):
-                th = 6.2832 * j / segs
-                sp, lift, hh, x, y = cu.at(f, th, rads[j])
-                if k == rings:
-                    hh = -0.04 * cu.h  # the edge tucks just under the surface: no gap under it
-                pts.append(cu.clip(top, cu.place(sp, lift, hh) if hh > 0.0 else _rl_add(sp, _rl_mul(lift, hh))))
-                uu, vv = _mi_stack_uv(u0 + x * sc, v0 + y * sc, stack, stacks, columns)
-                us.append(uu)
-                vs.append(vv)
-        for j in range(segs):
-            j1 = (j + 1) % segs
-            counts.append(3)
-            conn.extend((base, base + 1 + j, base + 1 + j1))
-            uvi.extend((base, base + 1 + j, base + 1 + j1))
-        for k in range(rings - 1):
-            a0, b0 = base + 1 + k * segs, base + 1 + (k + 1) * segs
-            for j in range(segs):
-                j1 = (j + 1) % segs
-                counts.append(4)
-                conn.extend((a0 + j, b0 + j, b0 + j1, a0 + j1))
-                uvi.extend((a0 + j, b0 + j, b0 + j1, a0 + j1))
-        # strands: thin fibres standing out of the cushion (the fuzz that makes moss read at a close-up),
-        # leaning every way, drooping and longer where the moss reaches over an edge
-        if strand_rate <= 0.0:
-            continue
-        count = int(strand_rate * 45.0 * small * small + rnd[2])
-        spts, scounts, sconn, sus, svs, suvi = S
-        for t in range(count):
-            if len(spts) + 6 * cards > MI_MAX_VERTS:
-                capped = True
-                break
-            q = _rand12(seed, ci, t, 23)
-            f = math.sqrt(q[0]) * 0.97
-            th = q[1] * 6.2832
-            sp, lift, hh, _, _ = cu.at(f, th)
-            root = cu.place(sp, lift, max(0.0, hh * 0.7))
-            ln = slen * (0.5 + q[2]) * (1.0 + droop * 2.0 * cu.edge * f * f)
-            tilt = 0.3 + mess * 0.35
-            d = _rl_norm(_rl_add(lift, _rl_add(_rl_mul(cu.t1, (q[3] - 0.5) * 2.0 * tilt),
-                                                _rl_mul(cu.t2, (q[4] - 0.5) * 2.0 * tilt))), lift)
-            sag = droop * (0.2 + 0.8 * f * f) * (1.0 + 2.0 * cu.edge)
-            d2 = _rl_norm(_rl_add(d, (0.0, -sag, 0.0)), d)
-            mid = _rl_add(root, _rl_mul(d, ln * 0.5))
-            tip = _rl_add(mid, _rl_mul(d2, ln * 0.5))
-            spine = (_rl_add(root, _rl_mul(lift, -0.15 * cu.h)), mid, tip)
-            side = _rl_norm(_rl_cross(d, lift), cu.t1)
-            side = _mi_rotate(side, d, q[5] * 3.1416)
-            stack = min(stacks - 1, int(q[6] * stacks))
-            for card in range(cards):
-                sv = side if card == 0 else _rl_norm(_rl_cross(d, side), cu.t2)
-                b = len(spts)
-                for row, (cp_, wf) in enumerate(zip(spine, (1.0, 0.75, 0.4))):
-                    w = 0.05 * ln * wf  # a fibre, not a blade
-                    spts.append(_rl_add(cp_, _rl_mul(sv, -w)))
-                    spts.append(_rl_add(cp_, _rl_mul(sv, w)))
-                    for side_u in (0.0, 1.0):
-                        uu, vv = _mi_stack_uv(0.5 + (side_u - 0.5) * wf, row * 0.5, stack, stacks, columns)
-                        sus.append(uu)
-                        svs.append(vv)
-                for row in range(2):
-                    a = b + row * 2
-                    scounts.append(4)
-                    sconn.extend((a, a + 1, a + 3, a + 2))
-                    suvi.extend((a, a + 1, a + 3, a + 2))
-    return {"moss": tuple(M), "strands": tuple(S), "clumps": len(clumps), "capped": capped}
+    if not sampler.total:
+        return empty
+    spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces)
+    bed = _MossBed(surf, s, cands, rows, faces).build()
+    det = _MossDetail(bed, s).build()
+    return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C),
+            "clumps": sum(1 for row in rows if row is not None and row[0] > 0.0),
+            "capped": bed.capped or det.capped}
 
 
 # -------------------------------------------------------------------- ivy
@@ -28910,11 +29652,13 @@ MI_PRESETS = {
     "Moss": collections.OrderedDict([
         ("Jungle roof", {}),
         ("Crevices only", {"coverage": 0.35, "crevices": 1.0, "patchiness": 0.3, "clump_size": 0.035,
-                           "thickness": 0.015, "edges": 0.8}),
+                           "thickness": 0.015, "edges": 0.8, "lumps": 0.5}),
         ("Thick carpet", {"coverage": 0.85, "clump_size": 0.07, "thickness": 0.035, "patchiness": 0.3,
-                          "mess": 0.4, "strands": 0.4}),
-        ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.4, "strand_length": 0.035, "droop": 1.3,
-                            "edges": 0.2})]),
+                          "mess": 0.4, "lumps": 0.8}),
+        ("Fruiting cushions", {"coverage": 0.5, "clump_size": 0.045, "thickness": 0.03, "lumps": 0.9,
+                               "patchiness": 0.7, "capsules": 0.9}),
+        ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.3, "strand_length": 0.02, "droop": 1.4,
+                            "edges": 0.2, "capsules": 0.1})]),
     "Ivy": collections.OrderedDict([
         ("Climbing ivy", {}),
         ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
@@ -29100,13 +29844,19 @@ class MossIvyPanel(QtWidgets.QWidget):
                   "With picked vertices: how far each clump reaches from its point, in metres (further into "
                   "sheltered corners and cracks).")
         self._row(k, main, "clump_size", "Clump size", FloatField(0.005, 3.0, 0.02, 0.4, decimals=3, step=0.01),
-                  "Radius of a clump in metres (sheltered spots grow bigger ones).")
+                  "Size of the moss's cushions and how fine its patches' edges are, in metres.")
         self._row(k, main, "thickness", "Thickness", FloatField(0.0, 0.5, 0.0, 0.12, decimals=3, step=0.005),
-                  "How high a cushion stands, in metres (thicker in sheltered spots, never into geometry above).")
+                  "How thick the moss is, in metres (thicker inside a patch and in sheltered spots, never into "
+                  "geometry above).")
+        self._row(k, main, "lumps", "Lumps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Packed cushions with creases between them (0 = a smooth carpet).")
         self._row(k, main, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "Ragged edges, lumps and wilder strands.")
-        self._row(k, main, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "Little tufts standing out of the moss (crossed cards, for close-ups). 0 = cushions only.")
+                  "Ragged patch edges and wilder shoots.")
+        self._row(k, main, "strands", "Shoots", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How many shoots stand out of the moss (tufts at Normal, shoots with leaves at High / Hero) "
+                  "and how many strands hang. 0 = the moss bed only.")
+        self._row(k, main, "capsules", "Capsules", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Sporophytes: thin stalks with nodding capsules, in clusters (Normal and up).")
         lay.addWidget(main)
         where = Section("Where it grows", expanded=True)
         self._row(k, where, "slope", "Slope limit", FloatField(0.0, 90.0, 0.0, 90.0, decimals=1, step=1.0),
@@ -29123,19 +29873,26 @@ class MossIvyPanel(QtWidgets.QWidget):
         lay.addWidget(where)
         more = Section("More", expanded=False)
         self._row(k, more, "size_var", "Size variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much clumps differ in size and height.")
-        self._row(k, more, "strand_length", "Strand length",
+                  "How much the thickness varies across a patch.")
+        self._row(k, more, "strand_length", "Shoot length",
                   FloatField(0.002, 0.5, 0.005, 0.15, decimals=3, step=0.005),
-                  "Length of a strand in metres (longer where moss hangs over an edge).")
-        self._row(k, more, "droop", "Droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How much strands bend down, most at the edges and over edges.")
+                  "How tall a shoot stands, in metres (capsule stalks are 1.6 - 3.2 x, hanging strands longer).")
+        self._row(k, more, "droop", "Hanging", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "Strands hanging where the moss faces sideways or down (over edges, down walls), and how "
+                  "long; shoots lean down there too.")
         self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
-                  "Proxy: light cushions, no strands. Normal / High / Hero: rounder cushions, more strands.")
+                  "Proxy: the moss bed only, coarse (layout).\n"
+                  "Normal: a finer, lumpy bed with little tufts, capsules and hanging strands (looks right "
+                  "from a mid shot out).\n"
+                  "High: a finer bed, shoots with a star of leaves (close-ups).\n"
+                  "Hero: the finest bed, leafy shoots with two whorls, rounder capsules (extreme close-ups: "
+                  "keep the patch small).")
         lay.addWidget(more)
         lay.addWidget(self._uv_section(k, "Tile size", "uv_tile", FloatField(0.05, 20.0, 0.1, 2.0, decimals=2,
                                                                                 step=0.05),
-                                       "How many metres of moss one UV tile holds (both ways). Each clump has its "
-                                       "own place in 0..1, at random: one moss texture for every clump."))
+                                       "How many metres of moss one UV tile holds (both ways). The bed is laid out "
+                                       "flat on each face at this scale, cut at tile lines and stacked into 0..1: "
+                                       "use a tiling moss texture (and displacement)."))
         lay.addWidget(self._seed_row(k))
         return box
 
@@ -29341,8 +30098,6 @@ class MossIvyPanel(QtWidgets.QWidget):
     @staticmethod
     def _counts(rep):
         bits = []
-        if rep.get("clumps"):
-            bits.append("%d clumps" % rep["clumps"])
         if rep.get("vines"):
             bits.append("%d vines, %d leaves" % (rep["vines"], rep.get("leaves", 0)))
         bits.append("%s faces" % format(rep.get("faces", 0), ","))

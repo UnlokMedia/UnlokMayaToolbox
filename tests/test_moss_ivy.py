@@ -5,7 +5,9 @@
 Moss on a roof slab with a gap between its boards, an inside corner where
 it meets a wall, a thin rail and a steep wall: it favours the up-facing
 and sheltered spots, keeps off the rail and the wall, never sits inside
-geometry, and its parts take their own UDIM tiles. Ivy on a post: vines
+geometry, its bed rolls over the boards' edges into the gap, the detail
+tiers add shoots, capsules and hanging strands, and its parts take their
+own UDIM tiles. Ivy on a post: vines
 climb it, stay on its surface, leaves stay out of it, picked seeds follow
 the post when it moves. Undo / redo (the redo regrows the seed planes),
 live edits out of the undo queue, save / reopen, bake, tags, presets and
@@ -112,11 +114,11 @@ def run():
     dt = time.time() - t0
     root = rep["root"]
     parts = tb["mi_parts"](root)
-    check("moss grows (clumps, both parts)", rep["clumps"] > 20 and set(parts) == {"moss", "strands"},
+    check("moss grows (clumps, all three parts)", rep["clumps"] > 20 and set(parts) == {"moss", "strands", "capsules"},
           "%d clumps, %d faces, %.2fs" % (rep["clumps"], rep["faces"], dt))
     check("moss grows fast", dt < 6.0, "%.2fs" % dt)
     names = sorted(tb["short_name"](x) for x in parts.values())
-    check("part names follow the convention", names == ["mossGreen_C_mossPatch0001_GEP",
+    check("part names follow the convention", names == ["mossGreen_C_mossPatch0001_GEP", "mossSpore_C_mossPatch0001_GEP",
                                                         "mossStrand_C_mossPatch0001_GEP"], str(names))
     surf = tb["_MiSurface"](nodes)
     s = tb["mi_settings_only"]("Moss", {"coverage": 0.5})
@@ -145,10 +147,19 @@ def run():
     thick = 0.02 / m
     verts = len(pts)
     bad = inside_count(surf, pts, 0.2 * thick, show=8)
-    check("moss cushions sit on the surface, not inside it", bad <= 0.01 * len(pts), "%d of %d" % (bad, len(pts)))
-    check("moss UVs in 1001, strands in 1002", part_tiles(tb, parts["moss"]) == [1001] and
-          part_tiles(tb, parts["strands"]) == [1002], "%s / %s" % (
-              part_tiles(tb, parts["moss"]), part_tiles(tb, parts["strands"])))
+    check("the moss bed sits on the surface, not inside it", bad <= 0.01 * len(pts), "%d of %d" % (bad, len(pts)))
+    in_gap = [p for p in pts if abs(p[2]) < 0.14 and 9.6 < p[1] < 10.45]
+    check("the bed rolls over the boards' edges into the gap between them", len(in_gap) >= 10,
+          "%d points down in the gap" % len(in_gap))
+    # the inside corner's strip: full moss there (out in the open it's a thin fringe at this coverage)
+    tops = [p[1] for p in pts if -6.1 < p[2] < -5.2 and abs(p[0]) < 8.0 and 10.5 < p[1] < 11.2]
+    lift = sorted(y - 10.5 for y in tops)
+    check("the bed is lumpy, about Thickness thick", lift and 0.3 * 0.25 / 10 < lift[len(lift) // 2] / 10 < 0.04 and
+          lift[-1] > 1.6 * lift[len(lift) // 4], "lift metres: quarter %.4f, median %.4f, top %.4f" % (
+              lift[len(lift) // 4] / 10, lift[len(lift) // 2] / 10, lift[-1] / 10) if lift else "none")
+    check("moss UVs in 1001, strands in 1002, capsules in 1003", part_tiles(tb, parts["moss"]) == [1001] and
+          part_tiles(tb, parts["strands"]) == [1002] and part_tiles(tb, parts["capsules"]) == [1003], "%s / %s / %s" % (
+              part_tiles(tb, parts["moss"]), part_tiles(tb, parts["strands"]), part_tiles(tb, parts["capsules"])))
     check("moss UVs stay inside their tile", min(us) >= 0.0 and max(us) <= 1.0 and min(vs) >= 0.0 and max(vs) <= 1.0)
     for part, node in parts.items():
         shape = tb["_log_shape"](node)
@@ -168,15 +179,32 @@ def run():
     tb["update_moss_ivy"]({root: {"coverage": 0.6}})
     check("re-scoring is quick (spots are cached)", time.time() - t0 < 1.5, "%.2fs" % (time.time() - t0))
     tb["update_moss_ivy"]({root: {"stacks": 3}})
-    check("3 stacks: moss in 1001-1003, strands after them", part_tiles(tb, parts["moss"]) == [1001, 1002, 1003] and
-          part_tiles(tb, parts["strands"]) == [1004, 1005, 1006],
-          "%s / %s" % (part_tiles(tb, parts["moss"]), part_tiles(tb, parts["strands"])))
+    check("3 stacks: the bed in 1001, strands 1002-1004, capsules after them",
+          part_tiles(tb, parts["moss"]) == [1001] and part_tiles(tb, parts["strands"]) == [1002, 1003, 1004] and
+          part_tiles(tb, parts["capsules"]) == [1005, 1006, 1007],
+          "%s / %s / %s" % (part_tiles(tb, parts["moss"]), part_tiles(tb, parts["strands"]),
+                            part_tiles(tb, parts["capsules"])))
     tb["update_moss_ivy"]({root: {"stacks": 1, "udim": 1011}})
     check("Start UDIM moves every part", part_tiles(tb, parts["moss"]) == [1011] and
           part_tiles(tb, parts["strands"]) == [1012])
+    counts = {}
     for detail in tb["MI_DETAILS"]:
+        t0 = time.time()
         r = tb["update_moss_ivy"]({root: {"detail": detail}})
-        print("   moss detail %s: %d faces" % (detail, r["faces"]))
+        counts[detail] = [mesh_data(tb, parts[p])[0].numPolygons if cmds.getAttr(parts[p] + ".visibility") else 0
+                          for p in ("moss", "strands", "capsules")]
+        print("   moss detail %s: %d faces (bed, strands, capsules %s) %.2fs" % (detail, r["faces"], counts[detail],
+                                                                             time.time() - t0))
+    check("Detail tiers: a finer bed and more standing out of it each step",
+          counts["Proxy"][0] < counts["Normal"][0] < counts["High"][0] < counts["Hero"][0] and
+          counts["Proxy"][1] == 0 == counts["Proxy"][2] and 0 < counts["Normal"][1] < counts["High"][1] and
+          counts["Normal"][2] > 0, str(counts))
+    tb["update_moss_ivy"]({root: {"detail": "Normal", "capsules": 0.0}})
+    check("Capsules 0: no sporophytes", not cmds.getAttr(parts["capsules"] + ".visibility"))
+    tb["update_moss_ivy"]({root: {"capsules": 0.3, "droop": 1.6, "strand_length": 0.02}})
+    low = min(p[1] for p in mesh_data(tb, parts["strands"])[1])
+    check("Hanging: strands hang down over the edges", low < 9.6, "lowest strand point y %.2f (boards' tops 10.5)" % low)
+    tb["update_moss_ivy"]({root: {"droop": 0.5, "strand_length": 0.012}})
 
     # --- undo / redo (the redo regrows what Grow made: live edits aren't undoable)
     cmds.undo()
@@ -233,6 +261,9 @@ def run():
     again = tb["update_moss_ivy"]({root: {}})
     check("Regrow keeps the picked faces", again["clumps"] == rep["clumps"] and
           list(tb["mi_data"](root)["faces"].values()) == [tops], "%d / %d" % (rep["clumps"], again["clumps"]))
+    bpts = mesh_data(tb, tb["mi_parts"](root)["moss"])[1]
+    check("the bed keeps to the picked faces", bpts and all(p[2] < -0.1 and p[1] > 10.3 for p in bpts),
+          "z %.2f..%.2f, lowest y %.2f" % (min(p[2] for p in bpts), max(p[2] for p in bpts), min(p[1] for p in bpts)))
 
     # --- ivy on a post
     cmds.file(new=True, force=True)

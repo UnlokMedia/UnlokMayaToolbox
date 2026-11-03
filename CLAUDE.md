@@ -747,18 +747,16 @@
     Without the crack test a gap between planks read as two exposed edges.
     `moss_score`: 0.5 x up-weight x (1 - edges x edge) + crevices x 0.62 x
     shelter x (0.6 + 0.4 up) + patchiness x 0.55 x noise.
-  - **Field and packing** (the user, 2026-11-03: "way more realism"; round
-    25 cm pads read as gumdrops): `_moss_field` scatters cushion
-    candidates (4.5 per cushion area: packing needs several) each tied to
-    the spots within 1.6 RA (weighted by distance, normal agreement and
-    being on the same level: a rail's top must not read the board under
-    it) plus a fine 2D noise for a ragged edge; both cached in
-    `_MI_MOSS_CACHE`, so Coverage and the weights only re-score.
-    `moss_clumps`: margin = field + 0.3 x Messiness x noise - (1 -
-    coverage); inside a patch cushions are bigger (`core`) and thicker,
-    packed 0.5 (ri + rj) apart, middles first; past the edge a few stray
-    tufts (none on exposed edges). A candidate covered within 5 cm above
-    (a rail on a board) is dropped, tested once when first kept (`memo`).
+  - **Field** (`_moss_field`, `_moss_margins`): candidates scattered at
+    4.5 per Clump size area, each tied to the spots within 1.6 RA (weighted
+    by distance, normal agreement and being on the same level: a rail's top
+    must not read the board under it) plus a fine noise for a ragged edge;
+    cached in `_MI_MOSS_CACHE`, so Coverage and the weights only re-score.
+    `_moss_margins` gives each candidate (margin, shelter, edge): margin =
+    field + 0.3 x Messiness x noise - (1 - coverage); a candidate covered
+    within 5 cm above (`_moss_obstacle`, a rail on a board) keeps that
+    distance (`ob`) and the bed stays 0.6 x it under. `moss_clumps` (the
+    old cushion packing) is only kept for its count and the tests.
   - **Directed moss** (the user, 2026-11-03: "more controlled / directed
     clumps in certain areas instead of overall coverage"): `mi_moss_picks`
     reads the selection: vertices / edges = clump centres (stored as
@@ -769,19 +767,59 @@
     masking is a re-score (cached field). Seeds: margin = 0.7 (1 - d /
     Spread) + 0.3 (score - 0.5) + noise - (1 - coverage) + 0.3, d to the
     nearest seed (grid); shelter still stretches a clump along a crack.
-  - **Cushions** (`_MossCushion`): rings x segments by Detail
-    (`MOSS_RINGS`, fewer on small cushions); profile (1 - f^2)^2, a smooth
-    bump flat where it meets the surface, so overlapping cushions blend
-    into a lumpy carpet (a domed profile showed every rim); lumps at 0.3 r.
-    `flat` (12 samples on two rings all on one face) skips per-point snaps;
-    `clear` (rays up from them) skips the per-point place rays; most roof
-    cushions are both. Otherwise each point is snapped by closest point
-    (wraps into corners and cracks; the back of a thin board is ignored),
-    lifted along 0.7 snapped + 0.3 clump normal; `place` caps the lift by a
-    ray; `clip` pulls points back in front of any surface between the top
-    and them. The edge ring tucks 0.04 h under. UV: planar, one scale
-    min(1 / Tile size, fit), random offset inside 0..1. Strands are thin
-    fibre cards (45 x rate per full cushion, one card, two crossed at Hero).
+  - **Bed** (the user, 2026-11-03: "the most procedural route ... the best
+    looking moss with obviously controllable tiers of detail"; reference:
+    jungle moss = mats and carpets, cushions and turfs where lit, wefts and
+    pendant curtains where shaded, setae with nodding capsules over it):
+    `_MossBed` is one continuous shell, not cushions. Per target triangle a
+    grid on its plane (axes from the normal only, `_moss_axes`: coplanar
+    faces share one grid, so no seams), cell e = Tile size / k (k =
+    ceil(tile / (cell x R)), `MOSS_DETAIL[0]`): every cell sits in one UV
+    tile, UV = (u - tile index x tile) / tile, so the bed takes a tiling
+    texture and displacement. Cells are clipped to the triangle
+    (`_moss_clip`); points keyed (plane, i, j) or by quantised position on
+    clip lines. Per point: kernel over the candidates within 1.3 R
+    (`_record`), margin -> c / pr smoothsteps, h = H x pr x (0.5 + 0.5 c) x
+    (0.75 + 0.6 shelter) x taper, x Size variation noise, x Lumps billow
+    (|noise| at 0.7 R and 0.32 R, `_moss_noise3`: packed cushions with
+    creases), less a tuck (the edge goes just under the surface). Faces
+    with no point above the surface are dropped. pr ramps over a margin
+    of 0.3 and is square-rooted: the edge slopes up and rounds over (over
+    0.13 it rose within one cell: a cut-paper edge at Normal).
+    - **Edges:** lift direction = corner normals (faces within 35 degrees,
+      `MOSS_SMOOTH`, blend: a stone). A sharp edge within 0.6 R rolls the
+      lift half way to the next face (both sides meet over it: moss rolls
+      over plank edges, fills inside corners); an open edge, a masked face
+      or a face facing down tapers it under.
+    - **Covered faces** (fix 2026-11-03: moss went into the wall): each
+      face is tested at 7 points (`_covered`: a ray out hits within 1 cm or
+      hits a back face = inside another solid). All covered = buried (no
+      moss, and neighbours run straight on into the corner instead of
+      rolling onto it); some = partial: that face's points, and its
+      neighbours', each cast a ray along their lift (`room`, stored in the
+      record) and stay under 0.6 x it (a board half under the wall, a rail
+      across a board). The centroid test alone missed half-covered faces.
+    - **Speed:** blocks of ~0.6 rk cells are skipped unless a candidate in
+      reach can show moss (exact bound on the margin), and the layout
+      (points, lift directions, kernel weights, noise; block polygons) is
+      cached in `_MI_MOSS_BEDS` (3 layouts), so Coverage, Thickness, Lumps
+      and the weights redo the sums only. `MOSS_MAX_CELLS` grows the cell
+      on huge areas (`capped`).
+  - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
+    sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,
+    tufts (5-point leaf stars on the bed); High 0.14 R, shoots (2-segment
+    stem + 4-leaf star); Hero 0.09 R, leafy shoots (3 segments, two
+    whorls). `_MossDetail` samples the bed's exposed faces area-weighted,
+    keyed by (plane, cell, triangle) so a tier's shoots keep their place
+    through edits. Hanging strands (ribbons bent down by gravity) where the
+    bed faces sideways or down (normal y < 0.35), Hanging x their length,
+    gathered into curtains (noise at 4 R, longer mid-curtain, a sine
+    wave down each; an even fringe read as grass);
+    capsules (seta ribbon + spindle capsule nodding 0.5 - 1.6 rad) in
+    noise clusters where the bed is full and up-facing. Parts: `strands`
+    (`mossStrand`: stems u 0..0.1, hanging u 0.12..0.22, stars round
+    (0.625, 0.625)) and `capsules` (`mossSpore`: setae u 0..0.1, capsules
+    0.2..1), both stacked. Thinned to `MI_MAX_VERTS`.
   - **Ivy walk** (`ivy_walk`): step = leaf x `IVY_STEP` (Detail); steer
     towards "up the surface" swung by a slow noise (Wander) with weight
     Climb x 0.6 (a per-step turn made vines spiral round posts), plus a
@@ -812,15 +850,15 @@
     kind; `_editing()` = selected live groups of the kind on show.
     Presets: `MI_PRESETS` + `unlokMossPresets` / `unlokIvyPresets`
     optionVars (seed and Start UDIM skipped).
-  - Speed (GUI test, Normal): a whole shack roof (44 planks) ~7 s, 3,000
-    cushions, 220k faces; a live Coverage edit rebuilds them all (~7 s);
-    the ledge 0.7 s; ivy 0.25 s. Too slow for live roof-sized edits yet.
+  - Speed (GUI test): a whole shack roof (44 planks) at Normal ~13 s to
+    grow (230k faces), a live Coverage edit ~5 s (cached layout). Three
+    planks of Fruiting cushions: Proxy ~2k verts, Normal ~30k, High ~320k,
+    Hero ~1M. Ivy 0.25 s.
   - Not done (ideas): following the meshes live (Regrow is manual), a
     click-to-plant picker (or changing a grown patch's picks: today picks
-    are set at Grow), rootlets on the stems, moss on the ivy. The
-    user wants much more realism than cushions give: next options are a
-    continuous carpet shell (displacement-ready UVs), fur-like alpha fuzz
-    cards, or scattering scanned moss / ivy assets.
+    are set at Grow), rootlets on the stems, moss on the ivy, caching the
+    detail layer (High / Hero edits rebuild it), High / Hero speed on big
+    areas.
   - Tests: `tests/test_moss_ivy.py`, `tests/gui_moss_ivy.py` (pictures in
     `tests/_out/moss_ivy`).
 - **Smart UDIM** (UV tab):

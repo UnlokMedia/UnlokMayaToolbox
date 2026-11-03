@@ -128,7 +128,8 @@ def _shade(nodes, name, rgb, vary):
 
 def shade_parts(ns, root):
     parts = ns["mi_parts"](root)
-    colours = {"moss": ("testMoss", (0.11, 0.18, 0.04), 1.5), "strands": ("testStrand", (0.36, 0.33, 0.12), 1.5),
+    colours = {"moss": ("testMoss", (0.11, 0.18, 0.04), 1.5), "strands": ("testStrand", (0.20, 0.30, 0.07), 1.5),
+               "capsules": ("testSpore", (0.35, 0.15, 0.06), 0),
                "stems": ("testStem", (0.24, 0.17, 0.10), 0), "leaves": ("testLeaf", (0.07, 0.20, 0.04), 12.0)}
     for part, node in parts.items():
         name, rgb, vary = colours[part]
@@ -283,6 +284,39 @@ def main():
     look((0, 24, 6), (34, 46, 52))
     snap("05b_roof_moss_faces.png")
     cmds.delete(roots)
+
+    # --- the Detail tiers on three planks, close up (fruiting cushions: every part shows)
+    verts = {}
+    for det in ns["MI_DETAILS"]:
+        cmds.select([planks[i] for i in (2, 3, 4)])
+        panel._sync_from_selection()
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Fruiting cushions"))
+        panel.load_preset()
+        panel.f["Moss"]["coverage"].setValue(0.75)
+        panel.f["Moss"]["detail"].setValue(det)
+        t0 = time.time()
+        panel.grow()
+        took = time.time() - t0
+        root = ns["mi_systems"]()[0]
+        shade_parts(ns, root)
+        parts = ns["mi_parts"](root)
+        verts[det] = sum(cmds.polyEvaluate(parts[p], vertex=True) for p in ("moss", "strands", "capsules")
+                         if cmds.getAttr(parts[p] + ".visibility"))
+        print("detail %s: %d verts, %.2fs" % (det, verts[det], took))
+        if det == "Proxy":  # aim every tier's pictures at the same spot: the bed point nearest its middle
+            pts = cmds.xform(parts["moss"] + ".vtx[*]", q=True, ws=True, t=True)
+            pts = [pts[i:i + 3] for i in range(0, len(pts), 3)]
+            mid = [sum(p[k] for p in pts) / len(pts) for k in range(3)]
+            aim = min(pts, key=lambda p: sum((p[k] - mid[k]) ** 2 for k in range(3)))
+        deselect()
+        look(aim, (aim[0] + 6, aim[1] + 5.5, aim[2] - 10))
+        snap("05c_detail_%s.png" % det.lower())
+        look(aim, (aim[0] + 1.2, aim[1] + 1.6, aim[2] - 2.6))
+        snap("05d_detail_%s_close.png" % det.lower())
+        cmds.delete(root)
+    counts = [verts[d] for d in ns["MI_DETAILS"]]
+    check("each Detail tier is heavier than the one before", all(a < b for a, b in zip(counts, counts[1:])),
+          ", ".join("%s %d" % (d, verts[d]) for d in ns["MI_DETAILS"]))
 
     # --- a thick carpet preset on the roof, shaggy over the eaves
     cmds.select(planks)
