@@ -130,6 +130,8 @@ def shade_parts(ns, root):
     parts = ns["mi_parts"](root)
     colours = {"moss": ("testMoss", (0.11, 0.18, 0.04), 1.5), "strands": ("testStrand", (0.20, 0.30, 0.07), 1.5),
                "capsules": ("testSpore", (0.35, 0.15, 0.06), 0),
+               "grass": ("testGrass", (0.50, 0.44, 0.30), 3.0), "litter": ("testLitter", (0.42, 0.25, 0.10), 2.0),
+               "tufts": ("testTuft", (0.14, 0.26, 0.05), 1.5),
                "stems": ("testStem", (0.24, 0.17, 0.10), 0), "leaves": ("testLeaf", (0.07, 0.20, 0.04), 12.0)}
     for part, node in parts.items():
         name, rgb, vary = colours[part]
@@ -317,6 +319,85 @@ def main():
     counts = [verts[d] for d in ns["MI_DETAILS"]]
     check("each Detail tier is heavier than the one before", all(a < b for a, b in zip(counts, counts[1:])),
           ", ".join("%s %d" % (d, verts[d]) for d in ns["MI_DETAILS"]))
+
+    # --- debris: tiny moss tufts on the planks, then the Debris kind's own scenes
+    panel.kind.buttons["Debris"].click()
+    pump()
+    check("the Debris fields show", panel.box["Debris"].isVisibleTo(panel) and "Debris" in panel.grow_btn.text())
+    window.grab().save(os.path.join(OUT, "05e_panel_debris.png"))
+    cmds.select([planks[i] for i in (2, 3, 4)])
+    panel._sync_from_selection()
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Moss tufts"))
+    panel.load_preset()
+    panel.grow()
+    root = ns["mi_systems"](kind="Debris")[0]
+    check("Moss tufts grow on the planks", ns["mi_data"](root)["tufts"] > 0 and
+          cmds.getAttr(ns["mi_parts"](root)["tufts"] + ".visibility"), panel.status.text())
+    shade_parts(ns, root)
+    deselect()
+    pts = cmds.xform(ns["mi_parts"](root)["tufts"] + ".vtx[*]", q=True, ws=True, t=True)
+    pts = [pts[i:i + 3] for i in range(0, len(pts), 3)]
+    mid = [sum(p[k] for p in pts) / len(pts) for k in range(3)]
+    tuft = min(pts, key=lambda p: sum((p[k] - mid[k]) ** 2 for k in range(3)))  # a tuft near the middle
+    look(tuft, (tuft[0] + 2.5, tuft[1] + 2.5, tuft[2] - 4))
+    snap("05f_debris_tufts.png")
+    look(tuft, (tuft[0] + 0.4, tuft[1] + 0.5, tuft[2] - 0.8))
+    snap("05g_debris_tufts_close.png")
+    cmds.delete(root)
+    # a barrel greenhouse roof under a mat of dry grass (the user's reference)
+    site = cmds.group(empty=True, name="greenhouse_GRP")
+    barrel = cmds.polyCylinder(r=10, h=30, sx=40, sy=1, sz=1, ax=(1, 0, 0), name="barrelRoof",
+                               constructionHistory=False)[0]
+    drop = []
+    for f in range(cmds.polyEvaluate(barrel, face=True)):
+        xyz = cmds.xform("%s.f[%d]" % (barrel, f), q=True, ws=True, t=True)
+        n = len(xyz) // 3
+        cx, cy = sum(xyz[0::3]) / n, sum(xyz[1::3]) / n
+        if cy < 0.01 or abs(cx) > 14.9:
+            drop.append("%s.f[%d]" % (barrel, f))
+    cmds.delete(drop)
+    cmds.move(80, 12, 0, barrel)
+    barrel = cmds.ls(cmds.parent(barrel, site)[0], long=True)[0]
+    ends = [box("sideWall%d" % i, (30, 12, 0.6), (80, 6, s * 9.7), parent=site) for i, s in enumerate((-1, 1))]
+    ground = box("yard", (60, 1, 50), (80, -0.5, 18), parent=site)
+    shade([barrel], "testPolycarb", (0.62, 0.66, 0.66))
+    shade(ends + [ground], "testConcrete", (0.45, 0.43, 0.40))
+    cmds.select(barrel)
+    panel._sync_from_selection()
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Dry grass mat"))
+    panel.load_preset()
+    t0 = time.time()
+    panel.grow()
+    took = time.time() - t0
+    root = ns["mi_systems"](kind="Debris")[0]
+    rep = ns["update_moss_ivy"]({root: {}})
+    check("Dry grass mat grows on the barrel roof", rep["bunches"] > 5, "%.2fs | %s" % (took, panel.status.text()))
+    shade_parts(ns, root)
+    deselect()
+    look((80, 18, 0), (112, 26, 34))
+    snap("05h_debris_grass_mat.png")
+    look((95, 19, 0), (110, 22, 13))
+    snap("05i_debris_grass_mat_end.png")
+    cmds.delete(root)
+    # autumn leaves and piles on the yard
+    cmds.select(ground)
+    panel._sync_from_selection()
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Autumn leaves"))
+    panel.load_preset()
+    panel.grow()
+    root = ns["mi_systems"](kind="Debris")[0]
+    rep = ns["update_moss_ivy"]({root: {}})
+    check("Autumn leaves: leaves and piles on the yard", rep["leaves"] > 100 and rep["piles"] >= 1,
+          panel.status.text())
+    shade_parts(ns, root)
+    deselect()
+    look((80, 0, 30), (98, 14, 56))
+    snap("05j_debris_leaves.png")
+    look((80, 0, 30), (84, 4, 36))
+    snap("05k_debris_leaves_close.png")
+    cmds.delete(ns["mi_systems"](kind="Debris"), site)
+    panel.kind.buttons["Moss"].click()
+    pump()
 
     # --- a thick carpet preset on the roof, shaggy over the eaves
     cmds.select(planks)

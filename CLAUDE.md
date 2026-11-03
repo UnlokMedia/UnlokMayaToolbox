@@ -713,18 +713,20 @@
       metal block in `tests/gui_thatch_roof.py`.
 - **Moss and Ivy** (Modeling tab; the user, 2026-11-03: "nice clumps of
   jungle moss ... on top of rooftops, or growing up in little crevices
-  interacting with geo, or ivy growing up columns of shacks"). Engine
-  `moss_build` / `ivy_build` (via `mi_build`, which runs `_roof_udims(...,
+  interacting with geo, or ivy growing up columns of shacks"; then "bunches
+  of dry grass, scattered leaves, small piles of leaves and tiny clumps of
+  moss" with a greenhouse-roof reference: the Debris kind). Engine
+  `moss_build` / `ivy_build` / `debris_build` (via `mi_build`, which runs `_roof_udims(...,
   order=MI_UDIM_ORDER)`); scene side `grow_moss_ivy`, `update_moss_ivy`,
   `rebuild_stale_moss_ivy`, `bake_moss_ivy`, `mi_selection`; panel
   `MossIvyPanel`.
   - **Scene:** one group per patch / plant, `mossPatch####_GRP` /
-    `ivy####_GRP`, with `unlokMossIvy` JSON (kind, settings, version,
+    `ivy####_GRP` / `debris####_GRP`, with `unlokMossIvy` JSON (kind, settings, version,
     `targets` uuids, ivy `seeds` as {"t": target uuid, "p": its local
     point, "w": world}, so Regrow follows a moved post). Parts are direct
     children tagged `unlokMossIvyPart` / `unlokMossIvyVerts`
-    (`MI_PARTS`: moss `mossGreen` + strands `mossStrand`, ivy `ivyStem` +
-    `ivyLeaf`), all with `unlokUvReady`, the stacked ones (`MI_STACKED_PARTS`)
+    (`MI_PARTS`: moss `mossGreen` + `mossStrand` + `mossSpore`, ivy
+    `ivyStem` + `ivyLeaf`, debris `grassDry` + `leafDry` + `mossTuft`), all with `unlokUvReady`, the stacked ones (`MI_STACKED_PARTS`)
     with `UV_STACKED_ATTR`. Grow = UndoChunk (group, JSON, seed planes),
     fill in NoUndo (`_rope_fill`); live edits NoUndo; a redo's seed planes
     are regrown by the panel's Redo job (`rebuild_stale_moss_ivy`, baked too:
@@ -844,6 +846,33 @@
     (small outward component), petioles 0.18..0.58 leaf long, leaves 0.7..1.3x
     from tip to old growth. The blade tilts out if a ray along it hits the
     wall; quads wound so the blade faces out.
+  - **Debris** (`_DebrisBuild`; kind "Debris", `DEBRIS_DEFAULTS`): the
+    moss's field (`_debris_field` = moss settings with clump size
+    `DEBRIS_FIELD_R`, so picks and faces work the same; mi_build output
+    counts are `leaves_n` / `tufts_n`: `_roof_udims` takes any key named
+    like a part for a mesh). `_spots(density, kind)`: per candidate,
+    density x its area share x a ramp on the margin, jittered and snapped,
+    never under something (`_moss_obstacle`) or onto a face turned away (a
+    rail's underside lies flush on the board: blades lifted into it).
+    - Grass `_bunch` / `_blade`: blades per 10 cm square by Detail
+      (`DEBRIS_DETAIL`, x Fullness; fewer, wider blades below Hero), each
+      started half its length back so its middle is in the bunch, walked
+      over the surface by closest point (curl per step), lifted onto the
+      mound (layer; 0.2 x bunch radius high: higher read as separate bales)
+      plus an arch; off an edge (closest point to the side,
+      or a face turned away) it steps level past it, then droops; every
+      free step casts a ray and the blade ends against what it hits (they
+      cut through the wall's corner before). Ribbons narrow to the tip.
+    - Leaves `_leaf`: rows x columns over a cut outline: a stalk row
+      (`DEBRIS_STALK`), then an ovate blade (half width 0.19 - 0.31 x
+      length; the first version, near round and cupped, read as crisps),
+      even columns for a midrib line, cup / ends / fold / crumple by Leaf curl, rests on its lowest
+      point (a quarter flipped), pushed out of curved surfaces. Piles
+      `_pile`: mound 0.3 R high, leaves sorted bottom first, tilted along
+      the mound, plus strays. Tufts `_tuft`: 2-5 `_dome`s run together (one at Proxy),
+      each dome rings with sqrt profile,
+      jittered rim tucked under, every point laid onto the surface by
+      closest point.
   - **Panel:** steps Select surfaces / Grow (Moss | Ivy segment, presets,
     Grow button) / Look (one box of fields per kind) / Finish (Select All,
     Regrow, Bake). Selecting a group shows its settings and switches the

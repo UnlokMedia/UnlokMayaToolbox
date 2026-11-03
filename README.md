@@ -670,19 +670,20 @@ trim Keep UVs. Levels and blockers are thatch only for now.
 
 ### Modeling > Moss and Ivy
 
-Jungle moss that gathers where it would really grow, and ivy that climbs
-posts and walls, grown on your own meshes. No plugin, no nodes: plain
+Jungle moss that gathers where it would really grow, ivy that climbs
+posts and walls, and debris (dry grass, dead leaves, leaf piles, moss
+tufts), grown on your own meshes. No plugin, no nodes: plain
 meshes with clean UVs, live while you tune them.
 
 1. **Select surfaces:** the meshes to grow on, together (a roof's planks,
    a ledge and the wall behind it, a post and the beam on it). To direct
-   moss, pick components instead of whole meshes: **faces** = moss only
+   moss or debris, pick components instead of whole meshes: **faces** = only
    on those faces (Coverage decides how full); **vertices or edges** = a
    clump round each picked point, out to *Spread* (further into sheltered
    corners and cracks). Both are remembered, so Regrow keeps them. For ivy,
    picked vertices, edges or faces are where vines start.
-2. **Grow** (one Ctrl+Z): pick **Moss** or **Ivy** (and a preset), then
-   **Grow Moss / Ivy on Selected**. The new patch is selected, so step 3
+2. **Grow** (one Ctrl+Z): pick **Moss**, **Ivy** or **Debris** (and a
+   preset), then **Grow ... on Selected**. The new patch is selected, so step 3
    edits it straight away.
 3. **Look** (live, out of the undo queue like the other tools' sliders).
    Selecting a moss patch or an ivy shows its settings, like the Channel Box.
@@ -722,6 +723,22 @@ geometry above Proxy) lying over the surface like shingles, cupped, its
 tip curled.
 Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
 
+**Debris** gathers where litter would, by the same field as moss (*Coverage*
+and the *Where it gathers* weights, picked points and faces), per square
+metre where it gathers:
+- *Grass bunches*: dry grass blades lying every which way (*Combed*: more
+  of them one way), piled into a low mound (*Fullness*), each blade walked
+  over the surface and hanging once it goes over an edge (*Droop*),
+  stopping against anything in its way.
+- *Leaves*: dead leaves lying on the surface, a stalk and an ovate blade
+  (some rounder, some narrower) cut in the geometry, dried (*Leaf curl*: edges curled up, ends lifted, folded on the
+  midrib, crumpled), one in four upside down.
+- *Leaf piles*: low mounds of leaves, each lying along the mound at its own
+  depth, a few strays round them.
+- *Moss tufts*: tiny clumps of moss, a few small rounded cushions run
+  together, lumpy on top, wrapped onto the surface.
+Presets: Roof litter, Dry grass mat, Autumn leaves, Leaf piles, Moss tufts.
+
 **Detail** is how close the camera gets, and how heavy the moss is:
 
 | Detail | Bed | Standing out of it | For |
@@ -731,7 +748,9 @@ Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
 | High | 0.14 x | shoots with a star of leaves | close-ups |
 | Hero | 0.09 x | leafy shoots (two whorls), rounder capsules | extreme close-ups: keep the patch small |
 
-For ivy it sets stem sides, walk steps and leaf rows.
+For ivy it sets stem sides, walk steps and leaf rows; for debris, blades
+per bunch and their segments (fewer, wider blades at Proxy / Normal), leaf
+rows and columns, tuft rings (one cushion per tuft at Proxy).
 
 **UVs:** every part has its own UDIM tiles from *Start UDIM* on, so no two
 parts share UV space except stacked variations. The moss bed is laid out
@@ -745,8 +764,11 @@ columns at one density over *Stem tiles* tiles.
 Patches are `mossPatch0001_GRP` holding `mossGreen_C_mossPatch0001_GEP`
 (the bed), `mossStrand_C_mossPatch0001_GEP` (shoots and hanging strands)
 and `mossSpore_C_mossPatch0001_GEP` (capsules); ivy is `ivy0001_GRP` holding
-`ivyStem_C_ivy0001_GEP` and `ivyLeaf_C_ivy0001_GEP`. **With Smart UDIM:**
-the bed, strands, capsules and leaves are Hands off (stacked), stems Keep UVs.
+`ivyStem_C_ivy0001_GEP` and `ivyLeaf_C_ivy0001_GEP`; debris is
+`debris0001_GRP` holding `grassDry_..._GEP` (blades: u across, v along),
+`leafDry_..._GEP` (each leaf in 0..1) and `mossTuft_..._GEP` (a top-down
+disc). **With Smart UDIM:** everything but ivy stems is Hands off (stacked),
+stems Keep UVs.
 
 **Speed:** a whole shack roof at Normal about 13 s to grow, then about 5 s
 per live edit (the bed's layout is kept between edits); use Proxy while
@@ -1544,10 +1566,13 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   round a picked point within Spread, moss kept to picked faces, Regrow
   keeping them). Ivy on a post: vines climb it, stems and leaves stay out
   of it, UVs inside their tiles, picked seeds (and Regrow following the
-  post), presets, speed.
+  post), presets, speed. Debris on the same ledge: all three parts, their
+  tiles, nothing inside geometry, off the rail, grass hanging over edges,
+  leaves lying flat and piles standing up, Detail tiers, a picked point.
 - `tests/gui_moss_ivy.py`: drives the Moss and Ivy panel in a real Maya
   session (grow moss on a plank roof, live edit, undo / redo, presets, each
-  Detail tier on three planks with a close-up, moss in a stone wall's
+  Detail tier on three planks with a close-up, debris: moss tufts, a dry
+  grass mat on a barrel greenhouse roof, autumn leaves and piles, moss in a stone wall's
   crevices, ivy up a post onto its beam and from picked seeds on a wall,
   Randomize, bake) and saves pictures to `tests/_out/moss_ivy`. Launch it
   like the smoke test below, with `tests/run_gui_moss_ivy.mel`.

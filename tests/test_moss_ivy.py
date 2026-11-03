@@ -340,6 +340,65 @@ def run():
         else:
             cmds.optionVar(stringValue=(var, old))
 
+    # --- debris: dry grass, dead leaves, leaf piles, moss tufts on the ledge
+    cmds.file(new=True, force=True)
+    nodes = ledge_scene()
+    surf = tb["_MiSurface"](nodes)
+    look = {"coverage": 0.6, "grass": 3.0, "leaves": 15.0, "piles": 0.6, "tufts": 12.0}
+    t0 = time.time()
+    rep = tb["grow_moss_ivy"]("Debris", nodes, look)
+    dt = time.time() - t0
+    root = rep["root"]
+    parts = tb["mi_parts"](root)
+    check("debris grows (grass bunches, leaves, piles, tufts; three parts)",
+          rep["bunches"] > 3 and rep["leaves"] > 40 and rep["piles"] >= 1 and rep["tufts"] > 5 and
+          set(parts) == {"grass", "litter", "tufts"},
+          "%d bunches, %d leaves, %d piles, %d tufts, %.2fs" % (rep["bunches"], rep["leaves"], rep["piles"],
+                                                                rep["tufts"], dt))
+    check("debris grows fast", dt < 8.0, "%.2fs" % dt)
+    names = sorted(n.split("|")[-1] for n in parts.values())
+    check("debris part names", names == ["grassDry_C_debris0001_GEP", "leafDry_C_debris0001_GEP",
+                                         "mossTuft_C_debris0001_GEP"], str(names))
+    check("every debris part is stacked and UV ready", all(
+        cmds.getAttr(tb["_log_shape"](n) + "." + tb["UV_STACKED_ATTR"]) and
+        cmds.getAttr(tb["_log_shape"](n) + "." + tb["UV_READY_ATTR"]) for n in parts.values()))
+    check("grass UVs in 1001, leaves in 1002, tufts in 1003", part_tiles(tb, parts["grass"]) == [1001] and
+          part_tiles(tb, parts["litter"]) == [1002] and part_tiles(tb, parts["tufts"]) == [1003], "%s / %s / %s" % (
+              part_tiles(tb, parts["grass"]), part_tiles(tb, parts["litter"]), part_tiles(tb, parts["tufts"])))
+    gpts = mesh_data(tb, parts["grass"])[1]
+    lpts = mesh_data(tb, parts["litter"])[1]
+    tpts = mesh_data(tb, parts["tufts"])[1]
+    for name, pts in (("grass", gpts), ("leaves", lpts), ("tufts", tpts)):
+        bad = inside_count(surf, pts, 0.03, show=4)
+        check("%s stay out of the geometry" % name, bad <= 0.02 * len(pts), "%d of %d" % (bad, len(pts)))
+    on_rail = [p for p in tpts + lpts if p[1] > 10.95 and 5.7 < p[2] < 6.3]
+    check("debris keeps off the thin rail's top", len(on_rail) <= 0.02 * len(tpts + lpts), "%d" % len(on_rail))
+    hang = [p for p in gpts if p[1] < 10.3]
+    check("grass hangs over the edges (into the gap, over the front)", len(hang) > 10, "%d points below the tops" %
+          len(hang))
+    lift = sorted(p[1] - 10.5 for p in lpts if abs(p[2]) > 0.3 and abs(p[2]) < 5.8 and abs(p[0]) < 9.5)
+    check("leaves lie on the boards, piles stand up a little",
+          lift and lift[len(lift) // 4] < 0.06 and lift[-1] > 0.12,
+          "lift (units): quarter %.3f, top %.3f" % (lift[len(lift) // 4], lift[-1]) if lift else "none")
+    counts = []
+    for det in tb["MI_DETAILS"]:
+        b = tb["mi_build"]("Debris", nodes, dict(look, detail=det))
+        counts.append((len(b["grass"][0]), len(b["litter"][0]), len(b["tufts"][0])))
+    check("Detail tiers: more blades, finer leaves and tufts each step",
+          all(a[i] < b[i] for a, b in zip(counts, counts[1:]) for i in range(3)), str(counts))
+    b = tb["mi_build"]("Debris", nodes, dict(look, grass=0.0, piles=0.0))
+    check("Grass bunches 0 and Leaf piles 0: none", not b["grass"][1] and b["piles"] == 0 and b["leaves_n"] > 20)
+    tb["update_moss_ivy"]({root: {"tufts": 0.0}})
+    check("an empty part is hidden", not cmds.getAttr(parts["tufts"] + ".visibility"))
+    pick = (0.0, 10.5, -3.0)
+    rep2 = tb["grow_moss_ivy"]("Debris", nodes, dict(look, spread=0.15, coverage=0.5), seeds=[pick])
+    p2 = tb["mi_parts"](rep2["root"])
+    allp = mesh_data(tb, p2["grass"])[1] + mesh_data(tb, p2["litter"])[1] + mesh_data(tb, p2["tufts"])[1]
+    far = max(math.sqrt((p[0] - pick[0]) ** 2 + (p[2] - pick[2]) ** 2) for p in allp) if allp else 99.0
+    check("a picked point gathers the debris round it", allp and far < 6.0, "farthest %.2f units" % far)
+    check("Debris presets fill in defaults", tb["mi_preset"]("Debris", "Dry grass mat")["grass"] == 6.0 and
+          tb["mi_preset"]("Debris", "Dry grass mat")["slope"] == tb["DEBRIS_DEFAULTS"]["slope"])
+
 
 try:
     run()

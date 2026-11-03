@@ -27308,15 +27308,16 @@ class ThatchRoofPanel(QtWidgets.QWidget):
 
 MI_SETTINGS = "unlokMossIvy"     # string on the group: JSON (kind, settings, targets, seeds)
 MI_BAKED = "unlokMossIvyBaked"   # the same after Bake (only a redo of Grow reads it)
-MI_PART = "unlokMossIvyPart"     # string on each part mesh: "moss", "strands", "capsules", "stems", "leaves"
+MI_PART = "unlokMossIvyPart"     # string on each part mesh: "moss", "strands", ... (MI_PARTS)
 MI_VERTS = "unlokMossIvyVerts"   # long on each part mesh: vertex count of the last build
 MI_VERSION = 1
-MI_KINDS = ("Moss", "Ivy")
+MI_KINDS = ("Moss", "Ivy", "Debris")
 MI_PARTS = {"Moss": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
-            "Ivy": (("stems", "ivyStem"), ("leaves", "ivyLeaf"))}
-MI_STEMS = {"Moss": "mossPatch", "Ivy": "ivy"}
-MI_UDIM_ORDER = ("moss", "strands", "capsules", "stems", "leaves")  # each part in its own tiles, from Start UDIM
-MI_STACKED_PARTS = ("moss", "strands", "capsules", "leaves")  # same UVs on every clump / card / leaf (UV_STACKED_ATTR)
+            "Ivy": (("stems", "ivyStem"), ("leaves", "ivyLeaf")),
+            "Debris": (("grass", "grassDry"), ("litter", "leafDry"), ("tufts", "mossTuft"))}
+MI_STEMS = {"Moss": "mossPatch", "Ivy": "ivy", "Debris": "debris"}
+MI_UDIM_ORDER = ("moss", "strands", "capsules", "stems", "leaves", "grass", "litter", "tufts")  # own tiles each
+MI_STACKED_PARTS = ("moss", "strands", "capsules", "leaves", "grass", "litter", "tufts")  # same UVs on every one
 MI_DETAILS = ("Proxy", "Normal", "High", "Hero")
 MI_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
 MI_MAX_VERTS = 900000  # per part; past it clumps / leaves are dropped (reported as capped)
@@ -27331,7 +27332,13 @@ IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
     "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
     "detail": "Normal", "seed": 1, "udim": 1001, "stem_tiles": 1, "stacks": 1, "stack_layout": "UDIM tiles"}
-MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS}
+DEBRIS_DEFAULTS = {
+    "coverage": 0.5, "spread": 0.4, "slope": 45.0, "crevices": 0.8, "edges": 0.3, "patchiness": 0.7,
+    "patch_size": 0.8, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
+    "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
+    "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5,
+    "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
+MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS, "Debris": DEBRIS_DEFAULTS}
 MI_PRESET_SKIP = ("seed", "udim")
 _MI_UP = (0.0, 1.0, 0.0)
 
@@ -29241,13 +29248,426 @@ def ivy_build(nodes, s, seeds=None, surf=None):
     return {"stems": stems, "leaves": leaves, "vines": len(vines), "leaves_n": n_leaves, "capped": capped}
 
 
+# ----------------------------------------------------------------- debris
+# Dry grass bunches, scattered leaves, small leaf piles and tiny moss tufts (the user, 2026-11-03, with a
+# reference of a greenhouse roof under a mat of dry grass): placed by the moss's coverage field, so they
+# gather where litter would (up-facing, sheltered, patchy) and follow picked points / faces the same way.
+# Detail: grass blades per 10 cm square and their width (x Blade width: fewer, wider blades read the same
+# from further out), blade segments, leaf (rows, columns), tuft (rings, segments).
+DEBRIS_DETAIL = {"Proxy": (6, 3.0, 2, (3, 2), (2, 6)),
+                 "Normal": (25, 1.6, 5, (6, 4), (3, 10)),
+                 "High": (50, 1.2, 7, (9, 6), (4, 14)),
+                 "Hero": (90, 1.0, 10, (14, 8), (6, 20))}
+DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first row)
+DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
+DEBRIS_PILE_LEAVES = 400  # most leaves in one pile
+
+
+def _debris_field(s):
+    """Moss settings for the coverage field from a debris patch's."""
+    fs = dict(MOSS_DEFAULTS)
+    for key in ("coverage", "spread", "slope", "crevices", "edges", "patchiness", "patch_size", "mess", "seed",
+                "detail"):
+        fs[key] = s[key]
+    fs["clump_size"] = DEBRIS_FIELD_R
+    return fs
+
+
+class _DebrisBuild(object):
+    """Grass, leaves, piles and tufts on the meshes (world space)."""
+
+    def __init__(self, surf, sampler, s, seeds=None, faces=None):
+        m = scene_m_per_unit()
+        self.m = m
+        self.surf = surf
+        self.s = s
+        self.seed = int(s["seed"])
+        detail = s["detail"] if s["detail"] in DEBRIS_DETAIL else "Normal"
+        self.fib_rate, self.fib_wide, self.segs, self.leaf_grid, self.tuft_grid = DEBRIS_DETAIL[detail]
+        self.proxy = detail == "Proxy"
+        self.var = clamp(float(s["size_var"]), 0.0, 1.0)
+        self.mess = clamp(float(s["mess"]), 0.0, 2.0)
+        self.stacks = max(1, int(s["stacks"]))
+        self.columns = s["stack_layout"] == MI_STACK_LAYOUTS[1]
+        self.lift = 0.001 / m  # what rests on the surface sits this far off it
+        self.G, self.L, self.T = _mi_mesh(), _mi_mesh(), _mi_mesh()
+        self.counts = {"bunches": 0, "leaves": 0, "piles": 0, "tufts": 0}
+        self.capped = False
+        fs = _debris_field(s)
+        self.R = DEBRIS_FIELD_R / m
+        _, self.cands, self.rows = _moss_margins(surf, sampler, fs, seeds, faces)
+        tried = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * self.R * self.R) * 4.5)))
+        self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
+        self.cover = 0.05 / m
+
+    # ------------------------------------------------------------- placing
+    def _spots(self, density, kind):
+        """Where items of one kind go: [(point, normal, randoms, margin)],
+        `density` per square metre inside the patches (ramping in at their
+        edges), jittered round the field's candidates, never under something."""
+        out = []
+        if density <= 0.0:
+            return out
+        dens = density * self.m * self.m  # per square scene unit
+        step = math.sqrt(self.per)
+        for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
+            if row is None:
+                continue
+            w = clamp((row[0] + 0.05) / 0.25, 0.0, 1.0)
+            if w <= 0.0:
+                continue
+            r = _rand12(self.seed, i, kind, 61)
+            count = int(dens * self.per * w + r[0])
+            if not count:
+                continue
+            p, n, memo = cand[0], cand[1], cand[5]
+            o = _moss_obstacle(self.surf, p, n, memo, self.R)
+            if o is not None and o < self.cover:
+                continue  # under something resting on the surface
+            t1, t2 = _mi_frame(n)
+            for q in range(count):
+                rr = _rand12(self.seed, i * 16 + q, kind, 67)
+                x, y = (rr[0] - 0.5) * step, (rr[1] - 0.5) * step
+                c = self.surf.closest((p[0] + t1[0] * x + t2[0] * y, p[1] + t1[1] * x + t2[1] * y,
+                                       p[2] + t1[2] * x + t2[2] * y))
+                if c is None or _rl_dot(c[2], n) < 0.3:  # snapped onto a face turned away (a rail's underside)
+                    continue
+                out.append((c[1], c[2], rr, row[0]))
+        return out
+
+    def _size(self, key, r):
+        return float(self.s[key]) / self.m * (1.0 + self.var * (r - 0.5) * 1.2)
+
+    def _full(self, mesh, n):
+        if len(mesh[0]) + n > MI_MAX_VERTS:
+            self.capped = True
+            return True
+        return False
+
+    def _uv(self, u, v, stack):
+        return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
+
+    def build(self):
+        s = self.s
+        for p, n, r, margin in self._spots(float(s["grass"]), 1):
+            self._bunch(p, n, r)
+        for p, n, r, margin in self._spots(float(s["piles"]), 3):
+            self._pile(p, n, r)
+        for p, n, r, margin in self._spots(float(s["leaves"]), 2):
+            t1, _ = _mi_frame(n, r[2] * 6.2832)
+            self._leaf(p, n, t1, self._size("leaf_size", r[3]), r, 0.0)
+        for p, n, r, margin in self._spots(float(s["tufts"]), 4):
+            self._tuft(p, n, r)
+        return self
+
+    # --------------------------------------------------------------- grass
+    def _bunch(self, c, n, r):
+        """A bunch of dry grass: blades lying every which way (Combed: more
+        of them one way), piled into a low mound, draping over edges."""
+        Rb = 0.5 * self._size("bunch_size", r[3])
+        Lg = float(self.s["grass_length"]) / self.m
+        full = max(0.0, float(self.s["fullness"]))
+        Hb = 0.2 * Rb * (0.5 + 0.5 * full)
+        count = int(self.fib_rate * full * math.pi * (Rb * self.m) ** 2 / 0.01 + 0.5)
+        segs = self.segs
+        if not count or self._full(self.G, count * 2 * (segs + 1)):
+            return
+        self.counts["bunches"] += 1
+        comb = clamp(float(self.s["comb"]), 0.0, 1.0)
+        width = 0.5 * float(self.s["blade_width"]) / self.m * self.fib_wide
+        g = 0.3 + 0.7 * clamp(float(self.s["droop"]), 0.0, 2.0)
+        main = r[4] * 6.2832
+        for k in range(count):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + k, 5, 71)
+            ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
+            L = Lg * (0.6 + 0.8 * rr[1])
+            rad = Rb * 0.85 * math.sqrt(rr[2])
+            a = rr[3] * 6.2832
+            t1, t2 = _mi_frame(n)
+            d = _rl_add(_rl_mul(t1, math.cos(ang)), _rl_mul(t2, math.sin(ang)))
+            off = _rl_add(_rl_mul(t1, rad * math.cos(a)), _rl_mul(t2, rad * math.sin(a)))
+            start = _rl_add(_rl_add(c, off), _rl_mul(d, -0.5 * L))  # the blade's middle in the bunch
+            spine, nrms = self._blade(start, n, d, L, segs, c, Rb, Hb, rr, g)
+            if len(spine) > 1:
+                self._ribbon(spine, nrms, width * (0.7 + 0.6 * rr[8]), (rr[9] - 0.5) * 1.4,
+                             min(self.stacks - 1, int(rr[10] * self.stacks)))
+
+    def _blade(self, start, n, d, L, segs, c, Rb, Hb, rr, g):
+        """A blade's spine: walked over the surface (lifted onto the mound,
+        arching a little over the blades under it), hanging once it walks off
+        an edge."""
+        surf = self.surf
+        hit = surf.closest(start)
+        if hit is None or _rl_dot(hit[2], n) < 0.3:  # a face turned away (the underside of a rail lying on it)
+            return [], []
+        base, nrm = hit[1], hit[2]
+        layer = 0.15 + 0.85 * rr[4]
+        arch = (0.3 + 0.7 * rr[5]) * 0.08 * L * (0.4 + 0.6 * layer)
+        step = L / segs
+        curl = (rr[6] - 0.5) * 0.5 * (0.4 + self.mess)
+
+        def lift(p, t):
+            q = _rl_sub(p, c)
+            f = 1.0 - _rl_dot(q, q) / (Rb * Rb)
+            return self.lift + max(0.0, Hb * f) * layer + arch * math.sin(math.pi * t)
+
+        d = _rl_norm(_rl_sub(d, _rl_mul(nrm, _rl_dot(d, nrm))), d)
+        spine, nrms = [_rl_add(base, _rl_mul(nrm, lift(base, 0.0)))], [nrm]
+        free = False
+        for k in range(1, segs + 1):
+            t = k / float(segs)
+            if not free:
+                d = _mi_rotate(d, nrm, curl)
+                q = _rl_add(base, _rl_mul(d, step))
+                hit = surf.closest(q)
+                if hit is not None:
+                    off = _rl_sub(q, hit[1])
+                    h = _rl_dot(off, hit[2])
+                    lat = _rl_len(_rl_sub(off, _rl_mul(hit[2], h)))
+                    if lat < 0.35 * step and _rl_dot(hit[2], nrm) > 0.3:
+                        nd = _rl_sub(hit[1], base)
+                        d = _rl_norm(_rl_sub(nd, _rl_mul(hit[2], _rl_dot(nd, hit[2]))), d)
+                        base, nrm = hit[1], hit[2]
+                        spine.append(_rl_add(base, _rl_mul(nrm, lift(base, t))))
+                        nrms.append(nrm)
+                        continue
+                free = True  # walked off an edge (or into a wall): level past it first, then it hangs
+            else:
+                d = _rl_norm((d[0], d[1] - g, d[2]), (0.0, -1.0, 0.0))
+            hit = surf.ray(spine[-1], d, step)
+            if hit is not None:  # something in the way: the blade ends against it
+                if hit[0] > 0.25 * step:
+                    spine.append(_rl_add(spine[-1], _rl_mul(d, hit[0] - self.lift)))
+                    nrms.append(nrms[-1])
+                break
+            spine.append(_rl_add(spine[-1], _rl_mul(d, step)))
+            nrms.append(nrms[-1])
+        return spine, nrms
+
+    def _ribbon(self, spine, nrms, w, twist, stack):
+        pts, counts, conn, us, vs, uvi = self.G
+        b = len(pts)
+        last = len(spine) - 1
+        for k, p in enumerate(spine):
+            d = _rl_sub(spine[min(last, k + 1)], spine[max(0, k - 1)])
+            d = _rl_norm(d, (1.0, 0.0, 0.0))
+            side = _rl_norm(_rl_cross(d, nrms[k]), _rl_any_perp(d))
+            if twist:
+                side = _mi_rotate(side, d, twist)
+            wk = w * (1.0 - 0.7 * (k / float(last)) ** 2)  # narrowing to the tip
+            pts.append(_rl_add(p, _rl_mul(side, -wk)))
+            pts.append(_rl_add(p, _rl_mul(side, wk)))
+            v = k / float(last)
+            for u in (0.0, 1.0):
+                x, y = self._uv(u, v, stack)
+                us.append(x)
+                vs.append(y)
+        for k in range(last):
+            a = b + 2 * k
+            counts.append(4)
+            conn.extend((a, a + 1, a + 3, a + 2))
+            uvi.extend((a, a + 1, a + 3, a + 2))
+
+    # -------------------------------------------------------------- leaves
+    def _leaf(self, base, n, t1, L, r, lift):
+        """A dead leaf lying on the surface (or on a pile: lift): a stalk,
+        then the blade's outline cut in the geometry (ovate: wide below the
+        middle, pointed tip; columns put a vertex line on the midrib), dried:
+        edges curled up, ends lifted, folded on the midrib, crumpled; one in
+        four lies upside down, resting on its edges."""
+        rows, cols = self.leaf_grid
+        nv = (rows + 1) * (cols + 1)
+        if self._full(self.L, nv):
+            return
+        self.counts["leaves"] += 1
+        curl = clamp(float(self.s["curl"]), 0.0, 2.0)
+        t2 = _rl_cross(n, t1)
+        cup = curl * (0.3 + 0.7 * r[5]) * 0.16
+        ends = curl * (r[6] - 0.3) * 0.35
+        fold = curl * r[7] * 0.12
+        crum = (0.2 + curl * 0.5) * r[8] * 0.05 * (0.0 if self.proxy else 1.0)
+        flip = r[9] < 0.25
+        sx, sy = r[10] * 50.0, r[11] * 50.0
+        wide = 0.25 * (0.75 + 0.5 * ((r[10] * 7.31) % 1.0))  # half width: some rounder, some narrower
+        grid = []
+        for k in range(rows + 1):
+            f = 0.0 if not k else DEBRIS_STALK + (1.0 - DEBRIS_STALK) * (k - 1) / float(rows - 1)
+            g = (f - DEBRIS_STALK) / (1.0 - DEBRIS_STALK)
+            w = 0.02 if g <= 0.0 else max(0.02, wide * math.sin(math.pi * g) ** 0.6 * (1.25 - 0.5 * g))
+            for j in range(cols + 1):
+                x = (-1.0 + 2.0 * j / float(cols)) * w
+                z = cup * (x / 0.25) ** 2 + ends * (f - 0.45) ** 2 * 2.0 + fold * abs(x) / 0.25
+                if crum:
+                    z += crum * _th_noise(sx + x * 7.0, sy + f * 7.0, self.seed + 41)
+                grid.append((x, f, z))
+        zs = [g[2] for g in grid]
+        lo, hi = min(zs), max(zs)
+        pts, counts, conn, us, vs, uvi = self.L
+        b = len(pts)
+        stack = min(self.stacks - 1, int(r[4] * self.stacks))
+        surf = None if self.proxy else self.surf
+        for x, f, z in grid:
+            z = (hi - z) if flip else (z - lo)  # resting on its lowest point(s)
+            h = z * L + lift + self.lift
+            p = (base[0] + (t1[0] * x + t2[0] * (f - 0.4)) * L + n[0] * h,
+                 base[1] + (t1[1] * x + t2[1] * (f - 0.4)) * L + n[1] * h,
+                 base[2] + (t1[2] * x + t2[2] * (f - 0.4)) * L + n[2] * h)
+            if surf is not None:  # never into the surface where it isn't flat
+                c = surf.closest(p)
+                if c is not None:
+                    dh = _rl_dot(_rl_sub(p, c[1]), c[2])
+                    if dh < self.lift:
+                        p = _rl_add(p, _rl_mul(c[2], self.lift - dh))
+            pts.append(p)
+            u, v = self._uv(0.5 + x / 0.8, f, stack)
+            us.append(u)
+            vs.append(v)
+        for k in range(rows):
+            for j in range(cols):
+                a = b + k * (cols + 1) + j
+                quad = (a, a + 1, a + cols + 2, a + cols + 1)
+                counts.append(4)
+                conn.extend(quad)
+                uvi.extend(quad)
+
+    def _pile(self, c, n, r):
+        """A small pile of leaves: a low mound of them, each lying along the
+        mound's slope at its own depth, a few strays round it."""
+        Rp = 0.5 * self._size("pile_size", r[3])
+        Lf = float(self.s["leaf_size"]) / self.m
+        Hp = 0.3 * Rp
+        count = min(DEBRIS_PILE_LEAVES, int(2.5 * math.pi * Rp * Rp / (0.45 * Lf * Lf) + 0.5))
+        if not count:
+            return
+        self.counts["piles"] += 1
+        t1, t2 = _mi_frame(n)
+        order = []
+        for k in range(count + count // 6):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + k, 6, 73)
+            stray = k >= count
+            rad = Rp * (1.0 + 0.6 * rr[0] if stray else math.sqrt(rr[0]))
+            a = rr[1] * 6.2832
+            f = 1.0 - (rad / Rp) ** 2
+            depth = max(0.0, Hp * f) * (0.2 + 0.8 * rr[2]) if not stray else 0.0
+            order.append((depth, rad, a, f, rr))
+        order.sort(key=lambda x: x[0])  # bottom leaves first
+        for depth, rad, a, f, rr in order:
+            radial = _rl_add(_rl_mul(t1, math.cos(a)), _rl_mul(t2, math.sin(a)))
+            hit = self.surf.closest(_rl_add(c, _rl_mul(radial, rad)))
+            if hit is None or _rl_dot(hit[2], n) < 0.3:
+                continue
+            slope = 2.0 * Hp * rad / (Rp * Rp) * (depth / max(1e-9, Hp * max(f, 1e-3))) if depth else 0.0
+            tilt = _rl_add(_rl_mul(radial, -slope * 0.8 + (rr[3] - 0.5) * 0.7),
+                           _rl_mul(_rl_cross(hit[2], radial), (rr[4] - 0.5) * 0.7))
+            nl = _rl_norm(_rl_add(hit[2], tilt), hit[2])
+            lt1, _ = _mi_frame(nl, rr[5] * 6.2832)
+            self._leaf(hit[1], nl, lt1, self._size("leaf_size", rr[6]), rr, depth)
+
+    # --------------------------------------------------------------- tufts
+    def _tuft(self, c, n, r):
+        """A tiny clump of moss: a few small cushions run together (one at
+        Proxy), the middle one biggest."""
+        rings, segs = self.tuft_grid
+        rad = 0.5 * self._size("tuft_size", r[3])
+        k = 1 if self.proxy else 2 + int(r[8] * 3.999)
+        if self._full(self.T, k * (1 + rings * segs)):
+            return
+        self.counts["tufts"] += 1
+        stack = min(self.stacks - 1, int(r[4] * self.stacks))
+        t1, t2 = _mi_frame(n, r[7] * 6.2832)
+        for i in range(k):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + i, 7, 79)
+            if not i:
+                q, sr, h = c, rad * (0.8 if k > 1 else 1.0), rad * (0.45 + 0.4 * r[6])
+            else:
+                a, d = rr[0] * 6.2832, rad * (0.35 + 0.4 * rr[1])
+                hit = self.surf.closest(_rl_add(c, _rl_add(_rl_mul(t1, d * math.cos(a)), _rl_mul(t2, d * math.sin(a)))))
+                if hit is None or _rl_dot(hit[2], n) < 0.3:
+                    continue
+                sr = rad * (0.4 + 0.3 * rr[2])
+                q, h = hit[1], sr * (0.6 + 0.5 * rr[3])
+            self._dome(q, n, sr, h, rr if i else r, stack)
+
+    def _dome(self, c, n, rad, h, r, stack):
+        """One moss cushion: a rounded dome with steep sides and a lumpy top,
+        its rim tucked under, every point laid onto the surface below it (it
+        wraps into a corner)."""
+        rings, segs = self.tuft_grid
+        t1, t2 = _mi_frame(n, r[7] * 6.2832)
+        pts, counts, conn, us, vs, uvi = self.T
+        b = len(pts)
+        sx, sy = r[10] * 50.0, r[11] * 50.0
+        pts.append(_rl_add(c, _rl_mul(n, h * (1.0 + 0.1 * _th_noise(sx, sy, self.seed + 43)))))
+        u, v = self._uv(0.5, 0.5, stack)
+        us.append(u)
+        vs.append(v)
+        for i in range(1, rings + 1):
+            f = i / float(rings)
+            for j in range(segs):
+                a = 6.2832 * j / float(segs)
+                ca, sa = math.cos(a), math.sin(a)
+                rj = 1.0 + 0.2 * _th_noise(sx + ca * 1.7, sy + sa * 1.7, self.seed + 45)
+                x, y = f * rad * rj * ca, f * rad * rj * sa
+                z = h * math.sqrt(max(0.0, 1.0 - f ** 2.2)) if i < rings else -0.08 * h
+                z *= 1.0 + 0.25 * _th_noise(sx + x / rad * 2.5, sy + y / rad * 2.5, self.seed + 47)
+                q = (c[0] + t1[0] * x + t2[0] * y, c[1] + t1[1] * x + t2[1] * y, c[2] + t1[2] * x + t2[2] * y)
+                hit = self.surf.closest(q)
+                if hit is not None:
+                    up = _rl_norm(_rl_add(hit[2], n), n)
+                    q = hit[1]
+                else:
+                    up = n
+                pts.append(_rl_add(q, _rl_mul(up, z)))
+                u, v = self._uv(0.5 + 0.38 * x / rad, 0.5 + 0.38 * y / rad, stack)  # rims reach 1.2 rad
+                us.append(u)
+                vs.append(v)
+        for j in range(segs):  # top fan
+            j2 = (j + 1) % segs
+            counts.append(3)
+            tri = (b, b + 1 + j, b + 1 + j2)
+            conn.extend(tri)
+            uvi.extend(tri)
+        for i in range(1, rings):
+            r0, r1 = b + 1 + (i - 1) * segs, b + 1 + i * segs
+            for j in range(segs):
+                j2 = (j + 1) % segs
+                quad = (r0 + j, r1 + j, r1 + j2, r0 + j2)
+                counts.append(4)
+                conn.extend(quad)
+                uvi.extend(quad)
+
+
+def debris_build(nodes, s, surf=None, seeds=None, faces=None):
+    """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
+    leaves (scattered and in piles), "tufts": tiny moss cushions,
+    "bunches", "leaves_n", "piles", "tufts_n", "capped"} (world space)."""
+    s = mi_settings_only("Debris", s)
+    surf = surf or _MiSurface(nodes)
+    empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "bunches": 0, "leaves_n": 0,
+             "piles": 0, "tufts_n": 0, "capped": False}
+    if not surf.items or float(s["coverage"]) <= 0.0:
+        return empty
+    sampler = _MiSampler(surf.nodes)
+    if not sampler.total:
+        return empty
+    b = _DebrisBuild(surf, sampler, s, seeds, faces).build()
+    return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "bunches": b.counts["bunches"],
+            "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
+            "capped": b.capped}
+
+
 def mi_build(kind, nodes, s, seeds=None, faces=None):
-    """Build a moss patch or an ivy plant: {part: mesh, ..., "udims": {part:
-    [UDIM]}} with each part in its own tiles from Start UDIM. Moss: seeds /
-    faces direct it (moss_clumps); ivy: seeds start the vines."""
+    """Build a moss patch, an ivy plant or a debris patch: {part: mesh, ...,
+    "udims": {part: [UDIM]}} with each part in its own tiles from Start UDIM.
+    Moss and debris: seeds / faces direct them; ivy: seeds start the vines."""
     kind = _mi_kind(kind)
     s = mi_settings_only(kind, s)
-    out = moss_build(nodes, s, seeds=seeds, faces=faces) if kind == "Moss" else ivy_build(nodes, s, seeds)
+    if kind == "Ivy":
+        out = ivy_build(nodes, s, seeds)
+    elif kind == "Debris":
+        out = debris_build(nodes, s, seeds=seeds, faces=faces)
+    else:
+        out = moss_build(nodes, s, seeds=seeds, faces=faces)
     return _roof_udims(out, int(s["udim"] or 1001), order=MI_UDIM_ORDER)
 
 
@@ -29507,6 +29927,11 @@ def _mi_report(kind, built, faces):
     rep = {"faces": faces, "capped": bool(built.get("capped")), "udims": built.get("udims", {})}
     if kind == "Moss":
         rep["clumps"] = built.get("clumps", 0)
+    elif kind == "Debris":
+        rep["bunches"] = built.get("bunches", 0)
+        rep["leaves"] = built.get("leaves_n", 0)
+        rep["piles"] = built.get("piles", 0)
+        rep["tufts"] = built.get("tufts_n", 0)
     else:
         rep["vines"] = built.get("vines", 0)
         rep["leaves"] = built.get("leaves_n", 0)
@@ -29525,7 +29950,7 @@ def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False, faces=
         raise ValueError("select the meshes to grow on")
     s = mi_settings_only(kind, settings)
     seeds = list(seeds or [])[:MI_MAX_SEEDS]
-    faces = {long_name(k): v for k, v in (faces or {}).items() if v} if kind == "Moss" else {}
+    faces = {long_name(k): v for k, v in (faces or {}).items() if v} if kind != "Ivy" else {}
     built = mi_build(kind, targets, s, seeds, {k: set(v) for k, v in faces.items()} if faces else None)
     stem = MI_STEMS[kind]
     with UndoChunk("Grow %s" % kind):
@@ -29558,7 +29983,7 @@ def update_moss_ivy(changes, attr=MI_SETTINGS):
     out of the undo queue (API geometry can't be undone anyway). Returns
     {"done", "lost", "errors", "faces", ...}."""
     report = {"done": [], "lost": [], "errors": [], "faces": 0, "capped": False, "clumps": 0, "vines": 0,
-              "leaves": 0}
+              "leaves": 0, "bunches": 0, "piles": 0, "tufts": 0}
     for root, change in changes.items():
         if not root or not cmds.objExists(root) or not cmds.attributeQuery(attr, node=root, exists=True):
             continue
@@ -29573,7 +29998,7 @@ def update_moss_ivy(changes, attr=MI_SETTINGS):
             report["lost"].append(root)
         s = mi_settings_only(kind, data)
         try:
-            built = mi_build(kind, targets, s, mi_seed_points(data), mi_face_mask(data) if kind == "Moss" else None)
+            built = mi_build(kind, targets, s, mi_seed_points(data), mi_face_mask(data) if kind != "Ivy" else None)
         except (ValueError, RuntimeError) as exc:
             report["errors"].append((root, str(exc)))
             continue
@@ -29583,7 +30008,7 @@ def update_moss_ivy(changes, attr=MI_SETTINGS):
             report["faces"] += _mi_write(root, built, kind)
         rep = _mi_report(kind, built, 0)
         report["capped"] = report["capped"] or rep["capped"]
-        for key in ("clumps", "vines", "leaves"):
+        for key in ("clumps", "vines", "leaves", "bunches", "piles", "tufts"):
             report[key] += rep.get(key, 0)
         report["done"].append(root)
     return report
@@ -29665,7 +30090,18 @@ MI_PRESETS = {
                           "stem_width": 0.006}),
         ("Overgrown", {"vines": 10, "length": 4.0, "branching": 1.0, "leaf_density": 1.1, "wander": 0.6,
                        "gravity": 0.6}),
-        ("Hanging vines", {"climb": 0.4, "gravity": 1.0, "wander": 0.25, "branching": 0.3})])}
+        ("Hanging vines", {"climb": 0.4, "gravity": 1.0, "wander": 0.25, "branching": 0.3})]),
+    "Debris": collections.OrderedDict([
+        ("Roof litter", {}),
+        ("Dry grass mat", {"coverage": 0.9, "grass": 6.0, "bunch_size": 0.5, "grass_length": 0.35,
+                           "fullness": 1.4, "comb": 0.3, "droop": 1.0, "leaves": 3.0, "piles": 0.0, "tufts": 4.0,
+                           "patchiness": 0.3}),
+        ("Autumn leaves", {"coverage": 0.7, "grass": 0.0, "leaves": 30.0, "piles": 0.6, "tufts": 0.0,
+                           "curl": 0.8}),
+        ("Leaf piles", {"grass": 0.0, "leaves": 4.0, "piles": 1.5, "pile_size": 0.4, "tufts": 0.0,
+                        "crevices": 1.0}),
+        ("Moss tufts", {"grass": 0.0, "leaves": 0.0, "piles": 0.0, "tufts": 25.0, "tuft_size": 0.03,
+                        "crevices": 1.0, "patchiness": 0.8})])}
 
 
 def mi_preset(kind, name):
@@ -29687,7 +30123,8 @@ def mi_preset(kind, name):
 
 class MossIvyPanel(QtWidgets.QWidget):
     TOOL_NAME = "Moss and Ivy"
-    TOOL_TIP = "Grow jungle moss on roofs, ledges and in crevices, and ivy up posts and walls."
+    TOOL_TIP = "Grow jungle moss on roofs, ledges and in crevices, ivy up posts and walls, and debris: dry " \
+               "grass, dead leaves, leaf piles, moss tufts."
 
     def __init__(self, parent=None):
         super(MossIvyPanel, self).__init__(parent)
@@ -29725,22 +30162,23 @@ class MossIvyPanel(QtWidgets.QWidget):
         tl.setContentsMargins(6, 0, 6, 0)
         tl.setSpacing(6)
         tl.addWidget(ToolHeader("Moss and Ivy", "Jungle moss that gathers where it would really grow (up-facing, "
-                                                "sheltered corners and crevices, off exposed edges) and ivy that "
-                                                "climbs posts and walls. Grown on your meshes; no plugin, no nodes."))
+                                                "sheltered corners and crevices, off exposed edges), ivy that "
+                                                "climbs posts and walls, and debris (dry grass, dead leaves, leaf "
+                                                "piles, moss tufts). Grown on your meshes; no plugin, no nodes."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
         outer.addWidget(top)
         scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
-        self.f = {"Moss": {}, "Ivy": {}}
+        self.f = {"Moss": {}, "Ivy": {}, "Debris": {}}
 
         # ---- 1. select
         card = self.step_select = StepCard(1, "Select surfaces", "Select the meshes to grow on together (a roof "
                                                                  "and the wall under it, a post and the floor). "
-                                                                 "To say where moss grows, pick faces (moss stays on "
-                                                                 "them) or vertices (a clump round each); for ivy, "
-                                                                 "vertices or faces where vines start. Select moss or "
-                                                                 "ivy to edit it.")
+                                                                 "To say where moss or debris goes, pick faces (it "
+                                                                 "stays on them) or vertices (a clump round each); "
+                                                                 "for ivy, vertices or faces where vines start. "
+                                                                 "Select moss, ivy or debris to edit it.")
         self.sel_label = hint_label("")
         card.add(self.sel_label)
         col.addWidget(card)
@@ -29749,7 +30187,9 @@ class MossIvyPanel(QtWidgets.QWidget):
         card = self.step_grow = StepCard(2, "Grow", "One Ctrl+Z undoes it. The new moss or ivy is selected, so "
                                                     "step 3 edits it straight away.")
         self.kind = SegmentField(MI_KINDS)
-        self.kind.setToolTip("Moss: clumps on up-facing, sheltered spots.\nIvy: vines with leaves that climb.")
+        self.kind.setToolTip("Moss: a moss bed on up-facing, sheltered spots.\nIvy: vines with leaves that climb."
+                             "\nDebris: bunches of dry grass, dead leaves (scattered and in small piles) and tiny "
+                             "moss tufts.")
         self.kind.changed.connect(lambda: self._kind_changed())
         card.add(self.kind)
         prow = QtWidgets.QWidget()
@@ -29780,7 +30220,7 @@ class MossIvyPanel(QtWidgets.QWidget):
 
         # ---- 3. look
         card = self.step_look = StepCard(3, "Look", "Every change shows straight away on the selected moss or ivy.")
-        self.box = {"Moss": self._moss_box(), "Ivy": self._ivy_box()}
+        self.box = {"Moss": self._moss_box(), "Ivy": self._ivy_box(), "Debris": self._debris_box()}
         for kind, box in self.box.items():
             card.add(box)
             for key, widget in self.f[kind].items():
@@ -29933,15 +30373,86 @@ class MossIvyPanel(QtWidgets.QWidget):
         lay.addWidget(self._seed_row(k))
         return box
 
+    def _debris_box(self):
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        k = "Debris"
+        main = Section("", header=False)
+        self._row(k, main, "coverage", "Coverage", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Where debris gathers: low = only the best spots (sheltered corners, crevices), high = most "
+                  "up-facing surfaces. With picked vertices: how full each clump is.")
+        self._row(k, main, "spread", "Spread", FloatField(0.01, 20.0, 0.05, 1.5, decimals=2, step=0.05),
+                  "With picked vertices: how far the debris round each point reaches, in metres.")
+        self._row(k, main, "grass", "Grass bunches", FloatField(0.0, 50.0, 0.0, 10.0, decimals=2, step=0.1),
+                  "Bunches of dry grass per square metre where debris gathers (0 = none).")
+        self._row(k, main, "bunch_size", "Bunch size", FloatField(0.02, 5.0, 0.05, 1.0, decimals=2, step=0.01),
+                  "How wide a bunch is, in metres.")
+        self._row(k, main, "grass_length", "Grass length", FloatField(0.01, 2.0, 0.05, 0.6, decimals=3,
+                                                                      step=0.01),
+                  "How long the blades are, in metres (they hang over edges).")
+        self._row(k, main, "fullness", "Fullness", FloatField(0.1, 4.0, 0.2, 3.0, decimals=2, step=0.05),
+                  "How many blades a bunch has, and how high they pile.")
+        self._row(k, main, "leaves", "Leaves", FloatField(0.0, 200.0, 0.0, 40.0, decimals=1, step=0.5),
+                  "Dead leaves scattered per square metre where debris gathers.")
+        self._row(k, main, "piles", "Leaf piles", FloatField(0.0, 20.0, 0.0, 3.0, decimals=2, step=0.05),
+                  "Small piles of leaves per square metre.")
+        self._row(k, main, "pile_size", "Pile size", FloatField(0.02, 5.0, 0.05, 1.0, decimals=2, step=0.01),
+                  "How wide a pile is, in metres.")
+        self._row(k, main, "leaf_size", "Leaf size", FloatField(0.005, 1.0, 0.02, 0.2, decimals=3, step=0.005),
+                  "Leaf length, in metres.")
+        self._row(k, main, "tufts", "Moss tufts", FloatField(0.0, 200.0, 0.0, 40.0, decimals=1, step=0.5),
+                  "Tiny moss cushions per square metre.")
+        self._row(k, main, "tuft_size", "Tuft size", FloatField(0.005, 0.5, 0.01, 0.1, decimals=3, step=0.005),
+                  "How wide a moss tuft is, in metres.")
+        lay.addWidget(main)
+        where = Section("Where it gathers", expanded=False)
+        self._row(k, where, "slope", "Slope limit", FloatField(0.0, 90.0, 0.0, 90.0, decimals=1, step=1.0),
+                  "Steepest slope (degrees) debris stays on in the open (fading out over the next 15 degrees).")
+        self._row(k, where, "crevices", "Crevices", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How strongly it gathers in corners, gaps and against walls.")
+        self._row(k, where, "edges", "Avoid edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Keeps it off exposed spots: ridges, convex edges, thin rails.")
+        self._row(k, where, "patchiness", "Patchiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "Breaks it into patches (0 = even).")
+        self._row(k, where, "patch_size", "Patch size", FloatField(0.02, 50.0, 0.1, 4.0, decimals=2, step=0.05),
+                  "How big the patches are, in metres.")
+        self._row(k, where, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "Ragged patch edges and more tangled grass.")
+        lay.addWidget(where)
+        more = Section("More", expanded=False)
+        self._row(k, more, "comb", "Combed", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How much a bunch's blades lie one way (0 = every which way, a tangle).")
+        self._row(k, more, "droop", "Droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How steeply blades hang once they're over an edge.")
+        self._row(k, more, "blade_width", "Blade width", FloatField(0.0005, 0.05, 0.001, 0.02, decimals=4,
+                                                                    step=0.0005),
+                  "Grass blade width, in metres (wider at Proxy / Normal, where there are fewer blades).")
+        self._row(k, more, "curl", "Leaf curl", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+                  "How dried the leaves are: edges curled up, ends lifted, folded, crumpled.")
+        self._row(k, more, "size_var", "Size variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+                  "How much bunches, piles, leaves and tufts differ in size.")
+        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
+                  "Proxy: a few wide blades per bunch, flat diamond leaves, 6-sided tufts (layout).\n"
+                  "Normal: fuller bunches, leaves with their outline, curl and crumple (mid shots).\n"
+                  "High: more, finer blades, smoother leaves and tufts (close-ups).\n"
+                  "Hero: the most blades and segments, the finest leaves (extreme close-ups).")
+        lay.addWidget(more)
+        lay.addWidget(self._uv_section(k, None, None, None, None))
+        lay.addWidget(self._seed_row(k))
+        return box
+
     def _uv_section(self, k, label, key, widget, tip):
         sec = Section("UVs", expanded=False)
         self._row(k, sec, "udim", "Start UDIM", IntField(1001, 1999, 1001, 1100),
                   "The first UDIM tile. Each part takes its own tiles from here on, so no two parts share UV space "
                   "(only stacked variations do).")
-        self._row(k, sec, key, label, widget, tip)
-        self._row(k, sec, "stacks", "Stacks" if k == "Moss" else "Leaf stacks", IntField(1, 16, 1, 8),
+        if key:
+            self._row(k, sec, key, label, widget, tip)
+        self._row(k, sec, "stacks", "Leaf stacks" if k == "Ivy" else "Stacks", IntField(1, 16, 1, 8),
                   "With 2+ stacks each %s picks one at random: one texture per stack." %
-                  ("clump and strand" if k == "Moss" else "leaf"))
+                  {"Moss": "clump and strand", "Ivy": "leaf"}.get(k, "blade, leaf and tuft"))
         self._row(k, sec, "stack_layout", "Layout", SegmentField(MI_STACK_LAYOUTS),
                   "UDIM tiles: stack 1 in the first tile, stack 2 in the next...\nAtlas columns: the stacks share "
                   "0..1, side by side.")
@@ -30045,7 +30556,8 @@ class MossIvyPanel(QtWidgets.QWidget):
                 points, faces = mi_moss_picks()
                 bits = []
                 if points:
-                    bits.append("a clump at each of the %d picked point(s)" % len(points))
+                    bits.append("%s round each of the %d picked point(s)" %
+                                ("a clump" if self._kind == "Moss" else "debris", len(points)))
                 if faces:
                     bits.append("only on the %d picked face(s)" % sum(len(v) for v in faces.values()))
                 extra = (": " + ", ".join(bits)) if bits else \
@@ -30053,7 +30565,7 @@ class MossIvyPanel(QtWidgets.QWidget):
             self.next_banner.set_text("Press <b>Grow %s on Selected</b>%s." % (self._kind, extra))
         else:
             self.next_banner.set_text("Select the meshes to grow %s on (or a %s to edit it)." %
-                                      (noun, "moss patch" if self._kind == "Moss" else "ivy"))
+                                      (noun, {"Moss": "moss patch", "Ivy": "ivy"}.get(self._kind, "debris patch")))
 
     # ============================================================= actions
     def _queue(self, kind, key):
@@ -30100,6 +30612,9 @@ class MossIvyPanel(QtWidgets.QWidget):
         bits = []
         if rep.get("vines"):
             bits.append("%d vines, %d leaves" % (rep["vines"], rep.get("leaves", 0)))
+        elif rep.get("bunches") or rep.get("piles") or rep.get("tufts") or rep.get("leaves"):
+            bits.append("%d grass bunches, %d leaves (%d piles), %d moss tufts" % (
+                rep.get("bunches", 0), rep.get("leaves", 0), rep.get("piles", 0), rep.get("tufts", 0)))
         bits.append("%s faces" % format(rep.get("faces", 0), ","))
         return ", ".join(bits)
 
@@ -30112,9 +30627,9 @@ class MossIvyPanel(QtWidgets.QWidget):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            if self._kind == "Moss":
+            if self._kind != "Ivy":
                 points, faces = mi_moss_picks()
-                rep = grow_moss_ivy("Moss", targets, self._settings(), points, select=True, faces=faces)
+                rep = grow_moss_ivy(self._kind, targets, self._settings(), points, select=True, faces=faces)
             else:
                 rep = grow_moss_ivy("Ivy", targets, self._settings(), seeds, select=True)
         finally:
@@ -30123,8 +30638,9 @@ class MossIvyPanel(QtWidgets.QWidget):
         msg = "Grew %s in %.2fs: %s. One Ctrl+Z undoes it." % (short_name(rep["root"]), time.time() - t0,
                                                                self._counts(rep))
         if not rep["faces"]:
-            msg = "Nothing grew on the selected meshes: raise Coverage, Slope limit or Crevices." \
-                if self._kind == "Moss" else "No vines grew: check the meshes and the Length."
+            msg = "No vines grew: check the meshes and the Length." if self._kind == "Ivy" else \
+                "Nothing grew on the selected meshes: raise Coverage, Slope limit or Crevices%s." % (
+                    "" if self._kind == "Moss" else ", or the amounts")
             level = "warn"
         elif rep["capped"]:
             msg += " Capped at %s vertices per part." % format(MI_MAX_VERTS, ",")
@@ -30147,7 +30663,7 @@ class MossIvyPanel(QtWidgets.QWidget):
     def regrow(self):
         roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
         if not roots:
-            self.set_status("No moss or ivy to regrow.", level="warn")
+            self.set_status("No moss, ivy or debris to regrow.", level="warn")
             return
         self._update(dict((r, {}) for r in roots), "Regrew")
 
@@ -30163,7 +30679,7 @@ class MossIvyPanel(QtWidgets.QWidget):
     def bake(self):
         roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
         if not roots:
-            self.set_status("No moss or ivy to bake.", level="warn")
+            self.set_status("No moss, ivy or debris to bake.", level="warn")
             return
         done = bake_moss_ivy(roots)
         self.set_status("Baked %d: plain meshes now. One Ctrl+Z undoes it." % len(done), level="fixed")
