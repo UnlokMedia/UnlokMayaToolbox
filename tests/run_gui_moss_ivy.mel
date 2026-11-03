@@ -1,2 +1,0 @@
-// Launch: set UNLOK_TEST_DIR to this folder, then  maya.exe -script <this file>
-python("import os; exec(compile(open(os.path.join(os.environ['UNLOK_TEST_DIR'], 'gui_moss_ivy.py')).read(), 'gui_moss_ivy.py', 'exec'), {'__name__': 'gui_moss_ivy'})");

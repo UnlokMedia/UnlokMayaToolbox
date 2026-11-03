@@ -27322,10 +27322,11 @@ MI_DETAILS = ("Proxy", "Normal", "High", "Hero")
 MI_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
 MI_MAX_VERTS = 900000  # per part; past it clumps / leaves are dropped (reported as capped)
 MI_MAX_SEEDS = 64
+MI_GATHER_NODES = 20000  # field candidates the crease / flow analysis looks at (the rest copy the nearest)
 
 MOSS_DEFAULTS = {
     "coverage": 0.55, "clump_size": 0.06, "size_var": 0.5, "thickness": 0.025, "mess": 0.6,
-    "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8,
+    "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8, "creases": 0.4,
     "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles"}
 IVY_DEFAULTS = {
@@ -27334,7 +27335,7 @@ IVY_DEFAULTS = {
     "detail": "Normal", "seed": 1, "udim": 1001, "stem_tiles": 1, "stacks": 1, "stack_layout": "UDIM tiles"}
 DEBRIS_DEFAULTS = {
     "coverage": 0.5, "spread": 0.4, "slope": 45.0, "crevices": 0.8, "edges": 0.3, "patchiness": 0.7,
-    "patch_size": 0.8, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
+    "patch_size": 0.8, "creases": 0.7, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
     "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
@@ -27702,7 +27703,9 @@ def moss_score(spot, s):
     upw = clamp(1.0 - (a - float(s["slope"])) / 15.0, 0.0, 1.0)
     crev = float(s["crevices"])
     shelter = clamp(occ * 1.7, 0.0, 1.0)
-    base = 0.5 * upw * (1.0 - float(s["edges"]) * edge) + crev * 0.62 * shelter * (0.6 + 0.4 * upw)
+    up_only = bool(s.get("_up_only"))  # debris: only where it faces up (no leaves up a sheltered wall)
+    base = 0.5 * upw * (1.0 - float(s["edges"]) * edge) + crev * 0.62 * shelter * (upw if up_only else
+                                                                              0.6 + 0.4 * upw)
     return base + float(s["patchiness"]) * 0.55 * noise + (r[5] - 0.5) * 0.12
 
 
@@ -27818,25 +27821,161 @@ def _moss_obstacle(surf, p, n, memo, R):
     return memo["o"]
 
 
+def _mi_gather(surf, sampler, s, R, cands):
+    """Where things collect, per field candidate: (table, grid, cell) with
+    table[i] = (gather, across, aniso, bank). gather 0..1: in a crease (the
+    surface round it turns up towards it: a gutter, a corner, the foot of a
+    wall or a frame) or where water running down the surface settles (the
+    foot of a slope or a wall, a level gutter: many candidates drain to it
+    and it is level). across: the unit tangent across the crease, towards
+    its walls (None: no one way); aniso 0..1: how much one way it is (a long
+    gutter or a wall's foot 1, a round dip or a corner 0); bank -1..1: which
+    side of across the wall is on (0: walls both sides, a channel). grid /
+    cell: the analysed candidates (the first MI_GATHER_NODES) by cell, for
+    looking up a point. Cached with the field."""
+    seed = int(s["seed"])
+    detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
+    key = ("gather", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
+           round(float(s["patch_size"]), 6), detail)
+    hit = _MI_MOSS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    none = (0.0, None, 0.0, 0.0)
+    N = min(len(cands), MI_GATHER_NODES)
+    if N < 3:
+        return [none] * len(cands), {}, 1.0
+    rad = 2.2 * math.sqrt(sampler.total / float(N))  # about 15 neighbours each
+    grid = {}
+    for i in range(N):
+        p = cands[i][0]
+        grid.setdefault((int(math.floor(p[0] / rad)), int(math.floor(p[1] / rad)), int(math.floor(p[2] / rad))),
+                        []).append(i)
+    crease, across, aniso, bank = [0.0] * N, [None] * N, [0.0] * N, [0.0] * N
+    down, settle, nbrs = [-1] * N, [0.0] * N, [()] * N
+    r2 = rad * rad
+    for i in range(N):
+        p, n = cands[i][0], cands[i][1]
+        px, py, pz = p
+        t1, t2 = _mi_frame(n)
+        gl = math.sqrt(max(0.0, 1.0 - n[1] * n[1]))  # downhill: (0, -1, 0) along the surface
+        gx, gy, gz = (n[0] * n[1] / gl, (n[1] * n[1] - 1.0) / gl, n[2] * n[1] / gl) if gl > 1e-6 else (0, 0, 0)
+        kx, ky, kz = int(math.floor(px / rad)), int(math.floor(py / rad)), int(math.floor(pz / rad))
+        W = conc = sxx = sxy = syy = mx = my = 0.0
+        best, dn, ahead = 0.05, -1, False
+        lst = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for j in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                        if j == i:
+                            continue
+                        q, m = cands[j][0], cands[j][1]
+                        d0, d1, d2 = q[0] - px, q[1] - py, q[2] - pz
+                        dd = d0 * d0 + d1 * d1 + d2 * d2
+                        if dd >= r2 or dd < 1e-18:
+                            continue
+                        dist = math.sqrt(dd)
+                        a = n[0] * d0 + n[1] * d1 + n[2] * d2
+                        b = m[0] * d0 + m[1] * d1 + m[2] * d2
+                        if a < -0.3 * dist or b > 0.3 * dist:
+                            continue  # behind either surface (the far side of a thin wall)
+                        c = (a - b) / dist  # > 0: the normals close in (concave)
+                        w = 1.0 - dist / rad
+                        lst.append((j, w))
+                        W += w
+                        if c > 0.0:
+                            conc += w * c
+                            u = d0 * t1[0] + d1 * t1[1] + d2 * t1[2]
+                            v = d0 * t2[0] + d1 * t2[1] + d2 * t2[2]
+                            ln = math.sqrt(u * u + v * v)
+                            if ln > 1e-12:
+                                u, v, k = u / ln, v / ln, w * c
+                                sxx += k * u * u
+                                sxy += k * u * v
+                                syy += k * v * v
+                                mx += k * u
+                                my += k * v
+                        if gl > 0.2 and d0 * gx + d1 * gy + d2 * gz > 0.5 * dist:
+                            ahead = True  # the surface goes on downhill (not an eave)
+                        if c > 0.2 or n[0] * m[0] + n[1] * m[1] + n[2] * m[2] > 0.7:  # water follows it
+                            sl = -d1 / dist
+                            if sl > best:
+                                best, dn = sl, j
+        nbrs[i] = lst
+        if W <= 0.0:
+            continue
+        crease[i] = clamp(conc / W / 0.45, 0.0, 1.0)
+        tr = sxx + syy
+        if tr > 1e-12:
+            ang = 0.5 * math.atan2(2.0 * sxy, sxx - syy)
+            ca, sa = math.cos(ang), math.sin(ang)
+            across[i] = (t1[0] * ca + t2[0] * sa, t1[1] * ca + t2[1] * sa, t1[2] * ca + t2[2] * sa)
+            aniso[i] = math.sqrt((sxx - syy) ** 2 + 4.0 * sxy * sxy) / tr
+            bank[i] = clamp((mx * ca + my * sa) / tr, -1.0, 1.0)
+        down[i] = dn
+        if gl < 0.2 or ahead:
+            settle[i] = clamp(1.0 - (best if dn >= 0 else 0.0) / 0.2, 0.0, 1.0)
+    acc = [1.0] * N  # water running down: every candidate passes its own and what reached it on downhill
+    for i in sorted(range(N), key=lambda k: -cands[k][0][1]):
+        if down[i] >= 0:
+            acc[down[i]] += acc[i]
+    lg = math.log(30.0)
+    g = [1.0 - (1.0 - crease[i]) * (1.0 - clamp(math.log(acc[i]) / lg, 0.0, 1.0) * settle[i]) for i in range(N)]
+    table = []
+    for i in range(N):  # one smoothing pass: random candidates are noisy
+        tw, tv = 1.0, g[i]
+        for j, w in nbrs[i]:
+            tw += w
+            tv += w * g[j]
+        table.append((tv / tw, across[i], aniso[i], bank[i]))
+    for i in range(N, len(cands)):
+        j = _mi_gather_near(grid, rad, cands, cands[i][0])
+        table.append(table[j] if j >= 0 else none)
+    hit = (table, grid, rad)
+    _MI_MOSS_CACHE[key] = hit
+    while len(_MI_MOSS_CACHE) > 10:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return hit
+
+
+def _mi_gather_near(grid, rad, cands, p):
+    """The analysed candidate nearest p (within a cell or so), or -1."""
+    kx, ky, kz = int(math.floor(p[0] / rad)), int(math.floor(p[1] / rad)), int(math.floor(p[2] / rad))
+    best, bd = -1, 4.0 * rad * rad
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for j in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                    q = cands[j][0]
+                    d = (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 + (q[2] - p[2]) ** 2
+                    if d < bd:
+                        best, bd = j, d
+    return best
+
+
 def _moss_margins(surf, sampler, s, seeds=None, faces=None):
     """(spots, candidates, rows): where each candidate sits in the coverage
     field, rows[i] = (margin, shelter, edge), None when a picked-faces mask
     leaves it out. margin > 0 is inside a patch (more = further in): the
     analysed spots' scores round it, plus fine noise for a ragged edge, less
-    1 - Coverage. Seeds (picked points) lead with nearness, out to Spread."""
+    1 - Coverage. Seeds (picked points) lead with nearness, out to Spread.
+    Creases add where things collect (gutters, corners, the foot of walls),
+    only where it faces up."""
     m = scene_m_per_unit()
     R = max(1e-4, float(s["clump_size"]) / m)
     thr = 1.0 - clamp(float(s["coverage"]), 0.0, 1.0)
     rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
     spots, cands = _moss_field(surf, sampler, s, R)
     scores = [moss_score(sp, s) for sp in spots]
+    creases = clamp(float(s.get("creases", 0.0)), 0.0, 2.0)
+    gat = _mi_gather(surf, sampler, s, R, cands)[0] if creases > 0.0 else None
     spread = max(1e-4, float(s["spread"]) / m)
     sgrid = {}
     for q in seeds or ():
         sgrid.setdefault((int(math.floor(q[0] / spread)), int(math.floor(q[1] / spread)),
                           int(math.floor(q[2] / spread))), []).append(q)
     rows = []
-    for p, n, r, near, fine, memo, node, face in cands:
+    for idx, (p, n, r, near, fine, memo, node, face) in enumerate(cands):
         if faces is not None and face not in faces.get(node, ()):
             rows.append(None)
             continue
@@ -27852,6 +27991,9 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None):
             d = min([_rl_len(_rl_sub(p, q)) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                      for q in sgrid.get((kx + dx, ky + dy, kz + dz), ())] or [spread * 2.0])
             margin = 0.7 * (1.0 - d / spread) + 0.3 * (sc / tw - 0.5) + rag * fine - thr + 0.3
+        if gat is not None and gat[idx][0] > 0.0:
+            upf = clamp((n[1] - 0.3) / 0.4, 0.0, 1.0)
+            margin += creases * 0.5 * gat[idx][0] * upf  # where it faces up (moss climbs walls by Crevices)
         rows.append((margin, occ / tw, edge / tw))
     return spots, cands, rows
 
@@ -29260,16 +29402,18 @@ DEBRIS_DETAIL = {"Proxy": (6, 3.0, 2, (3, 2), (2, 6)),
                  "Hero": (90, 1.0, 10, (14, 8), (6, 20))}
 DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first row)
 DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
-DEBRIS_PILE_LEAVES = 400  # most leaves in one pile
+DEBRIS_PILE_LEAVES = 400  # most leaves in one round pile (a drift along a crease: twice that)
+DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0}  # how much grass, leaves, piles, tufts crowd into creases
 
 
 def _debris_field(s):
     """Moss settings for the coverage field from a debris patch's."""
     fs = dict(MOSS_DEFAULTS)
     for key in ("coverage", "spread", "slope", "crevices", "edges", "patchiness", "patch_size", "mess", "seed",
-                "detail"):
+                "detail", "creases"):
         fs[key] = s[key]
     fs["clump_size"] = DEBRIS_FIELD_R
+    fs["_up_only"] = True  # crevices and creases don't pull leaves up a wall
     return fs
 
 
@@ -29296,26 +29440,37 @@ class _DebrisBuild(object):
         fs = _debris_field(s)
         self.R = DEBRIS_FIELD_R / m
         _, self.cands, self.rows = _moss_margins(surf, sampler, fs, seeds, faces)
+        self.creases = clamp(float(s["creases"]), 0.0, 2.0)
+        self.gat, self.ggrid, self.gcell = _mi_gather(surf, sampler, fs, self.R, self.cands) if self.creases else \
+            (None, {}, 1.0)
+        self.piles_at = {}  # cell -> [(centre, radius)] of the piles so far
         tried = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * self.R * self.R) * 4.5)))
         self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
         self.cover = 0.05 / m
 
     # ------------------------------------------------------------- placing
     def _spots(self, density, kind):
-        """Where items of one kind go: [(point, normal, randoms, margin)],
-        `density` per square metre inside the patches (ramping in at their
-        edges), jittered round the field's candidates, never under something."""
+        """Where items of one kind go: [(point, normal, randoms, margin,
+        candidate)], `density` per square metre inside the patches (ramping
+        in at their edges; more where things collect, piles most), jittered
+        round the field's candidates, never under something."""
         out = []
         if density <= 0.0:
             return out
         dens = density * self.m * self.m  # per square scene unit
         step = math.sqrt(self.per)
+        lim = float(self.s["slope"])
+        cut = math.cos(math.radians(min(90.0, lim + 15.0)))  # past Slope limit + 15 degrees: never
         for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
-            if row is None:
+            if row is None or cand[1][1] < cut:
                 continue
             w = clamp((row[0] + 0.05) / 0.25, 0.0, 1.0)
+            w *= clamp(1.0 - (math.degrees(math.acos(clamp(cand[1][1], -1.0, 1.0))) - lim) / 15.0, 0.0, 1.0)
             if w <= 0.0:
                 continue
+            if self.gat is not None:
+                gg = self.gat[i][0] * clamp((self.cands[i][1][1] - 0.3) / 0.4, 0.0, 1.0)
+                w *= max(0.15, 1.0 + self.creases * DEBRIS_GATHER[kind] * (gg - 0.2))
             r = _rand12(self.seed, i, kind, 61)
             count = int(dens * self.per * w + r[0])
             if not count:
@@ -29330,10 +29485,30 @@ class _DebrisBuild(object):
                 x, y = (rr[0] - 0.5) * step, (rr[1] - 0.5) * step
                 c = self.surf.closest((p[0] + t1[0] * x + t2[0] * y, p[1] + t1[1] * x + t2[1] * y,
                                        p[2] + t1[2] * x + t2[2] * y))
-                if c is None or _rl_dot(c[2], n) < 0.3:  # snapped onto a face turned away (a rail's underside)
+                if c is None or _rl_dot(c[2], n) < 0.3 or c[2][1] < cut:  # snapped onto a face turned away
                     continue
-                out.append((c[1], c[2], rr, row[0]))
+                out.append((c[1], c[2], rr, row[0], i))
         return out
+
+    def _gather(self, i):
+        """(gather, across, aniso, bank) of a candidate, or None."""
+        return self.gat[i] if self.gat is not None else None
+
+    def _gather_at(self, p):
+        """(gather, across, aniso, bank) at a point (the nearest analysed candidate)."""
+        if self.gat is None:
+            return None
+        j = _mi_gather_near(self.ggrid, self.gcell, self.cands, p)
+        return self.gat[j] if j >= 0 else (0.0, None, 0.0, 0.0)
+
+    def _along(self, n, gi, r, amount):
+        """The crease's direction at a spot (unit tangent), when the spot is
+        in one and r (a uniform) is under how strongly; else None."""
+        if gi is None or gi[1] is None:
+            return None
+        if r >= clamp(gi[0] * gi[2] * self.creases * amount, 0.0, 0.95):
+            return None
+        return _rl_norm(_rl_cross(n, gi[1]), None)
 
     def _size(self, key, r):
         return float(self.s[key]) / self.m * (1.0 + self.var * (r - 0.5) * 1.2)
@@ -29349,21 +29524,26 @@ class _DebrisBuild(object):
 
     def build(self):
         s = self.s
-        for p, n, r, margin in self._spots(float(s["grass"]), 1):
-            self._bunch(p, n, r)
-        for p, n, r, margin in self._spots(float(s["piles"]), 3):
-            self._pile(p, n, r)
-        for p, n, r, margin in self._spots(float(s["leaves"]), 2):
-            t1, _ = _mi_frame(n, r[2] * 6.2832)
+        for p, n, r, margin, ci in self._spots(float(s["grass"]), 1):
+            self._bunch(p, n, r, ci)
+        for p, n, r, margin, ci in self._spots(float(s["piles"]), 3):
+            self._pile(p, n, r, ci)
+        for p, n, r, margin, ci in self._spots(float(s["leaves"]), 2):
+            a = self._along(n, self._gather(ci), (r[0] * 7.77) % 1.0, 1.4)
+            if a is not None:  # in a gutter / along a wall's foot leaves wash round to lie along it
+                t1 = _rl_norm(_rl_cross(_mi_rotate(a, n, (r[2] - 0.5) * 1.2), n))
+            else:
+                t1, _ = _mi_frame(n, r[2] * 6.2832)
             self._leaf(p, n, t1, self._size("leaf_size", r[3]), r, 0.0)
-        for p, n, r, margin in self._spots(float(s["tufts"]), 4):
+        for p, n, r, margin, ci in self._spots(float(s["tufts"]), 4):
             self._tuft(p, n, r)
         return self
 
     # --------------------------------------------------------------- grass
-    def _bunch(self, c, n, r):
+    def _bunch(self, c, n, r, ci=-1):
         """A bunch of dry grass: blades lying every which way (Combed: more
-        of them one way), piled into a low mound, draping over edges."""
+        of them one way: mostly along a crease it's in, else downhill on a
+        slope), piled into a low mound, draping over edges."""
         Rb = 0.5 * self._size("bunch_size", r[3])
         Lg = float(self.s["grass_length"]) / self.m
         full = max(0.0, float(self.s["fullness"]))
@@ -29377,6 +29557,12 @@ class _DebrisBuild(object):
         width = 0.5 * float(self.s["blade_width"]) / self.m * self.fib_wide
         g = 0.3 + 0.7 * clamp(float(self.s["droop"]), 0.0, 2.0)
         main = r[4] * 6.2832
+        f1, f2 = _mi_frame(n)
+        a = self._along(n, self._gather(ci) if ci >= 0 else None, r[6], 2.0)
+        if a is None and n[1] < 0.985 and r[6] < 0.75:  # on a slope: washed / blown downhill
+            a = _rl_norm((n[0] * n[1], n[1] * n[1] - 1.0, n[2] * n[1]), None)
+        if a is not None:
+            main = math.atan2(_rl_dot(a, f2), _rl_dot(a, f1)) + (r[4] - 0.5) * 0.9
         for k in range(count):
             rr = _rand12(self.seed, int(r[5] * 1e6) + k, 5, 71)
             ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
@@ -29530,10 +29716,34 @@ class _DebrisBuild(object):
                 conn.extend(quad)
                 uvi.extend(quad)
 
-    def _pile(self, c, n, r):
-        """A small pile of leaves: a low mound of them, each lying along the
-        mound's slope at its own depth, a few strays round it."""
+    def _pile(self, c, n, r, ci=-1):
+        """A small pile of leaves where it fell: in a crease (a gutter, the
+        foot of a wall or a frame) a drift along it, following it round
+        bends and ending where it does, banked up against a wall; in a
+        corner pushed into it; in the open a round mound. Each leaf lies
+        along the pile's slope at its own depth; a few strays round it."""
         Rp = 0.5 * self._size("pile_size", r[3])
+        gi = self._gather(ci) if ci >= 0 else None
+        if gi is not None and gi[1] is not None and abs(gi[3]) > 0.15 and gi[0] * self.creases > 0.1:
+            side = _rl_mul(gi[1], 1.0 if gi[3] > 0.0 else -1.0)  # towards the wall: the pile moves up to it
+            for f in (0.6, 0.4, 0.2):
+                hit = self.surf.closest(_rl_add(c, _rl_mul(side, Rp * f * min(1.0, 1.5 * abs(gi[3])))))
+                if hit is not None and _rl_dot(hit[2], n) > 0.7:
+                    c, n = hit[1], hit[2]
+                    break
+        key = (int(math.floor(c[0] / (4.0 * Rp))), int(math.floor(c[1] / (4.0 * Rp))),
+               int(math.floor(c[2] / (4.0 * Rp))))
+        for dx in (-1, 0, 1):  # not into a pile already there
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q, rq in self.piles_at.get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                        if _rl_len(_rl_sub(c, q)) < 0.9 * (Rp + rq):
+                            return
+        e = clamp(1.6 * self.creases * gi[0] * gi[2], 0.0, 1.0) if gi is not None and gi[1] is not None else 0.0
+        if e >= 0.15 and self._drift(c, n, r, Rp, gi, e):
+            self.piles_at.setdefault(key, []).append((c, Rp))
+            return
+        self.piles_at.setdefault(key, []).append((c, Rp))
         Lf = float(self.s["leaf_size"]) / self.m
         Hp = 0.3 * Rp
         count = min(DEBRIS_PILE_LEAVES, int(2.5 * math.pi * Rp * Rp / (0.45 * Lf * Lf) + 0.5))
@@ -29562,6 +29772,104 @@ class _DebrisBuild(object):
             nl = _rl_norm(_rl_add(hit[2], tilt), hit[2])
             lt1, _ = _mi_frame(nl, rr[5] * 6.2832)
             self._leaf(hit[1], nl, lt1, self._size("leaf_size", rr[6]), rr, depth)
+
+    def _walk_crease(self, c, n, a, half, step):
+        """Points along a crease from c (excluded) the way a goes, up to half
+        long: [(point, normal, along)], turning with the crease, stopping
+        where it ends (things no longer collect, or the surface turns up:
+        a corner)."""
+        out = []
+        p, d, dist = c, a, 0.0
+        while dist + 1e-9 < half:
+            st = min(step, half - dist)
+            hit = self.surf.closest(_rl_add(p, _rl_mul(d, st)))
+            if hit is None or _rl_dot(hit[2], n) < 0.7:
+                break
+            q, qn = hit[1], hit[2]
+            if _rl_len(_rl_sub(q, p)) < 0.3 * st:
+                break  # stuck against something
+            gi = self._gather_at(q)
+            if gi is None or gi[0] * self.creases < 0.12:
+                break
+            if gi[1] is not None and gi[2] > 0.3:
+                a2 = _rl_norm(_rl_cross(qn, gi[1]), d)
+                if _rl_dot(a2, d) < 0.0:
+                    a2 = _rl_mul(a2, -1.0)
+                d = _rl_add(d, a2)
+            d = _rl_norm(_rl_sub(d, _rl_mul(qn, _rl_dot(d, qn))), d)
+            out.append((q, qn, d))
+            dist += _rl_len(_rl_sub(q, p))
+            p = q
+        return out
+
+    def _drift(self, c, n, r, Rp, gi, e):
+        """Leaves drifted along a crease: a long low pile following it (up to
+        Rp (1 + 2.2 e) each way), narrower, its crest banked towards the wall.
+        False when the crease is too short for one (then a round pile)."""
+        a = _rl_norm(_rl_cross(n, gi[1]), None)
+        if a is None:
+            return False
+        half = Rp * (1.0 + 2.2 * e)
+        step = 0.35 * Rp
+        back = self._walk_crease(c, n, _rl_mul(a, -1.0), half, step)
+        spine = [(q, qn, _rl_mul(d, -1.0)) for q, qn, d in reversed(back)] + [(c, n, a)] + \
+            self._walk_crease(c, n, a, half, step)
+        arc = [0.0]
+        for k in range(1, len(spine)):
+            arc.append(arc[-1] + _rl_len(_rl_sub(spine[k][0], spine[k - 1][0])))
+        Ls = arc[-1]
+        if Ls < 1.2 * Rp:
+            return False
+        Wp = Rp * (0.8 - 0.25 * e)  # half width
+        Hp = 0.3 * Rp * (1.0 + 0.3 * e)
+        sc = 0.5 * e * gi[3]  # the crest's place across: towards the wall's side (+ across)
+        Lf = float(self.s["leaf_size"]) / self.m
+        count = min(2 * DEBRIS_PILE_LEAVES, int(2.5 * math.pi * 0.5 * Ls * Wp / (0.45 * Lf * Lf) + 0.5))
+        if not count:
+            return False
+        self.counts["piles"] += 1
+        order = []
+        for k in range(count + count // 6):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + k, 6, 73)
+            stray = k >= count
+            t = 2.0 * rr[0] - 1.0
+            sx = (2.0 * rr[1] - 1.0) * (1.6 if stray else 1.0)
+            env = max(0.0, 1.0 - t * t)
+            prof = max(0.0, 1.0 - ((sx - sc) / (1.0 + abs(sc))) ** 2)
+            f = env * prof
+            depth = Hp * f * (0.2 + 0.8 * rr[2]) if not stray else 0.0
+            order.append((depth, t, sx, env, prof, f, rr))
+        order.sort(key=lambda x: x[0])  # bottom leaves first
+        for depth, t, sx, env, prof, f, rr in order:
+            at = (t + 1.0) * 0.5 * Ls
+            k = min(len(spine) - 2, max(0, bisect.bisect_right(arc, at) - 1))
+            seg = max(1e-12, arc[k + 1] - arc[k])
+            u = clamp((at - arc[k]) / seg, 0.0, 1.0)
+            pa, pb = spine[k], spine[k + 1]
+            base = _rl_add(pa[0], _rl_mul(_rl_sub(pb[0], pa[0]), u))
+            sn = _rl_norm(_rl_add(_rl_mul(pa[1], 1.0 - u), _rl_mul(pb[1], u)), n)
+            al = _rl_norm(_rl_add(_rl_mul(pa[2], 1.0 - u), _rl_mul(pb[2], u)), a)
+            side = _rl_norm(_rl_cross(al, sn), gi[1])  # + across, where the wall is
+            hit = None
+            for shrink in (1.0, 0.6, 0.3):
+                hit = self.surf.closest(_rl_add(base, _rl_mul(side, sx * Wp * shrink)))
+                if hit is not None and _rl_dot(hit[2], sn) > 0.5:
+                    break
+                hit = None
+            if hit is None:
+                continue
+            frac = depth / max(1e-9, Hp * f) if depth else 0.0
+            dh_al = Hp * prof * (-2.0 * t) * (2.0 / Ls)  # the pile's slope along and across
+            dh_sd = Hp * env * (-2.0 * (sx - sc) / (1.0 + abs(sc)) ** 2) / Wp
+            tilt = _rl_add(_rl_add(_rl_mul(al, -dh_al * frac * 0.8), _rl_mul(side, -dh_sd * frac * 0.8)),
+                           _rl_add(_rl_mul(al, (rr[3] - 0.5) * 0.7), _rl_mul(side, (rr[4] - 0.5) * 0.7)))
+            nl = _rl_norm(_rl_add(hit[2], tilt), hit[2])
+            if rr[7] < 0.5 * e:  # drifted leaves lie along it
+                lt1 = _rl_norm(_rl_cross(_mi_rotate(al, nl, (rr[5] - 0.5) * 1.4), nl))
+            else:
+                lt1, _ = _mi_frame(nl, rr[5] * 6.2832)
+            self._leaf(hit[1], nl, lt1, self._size("leaf_size", rr[6]), rr, depth)
+        return True
 
     # --------------------------------------------------------------- tufts
     def _tuft(self, c, n, r):
@@ -30100,6 +30408,8 @@ MI_PRESETS = {
                            "curl": 0.8}),
         ("Leaf piles", {"grass": 0.0, "leaves": 4.0, "piles": 1.5, "pile_size": 0.4, "tufts": 0.0,
                         "crevices": 1.0}),
+        ("Gutters and wall bases", {"coverage": 0.3, "grass": 0.5, "leaves": 12.0, "piles": 2.0, "pile_size": 0.3,
+                                    "tufts": 3.0, "crevices": 0.8, "creases": 1.3, "patchiness": 0.4}),
         ("Moss tufts", {"grass": 0.0, "leaves": 0.0, "piles": 0.0, "tufts": 25.0, "tuft_size": 0.03,
                         "crevices": 1.0, "patchiness": 0.8})])}
 
@@ -30115,23 +30425,812 @@ def mi_preset(kind, name):
     s = dict(MI_DEFAULTS[kind])
     s.update(over)
     return s
+# =============================================================================
+# Moss and Ivy - scatter groups
+# =============================================================================
+# The user, 2026-11-03: "a 'build a scatter group' ... it showed a bounding box like the roof does ... in that
+# group there's like a list of stuff in it, you can add / remove / undo and click things to control them". One
+# scatteredObjects####_GRP holds what it scatters onto (meshes and whole groups, read fresh at every regrow),
+# a wireframe box round it to click (scatteredObjects####_CTL) and layers: each its own type (Moss, Grass,
+# Leaves, Leaf piles, Moss tufts, Ivy), settings, area (picked faces / points), seed, on or off. Two layers of
+# a type each get their own parts (mossGreen_C_..., mossGreen2_C_...). A part mesh exists only while it holds
+# something (the user: empty parts showing as planes at the origin); one that empties while you edit hides
+# (keeping its material) and Bake removes it. Structure (layers, surfaces, areas, toggles) is undoable JSON;
+# geometry is built through the API outside the undo queue and rebuilt whenever the JSON and what was built
+# differ (after an undo / redo).
+
+SC_ATTR = "unlokScatter"           # string on the group: JSON (surfaces, udim, layers)
+SC_BAKED = "unlokScatterBaked"     # the same after Bake
+SC_STAMP = "unlokScatterStamp"     # string on the group: a token set after each build (a redo resets it)
+SC_PART = "unlokScatterPart"       # string on a part's shape: "<layer id>/<part>"
+SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
+SC_STEM = "scatteredObjects"
+SC_VERSION = 1
+SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patchiness", "patch_size", "mess")
+SC_DEBRIS_COMMON = SC_PLACE + ("size_var", "detail", "seed", "stacks", "stack_layout")
+SC_TYPES = collections.OrderedDict([
+    ("Moss", {"parts": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
+              "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {}}),
+    ("Grass", {"parts": (("grass", "grassDry"),),
+               "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
+                                           "blade_width"),
+               "over": {"slope": 40.0, "grass": 1.5}}),
+    ("Leaves", {"parts": (("litter", "leafDry"),), "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl"),
+                "over": {"slope": 35.0, "leaves": 8.0}}),
+    ("Leaf piles", {"parts": (("piles", "leafPile"),),
+                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl"),
+                    "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}}),
+    ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
+                    "over": {"slope": 60.0, "tufts": 6.0}}),
+    ("Ivy", {"parts": (("stems", "ivyStem"), ("leaves", "ivyLeaf")),
+             "keys": tuple(k for k in IVY_DEFAULTS if k != "udim"), "over": {}})])
+SC_DEBRIS_ITEMS = {"Grass": "grass", "Leaves": "leaves", "Leaf piles": "piles", "Moss tufts": "tufts"}
+SC_DEBRIS_OUT = {"Grass": ("grass", "grass"), "Leaves": ("litter", "litter"), "Leaf piles": ("litter", "piles"),
+                 "Moss tufts": ("tufts", "tufts")}  # debris_build's mesh -> the layer's part
+_SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
+_SC_LAST = {}   # group -> (JSON, stamp) it was last built from
+_SC_WROTE = {}  # (group, layer id / part) -> what was last written (mesh identity, tiles)
+
+
+def sc_type(name):
+    return name if name in SC_TYPES else "Moss"
+
+
+def sc_defaults(typ):
+    """A layer type's settings (its keys only)."""
+    typ = sc_type(typ)
+    base = MOSS_DEFAULTS if typ == "Moss" else (IVY_DEFAULTS if typ == "Ivy" else DEBRIS_DEFAULTS)
+    out = {k: base[k] for k in SC_TYPES[typ]["keys"]}
+    out.update(SC_TYPES[typ]["over"])
+    return out
+
+
+def sc_settings(layer):
+    """A layer's settings: its type's defaults under what it stores."""
+    s = sc_defaults(layer.get("type"))
+    s.update({k: v for k, v in (layer.get("s") or {}).items() if k in s})
+    return s
+
+
+def _sc_new_layer(data, typ, settings=None, name=None):
+    """A layer dict for a group's data (not added): unique id and tag (the
+    number its parts carry after the material: "" for the first of a type,
+    then 2, 3...)."""
+    typ = sc_type(typ)
+    n = int(data.get("next", 1))
+    data["next"] = n + 1
+    used = set(l.get("tag", "") for l in data.get("layers", []) if l.get("type") == typ)
+    tag, k = "", 1
+    while tag in used:
+        k += 1
+        tag = str(k)
+    s = sc_defaults(typ)
+    s.update({k2: v for k2, v in (settings or {}).items() if k2 in s})
+    return {"id": "L%d" % n, "type": typ, "tag": tag, "on": True, "s": s,
+            "name": name or (typ + (" " + tag if tag else "")), "seeds": [], "faces": {}}
+
+
+# --------------------------------------------------------------- build
+def _mi_drop_repeats(mesh):
+    """A mesh without corners that repeat a vertex: a face's back-to-back
+    repeats go (with their UVs), a face left with fewer than 3 corners or a
+    repeat further round goes too (Maya drops such faces itself, and the UVs
+    then no longer line up). The mesh itself when nothing repeats."""
+    if not mesh or not mesh[1]:
+        return mesh
+    pts, counts, conn, us, vs, uvi = mesh
+    k, bad = 0, False
+    for c in counts:
+        if len(set(conn[k:k + c])) != c:
+            bad = True
+            break
+        k += c
+    if not bad:
+        return mesh
+    nc, ncon, nuv = [], [], []
+    k = 0
+    for c in counts:
+        ids, uv = conn[k:k + c], uvi[k:k + c]
+        k += c
+        keep = [i for i in range(c) if ids[i] != ids[(i + 1) % c]]
+        fi = [ids[i] for i in keep]
+        if len(fi) < 3 or len(set(fi)) != len(fi):
+            continue
+        nc.append(len(fi))
+        ncon.extend(fi)
+        nuv.extend(uv[i] for i in keep)
+    return (pts, nc, ncon, us, vs, nuv)
+
+
+def _sc_build_layer(layer, surf):
+    """A layer's parts {part: mesh} and counts, built on the surfaces."""
+    typ = sc_type(layer.get("type"))
+    s = sc_settings(layer)
+    seeds = mi_seed_points(layer) or None
+    faces = mi_face_mask(layer)
+    counts = {}
+    if typ == "Moss":
+        ms = dict(MOSS_DEFAULTS)
+        ms.update(s)
+        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces)
+        parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
+        counts["clumps"] = out.get("clumps", 0)
+    elif typ == "Ivy":
+        ivs = dict(IVY_DEFAULTS)
+        ivs.update(s)
+        out = ivy_build(surf.nodes, ivs, seeds, surf=surf)
+        parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
+        counts["vines"], counts["leaves"] = out.get("vines", 0), out.get("leaves_n", 0)
+    else:
+        ds = dict(DEBRIS_DEFAULTS)
+        ds.update(s)
+        for t2, key in SC_DEBRIS_ITEMS.items():
+            if t2 != typ:
+                ds[key] = 0.0
+        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces)
+        src, part = SC_DEBRIS_OUT[typ]
+        parts = {part: out.get(src)}
+        counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
+                  "tufts": out.get("tufts_n", 0)}
+    counts["capped"] = bool(out.get("capped"))
+    return {p: _mi_drop_repeats(m) for p, m in parts.items()}, counts
+
+
+def sc_build(root, data, surf=None, only=None):
+    """Every on layer's parts for a group, from the cache where a layer and
+    its surfaces are unchanged (only: layer ids to rebuild regardless),
+    each part in its own UDIM tiles from the group's Start UDIM, in layer
+    order. Returns ({"<id>/<part>": mesh}, {"udims", counts...}, meshes)."""
+    meshes = sc_surfaces(data)
+    report = {"faces": 0, "capped": False, "clumps": 0, "vines": 0, "leaves": 0, "bunches": 0, "piles": 0,
+              "tufts": 0, "udims": {}, "surfaces": len(meshes)}
+    combined, order = {}, []
+    if not meshes:
+        return combined, report, meshes
+    surf = surf or _MiSurface(meshes)
+    skey = tuple(_mi_mesh_key(x) for x in surf.nodes)
+    for layer in data.get("layers", []):
+        lid = layer["id"]
+        for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
+            order.append(lid + "/" + part)
+        if not layer.get("on", True):
+            continue
+        key = (root, lid, json.dumps(layer, sort_keys=True), skey)
+        hit = _SC_BUILT.get(key) if not (only and lid in only) else None
+        if hit is None:
+            hit = _sc_build_layer(layer, surf) if surf.items else ({}, {})
+            _SC_BUILT[key] = hit
+            while len(_SC_BUILT) > 32:
+                _SC_BUILT.popitem(last=False)
+        parts, counts = hit
+        for part, mesh in parts.items():
+            if mesh and mesh[1]:
+                combined[lid + "/" + part] = mesh
+        for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts"):
+            report[k] += counts.get(k, 0)
+        report["capped"] = report["capped"] or counts.get("capped", False)
+    placed = _roof_udims(dict(combined), int(data.get("udim") or 1001), order=order)
+    report["udims"] = placed.pop("udims")
+    return placed, report, meshes
+
+
+# --------------------------------------------------------------- data
+def is_scatter(node):
+    """A live scatter group (not baked)."""
+    return bool(node) and cmds.objExists(node) and cmds.attributeQuery(SC_ATTR, node=node, exists=True)
+
+
+def _sc_attr(root):
+    for attr in (SC_ATTR, SC_BAKED):
+        if cmds.attributeQuery(attr, node=root, exists=True):
+            return attr
+    return None
+
+
+def sc_data(root):
+    """{"surfaces": [uuid], "udim", "layers": [{"id", "type", "tag", "name", "on", "s", "seeds", "faces"}]}."""
+    attr = _sc_attr(root)
+    data = {}
+    if attr:
+        try:
+            data = json.loads(cmds.getAttr(root + "." + attr) or "{}")
+        except ValueError:
+            data = {}
+    data.setdefault("surfaces", [])
+    data.setdefault("layers", [])
+    data.setdefault("udim", 1001)
+    data.setdefault("next", 1 + len(data["layers"]))
+    data["version"] = SC_VERSION
+    return data
+
+
+def sc_layer(data, lid):
+    for layer in data.get("layers", []):
+        if layer.get("id") == lid:
+            return layer
+    return None
+
+
+def sc_groups(baked=False):
+    """Every scatter group in the scene (baked ones too with baked=True)."""
+    attrs = (SC_ATTR, SC_BAKED) if baked else (SC_ATTR,)
+    found = []
+    for attr in attrs:
+        for node in cmds.ls(["*." + attr, "*:*." + attr], objectsOnly=True, long=True) or []:
+            if node not in found and cmds.objectType(node, isAType="transform"):
+                found.append(node)
+    return found
+
+
+def sc_parts(root):
+    """{"<layer id>/<part>": transform} under a scatter group."""
+    parts = {}
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        shape = _log_shape(child)
+        if shape and cmds.attributeQuery(SC_PART, node=shape, exists=True):
+            parts[cmds.getAttr(shape + "." + SC_PART)] = child
+    return parts
+
+
+def sc_box(root):
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        if cmds.attributeQuery(SC_BOX_ATTR, node=child, exists=True):
+            return child
+    return None
+
+
+def sc_owner(node):
+    """(group, layer id or None) a node belongs to: the group itself, its
+    box, or one of its parts (then its layer). (None, None) otherwise."""
+    if not node or not cmds.objExists(node):
+        return None, None
+    node = long_name(node)
+    if cmds.objectType(node, isAType="shape"):
+        node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+    if _sc_attr(node):
+        return node, None
+    parent = cmds.listRelatives(node, parent=True, fullPath=True)
+    if not parent or not _sc_attr(parent[0]):
+        return None, None
+    if cmds.attributeQuery(SC_BOX_ATTR, node=node, exists=True):
+        return parent[0], None
+    shape = _log_shape(node)
+    if shape and cmds.attributeQuery(SC_PART, node=shape, exists=True):
+        return parent[0], cmds.getAttr(shape + "." + SC_PART).split("/")[0]
+    return None, None
+
+
+def sc_surfaces(data):
+    """The meshes a group scatters onto, now: each stored mesh, and every
+    visible mesh under each stored group (meshes added to it later too),
+    never anything inside a scatter group."""
+    groups = [g + "|" for g in sc_groups(baked=True)]
+    out = []
+    for uid in data.get("surfaces") or []:
+        found = cmds.ls(uid, long=True) or []
+        if not found:
+            continue
+        node = found[0]
+        if _log_shape(node):
+            cand = [node]
+        else:
+            shapes = cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True,
+                                        noIntermediate=True) or []
+            cand = []
+            for sh in cmds.ls(shapes, visible=True, long=True) or []:
+                t = cmds.listRelatives(sh, parent=True, fullPath=True)[0]
+                if t not in cand:
+                    cand.append(t)
+        for t in cand:
+            if t not in out and not any((t + "|").startswith(g) for g in groups):
+                out.append(t)
+    return out
+
+
+def sc_area(layer):
+    """(picked points, picked face count) of a layer."""
+    return len(layer.get("seeds") or []), sum(len(v) for v in (layer.get("faces") or {}).values())
+
+
+# --------------------------------------------------------------- scene
+def _sc_set(root, data):
+    cmds.setAttr(root + "." + SC_ATTR, json.dumps(data, sort_keys=True), type="string")
+
+
+def _sc_make_part(root, layer, part, material):
+    """A part mesh for a layer (outside the undo queue, like its geometry):
+    a seed plane, tagged, named <material><tag>_C_scatteredObjects####_GEP."""
+    num = short_name(root)[len(SC_STEM):len(SC_STEM) + 4]
+    name = "%s%s_C_%s%s_GEP" % (material, layer.get("tag", ""), SC_STEM, num)
+    node = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1, constructionHistory=False,
+                                    name=name)[0])
+    node = long_name(cmds.parent(node, root)[0])
+    shape = _log_shape(node)
+    cmds.addAttr(shape, longName=SC_PART, dataType="string")
+    cmds.setAttr(shape + "." + SC_PART, layer["id"] + "/" + part, type="string")
+    cmds.addAttr(shape, longName=MI_VERTS, attributeType="long", defaultValue=0)
+    cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
+    if part in MI_STACKED_PARTS or part == "piles":
+        cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=True)
+    return node
+
+
+def _sc_fit_box(root, box, meshes):
+    """The box round what the group grew (else round its surfaces)."""
+    nodes = [n for n in sc_parts(root).values() if cmds.getAttr(n + ".visibility")] or meshes
+    if not box or not nodes:
+        return
+    bb = cmds.exactWorldBoundingBox(nodes)
+    size = [max(bb[k + 3] - bb[k], 1e-3) * 1.02 for k in range(3)]
+    for ax, v in zip("xyz", ((bb[0] + bb[3]) * 0.5, (bb[1] + bb[4]) * 0.5, (bb[2] + bb[5]) * 0.5)):
+        cmds.setAttr("%s.translate%s" % (box, ax.upper()), v)
+    for ax, v in zip("XYZ", size):
+        cmds.setAttr("%s.scale%s" % (box, ax), v)
+    for ax in "XYZ":
+        cmds.setAttr("%s.rotate%s" % (box, ax), 0.0)
+
+
+def _sc_write(root, data, placed, meshes):
+    """Put built parts in the group's meshes (outside the undo queue):
+    makes a part the first time it has something, hides one that's empty
+    now, rewrites only what changed. Returns the face count."""
+    parts = sc_parts(root)
+    faces = 0
+    sel = None
+    for layer in data.get("layers", []):
+        for part, material in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
+            key = layer["id"] + "/" + part
+            mesh = placed.get(key)
+            node = parts.get(key)
+            if not mesh:
+                if node and cmds.getAttr(node + ".visibility"):
+                    cmds.setAttr(node + ".visibility", False)
+                continue
+            if node is None:
+                if sel is None:
+                    sel = cmds.ls(selection=True, long=True) or []
+                node = _sc_make_part(root, layer, part, material)
+            sig = (id(mesh[0]), mesh[3][0] if mesh[3] else 0.0, mesh[4][0] if mesh[4] else 0.0, len(mesh[1]))
+            shape = _log_shape(node)
+            if _SC_WROTE.get((root, key)) != sig or cmds.getAttr(shape + "." + MI_VERTS) != len(mesh[0]):
+                cmds.setAttr(shape + "." + MI_VERTS, _rope_fill(shape, mesh))
+                _SC_WROTE[(root, key)] = sig
+            if not cmds.getAttr(node + ".visibility"):
+                cmds.setAttr(node + ".visibility", True)
+            faces += len(mesh[1])
+    known = set(l["id"] for l in data.get("layers", []))
+    for key, node in parts.items():  # a layer that's gone (its parts are deleted with it; this is a safety net)
+        if key.split("/")[0] not in known and cmds.getAttr(node + ".visibility"):
+            cmds.setAttr(node + ".visibility", False)
+    _sc_fit_box(root, sc_box(root), meshes)
+    if sel is not None:  # polyPlane / parent select the new part: keep what was selected
+        sel = [n for n in sel if cmds.objExists(n)]
+        if sel:
+            cmds.select(sel, replace=True)
+        else:
+            cmds.select(clear=True)
+    return faces
+
+
+def sc_regrow(root, only=None):
+    """Grow a group again from its JSON (outside the undo queue). Returns its report."""
+    data = sc_data(root)
+    with NoUndo():
+        placed, report, meshes = sc_build(root, data, only=only)
+        report["faces"] = _sc_write(root, data, placed, meshes)
+        stamp = "%d" % random.randint(1, 1 << 30)
+        cmds.setAttr(root + "." + SC_STAMP, stamp, type="string")
+    _SC_LAST[root] = (cmds.getAttr(root + "." + SC_ATTR), stamp)
+    report["root"] = root
+    return report
+
+
+def sc_sync():
+    """Regrow every group whose JSON or stamp no longer matches what was
+    built (an undo / redo of a structural change, a redo of a new group).
+    Returns the groups regrown."""
+    done = []
+    for root in sc_groups():
+        now = (cmds.getAttr(root + "." + SC_ATTR), cmds.getAttr(root + "." + SC_STAMP) or "")
+        last = _SC_LAST.get(root)
+        if last is None and now[1]:  # opened with the scene: as saved
+            _SC_LAST[root] = now
+            continue
+        if last != now:
+            sc_regrow(root)
+            done.append(root)
+    return done
+
+
+def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None, faces=None, select=True):
+    """A new scatter group on meshes / groups with one layer (one Ctrl+Z):
+    scatteredObjects####_GRP, its box, and the layer's parts. points /
+    faces: the layer's area. Returns the report (with "root")."""
+    nodes = []
+    for s in surfaces or ():
+        if s and cmds.objExists(s) and not sc_owner(s)[0] and not _mi_part_of(s):
+            s = long_name(s)
+            if s not in nodes:
+                nodes.append(s)
+    if not nodes:
+        raise ValueError("select the meshes or groups to scatter onto")
+    data = {"version": SC_VERSION, "surfaces": [cmds.ls(n, uuid=True)[0] for n in nodes], "udim": 1001, "next": 1,
+            "layers": []}
+    layer = _sc_new_layer(data, layer_type, settings)
+    meshes = sc_surfaces(data)
+    layer["seeds"] = _mi_store_seeds(list(points or [])[:MI_MAX_SEEDS], meshes)
+    layer["faces"] = _mi_store_faces(faces) if layer["type"] != "Ivy" else {}
+    data["layers"].append(layer)
+    with UndoChunk("New scatter group"):
+        num = _th_free_number(SC_STEM + "%04d_GRP")
+        root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (SC_STEM, num)))
+        cmds.addAttr(root, longName=SC_ATTR, dataType="string")
+        cmds.addAttr(root, longName=SC_STAMP, dataType="string")
+        _sc_set(root, data)
+        for attr in ("translate", "rotate", "scale"):  # parts are built in world space
+            for ax in "XYZ":
+                cmds.setAttr(root + "." + attr + ax, lock=True)
+        box = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
+                                      name="%s%04d_CTL" % (SC_STEM, num))[0])
+        box = long_name(cmds.parent(box, root)[0])
+        shape = _log_shape(box)
+        cmds.addAttr(box, longName=SC_BOX_ATTR, attributeType="bool", defaultValue=True)
+        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                     "visibleInRefractions"):
+            if cmds.attributeQuery(attr, node=shape, exists=True):
+                cmds.setAttr(shape + "." + attr, False)
+        cmds.setAttr(box + ".overrideEnabled", True)
+        cmds.setAttr(box + ".overrideShading", False)  # wireframe: click its edges to pick the group
+        if select:
+            cmds.select(root, replace=True)
+    return sc_regrow(root)
+
+
+def _sc_change(root, label, fn):
+    """A structural change to a group's JSON (one Ctrl+Z; fn(data) edits it,
+    may return parts to delete), then the regrow."""
+    data = sc_data(root)
+    gone = fn(data) or []
+    with UndoChunk(label):
+        _sc_set(root, data)
+        for node in gone:
+            if cmds.objExists(node):
+                cmds.delete(node)
+    return sc_regrow(root)
+
+
+def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None):
+    """Add a layer (one Ctrl+Z): a type's defaults (or settings), or a copy
+    of another layer (copy_of: its id; a new seed). Returns (report, id)."""
+    made = []
+
+    def edit(data):
+        src = sc_layer(data, copy_of) if copy_of else None
+        if src is not None:
+            layer = _sc_new_layer(data, src["type"], dict(src.get("s") or {}),
+                                  name=src.get("name", src["type"]) + " copy")
+            layer["s"]["seed"] = int(layer["s"].get("seed", 1)) + 1
+            layer["seeds"], layer["faces"] = list(src.get("seeds") or []), dict(src.get("faces") or {})
+        else:
+            layer = _sc_new_layer(data, layer_type, settings)
+            if points:
+                layer["seeds"] = _mi_store_seeds(list(points)[:MI_MAX_SEEDS], sc_surfaces(data))
+            if faces and layer["type"] != "Ivy":
+                layer["faces"] = _mi_store_faces(faces)
+        data["layers"].append(layer)
+        made.append(layer["id"])
+    rep = _sc_change(root, "Add scatter layer", edit)
+    return rep, made[0]
+
+
+def sc_remove_layer(root, lid):
+    """Remove a layer and its parts (one Ctrl+Z)."""
+    def edit(data):
+        data["layers"] = [l for l in data["layers"] if l.get("id") != lid]
+        return [n for k, n in sc_parts(root).items() if k.split("/")[0] == lid]
+    return _sc_change(root, "Remove scatter layer", edit)
+
+
+def sc_set_layer(root, lid, on=None, name=None, area=None):
+    """Turn a layer on / off, rename it, or set its area (points, faces) (one Ctrl+Z)."""
+    def edit(data):
+        layer = sc_layer(data, lid)
+        if layer is None:
+            return
+        if on is not None:
+            layer["on"] = bool(on)
+        if name:
+            layer["name"] = name
+        if area is not None:
+            points, faces = area
+            meshes = sc_surfaces(data)
+            layer["seeds"] = _mi_store_seeds(list(points or [])[:MI_MAX_SEEDS], meshes)
+            layer["faces"] = _mi_store_faces(faces) if layer["type"] != "Ivy" else {}
+    return _sc_change(root, "Scatter layer", edit)
+
+
+def sc_move_layer(root, lid, step):
+    """Move a layer up (-1) or down (+1) the list (UDIM order) (one Ctrl+Z)."""
+    def edit(data):
+        ls = data["layers"]
+        i = next((k for k, l in enumerate(ls) if l.get("id") == lid), None)
+        if i is not None and 0 <= i + step < len(ls):
+            ls[i], ls[i + step] = ls[i + step], ls[i]
+    return _sc_change(root, "Move scatter layer", edit)
+
+
+def sc_set_surfaces(root, add=(), remove=()):
+    """Add / remove meshes or groups it scatters onto (one Ctrl+Z)."""
+    def edit(data):
+        cur = list(data.get("surfaces") or [])
+        for n in add or ():
+            if n and cmds.objExists(n) and not sc_owner(n)[0] and not _mi_part_of(n):
+                uid = cmds.ls(n, uuid=True)[0]
+                if uid not in cur:
+                    cur.append(uid)
+        drop = set(cmds.ls(n, uuid=True)[0] for n in remove or () if n and cmds.objExists(n))
+        data["surfaces"] = [u for u in cur if u not in drop]
+    return _sc_change(root, "Scatter surfaces", edit)
+
+
+def sc_update(root, lid=None, change=None, group_change=None):
+    """Live edit (out of the undo queue, like the other tools' sliders): a
+    layer's settings (change) or the group's (group_change: udim), then the
+    regrow of that layer. Returns the report."""
+    data = sc_data(root)
+    if lid and change:
+        layer = sc_layer(data, lid)
+        if layer is not None:
+            layer.setdefault("s", {}).update(change)
+    if group_change:
+        data.update(group_change)
+    with NoUndo():
+        _sc_set(root, data)
+    return sc_regrow(root)
+
+
+def sc_surface_names(data):
+    """[(uuid, long name or None, "mesh" / "group")] of a group's surfaces."""
+    out = []
+    for uid in data.get("surfaces") or []:
+        found = cmds.ls(uid, long=True) or []
+        node = found[0] if found else None
+        out.append((uid, node, "mesh" if node and _log_shape(node) else "group"))
+    return out
+
+
+def bake_scatter(roots):
+    """Plain meshes (one Ctrl+Z): empty parts and the box go, the settings
+    move to a hidden attribute. Returns the groups baked."""
+    done = []
+    with UndoChunk("Scatter bake"):
+        for root in roots:
+            if not is_scatter(root):
+                continue
+            for node in sc_parts(root).values():
+                if not cmds.getAttr(node + ".visibility"):
+                    cmds.delete(node)
+            box = sc_box(root)
+            if box:
+                cmds.delete(box)
+            if cmds.attributeQuery(SC_BAKED, node=root, exists=True):
+                cmds.deleteAttr(root + "." + SC_BAKED)
+            cmds.renameAttr(root + "." + SC_ATTR, SC_BAKED)
+            done.append(root)
+    return done
+
+
+def sc_selection():
+    """{"root", "layer", "surfaces", "points", "faces"} from the selection:
+    the scatter group (and layer, from a part) picked, meshes and groups
+    that could be scattered onto, picked points and faces."""
+    out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}}
+    for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        root, lid = sc_owner(node)
+        if root:
+            if out["root"] is None:
+                out["root"], out["layer"] = root, lid
+            continue
+        if cmds.objectType(node, isAType="shape"):
+            node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
+        if _mi_part_of(node) or not cmds.objectType(node, isAType="transform"):
+            continue
+        if node not in out["surfaces"]:
+            out["surfaces"].append(node)
+    out["points"], out["faces"] = mi_moss_picks()
+    return out
+
+
+SC_PRESETS = {
+    "Moss": MI_PRESETS["Moss"],
+    "Ivy": MI_PRESETS["Ivy"],
+    "Grass": collections.OrderedDict([
+        ("Dry grass", {}),
+        ("Grass mat", {"coverage": 0.9, "grass": 6.0, "bunch_size": 0.5, "grass_length": 0.35, "fullness": 1.4,
+                       "comb": 0.3, "droop": 1.0, "patchiness": 0.3}),
+        ("Sparse tufts", {"coverage": 0.6, "grass": 0.6, "bunch_size": 0.2, "fullness": 0.7})]),
+    "Leaves": collections.OrderedDict([
+        ("Dead leaves", {}),
+        ("Autumn carpet", {"coverage": 0.7, "leaves": 30.0, "curl": 0.8}),
+        ("A few strays", {"coverage": 0.6, "leaves": 2.0})]),
+    "Leaf piles": collections.OrderedDict([
+        ("Leaf piles", {}),
+        ("Gutters and wall bases", {"coverage": 0.3, "piles": 2.0, "pile_size": 0.3, "creases": 1.3,
+                                    "patchiness": 0.4}),
+        ("Big heaps", {"piles": 0.4, "pile_size": 0.8})]),
+    "Moss tufts": collections.OrderedDict([
+        ("Moss tufts", {}),
+        ("Crevice tufts", {"tufts": 25.0, "tuft_size": 0.03, "crevices": 1.0, "patchiness": 0.8})])}
+
+
+def sc_user_presets(typ):
+    var = "unlokScatter%sPresets" % sc_type(typ).replace(" ", "")
+    if not cmds.optionVar(exists=var):
+        return {}
+    try:
+        data = json.loads(cmds.optionVar(q=var) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def sc_save_preset(typ, name, settings):
+    """Keep a layer preset in Maya's prefs (an optionVar: no files)."""
+    typ = sc_type(typ)
+    data = sc_user_presets(typ)
+    data[name] = {k: v for k, v in settings.items() if k in sc_defaults(typ) and k not in MI_PRESET_SKIP}
+    cmds.optionVar(stringValue=("unlokScatter%sPresets" % typ.replace(" ", ""), json.dumps(data, sort_keys=True)))
+
+
+def sc_delete_preset(typ, name):
+    typ = sc_type(typ)
+    data = sc_user_presets(typ)
+    if data.pop(name, None) is None:
+        return False
+    cmds.optionVar(stringValue=("unlokScatter%sPresets" % typ.replace(" ", ""), json.dumps(data, sort_keys=True)))
+    return True
+
+
+def sc_preset(typ, name):
+    """A layer type's full settings for a preset (built in or the user's), or None."""
+    typ = sc_type(typ)
+    over = SC_PRESETS[typ].get(name)
+    if over is None:
+        over = sc_user_presets(typ).get(name)
+    if over is None:
+        return None
+    s = sc_defaults(typ)
+    s.update({k: v for k, v in over.items() if k in s})
+    return s
 
 
 # =============================================================================
-# Moss and Ivy - panel
+# Moss and Ivy - scatter panel
 # =============================================================================
 
-class MossIvyPanel(QtWidgets.QWidget):
-    TOOL_NAME = "Moss and Ivy"
-    TOOL_TIP = "Grow jungle moss on roofs, ledges and in crevices, ivy up posts and walls, and debris: dry " \
-               "grass, dead leaves, leaf piles, moss tufts."
+def _scf(lo, hi, slo, shi, dec, step):
+    return lambda: FloatField(lo, hi, slo, shi, decimals=dec, step=step)
+
+
+_SC_COVER_TIP = "How much of the surface gets it: low = only the best spots (sheltered corners, crevices, creases), " \
+                "high = most surfaces it may grow on. With a picked area: how full it is round the picks."
+# key -> (label, widget factory, tip); (type, key) overrides it for one type
+SC_FIELDS = {
+    "coverage": ("Coverage", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_COVER_TIP),
+    "spread": ("Spread", _scf(0.01, 20.0, 0.05, 1.5, 2, 0.05),
+               "With picked points: how far it reaches from each point, in metres."),
+    "slope": ("Slope limit", _scf(0.0, 90.0, 0.0, 90.0, 1, 1.0),
+              "Steepest slope (degrees) it sits on; it fades out over the next 15 degrees. Leaves and grass never "
+              "go past it (nothing on walls with a low limit); moss still creeps up sheltered walls."),
+    "crevices": ("Crevices", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                 "How strongly it gathers in sheltered corners, gaps and crevices."),
+    "creases": ("Creases", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05),
+                "How strongly it collects where things wash down and get caught: gutters, corners, the foot of "
+                "walls and frames, the bottom of slopes. Piles stretch out along them, leaves and grass lie "
+                "along them."),
+    "edges": ("Avoid edges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+              "Keeps it off exposed spots: ridges, convex edges, thin rails."),
+    "patchiness": ("Patchiness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "Breaks it into patches (0 = even)."),
+    "patch_size": ("Patch size", _scf(0.02, 50.0, 0.1, 4.0, 2, 0.05), "How big the patches are, in metres."),
+    "mess": ("Messiness", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "Ragged patch edges (and more tangled grass)."),
+    "size_var": ("Size variation", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "How much the pieces differ in size."),
+    "stacks": ("Stacks", lambda: IntField(1, 16, 1, 8),
+               "With 2+ stacks each piece picks one at random: one texture per stack."),
+    "stack_layout": ("Layout", lambda: SegmentField(MI_STACK_LAYOUTS),
+                     "UDIM tiles: stack 1 in the first tile, stack 2 in the next...\nAtlas columns: the stacks share "
+                     "0..1, side by side."),
+    "detail": ("Detail", lambda: SegmentField(MI_DETAILS),
+               "Proxy: layout. Normal: mid shots. High: close-ups. Hero: extreme close-ups (keep it small)."),
+    # moss
+    "clump_size": ("Clump size", _scf(0.005, 3.0, 0.02, 0.4, 3, 0.01),
+                   "Size of the moss's cushions and how fine its patches' edges are, in metres."),
+    "thickness": ("Thickness", _scf(0.0, 0.5, 0.0, 0.12, 3, 0.005),
+                  "How thick the moss is, in metres (thicker inside a patch and in sheltered spots)."),
+    "lumps": ("Lumps", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "Packed cushions with creases between them (0 = smooth)."),
+    "strands": ("Shoots", _scf(0.0, 3.0, 0.0, 2.0, 2, 0.05),
+                "How many shoots stand out of the moss and how many strands hang. 0 = the moss bed only."),
+    "capsules": ("Capsules", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                 "Sporophytes: thin stalks with nodding capsules, in clusters (Normal and up)."),
+    "strand_length": ("Shoot length", _scf(0.002, 0.5, 0.005, 0.15, 3, 0.005), "How tall a shoot stands, in metres."),
+    ("Moss", "droop"): ("Hanging", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05),
+                        "Strands hanging where the moss faces sideways or down (over edges, down walls)."),
+    "uv_tile": ("Tile size", _scf(0.05, 20.0, 0.1, 2.0, 2, 0.05),
+                "How many metres of moss one UV tile holds (use a tiling moss texture)."),
+    # grass
+    "grass": ("Bunches", _scf(0.0, 50.0, 0.0, 10.0, 2, 0.1), "Bunches of dry grass per square metre where it gathers."),
+    "bunch_size": ("Bunch size", _scf(0.02, 5.0, 0.05, 1.0, 2, 0.01), "How wide a bunch is, in metres."),
+    "grass_length": ("Grass length", _scf(0.01, 2.0, 0.05, 0.6, 3, 0.01),
+                     "How long the blades are, in metres (they hang over edges)."),
+    "fullness": ("Fullness", _scf(0.1, 4.0, 0.2, 3.0, 2, 0.05), "How many blades a bunch has, and how high they pile."),
+    "comb": ("Combed", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+             "How much a bunch's blades lie one way (along a crease, else downhill; 0 = a tangle)."),
+    "droop": ("Droop", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "How steeply blades hang once they're over an edge."),
+    "blade_width": ("Blade width", _scf(0.0005, 0.05, 0.001, 0.02, 4, 0.0005), "Grass blade width, in metres."),
+    # leaves, piles, tufts
+    "leaves": ("Leaves", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Dead leaves per square metre where it gathers."),
+    "piles": ("Piles", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
+              "Leaf piles per square metre (drifts along gutters and wall feet, round heaps in the open)."),
+    "pile_size": ("Pile size", _scf(0.02, 5.0, 0.05, 1.0, 2, 0.01), "How wide a pile is, in metres."),
+    "leaf_size": ("Leaf size", _scf(0.005, 1.0, 0.02, 0.2, 3, 0.005), "Leaf length, in metres."),
+    "curl": ("Leaf curl", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05),
+             "How dried the leaves are: edges curled up, ends lifted, folded, crumpled."),
+    "tufts": ("Tufts", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Tiny moss cushions per square metre."),
+    "tuft_size": ("Tuft size", _scf(0.005, 0.5, 0.01, 0.1, 3, 0.005), "How wide a moss tuft is, in metres."),
+    # ivy
+    "vines": ("Vines", lambda: IntField(1, 64, 1, 20),
+              "How many vines: automatic seeds at the bottom of the meshes, or shared between the picked points."),
+    "length": ("Length", _scf(0.05, 40.0, 0.2, 8.0, 2, 0.1), "How far each vine grows, in metres."),
+    "climb": ("Climb", _scf(0.0, 2.0, 0.0, 1.5, 2, 0.05), "How strongly vines grow upwards."),
+    "wander": ("Wander", _scf(0.0, 2.0, 0.0, 1.5, 2, 0.05), "How much the vines meander."),
+    "branching": ("Branching", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "How often vines branch."),
+    ("Ivy", "leaf_size"): ("Leaf size", _scf(0.005, 1.0, 0.02, 0.25, 3, 0.005),
+                           "Leaf length in metres (smaller towards the tips)."),
+    "leaf_density": ("Leaves", _scf(0.0, 3.0, 0.0, 2.0, 2, 0.05), "How many leaves along the stems."),
+    "gravity": ("Gravity", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "Chance that a vine going over an edge lets go and hangs."),
+    "stem_width": ("Stem width", _scf(0.001, 0.3, 0.002, 0.05, 3, 0.001), "Stem diameter at the base, in metres."),
+    "leaf_var": ("Leaf variation", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "How much leaves differ in size."),
+    "stem_tiles": ("Stem tiles", lambda: IntField(1, 16, 1, 8), "UDIM tiles the stems are laid out in."),
+}
+_SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
+SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
+    "Moss": [("", True, ["coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands", "capsules"]),
+             ("Where it grows", True, _SC_WHERE),
+             ("More", False, ["size_var", "strand_length", "droop", "detail"]),
+             ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
+    "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness"]),
+              ("Where it gathers", True, _SC_WHERE + ["mess"]),
+              ("More", False, ["comb", "droop", "blade_width", "size_var", "detail"]),
+              ("UVs", False, ["stacks", "stack_layout"])],
+    "Leaves": [("", True, ["coverage", "spread", "leaves", "leaf_size", "curl"]),
+               ("Where it gathers", True, _SC_WHERE + ["mess"]),
+               ("More", False, ["size_var", "detail"]),
+               ("UVs", False, ["stacks", "stack_layout"])],
+    "Leaf piles": [("", True, ["coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
+                   ("Where it gathers", True, _SC_WHERE + ["mess"]),
+                   ("More", False, ["size_var", "detail"]),
+                   ("UVs", False, ["stacks", "stack_layout"])],
+    "Moss tufts": [("", True, ["coverage", "spread", "tufts", "tuft_size"]),
+                   ("Where it gathers", True, _SC_WHERE + ["mess"]),
+                   ("More", False, ["size_var", "detail"]),
+                   ("UVs", False, ["stacks", "stack_layout"])],
+    "Ivy": [("", True, ["vines", "length", "climb", "wander", "branching", "leaf_size", "leaf_density"]),
+            ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
+            ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
+
+
+class ScatterPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Scatter"
+    TOOL_TIP = "Scatter groups: moss, dry grass, dead leaves, leaf piles, moss tufts and ivy on your meshes, in " \
+               "layers you control one by one."
 
     def __init__(self, parent=None):
-        super(MossIvyPanel, self).__init__(parent)
+        super(ScatterPanel, self).__init__(parent)
         self._jobs = []
         self._pending = set()
-        self._kind = "Moss"
-        self._mode = "new"  # new (fields are for the next Grow) / edit (selected groups follow the fields)
+        self._root = None   # the group being edited (stays while you select meshes to add)
+        self._lid = None    # the layer being edited
+        self._filling = False
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
@@ -30140,16 +31239,15 @@ class MossIvyPanel(QtWidgets.QWidget):
         self._edit_timer.setSingleShot(True)
         self._edit_timer.setInterval(60)
         self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
-        self._redo_timer = QtCore.QTimer(self)
-        self._redo_timer.setSingleShot(True)
-        self._redo_timer.setInterval(50)
-        self._redo_timer.timeout.connect(_guarded(self._redo_timer, self._rebuild_stale))
+        self._undo_timer = QtCore.QTimer(self)
+        self._undo_timer.setSingleShot(True)
+        self._undo_timer.setInterval(50)
+        self._undo_timer.timeout.connect(_guarded(self._undo_timer, self._after_undo))
         self._build()
         self._install_jobs()
-        self._rebuild_stale()
 
     def showEvent(self, event):
-        super(MossIvyPanel, self).showEvent(event)
+        super(ScatterPanel, self).showEvent(event)
         self._sel_timer.start()
 
     # ============================================================== layout
@@ -30161,37 +31259,93 @@ class MossIvyPanel(QtWidgets.QWidget):
         tl = QtWidgets.QVBoxLayout(top)
         tl.setContentsMargins(6, 0, 6, 0)
         tl.setSpacing(6)
-        tl.addWidget(ToolHeader("Moss and Ivy", "Jungle moss that gathers where it would really grow (up-facing, "
-                                                "sheltered corners and crevices, off exposed edges), ivy that "
-                                                "climbs posts and walls, and debris (dry grass, dead leaves, leaf "
-                                                "piles, moss tufts). Grown on your meshes; no plugin, no nodes."))
+        tl.addWidget(ToolHeader("Scatter", "A scatter group holds what it grows on (meshes or whole groups) and "
+                                           "layers: moss, dry grass, dead leaves, leaf piles, moss tufts, ivy, "
+                                           "each with its own settings, on or off. Click the group's box in the "
+                                           "viewport to edit it."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
         outer.addWidget(top)
         scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
-        self.f = {"Moss": {}, "Ivy": {}, "Debris": {}}
 
-        # ---- 1. select
-        card = self.step_select = StepCard(1, "Select surfaces", "Select the meshes to grow on together (a roof "
-                                                                 "and the wall under it, a post and the floor). "
-                                                                 "To say where moss or debris goes, pick faces (it "
-                                                                 "stays on them) or vertices (a clump round each); "
-                                                                 "for ivy, vertices or faces where vines start. "
-                                                                 "Select moss, ivy or debris to edit it.")
-        self.sel_label = hint_label("")
-        card.add(self.sel_label)
+        # ---- 1. group
+        card = self.step_group = StepCard(1, "Scatter group", "Select meshes or groups (a whole shack group "
+                                                              "works: meshes added to it later are used too) and "
+                                                              "press New. Pick faces or vertices to say where the "
+                                                              "first layer goes.")
+        row = QtWidgets.QWidget()
+        rl = QtWidgets.QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+        lbl = QtWidgets.QLabel("Start with")
+        lbl.setMinimumWidth(92)
+        self.start_type = _Combo()
+        _guard_focus(self.start_type)
+        self.start_type.addItems(list(SC_TYPES))
+        self.start_type.setToolTip("The first layer of a new group (add more in step 2).")
+        self.start_type.activated.connect(lambda *_: self._show_layer())
+        rl.addWidget(lbl)
+        rl.addWidget(self.start_type, 1)
+        card.add(row)
+        self.new_btn = primary_button("New Scatter Group from Selected")
+        self.new_btn.setMinimumHeight(28)
+        self.new_btn.clicked.connect(lambda *_: self.new_group())
+        card.add(self.new_btn)
+        self.group_label = hint_label("")
+        card.add(self.group_label)
+        self.surf_list = QtWidgets.QListWidget()
+        self.surf_list.setMaximumHeight(96)
+        self.surf_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.surf_list.setToolTip("What the group grows on. A group (G) is read fresh at every regrow.")
+        card.add(self.surf_list)
+        add_s = secondary_button("Add Selected", "Add the selected meshes / groups to the group being edited.")
+        add_s.clicked.connect(lambda *_: self.add_surfaces())
+        rem_s = secondary_button("Remove", "Remove the surfaces picked in the list (or the selected meshes).")
+        rem_s.clicked.connect(lambda *_: self.remove_surfaces())
+        card.add(button_row(add_s, rem_s))
         col.addWidget(card)
 
-        # ---- 2. grow
-        card = self.step_grow = StepCard(2, "Grow", "One Ctrl+Z undoes it. The new moss or ivy is selected, so "
-                                                    "step 3 edits it straight away.")
-        self.kind = SegmentField(MI_KINDS)
-        self.kind.setToolTip("Moss: a moss bed on up-facing, sheltered spots.\nIvy: vines with leaves that climb."
-                             "\nDebris: bunches of dry grass, dead leaves (scattered and in small piles) and tiny "
-                             "moss tufts.")
-        self.kind.changed.connect(lambda: self._kind_changed())
-        card.add(self.kind)
+        # ---- 2. layers
+        card = self.step_layers = StepCard(2, "Layers", "Tick to turn a layer on or off, double-click to rename. "
+                                                        "Click a layer (or its mesh in the viewport) to edit it.")
+        self.layer_list = QtWidgets.QListWidget()
+        self.layer_list.setMaximumHeight(130)
+        self.layer_list.itemChanged.connect(lambda item: self._layer_item_changed(item))
+        self.layer_list.currentItemChanged.connect(lambda *_: self._layer_picked())
+        card.add(self.layer_list)
+        row = QtWidgets.QWidget()
+        rl = QtWidgets.QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+        self.add_type = _Combo()
+        _guard_focus(self.add_type)
+        self.add_type.addItems(list(SC_TYPES))
+        add_l = secondary_button("Add Layer", "Add a layer of this type to the group (from picked faces / vertices: "
+                                              "there only).")
+        add_l.clicked.connect(lambda *_: self.add_layer())
+        rl.addWidget(self.add_type, 1)
+        rl.addWidget(add_l)
+        card.add(row)
+        dup = secondary_button("Duplicate", "Copy the layer (a new seed): e.g. a second, sparser moss.")
+        dup.clicked.connect(lambda *_: self.duplicate_layer())
+        dele = secondary_button("Delete", "Remove the layer and its meshes (one Ctrl+Z).")
+        dele.clicked.connect(lambda *_: self.delete_layer())
+        up = secondary_button("Up", "Move the layer up the list (its UDIM tiles come earlier).")
+        up.clicked.connect(lambda *_: self.move_layer(-1))
+        down = secondary_button("Down", "Move the layer down the list.")
+        down.clicked.connect(lambda *_: self.move_layer(1))
+        card.add(button_row(dup, dele, up, down))
+        pick = secondary_button("Use Picked Area", "The layer grows only on the picked faces, or round the picked "
+                                                   "vertices (ivy: vines start there).")
+        pick.clicked.connect(lambda *_: self.set_area())
+        clear = secondary_button("Clear Area", "The layer grows everywhere it likes again.")
+        clear.clicked.connect(lambda *_: self.set_area(clear=True))
+        card.add(button_row(pick, clear))
+        col.addWidget(card)
+
+        # ---- 3. layer settings
+        card = self.step_look = StepCard(3, "Layer settings", "Every change shows straight away on the layer.")
         prow = QtWidgets.QWidget()
         pl = QtWidgets.QHBoxLayout(prow)
         pl.setContentsMargins(0, 0, 0, 0)
@@ -30200,9 +31354,9 @@ class MossIvyPanel(QtWidgets.QWidget):
         plabel.setMinimumWidth(92)
         self.preset_combo = _Combo()
         _guard_focus(self.preset_combo)
-        self.preset_combo.setToolTip("Pick a preset to load it (onto the selected moss / ivy, or for the next Grow).")
+        self.preset_combo.setToolTip("Pick a preset to load it onto the layer (or for a new group's first layer).")
         self.preset_combo.activated.connect(lambda *_: self.load_preset())
-        save = secondary_button("Save...", "Keep the current settings as a preset of your own (kept in Maya's "
+        save = secondary_button("Save...", "Keep the layer's settings as a preset of your own (in Maya's "
                                            "preferences, for every scene).")
         save.clicked.connect(lambda *_: self.save_preset())
         delete = secondary_button("Delete", "Remove the chosen preset (your own presets only).")
@@ -30212,34 +31366,33 @@ class MossIvyPanel(QtWidgets.QWidget):
         pl.addWidget(save)
         pl.addWidget(delete)
         card.add(prow)
-        self.grow_btn = primary_button("Grow Moss on Selected")
-        self.grow_btn.setMinimumHeight(28)
-        self.grow_btn.clicked.connect(lambda *_: self.grow())
-        card.add(self.grow_btn)
-        col.addWidget(card)
-
-        # ---- 3. look
-        card = self.step_look = StepCard(3, "Look", "Every change shows straight away on the selected moss or ivy.")
-        self.box = {"Moss": self._moss_box(), "Ivy": self._ivy_box(), "Debris": self._debris_box()}
-        for kind, box in self.box.items():
-            card.add(box)
-            for key, widget in self.f[kind].items():
-                widget.setValue(MI_DEFAULTS[kind][key])
-                widget.changed.connect(lambda k=key, kd=kind: self._queue(kd, k))
+        self.f = {}
+        self.box = {}
+        for typ in SC_TYPES:
+            self.box[typ] = self._type_box(typ)
+            card.add(self.box[typ])
+            for key, widget in self.f[typ].items():
+                widget.setValue(sc_defaults(typ)[key])
+                widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
         col.addWidget(card)
 
         # ---- 4. finish
-        card = self.step_finish = StepCard(4, "Finish", "Regrow after moving or editing the meshes (each keeps its "
-                                                        "own settings). Bake keeps the meshes and forgets the "
-                                                        "settings.")
-        pick = secondary_button("Select All", "Select every moss patch (or ivy) in the scene.")
-        pick.clicked.connect(lambda *_: self.select_all())
-        regrow = secondary_button("Regrow", "Grow the selected moss / ivy (or all of it) again on its meshes as they "
-                                            "are now.")
+        card = self.step_finish = StepCard(4, "Finish", "Regrow after editing the meshes. Bake keeps the meshes "
+                                                        "and forgets the settings (and drops the box).")
+        urow = Section("", header=False)
+        self.udim = IntField(1001, 1999, 1001, 1100)
+        self.udim.setValue(1001)
+        self.udim.changed.connect(lambda: self._udim_changed())
+        urow.add_row("Start UDIM", self.udim, "The group's first UDIM tile: every layer's parts take their own "
+                                              "tiles from here, in layer order (no two share UV space).")
+        card.add(urow)
+        sel_all = secondary_button("Select All", "Select every scatter group in the scene.")
+        sel_all.clicked.connect(lambda *_: self.select_all())
+        regrow = secondary_button("Regrow", "Grow the group (or all of them) again on its meshes as they are now.")
         regrow.clicked.connect(lambda *_: self.regrow())
-        bake = secondary_button("Bake", "Turn the selected moss / ivy (or all of it) into plain meshes (one Ctrl+Z).")
+        bake = secondary_button("Bake", "Turn the group (or all of them) into plain meshes (one Ctrl+Z).")
         bake.clicked.connect(lambda *_: self.bake())
-        card.add(button_row(pick, regrow, bake))
+        card.add(button_row(sel_all, regrow, bake))
         col.addWidget(card)
         col.addStretch(1)
 
@@ -30247,329 +31400,190 @@ class MossIvyPanel(QtWidgets.QWidget):
         self.status.setWordWrap(True)
         self.status.setContentsMargins(8, 0, 8, 6)
         outer.addWidget(self.status)
-        self._kind_changed()
+        self._refresh()
 
-    def _row(self, kind, sec, key, label, widget, tip):
-        self.f[kind][key] = widget
-        sec.add_row(label, widget, tip)
-        return widget
-
-    def _seed_row(self, kind):
+    def _type_box(self, typ):
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self.f[typ] = {}
+        for title, expanded, keys in SC_LAYOUT[typ]:
+            sec = Section(title, expanded=expanded, header=bool(title))
+            for key in keys:
+                label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
+                widget = make()
+                self.f[typ][key] = widget
+                sec.add_row(label, widget, tip)
+            lay.addWidget(sec)
         w = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(w)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(6)
         lbl = QtWidgets.QLabel("Seed")
         lbl.setMinimumWidth(92)
-        self.f[kind]["seed"] = IntField(1, 99999, 1, 9999)
-        self.f[kind]["seed"].setToolTip("The random seed: another one grows a different patch with the same look.")
-        rand = secondary_button("Randomize", "A new seed (each selected moss / ivy gets its own).")
+        self.f[typ]["seed"] = IntField(1, 99999, 1, 9999)
+        self.f[typ]["seed"].setToolTip("The random seed: another one grows a different layout with the same look.")
+        rand = secondary_button("Randomize", "A new seed for the layer.")
         rand.clicked.connect(lambda *_: self.randomize())
         sl.addWidget(lbl)
-        sl.addWidget(self.f[kind]["seed"], 1)
+        sl.addWidget(self.f[typ]["seed"], 1)
         sl.addWidget(rand)
-        return w
-
-    def _moss_box(self):
-        box = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        k = "Moss"
-        main = Section("", header=False)
-        self._row(k, main, "coverage", "Coverage", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much of the surface gets moss: low = only the best spots (sheltered corners, crevices), "
-                  "high = most up-facing surfaces. With picked vertices: how full each clump is.")
-        self._row(k, main, "spread", "Spread", FloatField(0.01, 20.0, 0.05, 1.5, decimals=2, step=0.05),
-                  "With picked vertices: how far each clump reaches from its point, in metres (further into "
-                  "sheltered corners and cracks).")
-        self._row(k, main, "clump_size", "Clump size", FloatField(0.005, 3.0, 0.02, 0.4, decimals=3, step=0.01),
-                  "Size of the moss's cushions and how fine its patches' edges are, in metres.")
-        self._row(k, main, "thickness", "Thickness", FloatField(0.0, 0.5, 0.0, 0.12, decimals=3, step=0.005),
-                  "How thick the moss is, in metres (thicker inside a patch and in sheltered spots, never into "
-                  "geometry above).")
-        self._row(k, main, "lumps", "Lumps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Packed cushions with creases between them (0 = a smooth carpet).")
-        self._row(k, main, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "Ragged patch edges and wilder shoots.")
-        self._row(k, main, "strands", "Shoots", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How many shoots stand out of the moss (tufts at Normal, shoots with leaves at High / Hero) "
-                  "and how many strands hang. 0 = the moss bed only.")
-        self._row(k, main, "capsules", "Capsules", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Sporophytes: thin stalks with nodding capsules, in clusters (Normal and up).")
-        lay.addWidget(main)
-        where = Section("Where it grows", expanded=True)
-        self._row(k, where, "slope", "Slope limit", FloatField(0.0, 90.0, 0.0, 90.0, decimals=1, step=1.0),
-                  "Steepest slope (degrees) moss grows on in the open; it fades out over the next 15 degrees. "
-                  "Sheltered spots on walls still get some (Crevices).")
-        self._row(k, where, "crevices", "Crevices", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How strongly moss gathers in corners, crevices and gaps (also up walls there).")
-        self._row(k, where, "edges", "Avoid edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Keeps moss off exposed spots: ridges, convex edges, thin rails.")
-        self._row(k, where, "patchiness", "Patchiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Breaks the cover into patches (0 = even).")
-        self._row(k, where, "patch_size", "Patch size", FloatField(0.02, 50.0, 0.1, 4.0, decimals=2, step=0.05),
-                  "How big the patches are, in metres.")
-        lay.addWidget(where)
-        more = Section("More", expanded=False)
-        self._row(k, more, "size_var", "Size variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much the thickness varies across a patch.")
-        self._row(k, more, "strand_length", "Shoot length",
-                  FloatField(0.002, 0.5, 0.005, 0.15, decimals=3, step=0.005),
-                  "How tall a shoot stands, in metres (capsule stalks are 1.6 - 3.2 x, hanging strands longer).")
-        self._row(k, more, "droop", "Hanging", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "Strands hanging where the moss faces sideways or down (over edges, down walls), and how "
-                  "long; shoots lean down there too.")
-        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
-                  "Proxy: the moss bed only, coarse (layout).\n"
-                  "Normal: a finer, lumpy bed with little tufts, capsules and hanging strands (looks right "
-                  "from a mid shot out).\n"
-                  "High: a finer bed, shoots with a star of leaves (close-ups).\n"
-                  "Hero: the finest bed, leafy shoots with two whorls, rounder capsules (extreme close-ups: "
-                  "keep the patch small).")
-        lay.addWidget(more)
-        lay.addWidget(self._uv_section(k, "Tile size", "uv_tile", FloatField(0.05, 20.0, 0.1, 2.0, decimals=2,
-                                                                                step=0.05),
-                                       "How many metres of moss one UV tile holds (both ways). The bed is laid out "
-                                       "flat on each face at this scale, cut at tile lines and stacked into 0..1: "
-                                       "use a tiling moss texture (and displacement)."))
-        lay.addWidget(self._seed_row(k))
+        lay.addWidget(w)
         return box
-
-    def _ivy_box(self):
-        box = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        k = "Ivy"
-        main = Section("", header=False)
-        self._row(k, main, "vines", "Vines", IntField(1, 64, 1, 20),
-                  "How many vines: automatic seeds at the bottom of the meshes, or shared between the picked seeds.")
-        self._row(k, main, "length", "Length", FloatField(0.05, 40.0, 0.2, 8.0, decimals=2, step=0.1),
-                  "How far each vine grows, in metres.")
-        self._row(k, main, "climb", "Climb", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
-                  "How strongly vines grow upwards (0 = they wander anywhere).")
-        self._row(k, main, "wander", "Wander", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
-                  "How much the vines meander.")
-        self._row(k, main, "branching", "Branching", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How often vines branch (two levels of thinner, shorter branches).")
-        self._row(k, main, "leaf_size", "Leaf size", FloatField(0.005, 1.0, 0.02, 0.25, decimals=3, step=0.005),
-                  "Leaf length in metres (smaller towards the tips).")
-        self._row(k, main, "leaf_density", "Leaves", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How many leaves along the stems (0 = bare stems).")
-        lay.addWidget(main)
-        more = Section("More", expanded=False)
-        self._row(k, more, "gravity", "Gravity", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Chance that a vine going over an edge (or under an overhang) lets go and hangs.")
-        self._row(k, more, "stem_width", "Stem width", FloatField(0.001, 0.3, 0.002, 0.05, decimals=3, step=0.001),
-                  "Stem diameter at the base, in metres (thinner along the vine and on branches).")
-        self._row(k, more, "leaf_var", "Leaf variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much leaves differ in size.")
-        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
-                  "Proxy: 3-sided stems, flat leaves. Normal / High / Hero: rounder stems, smoother, bent leaves.")
-        lay.addWidget(more)
-        lay.addWidget(self._uv_section(k, "Stem tiles", "stem_tiles", IntField(1, 16, 1, 8),
-                                       "UDIM tiles the stems are laid out in (neat columns at one density)."))
-        lay.addWidget(self._seed_row(k))
-        return box
-
-    def _debris_box(self):
-        box = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        k = "Debris"
-        main = Section("", header=False)
-        self._row(k, main, "coverage", "Coverage", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Where debris gathers: low = only the best spots (sheltered corners, crevices), high = most "
-                  "up-facing surfaces. With picked vertices: how full each clump is.")
-        self._row(k, main, "spread", "Spread", FloatField(0.01, 20.0, 0.05, 1.5, decimals=2, step=0.05),
-                  "With picked vertices: how far the debris round each point reaches, in metres.")
-        self._row(k, main, "grass", "Grass bunches", FloatField(0.0, 50.0, 0.0, 10.0, decimals=2, step=0.1),
-                  "Bunches of dry grass per square metre where debris gathers (0 = none).")
-        self._row(k, main, "bunch_size", "Bunch size", FloatField(0.02, 5.0, 0.05, 1.0, decimals=2, step=0.01),
-                  "How wide a bunch is, in metres.")
-        self._row(k, main, "grass_length", "Grass length", FloatField(0.01, 2.0, 0.05, 0.6, decimals=3,
-                                                                      step=0.01),
-                  "How long the blades are, in metres (they hang over edges).")
-        self._row(k, main, "fullness", "Fullness", FloatField(0.1, 4.0, 0.2, 3.0, decimals=2, step=0.05),
-                  "How many blades a bunch has, and how high they pile.")
-        self._row(k, main, "leaves", "Leaves", FloatField(0.0, 200.0, 0.0, 40.0, decimals=1, step=0.5),
-                  "Dead leaves scattered per square metre where debris gathers.")
-        self._row(k, main, "piles", "Leaf piles", FloatField(0.0, 20.0, 0.0, 3.0, decimals=2, step=0.05),
-                  "Small piles of leaves per square metre.")
-        self._row(k, main, "pile_size", "Pile size", FloatField(0.02, 5.0, 0.05, 1.0, decimals=2, step=0.01),
-                  "How wide a pile is, in metres.")
-        self._row(k, main, "leaf_size", "Leaf size", FloatField(0.005, 1.0, 0.02, 0.2, decimals=3, step=0.005),
-                  "Leaf length, in metres.")
-        self._row(k, main, "tufts", "Moss tufts", FloatField(0.0, 200.0, 0.0, 40.0, decimals=1, step=0.5),
-                  "Tiny moss cushions per square metre.")
-        self._row(k, main, "tuft_size", "Tuft size", FloatField(0.005, 0.5, 0.01, 0.1, decimals=3, step=0.005),
-                  "How wide a moss tuft is, in metres.")
-        lay.addWidget(main)
-        where = Section("Where it gathers", expanded=False)
-        self._row(k, where, "slope", "Slope limit", FloatField(0.0, 90.0, 0.0, 90.0, decimals=1, step=1.0),
-                  "Steepest slope (degrees) debris stays on in the open (fading out over the next 15 degrees).")
-        self._row(k, where, "crevices", "Crevices", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How strongly it gathers in corners, gaps and against walls.")
-        self._row(k, where, "edges", "Avoid edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Keeps it off exposed spots: ridges, convex edges, thin rails.")
-        self._row(k, where, "patchiness", "Patchiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "Breaks it into patches (0 = even).")
-        self._row(k, where, "patch_size", "Patch size", FloatField(0.02, 50.0, 0.1, 4.0, decimals=2, step=0.05),
-                  "How big the patches are, in metres.")
-        self._row(k, where, "mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "Ragged patch edges and more tangled grass.")
-        lay.addWidget(where)
-        more = Section("More", expanded=False)
-        self._row(k, more, "comb", "Combed", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much a bunch's blades lie one way (0 = every which way, a tangle).")
-        self._row(k, more, "droop", "Droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How steeply blades hang once they're over an edge.")
-        self._row(k, more, "blade_width", "Blade width", FloatField(0.0005, 0.05, 0.001, 0.02, decimals=4,
-                                                                    step=0.0005),
-                  "Grass blade width, in metres (wider at Proxy / Normal, where there are fewer blades).")
-        self._row(k, more, "curl", "Leaf curl", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-                  "How dried the leaves are: edges curled up, ends lifted, folded, crumpled.")
-        self._row(k, more, "size_var", "Size variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-                  "How much bunches, piles, leaves and tufts differ in size.")
-        self._row(k, more, "detail", "Detail", SegmentField(MI_DETAILS),
-                  "Proxy: a few wide blades per bunch, flat diamond leaves, 6-sided tufts (layout).\n"
-                  "Normal: fuller bunches, leaves with their outline, curl and crumple (mid shots).\n"
-                  "High: more, finer blades, smoother leaves and tufts (close-ups).\n"
-                  "Hero: the most blades and segments, the finest leaves (extreme close-ups).")
-        lay.addWidget(more)
-        lay.addWidget(self._uv_section(k, None, None, None, None))
-        lay.addWidget(self._seed_row(k))
-        return box
-
-    def _uv_section(self, k, label, key, widget, tip):
-        sec = Section("UVs", expanded=False)
-        self._row(k, sec, "udim", "Start UDIM", IntField(1001, 1999, 1001, 1100),
-                  "The first UDIM tile. Each part takes its own tiles from here on, so no two parts share UV space "
-                  "(only stacked variations do).")
-        if key:
-            self._row(k, sec, key, label, widget, tip)
-        self._row(k, sec, "stacks", "Leaf stacks" if k == "Ivy" else "Stacks", IntField(1, 16, 1, 8),
-                  "With 2+ stacks each %s picks one at random: one texture per stack." %
-                  {"Moss": "clump and strand", "Ivy": "leaf"}.get(k, "blade, leaf and tuft"))
-        self._row(k, sec, "stack_layout", "Layout", SegmentField(MI_STACK_LAYOUTS),
-                  "UDIM tiles: stack 1 in the first tile, stack 2 in the next...\nAtlas columns: the stacks share "
-                  "0..1, side by side.")
-        return sec
 
     # ============================================================ state
     def set_status(self, text, level="info"):
         color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
         self.status.setText('<span style="color:%s">%s</span>' % (color, text))
 
-    def _settings(self, kind=None):
-        kind = kind or self._kind
-        return {k: w.value() for k, w in self.f[kind].items()}
+    def _alive(self):
+        if self._root and not is_scatter(self._root):
+            self._root, self._lid = None, None
+        return self._root
 
-    def _show(self, kind, settings):
-        for key, widget in self.f[kind].items():
-            widget.setValue(settings.get(key, MI_DEFAULTS[kind][key]))
+    def _data(self):
+        return sc_data(self._root) if self._alive() else None
 
-    def _fill_presets(self, current=None):
+    def _layer(self, data=None):
+        data = data or self._data()
+        return sc_layer(data, self._lid) if data and self._lid else None
+
+    def _type(self):
+        layer = self._layer()
+        return sc_type(layer["type"]) if layer else self.start_type.currentText()
+
+    def _settings(self, typ=None):
+        typ = typ or self._type()
+        return {k: w.value() for k, w in self.f[typ].items()}
+
+    def _show(self, typ, settings):
+        for key, widget in self.f[typ].items():
+            widget.setValue(settings.get(key, sc_defaults(typ).get(key)))
+
+    def _fill_presets(self):
+        typ = self._type()
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.preset_combo.addItems(list(MI_PRESETS[self._kind]))
-        user = sorted(mi_user_presets(self._kind))
+        self.preset_combo.addItems(list(SC_PRESETS[typ]))
+        user = sorted(sc_user_presets(typ))
         if user:
             self.preset_combo.insertSeparator(self.preset_combo.count())
             self.preset_combo.addItems(user)
-        if current:
-            i = self.preset_combo.findText(current)
-            if i >= 0:
-                self.preset_combo.setCurrentIndex(i)
         self.preset_combo.blockSignals(False)
 
-    def _kind_changed(self, kind=None):
-        kind = _mi_kind(kind or self.kind.value())
-        if kind != self.kind.value():
-            self.kind.setValue(kind)
-        self._kind = kind
-        for k, box in self.box.items():
-            box.setVisible(k == kind)
-        self.grow_btn.setText("Grow %s on Selected" % kind)
-        self.grow_btn.setToolTip("Grow %s on the selected meshes with the settings in step 3%s. One Ctrl+Z undoes "
-                                 "it." % (kind.lower(), " (from the picked vertices / faces, else automatic seeds "
-                                                         "at the bottom)" if kind == "Ivy" else ""))
+    def _show_layer(self):
+        typ = self._type()
+        for t, box in self.box.items():
+            box.setVisible(t == typ)
+        layer = self._layer()
+        if layer is not None:
+            self._show(typ, sc_settings(layer))
+            self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
+        else:
+            self.step_look.title.setText("Settings for the first layer (%s)" % typ)
         self._fill_presets()
-        self._mode = "edit" if self._editing() else "new"
+
+    def _refresh(self):
+        """Lists, settings and banner from the scene."""
+        self._filling = True
+        try:
+            data = self._data()
+            self.surf_list.clear()
+            self.layer_list.clear()
+            if data is not None:
+                if self._lid is None or sc_layer(data, self._lid) is None:
+                    self._lid = data["layers"][0]["id"] if data["layers"] else None
+                self.group_label.setText("Editing <b>%s</b>." % short_name(self._root))
+                for uid, node, kind in sc_surface_names(data):
+                    item = QtWidgets.QListWidgetItem(("%s%s" % (short_name(node), "  (G)" if kind == "group" else ""))
+                                                     if node else "(deleted)")
+                    item.setData(QtCore.Qt.UserRole, uid)
+                    self.surf_list.addItem(item)
+                for layer in data["layers"]:
+                    pts, fcs = sc_area(layer)
+                    extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
+                    item = QtWidgets.QListWidgetItem(layer.get("name", layer["type"]) + extra)
+                    item.setData(QtCore.Qt.UserRole, layer["id"])
+                    item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEditable)
+                    item.setCheckState(QtCore.Qt.Checked if layer.get("on", True) else QtCore.Qt.Unchecked)
+                    self.layer_list.addItem(item)
+                    if layer["id"] == self._lid:
+                        self.layer_list.setCurrentItem(item)
+                self.udim.setValue(int(data.get("udim") or 1001))
+            else:
+                self.group_label.setText("No scatter group being edited.")
+            self._show_layer()
+        finally:
+            self._filling = False
         self._update_states()
 
-    def _editing(self):
-        """The selected moss / ivy groups of the kind on show."""
-        systems = mi_selection()[0]
-        return [r for r in systems if is_mi_system(r) and mi_data(r)["kind"] == self._kind]
+    def _update_states(self):
+        try:
+            sel = sc_selection()
+        except Exception:
+            sel = {"surfaces": [], "points": [], "faces": {}}
+        root = self._alive()
+        self.step_group.set_state("done" if root else "current")
+        self.step_layers.set_state("current" if root else "todo")
+        self.step_look.set_state("current" if root and self._lid else "todo")
+        self.step_finish.set_state("todo")
+        if root:
+            name = (self._layer() or {}).get("name", "")
+            self.next_banner.set_text("Editing <b>%s</b>%s. Changes in step 3 show straight away; Add Selected "
+                                      "puts the selected meshes / groups in it." %
+                                      (short_name(root), (", layer <b>%s</b>" % name) if name else ""),
+                                      tag="EDITING", tone="active")
+        elif sel["surfaces"]:
+            bits = ""
+            if sel["faces"]:
+                bits = ", only on the %d picked face(s)" % sum(len(v) for v in sel["faces"].values())
+            elif sel["points"]:
+                bits = ", round the %d picked point(s)" % len(sel["points"])
+            self.next_banner.set_text("Press <b>New Scatter Group from Selected</b> (%d mesh(es) / group(s)%s)." %
+                                      (len(sel["surfaces"]), bits))
+        else:
+            self.next_banner.set_text("Select meshes or groups to scatter onto, or a scatter group (its box) to "
+                                      "edit it.")
 
     def _sync_from_selection(self):
         if not self.isVisible():
             return
         try:
-            systems, targets, seeds = mi_selection()
-            live = [r for r in systems if is_mi_system(r)]
-            if live:
-                data = mi_data(live[0])  # show the first selected group's settings, like the Channel Box
-                if data["kind"] != self._kind:
-                    self._kind_changed(data["kind"])
-                self._show(data["kind"], data)
-            parts = []
-            if targets:
-                parts.append("%d mesh(es) to grow on" % len(targets))
-            if seeds:
-                parts.append("%d seed point(s)" % len(seeds))
-            if live:
-                kinds = sorted(set(mi_data(r)["kind"].lower() for r in live))
-                parts.append("%d %s selected" % (len(live), " and ".join(kinds)))
-            if len(systems) > len(live):
-                parts.append("%d baked" % (len(systems) - len(live)))
-            self.sel_label.setText((", ".join(parts) + ".") if parts else "Nothing selected.")
-            self._mode = "edit" if self._editing() else "new"
-            self._update_states()
+            sel = sc_selection()
+            if sel["root"]:
+                if sel["root"] != self._root:
+                    self._root, self._lid = sel["root"], None
+                if sel["layer"]:
+                    self._lid = sel["layer"]
+            self._refresh()
         except Exception:
             traceback.print_exc()
 
-    def _update_states(self):
-        try:
-            systems, targets, seeds = mi_selection()
-        except Exception:
-            systems, targets, seeds = [], [], []
-        editing = self._mode == "edit"
-        self.step_select.set_state("done" if targets or editing else "current")
-        self.step_grow.set_state("current" if targets else ("done" if editing else "todo"))
-        self.step_look.set_state("current" if editing else "todo")
-        self.step_finish.set_state("todo")
-        noun = self._kind.lower()
-        if editing:
-            n = len(self._editing())
-            self.next_banner.set_text("Changes in step 3 apply straight away to the %d selected %s. <b>Regrow</b> "
-                                      "after moving or editing its meshes." % (n, noun), tag="EDITING", tone="active")
-        elif targets:
-            extra = ""
-            if self._kind == "Ivy":
-                extra = (" from the %d picked seed(s)" % len(seeds)) if seeds else \
-                    " (pick vertices or faces to say where vines start)"
-            else:
-                points, faces = mi_moss_picks()
-                bits = []
-                if points:
-                    bits.append("%s round each of the %d picked point(s)" %
-                                ("a clump" if self._kind == "Moss" else "debris", len(points)))
-                if faces:
-                    bits.append("only on the %d picked face(s)" % sum(len(v) for v in faces.values()))
-                extra = (": " + ", ".join(bits)) if bits else \
-                    " (or pick vertices for clumps / faces for areas, to say where it goes)"
-            self.next_banner.set_text("Press <b>Grow %s on Selected</b>%s." % (self._kind, extra))
-        else:
-            self.next_banner.set_text("Select the meshes to grow %s on (or a %s to edit it)." %
-                                      (noun, {"Moss": "moss patch", "Ivy": "ivy"}.get(self._kind, "debris patch")))
-
     # ============================================================= actions
-    def _queue(self, kind, key):
-        if kind != self._kind:
+    def _counts(self, rep):
+        bits = []
+        for key, word in (("clumps", "moss clumps"), ("bunches", "grass bunches"), ("leaves", "leaves"),
+                          ("piles", "piles"), ("tufts", "tufts"), ("vines", "vines")):
+            if rep.get(key):
+                bits.append("%s %s" % (format(rep[key], ","), word))
+        bits.append("%s faces" % format(rep.get("faces", 0), ","))
+        return ", ".join(bits)
+
+    def _report(self, verb, rep, t0):
+        msg = "%s %s in %.2fs: %s." % (verb, short_name(rep.get("root", self._root or "")), time.time() - t0,
+                                      self._counts(rep))
+        level = "info"
+        if not rep.get("surfaces"):
+            msg = "%s: it has nothing to grow on (add meshes or groups in step 1)." % verb
+            level = "warn"
+        elif rep.get("capped"):
+            msg += " Capped at %s vertices per part: lower the amount or the Detail." % format(MI_MAX_VERTS, ",")
+            level = "warn"
+        self.set_status(msg, level)
+
+    def _queue(self, typ, key):
+        if self._filling or typ != self._type():
             return
         self._pending.add(key)
         self._edit_timer.start()
@@ -30577,158 +31591,238 @@ class MossIvyPanel(QtWidgets.QWidget):
     @ui_safe
     def _apply_pending(self):
         keys, self._pending = self._pending, set()
-        if not keys or self._mode != "edit":
-            return
-        roots = self._editing()
-        if not roots:
+        if not keys or not self._alive() or not self._layer():
             return
         values = self._settings()
-        change = {k: values[k] for k in keys}
-        self._update(dict((r, change) for r in roots), "Updated")
-
-    def _update(self, changes, verb):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            report = update_moss_ivy(changes)
+            rep = sc_update(self._root, self._lid, {k: values[k] for k in keys})
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
-        msg = "%s %d in %.2fs: %s." % (verb, len(report["done"]), time.time() - t0, self._counts(report))
-        level = "info"
-        if report["capped"]:
-            msg += " Capped at %s vertices per part: lower the density or the Detail." % format(MI_MAX_VERTS, ",")
-            level = "warn"
-        if report["lost"]:
-            msg += " %d lost a mesh it grew on (deleted?)." % len(report["lost"])
-            level = "warn"
-        if report["errors"]:
-            msg += " %s" % report["errors"][0][1]
-            level = "warn"
-        self.set_status(msg, level)
-        return report
+        self._report("Updated", rep, t0)
 
-    @staticmethod
-    def _counts(rep):
-        bits = []
-        if rep.get("vines"):
-            bits.append("%d vines, %d leaves" % (rep["vines"], rep.get("leaves", 0)))
-        elif rep.get("bunches") or rep.get("piles") or rep.get("tufts") or rep.get("leaves"):
-            bits.append("%d grass bunches, %d leaves (%d piles), %d moss tufts" % (
-                rep.get("bunches", 0), rep.get("leaves", 0), rep.get("piles", 0), rep.get("tufts", 0)))
-        bits.append("%s faces" % format(rep.get("faces", 0), ","))
-        return ", ".join(bits)
-
-    @ui_safe
-    def grow(self):
-        systems, targets, seeds = mi_selection()
-        if not targets:
-            self.set_status("Select the meshes to grow %s on first." % self._kind.lower(), level="warn")
+    def _udim_changed(self):
+        if self._filling or not self._alive():
             return
         t0 = time.time()
+        self._report("Updated", sc_update(self._root, group_change={"udim": self.udim.value()}), t0)
+
+    def _structural(self, verb, fn):
+        t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            if self._kind != "Ivy":
-                points, faces = mi_moss_picks()
-                rep = grow_moss_ivy(self._kind, targets, self._settings(), points, select=True, faces=faces)
-            else:
-                rep = grow_moss_ivy("Ivy", targets, self._settings(), seeds, select=True)
+            rep = fn()
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
-        level = "fixed"
-        msg = "Grew %s in %.2fs: %s. One Ctrl+Z undoes it." % (short_name(rep["root"]), time.time() - t0,
-                                                               self._counts(rep))
-        if not rep["faces"]:
-            msg = "No vines grew: check the meshes and the Length." if self._kind == "Ivy" else \
-                "Nothing grew on the selected meshes: raise Coverage, Slope limit or Crevices%s." % (
-                    "" if self._kind == "Moss" else ", or the amounts")
-            level = "warn"
-        elif rep["capped"]:
-            msg += " Capped at %s vertices per part." % format(MI_MAX_VERTS, ",")
-            level = "warn"
-        self.set_status(msg, level)
-        self._sync_from_selection()
+        if isinstance(rep, tuple):
+            rep, self._lid = rep
+        self._report(verb, rep, t0)
+        self._refresh()
+        return rep
+
+    @ui_safe
+    def new_group(self):
+        sel = sc_selection()
+        if not sel["surfaces"]:
+            self.set_status("Select the meshes or groups to scatter onto first.", level="warn")
+            return
+        typ = self.start_type.currentText()
+        s = self._settings(typ)
+        rep = self._structural("Grew", lambda: create_scatter_group(sel["surfaces"], typ, s, sel["points"],
+                                                                    sel["faces"]))
+        self._root = rep["root"]
+        self._lid = sc_data(self._root)["layers"][0]["id"]
+        self._refresh()
+
+    @ui_safe
+    def add_surfaces(self):
+        if not self._alive():
+            self.set_status("Select a scatter group (click its box) first, then the meshes to add.", level="warn")
+            return
+        sel = sc_selection()
+        if not sel["surfaces"]:
+            self.set_status("Select the meshes or groups to add.", level="warn")
+            return
+        self._structural("Added %d to" % len(sel["surfaces"]), lambda: sc_set_surfaces(self._root, add=sel["surfaces"]))
+
+    @ui_safe
+    def remove_surfaces(self):
+        if not self._alive():
+            return
+        uids = [i.data(QtCore.Qt.UserRole) for i in self.surf_list.selectedItems()]
+        nodes = [n for n in (cmds.ls(u, long=True) for u in uids) for n in n]
+        if not nodes:
+            nodes = sc_selection()["surfaces"]
+        if not nodes:
+            self.set_status("Pick the surfaces to remove in the list.", level="warn")
+            return
+        self._structural("Removed %d from" % len(nodes), lambda: sc_set_surfaces(self._root, remove=nodes))
+
+    @ui_safe
+    def add_layer(self):
+        if not self._alive():
+            self.set_status("Select a scatter group (click its box) first.", level="warn")
+            return
+        typ = self.add_type.currentText()
+        sel = sc_selection()
+        self._structural("Added %s to" % typ.lower(),
+                         lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"]))
+
+    @ui_safe
+    def duplicate_layer(self):
+        if self._alive() and self._lid:
+            self._structural("Duplicated a layer in", lambda: sc_add_layer(self._root, None, copy_of=self._lid))
+
+    @ui_safe
+    def delete_layer(self):
+        if self._alive() and self._lid:
+            lid, self._lid = self._lid, None
+            self._structural("Removed a layer from", lambda: sc_remove_layer(self._root, lid))
+
+    @ui_safe
+    def move_layer(self, step):
+        if self._alive() and self._lid:
+            self._structural("Moved a layer in", lambda: sc_move_layer(self._root, self._lid, step))
+
+    @ui_safe
+    def set_area(self, clear=False):
+        if not (self._alive() and self._lid):
+            return
+        if clear:
+            area = ([], {})
+        else:
+            points, faces = mi_moss_picks()
+            if not points and not faces:
+                self.set_status("Pick faces or vertices on the meshes first.", level="warn")
+                return
+            area = (points, faces)
+        self._structural("New area in", lambda: sc_set_layer(self._root, self._lid, area=area))
+
+    def _layer_item_changed(self, item):
+        if self._filling or not self._alive():
+            return
+        lid = item.data(QtCore.Qt.UserRole)
+        layer = sc_layer(self._data(), lid)
+        if layer is None:
+            return
+        on = item.checkState() == QtCore.Qt.Checked
+        name = item.text().split("  (")[0].strip()
+        try:
+            if on != layer.get("on", True):
+                self._structural("Turned %s a layer in" % ("on" if on else "off"),
+                                 lambda: sc_set_layer(self._root, lid, on=on))
+            elif name and name != layer.get("name"):
+                self._structural("Renamed a layer in", lambda: sc_set_layer(self._root, lid, name=name))
+        except Exception as exc:
+            traceback.print_exc()
+            self.set_status("Error: %s" % exc, level="error")
+
+    def _layer_picked(self):
+        if self._filling:
+            return
+        item = self.layer_list.currentItem()
+        if item is not None:
+            self._lid = item.data(QtCore.Qt.UserRole)
+            self._filling = True
+            try:
+                self._show_layer()
+            finally:
+                self._filling = False
+            self._update_states()
 
     @ui_safe
     def randomize(self):
-        roots = self._editing() if self._mode == "edit" else []
-        if not roots:
-            self.f[self._kind]["seed"].setValue(random.randint(1, 9999))
-            self.set_status("New seed for the next Grow.")
-            return
-        changes = dict((r, {"seed": random.randint(1, 9999)}) for r in roots)
-        self._update(changes, "New seed for")
-        self._show(self._kind, mi_data(roots[0]))
+        typ = self._type()
+        seed = random.randint(1, 9999)
+        self.f[typ]["seed"].setValue(seed)
+        if self._alive() and self._layer():
+            t0 = time.time()
+            self._report("New seed for", sc_update(self._root, self._lid, {"seed": seed}), t0)
+        else:
+            self.set_status("New seed for the next group.")
 
     @ui_safe
     def regrow(self):
-        roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
+        roots = [self._root] if self._alive() else sc_groups()
         if not roots:
-            self.set_status("No moss, ivy or debris to regrow.", level="warn")
+            self.set_status("No scatter groups to regrow.", level="warn")
             return
-        self._update(dict((r, {}) for r in roots), "Regrew")
+        t0 = time.time()
+        rep = None
+        for root in roots:
+            rep = sc_regrow(root)
+        self._report("Regrew", rep, t0)
 
     @ui_safe
     def select_all(self):
-        found = mi_systems(kind=self._kind)
+        found = sc_groups()
         if found:
             cmds.select(found, replace=True)
-        self.set_status("Selected %d %s." % (len(found), self._kind.lower()) if found else
-                        "No %s in the scene." % self._kind.lower())
+        self.set_status("Selected %d scatter group(s)." % len(found) if found else "No scatter groups in the scene.")
 
     @ui_safe
     def bake(self):
-        roots = [r for r in mi_selection()[0] if is_mi_system(r)] or mi_systems()
+        roots = [self._root] if self._alive() else sc_groups()
         if not roots:
-            self.set_status("No moss, ivy or debris to bake.", level="warn")
+            self.set_status("No scatter groups to bake.", level="warn")
             return
-        done = bake_moss_ivy(roots)
+        done = bake_scatter(roots)
         self.set_status("Baked %d: plain meshes now. One Ctrl+Z undoes it." % len(done), level="fixed")
-        self._sync_from_selection()
+        self._root, self._lid = None, None
+        self._refresh()
 
     @ui_safe
     def load_preset(self):
+        typ = self._type()
         name = self.preset_combo.currentText()
-        s = mi_preset(self._kind, name)
+        s = sc_preset(typ, name)
         if s is None:
             return
-        for key in MI_PRESET_SKIP:
-            s[key] = self.f[self._kind][key].value()
-        self._show(self._kind, s)
-        roots = self._editing() if self._mode == "edit" else []
-        if roots:
-            keys = [k for k in MI_DEFAULTS[self._kind] if k not in MI_PRESET_SKIP]
-            self._update(dict((r, {k: s[k] for k in keys}) for r in roots), "'%s' on" % name)
+        s["seed"] = self.f[typ]["seed"].value()
+        self._filling = True
+        try:
+            self._show(typ, s)
+        finally:
+            self._filling = False
+        if self._alive() and self._layer():
+            t0 = time.time()
+            self._report("'%s' on" % name, sc_update(self._root, self._lid, s), t0)
         else:
-            self.set_status("Loaded '%s' for the next Grow." % name)
+            self.set_status("Loaded '%s' for the next group's first layer." % name)
 
     @ui_safe
     def save_preset(self):
-        name, ok = QtWidgets.QInputDialog.getText(self, "Save %s Preset" % self._kind, "Preset name:")
+        typ = self._type()
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save %s Preset" % typ, "Preset name:")
         name = (name or "").strip()
         if not ok or not name:
             return
-        if name in MI_PRESETS[self._kind]:
+        if name in SC_PRESETS[typ]:
             self.set_status("'%s' is a built-in preset: pick another name." % name, level="warn")
             return
-        mi_save_preset(self._kind, name, self._settings())
-        self._fill_presets(name)
-        self.set_status("Saved preset '%s'." % name, level="fixed")
+        sc_save_preset(typ, name, self._settings(typ))
+        self._fill_presets()
+        self.preset_combo.setCurrentIndex(self.preset_combo.findText(name))
+        self.set_status("Saved %s preset '%s'." % (typ.lower(), name), level="fixed")
 
     @ui_safe
     def delete_preset(self):
+        typ = self._type()
         name = self.preset_combo.currentText()
-        if name in MI_PRESETS[self._kind]:
+        if name in SC_PRESETS[typ]:
             self.set_status("Built-in presets can't be deleted.", level="warn")
             return
-        if mi_delete_preset(self._kind, name):
+        if sc_delete_preset(typ, name):
             self._fill_presets()
             self.set_status("Deleted preset '%s'." % name)
 
-    def _rebuild_stale(self):
+    def _after_undo(self):
         try:
-            stale = rebuild_stale_moss_ivy()
-            if stale:
-                self.set_status("Regrew %d moss / ivy brought back by a redo." % len(stale))
+            done = sc_sync()
+            if done:
+                self.set_status("Regrew %d scatter group(s) after the undo / redo." % len(done))
+            self._refresh()
         except Exception:
             traceback.print_exc()
 
@@ -30737,11 +31831,12 @@ class MossIvyPanel(QtWidgets.QWidget):
         if maya_main_window() is None:
             return
         self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
-                      cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
+                      cmds.scriptJob(event=["Undo", lambda: self._undo_timer.start()]),
+                      cmds.scriptJob(event=["Redo", lambda: self._undo_timer.start()])]
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
-        for timer in (self._sel_timer, self._edit_timer, self._redo_timer):
+        for timer in (self._sel_timer, self._edit_timer, self._undo_timer):
             timer.stop()
         reg = _registry()["jobs"]
         for job in self._jobs:
@@ -32090,7 +33185,7 @@ class QuadFillPanel(QtWidgets.QWidget):
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
     ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel,
-                  MossIvyPanel, QuadFillPanel]),
+                  ScatterPanel, QuadFillPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

@@ -668,28 +668,51 @@ trim Keep UVs. Levels and blockers are thatch only for now.
 **Speed:** a clean 16 x 9 m roof takes about 0.9 s, a makeshift one about
 3.5 s (about 460 panels).
 
-### Modeling > Moss and Ivy
+### Modeling > Scatter
 
-Jungle moss that gathers where it would really grow, ivy that climbs
-posts and walls, and debris (dry grass, dead leaves, leaf piles, moss
-tufts), grown on your own meshes. No plugin, no nodes: plain
-meshes with clean UVs, live while you tune them.
+Moss, dry grass, dead leaves, leaf piles, moss tufts and ivy on your own
+meshes, as a **scatter group**: what it grows on, plus layers you control
+one by one. No plugin, no nodes: plain meshes with clean UVs, live while
+you tune them.
 
-1. **Select surfaces:** the meshes to grow on, together (a roof's planks,
-   a ledge and the wall behind it, a post and the beam on it). To direct
-   moss or debris, pick components instead of whole meshes: **faces** = only
-   on those faces (Coverage decides how full); **vertices or edges** = a
-   clump round each picked point, out to *Spread* (further into sheltered
-   corners and cracks). Both are remembered, so Regrow keeps them. For ivy,
-   picked vertices, edges or faces are where vines start.
-2. **Grow** (one Ctrl+Z): pick **Moss**, **Ivy** or **Debris** (and a
-   preset), then **Grow ... on Selected**. The new patch is selected, so step 3
-   edits it straight away.
-3. **Look** (live, out of the undo queue like the other tools' sliders).
-   Selecting a moss patch or an ivy shows its settings, like the Channel Box.
-4. **Finish:** **Regrow** after moving or editing the meshes (picked seeds
-   follow the mesh they were picked on), **Bake** keeps plain meshes,
-   **Select All**.
+1. **Scatter group:** select meshes or whole groups (a shack's group works:
+   meshes you add to it later are used at the next regrow), pick what the
+   first layer is (*Start with*, and a preset), then **New Scatter Group
+   from Selected** (one Ctrl+Z). It's `scatteredObjects0001_GRP`, with a
+   wireframe box round it (`scatteredObjects0001_CTL`, never renders):
+   click the box in the viewport to edit the group. **Add Selected** /
+   **Remove** change what it grows on.
+2. **Layers:** **Add Layer** of any type (Moss, Grass, Leaves, Leaf piles,
+   Moss tufts, Ivy); two of a type are fine (a moss that keeps to flat
+   rooftops and a second, sparse one that grows anywhere). Tick a layer to
+   turn it on or off, double-click to rename, **Duplicate** (a new seed),
+   **Delete**, **Up** / **Down**. Each is one Ctrl+Z. To say where a layer
+   goes, pick components and press **Use Picked Area**: **faces** = only on
+   those faces; **vertices or edges** = a clump round each picked point,
+   out to *Spread* (ivy: vines start there). **Clear Area** frees it again.
+   Clicking a layer's mesh in the viewport edits that layer.
+3. **Layer settings** (live, out of the undo queue like the other tools'
+   sliders): every layer has its own *Coverage*, *Slope limit*, *Crevices*,
+   *Creases*, *Avoid edges*, patches, sizes, Detail and seed; presets per
+   type (and your own: **Save...**).
+4. **Finish:** **Regrow** after editing the meshes, **Bake** keeps plain
+   meshes (the box and any empty part go), **Select All**, the group's
+   *Start UDIM*.
+
+A layer's meshes exist only while they hold something: a moss layer with
+no capsules has no capsule mesh. One that empties while you tune it hides
+(keeping any material you gave it) until Bake.
+
+**Where things go:** every layer scores the surface the same way (below),
+then **Creases** adds where things collect: gutters, inside corners, the
+foot of walls, frames and posts (the surface round a spot turning up
+towards it), and where water running down the surface settles (the foot
+of a slope or a wall, a level gutter). Leaf piles there become drifts
+along the crease, following it round bends, banked up against the wall;
+leaves and grass lie along it. Grass, leaves, piles and tufts never sit
+past their *Slope limit* (nothing up a wall with a low limit); moss still
+creeps up sheltered walls
+(Crevices).
 
 **Moss** scatters spots over the meshes and scores each one: up-facing
 (*Slope limit*, faded out over the next 15 degrees), sheltered (short rays
@@ -723,21 +746,26 @@ geometry above Proxy) lying over the surface like shingles, cupped, its
 tip curled.
 Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
 
-**Debris** gathers where litter would, by the same field as moss (*Coverage*
-and the *Where it gathers* weights, picked points and faces), per square
-metre where it gathers:
-- *Grass bunches*: dry grass blades lying every which way (*Combed*: more
-  of them one way), piled into a low mound (*Fullness*), each blade walked
-  over the surface and hanging once it goes over an edge (*Droop*),
-  stopping against anything in its way.
+**Grass**, **Leaves**, **Leaf piles** and **Moss tufts** gather where
+litter would, by the same field as moss (*Coverage*, the *Where it
+gathers* weights, a picked area), per square metre where they gather:
+- *Grass*: bunches of dry grass blades lying every which way (*Combed*:
+  more of them one way: along a crease, else downhill on a slope), piled
+  into a low mound (*Fullness*), each blade walked over the surface and
+  hanging once it goes over an edge (*Droop*), stopping against anything in
+  its way.
 - *Leaves*: dead leaves lying on the surface, a stalk and an ovate blade
-  (some rounder, some narrower) cut in the geometry, dried (*Leaf curl*: edges curled up, ends lifted, folded on the
-  midrib, crumpled), one in four upside down.
-- *Leaf piles*: low mounds of leaves, each lying along the mound at its own
-  depth, a few strays round them.
+  (some rounder, some narrower) cut in the geometry, dried (*Leaf curl*:
+  edges curled up, ends lifted, folded on the midrib, crumpled), one in
+  four upside down.
+- *Leaf piles*: in a crease a drift along it, in a corner pushed into it,
+  in the open a round mound; each leaf lying along the pile at its own
+  depth, a few strays round it.
 - *Moss tufts*: tiny clumps of moss, a few small rounded cushions run
   together, lumpy on top, wrapped onto the surface.
-Presets: Roof litter, Dry grass mat, Autumn leaves, Leaf piles, Moss tufts.
+Presets: Grass: Dry grass, Grass mat, Sparse tufts. Leaves: Dead leaves,
+Autumn carpet, A few strays. Leaf piles: Leaf piles, Gutters and wall
+bases, Big heaps. Moss tufts: Moss tufts, Crevice tufts.
 
 **Detail** is how close the camera gets, and how heavy the moss is:
 
@@ -761,13 +789,16 @@ stalk at the bottom 20%). *Stacks* gives each shoot / strand / leaf one of
 N stacks (UDIM tiles or atlas columns). Stems are laid out in neat
 columns at one density over *Stem tiles* tiles.
 
-Patches are `mossPatch0001_GRP` holding `mossGreen_C_mossPatch0001_GEP`
-(the bed), `mossStrand_C_mossPatch0001_GEP` (shoots and hanging strands)
-and `mossSpore_C_mossPatch0001_GEP` (capsules); ivy is `ivy0001_GRP` holding
-`ivyStem_C_ivy0001_GEP` and `ivyLeaf_C_ivy0001_GEP`; debris is
-`debris0001_GRP` holding `grassDry_..._GEP` (blades: u across, v along),
-`leafDry_..._GEP` (each leaf in 0..1) and `mossTuft_..._GEP` (a top-down
-disc). **With Smart UDIM:** everything but ivy stems is Hands off (stacked),
+**Names:** `scatteredObjects0001_GRP` holds the box
+`scatteredObjects0001_CTL` and each layer's meshes, named after their
+material: `mossGreen_C_scatteredObjects0001_GEP` (the bed),
+`mossStrand_..._GEP` (shoots and hanging strands), `mossSpore_..._GEP`
+(capsules), `grassDry_..._GEP` (blades: u across, v along),
+`leafDry_..._GEP` (each leaf in 0..1), `leafPile_..._GEP`,
+`mossTuft_..._GEP` (a top-down disc), `ivyStem_..._GEP`, `ivyLeaf_..._GEP`.
+A second layer of a type adds a number after the material
+(`mossGreen2_C_scatteredObjects0001_GEP`). Every part takes its own UDIM
+tiles, in layer order. **With Smart UDIM:** everything but ivy stems is Hands off (stacked),
 stems Keep UVs.
 
 **Speed:** a whole shack roof at Normal about 13 s to grow, then about 5 s
@@ -1569,13 +1600,23 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   post), presets, speed. Debris on the same ledge: all three parts, their
   tiles, nothing inside geometry, off the rail, grass hanging over edges,
   leaves lying flat and piles standing up, Detail tiers, a picked point.
-- `tests/gui_moss_ivy.py`: drives the Moss and Ivy panel in a real Maya
-  session (grow moss on a plank roof, live edit, undo / redo, presets, each
-  Detail tier on three planks with a close-up, debris: moss tufts, a dry
-  grass mat on a barrel greenhouse roof, autumn leaves and piles, moss in a stone wall's
-  crevices, ivy up a post onto its beam and from picked seeds on a wall,
-  Randomize, bake) and saves pictures to `tests/_out/moss_ivy`. Launch it
-  like the smoke test below, with `tests/run_gui_moss_ivy.mel`.
+- `tests/test_scatter.py`: headless scatter group tests on a yard under
+  one Maya group (floor, wall, beam, gutter): the group's name, box and
+  part names, every mesh of the Maya group found (and one added later),
+  only parts that hold something, no leaves up the wall, leaf piles
+  gathering at creases (the foot of the wall, the beam, the gutter and the
+  crate, and in the gutter) as drifts along them, no grass up the wall, no two parts in one UDIM tile, live edits out of the
+  undo queue rebuilding only their layer, layers on / off, Delete,
+  Duplicate, Up and surfaces changed with one Ctrl+Z each (the undo /
+  redo regrows), a new group's undo / redo, presets, Bake dropping the box
+  and empty parts.
+- `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
+  on a shack porch (a group from the Maya group with a leaf piles layer,
+  then flat moss, leaves, grass and a sparse moss added through the panel,
+  a layer unticked and back with one Ctrl+Z, a part clicked picks its
+  layer, the box picks the group, Delete, Duplicate) and saves pictures to
+  `tests/_out/scatter`. Launch it like the smoke test below, with
+  `tests/run_gui_scatter.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

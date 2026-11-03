@@ -711,6 +711,79 @@
     - Tests: `tests/test_corrugated_roof.py` (gap rays, closed solids, ray
       enter / leave order for interpenetration, frame under metal, UVs),
       metal block in `tests/gui_thatch_roof.py`.
+- **Scatter** (Modeling tab; replaces the Moss and Ivy panel. The user,
+  2026-11-03: "it just kind of controls everything at once, I have grass
+  and leaves appearing on vertical walls ... a 'build a scatter group' and
+  it showed a bounding box like the roof does ... a list of stuff in it,
+  you can add / remove / undo and click things to control them"; naming:
+  "everything would be under a scatteredObjects####_GRP"). Engine
+  `sc_build` (each on layer by `_sc_build_layer`: moss_build / ivy_build /
+  debris_build with the other items zeroed; cached per layer JSON and
+  surface mesh keys in `_SC_BUILT`, so a live edit rebuilds only its
+  layer; then one `_roof_udims` over every part, keys "<layer id>/<part>",
+  in layer order); scene side `create_scatter_group`, `sc_add_layer`,
+  `sc_remove_layer`, `sc_set_layer` (on / name / area), `sc_move_layer`,
+  `sc_set_surfaces`, `sc_update` (live), `sc_regrow`, `sc_sync`,
+  `bake_scatter`, `sc_selection`, `sc_owner`; panel `ScatterPanel`.
+  - **Scene:** `scatteredObjects####_GRP` (transforms locked: parts are
+    world space) with `unlokScatter` JSON {surfaces: [uuid], udim, next,
+    layers: [{id "L<n>", type (`SC_TYPES`), tag ("" / "2"...: the number
+    after the material in part names), name, on, s (only the type's keys,
+    `sc_defaults` under it), seeds, faces}]}; a box
+    `scatteredObjects####_CTL` (`unlokScatterBox`, wireframe, no render
+    flags) refit round the visible parts after each build. Parts
+    `<material><tag>_C_scatteredObjects####_GEP` tagged `unlokScatterPart`
+    "<layer id>/<part>", `unlokMossIvyVerts`, UV ready / stacked.
+    Surfaces: a mesh, or every visible mesh under a stored group, read at
+    each build (`sc_surfaces`; never inside a scatter group).
+  - **Undo model:** structure (layers, surfaces, areas, toggles) is an
+    UndoChunk on the JSON (`_sc_change`; Delete deletes the layer's parts
+    inside it). Geometry and part creation are NoUndo (tool-managed,
+    `_sc_write`: a part is made the first time it has faces, hidden when
+    it empties, rewritten only when its mesh or UV shift changed:
+    `_SC_WROTE`). After each build the group's `unlokScatterStamp` gets a
+    random token (NoUndo) and `_SC_LAST[root]` = (JSON, token);
+    `sc_sync` (the panel's Undo and Redo jobs) regrows any group whose
+    pair differs: an undone / redone structural change, or a redone new
+    group (its stamp comes back empty). A scene opened with a stamp is
+    taken as built. No placeholder meshes (the user saw the old hidden
+    placeholders as planes at the origin).
+  - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
+    and Creases only count where it faces up, and `_spots` hard-cuts past
+    Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass
+    40, leaves 35, piles 30 (Creases 1.0), tufts 60 degrees.
+  - **Creases** (`_mi_gather`, cached with the field): over the field's
+    candidates (the first `MI_GATHER_NODES`; the rest copy the nearest),
+    neighbours within 2.2 x their spacing that each can see (not behind
+    either surface): concavity c = (n_p - n_q) . d / |d| (> 0: normals close
+    in), averaged = crease; a 2D structure tensor of the concave
+    directions gives across (towards the walls), aniso (one way) and bank
+    (which side the wall is on, 0 in a channel). Water: each candidate
+    drains to its steepest lower neighbour (smooth joins, or concave ones:
+    into a wall's foot, never over a convex edge), accumulated top down;
+    settle = level enough and (flat or the surface goes on downhill: not an
+    eave); gather = 1 - (1 - crease)(1 - log(acc)/log 30 x settle), one
+    smoothing pass. `_moss_margins` adds Creases x 0.5 x gather x up-facing
+    (moss on a rail's side at its foot otherwise). `_spots` scales density by
+    `DEBRIS_GATHER` (piles 3, leaves 1.5, tufts 1, grass 0.5).
+  - **Drifts** (`_pile` / `_drift` / `_walk_crease`): a pile on a one-sided
+    crease moves up to the wall; with e = 1.6 Creases gather aniso >= 0.15
+    a spine is walked both ways along n x across (0.35 R steps, snapped,
+    turning with the local crease, stopping where gather fades, the surface
+    turns up, or it gets stuck), up to R (1 + 2.2 e) each way; leaves in an
+    envelope (1 - t^2) x a banked profile (crest 0.5 e bank towards the
+    wall), tilted along both slopes, half of them along the drift. Too
+    short a spine: a round pile. Piles skip a spot inside one already made.
+  - `_mi_drop_repeats` cleans faces that repeat a vertex (the moss bed
+    makes a few on the porch scene; Maya drops them and `assignUVs` fails).
+  - Not done (phases agreed with the user): draw on surfaces + scatter on
+    the drawing with falloff (2), an influence brush per layer (own stamp
+    brush; Artisan per-vertex maps tested fine but need dense meshes) (3),
+    bundles / variants per layer (palm, jungle foliage, pine cones; the
+    user's own meshes as a layer type) (4), group presets (5); converting
+    an old mossPatch / ivy / debris group into a scatter group.
+  - Tests: `tests/test_scatter.py`, `tests/gui_scatter.py` (pictures in
+    `tests/_out/scatter`).
 - **Moss and Ivy** (Modeling tab; the user, 2026-11-03: "nice clumps of
   jungle moss ... on top of rooftops, or growing up in little crevices
   interacting with geo, or ivy growing up columns of shacks"; then "bunches
@@ -718,8 +791,8 @@
   moss" with a greenhouse-roof reference: the Debris kind). Engine
   `moss_build` / `ivy_build` / `debris_build` (via `mi_build`, which runs `_roof_udims(...,
   order=MI_UDIM_ORDER)`); scene side `grow_moss_ivy`, `update_moss_ivy`,
-  `rebuild_stale_moss_ivy`, `bake_moss_ivy`, `mi_selection`; panel
-  `MossIvyPanel`.
+  `rebuild_stale_moss_ivy`, `bake_moss_ivy`, `mi_selection` (old groups
+  still regrow through these; the panel is now Scatter, above).
   - **Scene:** one group per patch / plant, `mossPatch####_GRP` /
     `ivy####_GRP` / `debris####_GRP`, with `unlokMossIvy` JSON (kind, settings, version,
     `targets` uuids, ivy `seeds` as {"t": target uuid, "p": its local
@@ -888,8 +961,8 @@
     are set at Grow), rootlets on the stems, moss on the ivy, caching the
     detail layer (High / Hero edits rebuild it), High / Hero speed on big
     areas.
-  - Tests: `tests/test_moss_ivy.py`, `tests/gui_moss_ivy.py` (pictures in
-    `tests/_out/moss_ivy`).
+  - Tests: `tests/test_moss_ivy.py` (the engine; its old panel's GUI test
+    went with the panel).
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
     then sections `*_UDS`, then material sets `td100_woodGreen_c085[_stack]`).
@@ -1815,7 +1888,7 @@ the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 (pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
 Corrugated metal: `tests/test_corrugated_roof.py`.
-Moss and Ivy: `tests/test_moss_ivy.py`, GUI `tests/run_gui_moss_ivy.mel`.
+Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
   `cat > file` without a heredoc, hang. Write patch scripts to files and

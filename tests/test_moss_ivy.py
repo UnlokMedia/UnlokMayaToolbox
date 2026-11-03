@@ -351,7 +351,7 @@ def run():
     root = rep["root"]
     parts = tb["mi_parts"](root)
     check("debris grows (grass bunches, leaves, piles, tufts; three parts)",
-          rep["bunches"] > 3 and rep["leaves"] > 40 and rep["piles"] >= 1 and rep["tufts"] > 5 and
+          rep["bunches"] >= 3 and rep["leaves"] > 40 and rep["piles"] >= 1 and rep["tufts"] > 5 and
           set(parts) == {"grass", "litter", "tufts"},
           "%d bunches, %d leaves, %d piles, %d tufts, %.2fs" % (rep["bunches"], rep["leaves"], rep["piles"],
                                                                 rep["tufts"], dt))
