@@ -29485,13 +29485,1341 @@ class MossIvyPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Quad Fill
+# =============================================================================
+#
+# Fills a hole in a mesh with clean quads, the way you'd do it by hand
+# (Maya's Fill Hole leaves one n-gon):
+#   Corners    the border is split into four sides at its best corners
+#              (qf_corners scores every start and split: sharp turns,
+#              opposite sides of equal length, square cells) and filled with
+#              a grid, so every edge loop runs across to the opposite side.
+#              An even hole always gets a pure grid, no poles: the corners
+#              slide along the border to make opposite sides match.
+#   Odd holes  can't be all quads (every quad adds four edge ends), so one
+#              triangle cuts off the sharpest corner first.
+#   Rings      round holes get a loop that follows the border before the
+#              grid starts (the quad-sphere pattern): the grid's corners sit
+#              inside instead of squashing quads against the rim.
+#   Shape      a Coons patch between the four sides (straight lines from
+#              side to side) lifted along its normal by "Follow surface": a
+#              bicubic patch that leaves each border vertex at the surface's
+#              own slope (a quadric fitted to the mesh round it), so a hole
+#              in a sphere fills round. A slope only counts as far as the
+#              surface's curvature backs it up, so an open tube end closes
+#              flat instead of domed. Smooth relaxes the inside along the
+#              surface.
+#   Writes     only Maya's own undoable poly edits on the mesh itself
+#              (polyCloseBorder, polySplit, polyExtrudeFacet for the rings,
+#              one vertex tweak): the same node, name, attributes and sets,
+#              one Ctrl+Z. A mesh without history gets none.
+#   Preview    one hidden wireframe mesh (never saved, out of the undo
+#              queue) that follows the selection and the sliders.
+
+QF_DEFAULTS = {"smooth": 0.25, "follow": 1.0, "rings": "Auto", "offset": 0, "span": 0, "soften": True}
+QF_RINGS = ("Auto", "0", "1", "2", "3")
+QF_MAX_EDGES = 1000          # longer borders are refused (a mesh's outer rim, not a hole)
+QF_SCAN_EDGES = 200000       # a mesh picked whole is only searched for its hole up to this size
+QF_SMOOTH_ITERS = 30         # relax passes at Smooth 1
+QF_CHUNK = "unlokQuadFill"
+QF_PREVIEW_ATTR = "unlokQuadFillPreview"
+
+
+def _qf_sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _qf_add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _qf_mul(a, s):
+    return (a[0] * s, a[1] * s, a[2] * s)
+
+
+def _qf_dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _qf_cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _qf_len(a):
+    return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+
+
+def _qf_norm(a, fallback=None):
+    n = _qf_len(a)
+    if n < 1e-12:
+        return fallback
+    return (a[0] / n, a[1] / n, a[2] / n)
+
+
+def _qf_lerp(a, b, t):
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+
+
+def _qf_flat(a, n):
+    """a without its component along unit n."""
+    return _qf_sub(a, _qf_mul(n, _qf_dot(a, n)))
+
+
+def _qf_perp(n):
+    a = (1.0, 0.0, 0.0) if abs(n[0]) < 0.9 else (0.0, 1.0, 0.0)
+    return _qf_norm(_qf_cross(n, a))
+
+
+def _qf_newell(pts):
+    """Unit normal of a closed loop (right hand round the loop's order)."""
+    nx = ny = nz = 0.0
+    n = len(pts)
+    for i in range(n):
+        p, q = pts[i], pts[(i + 1) % n]
+        nx += (p[1] - q[1]) * (p[2] + q[2])
+        ny += (p[2] - q[2]) * (p[0] + q[0])
+        nz += (p[0] - q[0]) * (p[1] + q[1])
+    return _qf_norm((nx, ny, nz))
+
+
+def _qf_solve(m, r):
+    """Small dense solve (Gaussian elimination, partial pivoting); None if
+    singular."""
+    n = len(r)
+    a = [list(m[i]) + [r[i]] for i in range(n)]
+    for c in range(n):
+        piv = max(range(c, n), key=lambda i: abs(a[i][c]))
+        if abs(a[piv][c]) < 1e-300:
+            return None
+        a[c], a[piv] = a[piv], a[c]
+        for i in range(c + 1, n):
+            f = a[i][c] / a[c][c]
+            if f:
+                for j in range(c, n + 1):
+                    a[i][j] -= f * a[c][j]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (a[i][n] - sum(a[i][j] * x[j] for j in range(i + 1, n))) / a[i][i]
+    return x
+
+
+def _qf_fit(p, n0, ring):
+    """The surface round border point p: a quadric h = a x^2 + b xy + c y^2
+    + d x + e y (frame t1, t2, n0) fitted to the mesh vertices near it.
+    Returns (normal at p, (t1, t2, a, b, c)) for _qf_curv. Falls back to n0
+    (flat) when there are too few points or the fit goes wild."""
+    t1 = _qf_perp(n0)
+    t2 = _qf_cross(n0, t1)
+    flat = (n0, (t1, t2, 0.0, 0.0, 0.0))
+    if len(ring) < 5:
+        return flat
+    m = [[0.0] * 5 for _ in range(5)]
+    r = [0.0] * 5
+    for q in ring:
+        d = _qf_sub(q, p)
+        x, y, h = _qf_dot(d, t1), _qf_dot(d, t2), _qf_dot(d, n0)
+        f = (x * x, x * y, y * y, x, y)
+        for i in range(5):
+            r[i] += f[i] * h
+            fi = f[i]
+            row = m[i]
+            for j in range(5):
+                row[j] += fi * f[j]
+    ridge = 1e-6 * max(m[i][i] for i in range(5))
+    for i in range(5):
+        m[i][i] += ridge
+    sol = _qf_solve(m, r)
+    if sol is None:
+        return flat
+    a, b, c, d, e = sol
+    n = _qf_norm(_qf_sub(_qf_sub(n0, _qf_mul(t1, d)), _qf_mul(t2, e)))
+    if n is None or _qf_dot(n, n0) < 0.5:
+        return flat
+    return n, (t1, t2, a, b, c)
+
+
+def _qf_curv(quad, u):
+    """Normal curvature of a _qf_fit quadric along unit tangent u."""
+    t1, t2, a, b, c = quad
+    x, y = _qf_dot(u, t1), _qf_dot(u, t2)
+    s = x * x + y * y
+    return 2.0 * (a * x * x + b * x * y + c * y * y) / s if s > 1e-12 else 0.0
+
+
+def _qf_turns(pts, nrm):
+    """Signed turn at each vertex of a closed loop, in the plane of nrm
+    (positive = convex for a loop running round nrm)."""
+    n = len(pts)
+    out = []
+    for k in range(n):
+        a = _qf_flat(_qf_sub(pts[k], pts[k - 1]), nrm)
+        b = _qf_flat(_qf_sub(pts[(k + 1) % n], pts[k]), nrm)
+        out.append(math.atan2(_qf_dot(nrm, _qf_cross(a, b)), _qf_dot(a, b)))
+    return out
+
+
+def qf_corners(pts, turns):
+    """The best grid for an even closed loop: (start, a) with sides of a, b,
+    a, b edges (a + b = n / 2) from vertex start round the loop. Scores sharp
+    corners, opposite sides of equal length and square cells (the distance
+    between opposite sides' middles over their edge counts)."""
+    n = len(pts)
+    h = n // 2
+    cum = [0.0]
+    for i in range(n):
+        cum.append(cum[-1] + _qf_len(_qf_sub(pts[(i + 1) % n], pts[i])))
+    total = cum[-1] or 1.0
+    cum2 = cum + [total + c for c in cum[1:]]
+    tc = [min(t, 1.75) for t in turns]
+    eps = 1e-9 * total + 1e-12
+
+    def at(s):
+        s %= total
+        i = min(n - 1, bisect.bisect_right(cum, s) - 1)
+        seg = cum[i + 1] - cum[i]
+        return _qf_lerp(pts[i], pts[(i + 1) % n], (s - cum[i]) / seg if seg > 0 else 0.0)
+
+    def score(s, a):
+        b = h - a
+        c1, c2, c3 = (s + a) % n, (s + a + b) % n, (s + 2 * a + b) % n
+        la = cum2[s + a] - cum2[s]
+        lb = cum2[c1 + b] - cum2[c1]
+        lc = cum2[c2 + a] - cum2[c2]
+        ld = cum2[c3 + b] - cum2[c3]
+        imb = abs(la - lc) / (la + lc + eps) + abs(lb - ld) / (lb + ld + eps)
+        mb, mt = at(cum2[s] + la * 0.5), at(cum2[c2] + lc * 0.5)
+        mr, ml = at(cum2[c1] + lb * 0.5), at(cum2[c3] + ld * 0.5)
+        w = _qf_len(_qf_sub(mr, ml)) + eps
+        hh = _qf_len(_qf_sub(mt, mb)) + eps
+        asp = abs(math.log((w / a) / (hh / b)))
+        return tc[s] + tc[c1] + tc[c2] + tc[c3] - imb - 0.5 * asp
+
+    # coarse to fine on long loops (the full search is n^2 / 2 scores)
+    sa, ss = max(1, h // 40), max(1, n // 80)
+    best = None
+    for a in range(1, h, sa):
+        for s in range(0, n, ss):
+            v = score(s, a)
+            if best is None or v > best[0] + 1e-9:
+                best = (v, s, a)
+    if sa > 1 or ss > 1:
+        _, s0, a0 = best
+        for a in range(max(1, a0 - sa), min(h - 1, a0 + sa) + 1):
+            for d in range(-ss, ss + 1):
+                s = (s0 + d) % n
+                v = score(s, a)
+                if v > best[0] + 1e-9:
+                    best = (v, s, a)
+    return best[1], best[2]
+
+
+class _QfSide(object):
+    """One side of the patch: its points, arc-length fractions and surface
+    normals, sampled at a fraction t (0 = its first corner)."""
+
+    def __init__(self, pts, nrms):
+        self.pts, self.nrms = pts, nrms
+        cum = [0.0]
+        for i in range(len(pts) - 1):
+            cum.append(cum[-1] + _qf_len(_qf_sub(pts[i + 1], pts[i])))
+        total = cum[-1]
+        n = len(pts) - 1
+        self.fr = [c / total for c in cum] if total > 1e-12 else [i / float(n) for i in range(n + 1)]
+
+    def _seg(self, t):
+        fr = self.fr
+        i = min(len(fr) - 2, max(0, bisect.bisect_right(fr, t) - 1))
+        d = fr[i + 1] - fr[i]
+        return i, (clamp((t - fr[i]) / d, 0.0, 1.0) if d > 1e-12 else 0.0)
+
+    def at(self, t):
+        i, f = self._seg(t)
+        return _qf_lerp(self.pts[i], self.pts[i + 1], f)
+
+    def nrm(self, t):
+        i, f = self._seg(t)
+        return _qf_norm(_qf_lerp(self.nrms[i], self.nrms[i + 1], f), self.nrms[i])
+
+
+def _qf_hermite_g(da, db):
+    """Tangent length factor for a cubic between two inward directions: 1
+    for a straight run, more as the run turns (2 tan(t/4) / sin(t/2) makes a
+    cubic follow a circular arc)."""
+    th = math.acos(clamp(-_qf_dot(da, db), -1.0, 1.0))
+    th = min(th, 2.9)
+    if th < 1e-3:
+        return 1.0
+    return 2.0 * math.tan(th * 0.25) / math.sin(th * 0.5)
+
+
+class _QfPatch(object):
+    """The fill's shape over the unit square (bottom, right, top, left
+    sides): flat() is the linear Coons patch, curved() blends two cubic
+    lofts that leave each side along the surface (the chord across, laid
+    into the tangent plane at each end)."""
+
+    def __init__(self, sides):
+        self.s = sides
+        b, r, t, l = sides
+        self.c00, self.c10, self.c11, self.c01 = b.at(0.0), b.at(1.0), r.at(1.0), t.at(1.0)
+
+    def _sides(self, u, v):
+        b, r, t, l = self.s
+        return b.at(u), t.at(1.0 - u), l.at(1.0 - v), r.at(v)
+
+    def flat(self, u, v):
+        pb, pt, pl, pr = self._sides(u, v)
+        out = []
+        for k in range(3):
+            out.append((1 - v) * pb[k] + v * pt[k] + (1 - u) * pl[k] + u * pr[k]
+                       - ((1 - u) * (1 - v) * self.c00[k] + u * (1 - v) * self.c10[k]
+                          + (1 - u) * v * self.c01[k] + u * v * self.c11[k]))
+        return tuple(out)
+
+    @staticmethod
+    def _loft(p0, p1, n0, n1, t):
+        chord = _qf_sub(p1, p0)
+        e = _qf_norm(chord)
+        if e is None:
+            return p0
+        d0 = _qf_norm(_qf_flat(e, n0), e)
+        d1 = _qf_norm(_qf_flat(_qf_mul(e, -1.0), n1), _qf_mul(e, -1.0))
+        c = _qf_len(chord) * _qf_hermite_g(d0, d1)
+        t2, t3 = t * t, t * t * t
+        h0, h1 = 2 * t3 - 3 * t2 + 1, -2 * t3 + 3 * t2
+        h2, h3 = (t3 - 2 * t2 + t) * c, (t3 - t2) * c
+        return tuple(h0 * p0[k] + h1 * p1[k] + h2 * d0[k] - h3 * d1[k] for k in range(3))
+
+    def curved(self, u, v):
+        b, r, t, l = self.s
+        pb, pt, pl, pr = self._sides(u, v)
+        lv = self._loft(pb, pt, b.nrm(u), t.nrm(1.0 - u), v)
+        lu = self._loft(pl, pr, l.nrm(1.0 - v), r.nrm(v), u)
+        du, dv = u * (1 - u), v * (1 - v)
+        den = du * du + dv * dv
+        w = du * du / den if den > 1e-18 else 0.5
+        return _qf_lerp(lu, lv, w)
+
+    def normal(self, u, v, fallback):
+        e = 1e-3
+        fu = _qf_sub(self.flat(min(1.0, u + e), v), self.flat(max(0.0, u - e), v))
+        fv = _qf_sub(self.flat(u, min(1.0, v + e)), self.flat(u, max(0.0, v - e)))
+        n = _qf_norm(_qf_cross(fu, fv))
+        if n is None or _qf_dot(n, fallback) < 0.0:
+            return fallback
+        return n
+
+
+def _qf_normals(hole, order, nrm):
+    """Surface normals the fill leaves the border along, at the loop
+    positions in order (border indices, running round the fill). The
+    surface's slope out of the hole's plane only counts as far as its own
+    curvature backs it up: a sphere's border keeps its tilt, an open tube's
+    end (tilted 90 degrees but straight along its length) lies flat."""
+    pts = [hole["pts"][k] for k in order]
+    m = len(pts)
+    cen = _qf_mul(functools.reduce(_qf_add, pts), 1.0 / m)
+    out = []
+    for i, k in enumerate(order):
+        p = pts[i]
+        tan = _qf_norm(_qf_sub(pts[(i + 1) % m], pts[i - 1]), (1.0, 0.0, 0.0))
+        n0 = hole["n0"][k] or nrm
+        nb, quad = _qf_fit(p, n0, hole["ring"][k])
+        flat_in = _qf_norm(_qf_cross(nrm, tan)) or _qf_norm(_qf_sub(cen, p), tan)
+        d = _qf_norm(_qf_cross(nb, tan)) or flat_in  # inward along the surface
+        beta = math.asin(clamp(_qf_dot(d, nrm), -1.0, 1.0))
+        sign = 1.0 if beta >= 0.0 else -1.0
+        rho = _qf_len(_qf_flat(_qf_sub(cen, p), nrm))
+        _, _, qa, qb, qc = quad
+        tr, det = qa + qc, qa * qc - 0.25 * qb * qb  # principal curvatures: eigenvalues of [[2a, b], [b, 2c]]
+        kmax = abs(tr) + math.sqrt(max(0.0, tr * tr - 4.0 * det))
+        # the tilt the curvature would give across the hole, less what the
+        # fit's leak between directions could fake
+        expect = (-_qf_curv(quad, d) * sign - 0.15 * kmax) * rho
+        beta = sign * min(abs(beta), 1.3 * max(0.0, expect))
+        # in the hole's plane: the surface's own way in, but straight in from
+        # the border where the surface stands up (a tube's end): there d's
+        # flat part is a sliver, and normalising it pointed border normals
+        # the wrong way
+        fd = _qf_flat(d, nrm)
+        w = clamp((_qf_len(fd) - 0.3) / 0.4, 0.0, 1.0) if _qf_dot(fd, flat_in) > 0.0 else 0.0
+        flat_d = _qf_norm(_qf_lerp(flat_in, _qf_norm(fd, flat_in), w), flat_in)
+        used = _qf_norm(_qf_add(_qf_mul(flat_d, math.cos(beta)), _qf_mul(nrm, math.sin(beta))), flat_in)
+        out.append(_qf_norm(_qf_cross(tan, used), nrm))
+    return out
+
+
+def _qf_untangle(nodes, faces, fixed, nrm_of, iters=300):
+    """Open up folded or knife-thin corners (under ~15 degrees) by moving
+    the free nodes (ids >= fixed) along the surface: gradient steps on
+    sum(max(0, tau - A)^2), A = a corner's doubled area about its node's
+    normal. Keeps the best state it reaches. Concave borders fold a Coons
+    grid; clean grids aren't touched."""
+    corners = []
+    for f in faces:
+        k = len(f)
+        for i in range(k):
+            if max(f[i - 1], f[i], f[(i + 1) % k]) >= fixed:  # all-border corners can't move
+                corners.append((f[i - 1], f[i], f[(i + 1) % k]))
+    if not corners:
+        return
+    h2 = sum(_qf_dot(_qf_sub(nodes[b], nodes[a]), _qf_sub(nodes[b], nodes[a])) for a, b, _ in corners)
+    h2 = h2 / max(1, len(corners)) or 1.0
+    cap = 0.2 * math.sqrt(h2)
+    best, since = None, 0
+    for _ in range(iters):
+        grad = collections.defaultdict(lambda: (0.0, 0.0, 0.0))
+        bad, deficit = 0, 0.0
+        for a, b, c in corners:
+            nb = nrm_of[b]
+            u = _qf_sub(nodes[b], nodes[a])
+            w = _qf_sub(nodes[c], nodes[b])
+            area = _qf_dot(nb, _qf_cross(u, w))
+            tau = 0.25 * _qf_len(u) * _qf_len(w)
+            if area >= tau:
+                continue
+            g = tau - area
+            bad += area <= 0.0
+            deficit += g
+            wn, nu = _qf_cross(w, nb), _qf_cross(nb, u)
+            grad[a] = _qf_add(grad[a], _qf_mul(wn, -g))
+            grad[c] = _qf_add(grad[c], _qf_mul(nu, g))
+            grad[b] = _qf_add(grad[b], _qf_mul(_qf_sub(wn, nu), g))
+        if not grad:
+            return
+        score = (bad, deficit)
+        if best is None or score < best[0]:
+            best, since = (score, list(nodes)), 0
+        else:
+            since += 1
+            if since > 60:  # stuck (a corner nothing free can open)
+                break
+        for v, gv in grad.items():
+            if v < fixed:
+                continue
+            d = _qf_mul(_qf_flat(gv, nrm_of[v]), 0.3 / h2)
+            ln = _qf_len(d)
+            if ln > cap:
+                d = _qf_mul(d, cap / ln)
+            nodes[v] = _qf_add(nodes[v], d)
+    if best is not None:
+        nodes[:] = best[1]
+
+
+def qf_plan(hole, settings=None):
+    """The fill for one hole (pure maths, from qf_read): node positions
+    (0..n-1 are the border, in loop order), faces (node ids, wound like the
+    mesh), and the layout. Raises ValueError with a message for the user."""
+    st = dict(QF_DEFAULTS)
+    st.update(settings or {})
+    pts = list(hole["pts"])
+    n = len(pts)
+    if n < 3:
+        raise ValueError("a hole needs at least 3 border edges")
+    nrm = _qf_newell(pts)
+    if nrm is None:
+        nrm = _qf_norm(functools.reduce(_qf_add, [x for x in hole["n0"] if x] or [(0.0, 1.0, 0.0)]),
+                       (0.0, 1.0, 0.0))
+    nodes = list(pts)
+    faces = []
+    plan = {"n": n, "nodes": nodes, "faces": faces, "ear": None, "rings": 0, "ring_ids": [],
+            "grid": {}, "A": 0, "B": 0, "order": [], "normal": nrm}
+    order = list(range(n))
+    if n % 2:
+        turns = _qf_turns(pts, nrm)
+        ear = (max(range(n), key=lambda k: turns[k]) + int(st["offset"])) % n
+        a, c = (ear - 1) % n, (ear + 1) % n
+        faces.append((a, ear, c))
+        plan["ear"] = ear
+        order = [k for k in order if k != ear]
+        if n == 3:
+            plan["order"] = order
+            return plan
+    m = len(order)
+    rp = [pts[k] for k in order]
+    turns = _qf_turns(rp, nrm)
+    start, a = qf_corners(rp, turns)
+    if plan["ear"] is None:
+        start = (start + int(st["offset"])) % m
+    h = m // 2
+    a = max(1, min(h - 1, a + int(st["span"])))
+    b = h - a
+    seq = [order[(start + q) % m] for q in range(m)]  # border node at each position q round the grid
+    corner_q = (0, a, a + b, 2 * a + b)
+    rings = st["rings"]
+    if rings == "Auto":  # round holes, and concave ones (two faces at every border vertex)
+        round_hole = m >= 12 and max(turns[(start + q) % m] for q in corner_q) < 0.87
+        k = 1 if round_hole or (m >= 8 and min(turns) < -0.45) else 0
+    else:
+        k = max(0, int(rings))
+    plan.update({"A": a, "B": b, "rings": k, "order": seq})
+
+    snrm = _qf_normals(hole, seq, nrm)
+    lens = (a, b, a, b)
+    sides = []
+    for si in range(4):
+        q0 = corner_q[si]
+        qs = [(q0 + j) % m for j in range(lens[si] + 1)]
+        sides.append(_QfSide([nodes[seq[q]] for q in qs], [snrm[q] for q in qs]))
+    patch = _QfPatch(sides)
+
+    # domain (unit square) position of every node; border by arc length
+    def perim(si, t):
+        return ((t, 0.0), (1.0, t), (1.0 - t, 1.0), (0.0, 1.0 - t))[si]
+
+    side_of = []
+    for q in range(m):
+        si = 0 if q < a else (1 if q < a + b else (2 if q < 2 * a + b else 3))
+        j = q - corner_q[si]
+        side_of.append((si, sides[si].fr[j], j / float(lens[si])))
+    dom = {}
+    for q in range(m):
+        si, t_arc, _ = side_of[q]
+        dom[seq[q]] = perim(si, t_arc)
+    gu, gv = 1.0 / (a + 2 * k), 1.0 / (b + 2 * k)
+    prev = list(seq)
+    for r in range(1, k + 1):
+        cur = []
+        for q in range(m):
+            si, t_arc, t_uni = side_of[q]
+            x, y = perim(si, t_arc + (t_uni - t_arc) * r / float(k))
+            nodes.append(None)
+            nid = len(nodes) - 1
+            dom[nid] = (r * gu + x * (1 - 2 * r * gu), r * gv + y * (1 - 2 * r * gv))
+            cur.append(nid)
+        for q in range(m):
+            q1 = (q + 1) % m
+            faces.append((prev[q], prev[q1], cur[q1], cur[q]))
+        plan["ring_ids"].append(cur)
+        prev = cur
+    edge = prev  # the grid's own border, position q
+
+    def gq(i, j):
+        if j == 0:
+            return i
+        if i == a:
+            return a + j
+        if j == b:
+            return a + b + (a - i)
+        return (2 * a + b + (b - j)) % m
+
+    grid = plan["grid"]
+    for i in range(a + 1):
+        for j in range(b + 1):
+            if i in (0, a) or j in (0, b):
+                grid[(i, j)] = edge[gq(i, j)]
+    for i in range(1, a):
+        for j in range(1, b):
+            p0, p1 = dom[grid[(i, 0)]], dom[grid[(i, b)]]
+            q0, q1 = dom[grid[(0, j)]], dom[grid[(a, j)]]
+            # where the line across from bottom to top meets the one from left to right
+            d1 = (p1[0] - p0[0], p1[1] - p0[1])
+            d2 = (q1[0] - q0[0], q1[1] - q0[1])
+            den = d1[0] * d2[1] - d1[1] * d2[0]
+            if abs(den) > 1e-12:
+                s = ((q0[0] - p0[0]) * d2[1] - (q0[1] - p0[1]) * d2[0]) / den
+                uv = (p0[0] + d1[0] * s, p0[1] + d1[1] * s)
+            else:
+                uv = (i / float(a), j / float(b))
+            nodes.append(None)
+            grid[(i, j)] = len(nodes) - 1
+            dom[grid[(i, j)]] = (clamp(uv[0], 0.0, 1.0), clamp(uv[1], 0.0, 1.0))
+    for i in range(a):
+        for j in range(b):
+            faces.append((grid[(i, j)], grid[(i + 1, j)], grid[(i + 1, j + 1)], grid[(i, j + 1)]))
+
+    # shape: the flat Coons patch, lifted along its normal toward the curved one
+    follow = float(st["follow"])
+    nrms = {}
+    for nid in range(n, len(nodes)):
+        u, v = dom[nid]
+        p = patch.flat(u, v)
+        nn = patch.normal(u, v, nrm)
+        if follow:
+            p = _qf_add(p, _qf_mul(nn, follow * _qf_dot(_qf_sub(patch.curved(u, v), p), nn)))
+        nodes[nid] = p
+        nrms[nid] = nn
+    iters = int(round(clamp(float(st["smooth"]), 0.0, 1.0) * QF_SMOOTH_ITERS))
+    if iters and len(nodes) > n:
+        adj = collections.defaultdict(set)
+        for f in faces:
+            for i in range(len(f)):
+                x, y = f[i], f[(i + 1) % len(f)]
+                adj[x].add(y)
+                adj[y].add(x)
+        free = list(range(n, len(nodes)))
+        for _ in range(iters):
+            new = {}
+            for nid in free:
+                nb = adj[nid]
+                avg = _qf_mul(functools.reduce(_qf_add, [nodes[w] for w in nb]), 1.0 / len(nb))
+                d = _qf_flat(_qf_sub(avg, nodes[nid]), nrms[nid])
+                new[nid] = _qf_add(nodes[nid], _qf_mul(d, 0.5))
+            for nid, p in new.items():
+                nodes[nid] = p
+    if len(nodes) > n:
+        nrm_of = dict(nrms)
+        for q in range(m):
+            nrm_of[seq[q]] = snrm[q]
+        for x in range(n):
+            nrm_of.setdefault(x, nrm)
+        _qf_untangle(nodes, faces, n, nrm_of)
+    return plan
+
+
+def qf_describe(plan):
+    """'16 edges: 4 x 4 grid, 1 ring' and the like."""
+    if plan["A"] == 0:
+        return "%d edges: one triangle" % plan["n"]
+    text = "%d edges: %d x %d grid" % (plan["n"], plan["A"], plan["B"])
+    if plan["rings"]:
+        text += ", %d ring%s" % (plan["rings"], "s" if plan["rings"] > 1 else "")
+    if plan["ear"] is not None:
+        text += " + 1 triangle (odd edge count)"
+    return text
+
+
+# ---------------------------------------------------------------- the scene
+
+def _qf_walk(dp, e0):
+    """The border loop through border edge e0: (vertex ids in the fill's
+    winding, i.e. against the face on each border edge, None) or (None,
+    reason)."""
+    fn = om.MFnMesh(dp)
+    vit, eit = om.MItMeshVertex(dp), om.MItMeshEdge(dp)
+    a, b = fn.getEdgeVertices(e0)
+    loop = [a]
+    prev, cur = e0, b
+    while cur != a:
+        vit.setIndex(cur)
+        nxt = []
+        for e in vit.getConnectedEdges():
+            if e != prev:
+                eit.setIndex(e)
+                if eit.onBoundary():
+                    nxt.append(e)
+        if len(nxt) != 1:
+            return None, "two holes touch at a vertex (non-manifold)"
+        loop.append(cur)
+        if len(loop) > QF_MAX_EDGES:
+            return None, "its border has over %d edges" % QF_MAX_EDGES
+        x, y = fn.getEdgeVertices(nxt[0])
+        prev, cur = nxt[0], (y if x == cur else x)
+    eit.setIndex(e0)
+    fv = list(fn.getPolygonVertices(eit.getConnectedFaces()[0]))
+    i = fv.index(a)
+    if fv[(i + 1) % len(fv)] == b:  # that face runs a -> b, so the fill runs b -> a
+        loop = [loop[0]] + loop[:0:-1]
+    return loop, None
+
+
+def qf_selection():
+    """Holes picked by the selection: ([(shape, [loop, ...]), ...], notes).
+    An edge, vertex or face on a hole's border picks that hole; a mesh picked
+    whole picks its only hole."""
+    sel = om.MGlobal.getActiveSelectionList()
+    found = collections.OrderedDict()
+    notes = []
+    for i in range(sel.length()):
+        try:
+            dp, comp = sel.getComponent(i)
+            dp.extendToShape()
+        except Exception:
+            continue
+        if not dp.hasFn(om.MFn.kMesh) or om.MFnDagNode(dp).isIntermediateObject:
+            continue
+        key = dp.fullPathName()
+        entry = found.setdefault(key, [dp, [], False])
+        if comp.isNull():
+            entry[2] = True
+            continue
+        ids = om.MFnSingleIndexedComponent(comp).getElements()[:20000]
+        eit = om.MItMeshEdge(dp)
+        if comp.hasFn(om.MFn.kMeshEdgeComponent):
+            for e in ids:
+                eit.setIndex(e)
+                if eit.onBoundary():
+                    entry[1].append(e)
+        elif comp.hasFn(om.MFn.kMeshVertComponent):
+            vit = om.MItMeshVertex(dp)
+            for v in ids:
+                vit.setIndex(v)
+                if vit.onBoundary():
+                    for e in vit.getConnectedEdges():
+                        eit.setIndex(e)
+                        if eit.onBoundary():
+                            entry[1].append(e)
+                            break
+        elif comp.hasFn(om.MFn.kMeshPolygonComponent):
+            pit = om.MItMeshPolygon(dp)
+            for f in ids:
+                pit.setIndex(f)
+                for e in pit.getEdges():
+                    eit.setIndex(e)
+                    if eit.onBoundary():
+                        entry[1].append(e)
+    out = []
+    for key, (dp, seeds, whole) in found.items():
+        name = short_name(om.MFnDagNode(dp.transform()).fullPathName())
+        fn = om.MFnMesh(dp)
+        scanned = whole and not seeds
+        if scanned:
+            if fn.numEdges > QF_SCAN_EDGES:
+                notes.append("%s is big: pick an edge on the hole." % name)
+                continue
+            eit = om.MItMeshEdge(dp)
+            while not eit.isDone():
+                if eit.onBoundary():
+                    seeds.append(eit.index())
+                eit.next()
+            if not seeds:
+                notes.append("%s has no holes." % name)
+                continue
+        loops, done = [], set()
+        for e in seeds:
+            if e in done:
+                continue
+            done.add(e)
+            loop, why = _qf_walk(dp, e)
+            if loop is None:
+                notes.append("Skipped a hole on %s: %s." % (name, why))
+                continue
+            vit = om.MItMeshVertex(dp)
+            ring = set(loop)
+            for v in loop:
+                vit.setIndex(v)
+                for ce in vit.getConnectedEdges():
+                    x, y = fn.getEdgeVertices(ce)
+                    if x in ring and y in ring:
+                        done.add(ce)
+            loops.append(loop)
+        if scanned and len(loops) > 1:
+            notes.append("%s has %d open borders: pick an edge on the one to fill." % (name, len(loops)))
+            continue
+        if loops:
+            out.append((key, loops))
+    return out, notes
+
+
+def qf_read(dp, loop):
+    """What qf_plan needs from the mesh round one hole (object space): the
+    border points, each border vertex's face normal and the vertices
+    within two edges of it."""
+    fn = om.MFnMesh(dp)
+    vit = om.MItMeshVertex(dp)
+    nbrs = {}
+
+    def around(v):
+        if v not in nbrs:
+            vit.setIndex(v)
+            nbrs[v] = list(vit.getConnectedVertices())
+        return nbrs[v]
+
+    def pos(v):
+        p = fn.getPoint(v)
+        return (p.x, p.y, p.z)
+
+    pts, n0s, rings = [], [], []
+    for v in loop:
+        vit.setIndex(v)
+        acc = (0.0, 0.0, 0.0)
+        for f in vit.getConnectedFaces():
+            q = fn.getPolygonNormal(f)
+            acc = _qf_add(acc, (q.x, q.y, q.z))
+        near = set(around(v))
+        for w in list(near):
+            near.update(around(w))
+        near.discard(v)
+        pts.append(pos(v))
+        n0s.append(_qf_norm(acc))
+        rings.append([pos(w) for w in near])
+    return {"pts": pts, "n0": n0s, "ring": rings}
+
+
+def _qf_has_history(shape):
+    return bool(cmds.listConnections(shape + ".inMesh", source=True, destination=False))
+
+
+def _qf_vertex_faces(dp, v):
+    vit = om.MItMeshVertex(dp)
+    vit.setIndex(v)
+    return set(vit.getConnectedFaces())
+
+
+def _qf_edge_between(dp, a, b):
+    fn = om.MFnMesh(dp)
+    vit = om.MItMeshVertex(dp)
+    vit.setIndex(a)
+    for e in vit.getConnectedEdges():
+        if b in fn.getEdgeVertices(e):
+            return e
+    return None
+
+
+def _qf_split(dp, shape, path, first_face, history):
+    """polySplit through vertices ('v', id) and edge middles ('e', id). A
+    vertex is given as an end of an edge on the new face it shares with its
+    neighbour in the path."""
+    fn = om.MFnMesh(dp)
+    eit = om.MItMeshEdge(dp)
+    pit = om.MItMeshPolygon(dp)
+
+    def faces(item):
+        if item[0] == "v":
+            return _qf_vertex_faces(dp, item[1])
+        eit.setIndex(item[1])
+        return set(eit.getConnectedFaces())
+
+    ip = []
+    for i, item in enumerate(path):
+        if item[0] == "e":
+            ip.append((item[1], 0.5))
+            continue
+        other = path[i + 1] if i + 1 < len(path) else path[i - 1]
+        common = [f for f in faces(item) & faces(other) if f >= first_face]
+        if not common:
+            raise RuntimeError("the split's points don't share a face")
+        pit.setIndex(max(common))
+        for e in pit.getEdges():
+            x, y = fn.getEdgeVertices(e)
+            if x == item[1]:
+                ip.append((e, 0.0))
+                break
+            if y == item[1]:
+                ip.append((e, 1.0))
+                break
+    cmds.polySplit(shape, ip=ip, constructionHistory=history)
+
+
+def _qf_build(dp, loop, plan, history, soften):
+    """Make one plan's faces in the mesh with Maya's own poly edits (inside
+    the caller's undo chunk) and move the new vertices into place. Returns
+    the new face ids."""
+    shape = dp.fullPathName()
+    fn = om.MFnMesh(dp)
+    nv0, nf0 = fn.numVertices, fn.numPolygons
+    n = len(loop)
+    edges = [_qf_edge_between(dp, loop[i], loop[(i + 1) % n]) for i in range(n)]
+    cmds.polyCloseBorder(["%s.e[%d]" % (shape, e) for e in edges], constructionHistory=history)
+    if om.MFnMesh(dp).numPolygons != nf0 + 1:
+        raise RuntimeError("Maya didn't close the hole")
+    vid = {k: loop[k] for k in range(n)}
+    if plan["ear"] is not None and plan["A"]:
+        ear = plan["ear"]
+        _qf_split(dp, shape, [("v", loop[(ear - 1) % n]), ("v", loop[(ear + 1) % n])], nf0, history)
+    seq = plan["order"]
+    m = len(seq)
+    k = plan["rings"]
+    if k:
+        fn = om.MFnMesh(dp)
+        cap = max(range(nf0, fn.numPolygons), key=lambda f: len(fn.getPolygonVertices(f)))
+        size = sum(_qf_len(_qf_sub(plan["nodes"][seq[q]], plan["nodes"][seq[q - 1]])) for q in range(m)) / m
+        cmds.polyExtrudeFacet("%s.f[%d]" % (shape, cap), divisions=k, offset=0.02 * size, thickness=0.0,
+                              keepFacesTogether=True, constructionHistory=history)
+        fn = om.MFnMesh(dp)
+        used = set(f for f in range(nf0, fn.numPolygons) if len(fn.getPolygonVertices(f)) == 3)
+        prev = [vid[x] for x in seq]
+        for r in range(k):
+            cur = [None] * m
+            for q in range(m):
+                a, b = prev[q], prev[(q + 1) % m]
+                cand = [f for f in _qf_vertex_faces(dp, a) & _qf_vertex_faces(dp, b)
+                        if f >= nf0 and f not in used and len(fn.getPolygonVertices(f)) == 4]
+                if len(cand) != 1:
+                    raise RuntimeError("the rings didn't come out as planned")
+                used.add(cand[0])
+                fv = list(fn.getPolygonVertices(cand[0]))
+                ia, ib = fv.index(a), fv.index(b)
+                step = 1 if fv[(ia + 1) % 4] == b else -1
+                on_b, on_a = fv[(ib + step) % 4], fv[(ia - step) % 4]
+                for qq, x in (((q + 1) % m, on_b), (q, on_a)):
+                    if cur[qq] not in (None, x):
+                        raise RuntimeError("the rings didn't come out as planned")
+                    cur[qq] = x
+            for q in range(m):
+                vid[plan["ring_ids"][r][q]] = cur[q]
+            prev = cur
+    a, b, grid = plan["A"], plan["B"], plan["grid"]
+    if a:
+        g = lambda i, j: vid[grid[(i, j)]]  # noqa: E731
+        for i in range(1, a):
+            _qf_split(dp, shape, [("v", g(i, 0)), ("v", g(i, b))], nf0, history)
+        low = {i: g(i, 0) for i in range(1, a)}
+        top = {i: g(i, b) for i in range(1, a)}
+        for j in range(1, b):
+            path = [("v", g(0, j))]
+            for i in range(1, a):
+                e = _qf_edge_between(dp, low[i], top[i])
+                if e is None:
+                    raise RuntimeError("the grid didn't come out as planned")
+                path.append(("e", e))
+            path.append(("v", g(a, j)))
+            before = om.MFnMesh(dp).numVertices
+            _qf_split(dp, shape, path, nf0, history)
+            vit = om.MItMeshVertex(dp)
+            for i in range(1, a):
+                vit.setIndex(low[i])
+                x = [w for w in vit.getConnectedVertices() if w >= before]
+                vit2 = om.MItMeshVertex(dp)
+                hit = None
+                for w in x:
+                    vit2.setIndex(w)
+                    if top[i] in vit2.getConnectedVertices():
+                        hit = w
+                if hit is None:
+                    raise RuntimeError("the grid didn't come out as planned")
+                vid[grid[(i, j)]] = hit
+                low[i] = hit
+    # check: the mesh's new faces are exactly the plan's
+    fn = om.MFnMesh(dp)
+    made = collections.Counter(frozenset(fn.getPolygonVertices(f)) for f in range(nf0, fn.numPolygons))
+    want = collections.Counter(frozenset(vid[x] for x in f) for f in plan["faces"])
+    if made != want or fn.numVertices != nv0 + len(plan["nodes"]) - n:
+        raise RuntimeError("the fill didn't come out as planned")
+    nv1 = fn.numVertices
+    if nv1 > nv0:
+        target = {}
+        for node in range(n, len(plan["nodes"])):
+            target[vid[node]] = plan["nodes"][node]
+        cur = fn.getPoints()
+        plug = om.MFnDependencyNode(dp.node()).findPlug("pnts", False)
+        have = set(plug.getExistingArrayAttributeIndices())
+        flat = []
+        for v in range(nv0, nv1):
+            t = (0.0, 0.0, 0.0)
+            if v in have:
+                el = plug.elementByLogicalIndex(v)
+                t = (el.child(0).asFloat(), el.child(1).asFloat(), el.child(2).asFloat())
+            c, q = cur[v], target[v]
+            flat.extend((t[0] + q[0] - c.x, t[1] + q[1] - c.y, t[2] + q[2] - c.z))
+        cmds.setAttr("%s.pnts[%d:%d]" % (shape, nv0, nv1 - 1), *flat, type="float3")
+    new_faces = list(range(nf0, fn.numPolygons))
+    if soften:
+        pit = om.MItMeshPolygon(dp)
+        inner = set()
+        for f in new_faces:
+            pit.setIndex(f)
+            inner.update(pit.getEdges())
+        inner.difference_update(edges)
+        if inner:
+            cmds.polySoftEdge(["%s.e[%d]" % (shape, e) for e in sorted(inner)], angle=180,
+                              constructionHistory=history)
+        # the old border: soft where the fill carries the surface on, hard
+        # where it turns a corner (an open tube's end keeps its rim)
+        cmds.polySoftEdge(["%s.e[%d]" % (shape, e) for e in edges], angle=60, constructionHistory=history)
+    _qf_shade(shape, dp, loop, new_faces)
+    return new_faces
+
+
+def _qf_shade(shape, dp, loop, new_faces):
+    """New faces of a per-face shaded mesh go in the material of the faces
+    round the hole (a whole-object assignment covers them already)."""
+    sgs = set(cmds.listConnections(shape, type="shadingEngine") or [])
+    if len(sgs) < 2 and cmds.listConnections(shape + ".instObjGroups[0]", type="shadingEngine"):
+        return
+    counts = collections.Counter()
+    vit = om.MItMeshVertex(dp)
+    first = new_faces[0]
+    for v in loop:
+        vit.setIndex(v)
+        for f in vit.getConnectedFaces():
+            if f < first:
+                for sg in sgs:
+                    if cmds.sets("%s.f[%d]" % (shape, f), isMember=sg):
+                        counts[sg] += 1
+                        break
+        if sum(counts.values()) >= 12:
+            break
+    if counts:
+        cmds.sets(["%s.%s" % (shape, r) for r in face_ranges(new_faces)], edit=True,
+                  forceElement=counts.most_common(1)[0][0])
+
+
+def quad_fill(picked=None, settings=None, select=True):
+    """Fill holes with quads: picked as from qf_selection() (default: the
+    current selection). One Ctrl+Z undoes it all; if anything fails, nothing
+    is changed. Returns {"holes", "faces", "triangles", "shapes", "plans",
+    "notes"}."""
+    notes = []
+    if picked is None:
+        picked, notes = qf_selection()
+    st = dict(QF_DEFAULTS)
+    st.update(settings or {})
+    jobs = []
+    for shape, loops in picked:
+        dp = get_dag_path(shape)
+        for loop in loops:
+            try:
+                jobs.append((shape, dp, loop, qf_plan(qf_read(dp, loop), st)))
+            except ValueError as exc:
+                notes.append("Skipped a hole: %s." % exc)
+    report = {"holes": 0, "faces": [], "triangles": 0, "shapes": [], "plans": [j[3] for j in jobs],
+              "notes": notes}
+    if not jobs:
+        return report
+    try:
+        with UndoChunk(QF_CHUNK):
+            history = {}
+            for shape, dp, loop, plan in jobs:
+                if shape not in history:
+                    history[shape] = _qf_has_history(shape)
+                    report["shapes"].append(shape)
+                faces = _qf_build(dp, loop, plan, history[shape], bool(st["soften"]))
+                report["faces"].extend("%s.%s" % (shape, r) for r in face_ranges(faces))
+                report["holes"] += 1
+                report["triangles"] += sum(1 for f in plan["faces"] if len(f) == 3)
+            if select and report["faces"]:
+                cmds.select(report["faces"], replace=True)
+    except Exception:
+        undo_if_last(QF_CHUNK)
+        raise
+    return report
+
+
+class QuadFillPreview(object):
+    """One hidden wireframe mesh showing the planned fills (world space).
+    Never saved, never in the undo queue; rebuilt in place when the layout
+    changes."""
+
+    COLOR = (0.25, 0.9, 0.8)
+
+    def __init__(self):
+        self.handle = None
+        self.topo = None
+
+    def _alive(self):
+        return self.handle is not None and self.handle.isValid() and self.handle.isAlive()
+
+    def show(self, items):
+        """items: [(shape, plan)]."""
+        pts, counts, conn = [], [], []
+        for shape, plan in items:
+            dp = get_dag_path(shape)
+            if dp is None:
+                continue
+            mat = dp.inclusiveMatrix()
+            base = len(pts)
+            for p in plan["nodes"]:
+                pts.append(om.MPoint(p[0], p[1], p[2]) * mat)
+            for f in plan["faces"]:
+                counts.append(len(f))
+                conn.extend(base + x for x in f)
+        if not counts:
+            self.clear()
+            return
+        topo = (tuple(counts), tuple(conn))
+        with NoUndo():
+            if self._alive():
+                sdp = om.MDagPath.getAPathTo(self.handle.object())
+                sdp.extendToShape()
+                fn = om.MFnMesh(sdp)
+                if topo == self.topo:
+                    fn.setPoints(om.MPointArray(pts))
+                else:
+                    fn.createInPlace(om.MPointArray(pts), counts, conn)
+                fn.updateSurface()
+            else:
+                mod = om.MDagModifier()
+                xobj = mod.createNode("transform")
+                mod.renameNode(xobj, "quadFillPreview")
+                mod.doIt()
+                sobj = om.MFnMesh().create(om.MPointArray(pts), counts, conn, parent=xobj)
+                for obj in (xobj, sobj):
+                    om.MFnDependencyNode(obj).setDoNotWrite(True)  # never saved with the scene
+                xform = om.MDagPath.getAPathTo(xobj).fullPathName()
+                sh = om.MDagPath.getAPathTo(sobj).fullPathName()
+                cmds.addAttr(xform, longName=QF_PREVIEW_ATTR, attributeType="bool", defaultValue=True)
+                cmds.setAttr(xform + ".hiddenInOutliner", True)
+                for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                             "visibleInRefractions"):
+                    cmds.setAttr(sh + "." + attr, False)
+                cmds.setAttr(sh + ".overrideEnabled", True)
+                cmds.setAttr(sh + ".overrideShading", False)  # wireframe: the edge flow shows
+                cmds.setAttr(sh + ".overrideRGBColors", True)
+                cmds.setAttr(sh + ".overrideColorRGB", *self.COLOR)
+                if cmds.attributeQuery("alwaysDrawOnTop", node=sh, exists=True):
+                    cmds.setAttr(sh + ".alwaysDrawOnTop", True)
+                self.handle = om.MObjectHandle(xobj)
+        self.topo = topo
+
+    def node(self):
+        return om.MDagPath.getAPathTo(self.handle.object()).fullPathName() if self._alive() else None
+
+    def forget(self):
+        """Before a new or opened scene: drop the handle unused (Maya objects
+        kept across a scene change crash when touched)."""
+        self.handle = None
+        self.topo = None
+
+    def clear(self):
+        if self._alive():
+            name = self.node()
+            with NoUndo():
+                try:
+                    cmds.delete(name)
+                except Exception:
+                    traceback.print_exc()
+        self.handle = None
+        self.topo = None
+
+
+def qf_clear_previews():
+    """Delete stray previews (a previous paste that didn't close cleanly)."""
+    stray = [x for x in cmds.ls(type="transform", long=True) or []
+             if cmds.attributeQuery(QF_PREVIEW_ATTR, node=x, exists=True)]
+    if stray:
+        with NoUndo():
+            cmds.delete(stray)
+
+
+class QuadFillPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Quad Fill"
+    TOOL_TIP = "Fill a hole with clean quads: edge loops carried across, following the surface."
+
+    FIELDS = ("smooth", "follow", "rings", "offset", "span", "soften")
+
+    def __init__(self, parent=None):
+        super(QuadFillPanel, self).__init__(parent)
+        self._jobs = []
+        self.picked = []
+        self.notes = []
+        self.holes = []          # [(shape, hole data)]
+        self.plans = []          # [(shape, plan)]
+        self.preview = QuadFillPreview()
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(80)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._sync_from_selection))
+        self._edit_timer = QtCore.QTimer(self)
+        self._edit_timer.setSingleShot(True)
+        self._edit_timer.setInterval(30)
+        self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._replan))
+        self._build()
+        self._install_jobs()
+        try:
+            qf_clear_previews()
+        except Exception:
+            traceback.print_exc()
+        self._sync_from_selection()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Quad Fill", "Fill a hole with clean quads: the edge loops carry across to the "
+                                             "other side and the patch follows the surface round it. It fills "
+                                             "the mesh itself: same node, name and attributes."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+
+        # ---- 1. pick
+        card = self.step_pick = StepCard(1, "Pick the hole", "Select one edge on the hole's border (or the whole "
+                                                             "border, a border vertex, or a face next to it). "
+                                                             "Pick an edge on each hole to fill several.")
+        self.hole_label = hint_label("")
+        card.add(self.hole_label)
+        col.addWidget(card)
+
+        # ---- 2. shape
+        card = self.step_shape = StepCard(2, "Shape", "The teal wireframe is a preview: it follows these live.")
+        grid = Section("", header=False)
+        self.f = {}
+        self.f["smooth"] = FloatField(0.0, 1.0, decimals=2, step=0.05)
+        grid.add_row("Smooth", self.f["smooth"], "Relaxes the inside so the quads even out. 0 keeps every line "
+                                                 "dead straight between opposite border points.")
+        self.f["follow"] = FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05)
+        grid.add_row("Follow surface", self.f["follow"], "1 carries the surface's curvature across, so a hole in "
+                                                         "a sphere fills round. 0 = straight lines from side to "
+                                                         "side (flat across a flat border). Above 1 bulges more.")
+        card.add(grid)
+        lay = Section("Layout", expanded=True)
+        self.f["rings"] = ComboField(QF_RINGS)
+        lay.add_row("Rings", self.f["rings"], "Loops that follow the border before the grid starts. Auto: one "
+                                              "for round holes, none for holes with corners.")
+        self.f["offset"] = IntField(-200, 200, -8, 8)
+        lay.add_row("Offset", self.f["offset"], "Turns the grid round the hole: moves its corners along the "
+                                                "border by this many edges. On an odd hole it moves the "
+                                                "triangle.")
+        self.f["span"] = IntField(-200, 200, -8, 8)
+        lay.add_row("Span", self.f["span"], "Makes the grid longer one way and shorter the other.")
+        self.f["soften"] = CheckField("Smooth shading")
+        self.f["soften"].setToolTip("Soften the new edges and the old border so the patch shades smoothly "
+                                    "into the mesh.")
+        lay.add_full(self.f["soften"])
+        card.add(lay)
+        self.preview_check = CheckField("Preview")
+        self.preview_check.setValue(True)
+        self.preview_check.setToolTip("Show the fill as a wireframe before you commit it.")
+        self.preview_check.changed.connect(lambda: self._edit_timer.start())
+        defaults = secondary_button("Defaults", "Put the settings back to their defaults.")
+        defaults.clicked.connect(lambda *_: self.reset_settings())
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.preview_check)
+        row.addStretch(1)
+        row.addWidget(defaults)
+        card.add_layout(row)
+        for key, widget in self.f.items():
+            widget.setValue(QF_DEFAULTS[key])
+            widget.changed.connect(lambda *_: self._edit_timer.start())
+        col.addWidget(card)
+
+        # ---- 3. fill
+        card = self.step_fill = StepCard(3, "Fill", "Fills the mesh itself (same node, name, attributes and "
+                                                    "sets). One Ctrl+Z undoes it.")
+        self.fill_btn = primary_button("Fill Hole")
+        self.fill_btn.setMinimumHeight(28)
+        self.fill_btn.setToolTip("Fill the picked hole(s) with the layout in the preview.")
+        self.fill_btn.clicked.connect(lambda *_: self.fill())
+        card.add(self.fill_btn)
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+
+    # ============================================================ state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def settings(self):
+        return {k: w.value() for k, w in self.f.items()}
+
+    def reset_settings(self):
+        for key, widget in self.f.items():
+            widget.setValue(QF_DEFAULTS[key])
+        self._replan()
+
+    def _sync_from_selection(self):
+        try:
+            self.picked, self.notes = qf_selection()
+            self.holes = []
+            for shape, loops in self.picked:
+                dp = get_dag_path(shape)
+                for loop in loops:
+                    self.holes.append((shape, qf_read(dp, loop)))
+        except Exception:
+            traceback.print_exc()
+            self.picked, self.holes, self.notes = [], [], []
+        self._replan()
+
+    @ui_safe
+    def _replan(self):
+        st = self.settings()
+        self.plans, errors = [], []
+        for shape, hole in self.holes:
+            try:
+                self.plans.append((shape, qf_plan(hole, st)))
+            except ValueError as exc:
+                errors.append(str(exc))
+        lines = [qf_describe(p) for _, p in self.plans[:4]]
+        if len(self.plans) > 4:
+            lines.append("... %d holes in all" % len(self.plans))
+        lines += self.notes + ["Skipped: %s." % e for e in errors]
+        self.hole_label.setText("<br>".join(lines) if lines else "Nothing picked.")
+        has = bool(self.plans)
+        self.step_pick.set_state("done" if has else "current")
+        self.step_shape.set_state("current" if has else "todo")
+        self.step_fill.set_state("current" if has else "todo")
+        self.fill_btn.setEnabled(has)
+        if not has:
+            self.next_banner.set_text("Select an edge on the border of the hole to fill.")
+        else:
+            self.next_banner.set_text("Check the preview, adjust it in step 2, then press <b>Fill Hole</b>.")
+        try:
+            if has and self.preview_check.value() and self.isVisible():
+                self.preview.show(self.plans)
+            else:
+                self.preview.clear()
+        except Exception:
+            traceback.print_exc()
+            self.preview.clear()
+
+    # ============================================================= actions
+    @ui_safe
+    def fill(self):
+        self._sel_timer.stop()
+        self._edit_timer.stop()
+        self.preview.clear()
+        picked, notes = qf_selection()
+        if not picked:
+            self.set_status(" ".join(notes) or "Select an edge on the hole's border first.", level="warn")
+            return
+        t0 = time.time()
+        report = quad_fill(picked, self.settings())
+        if not report["holes"]:
+            self.set_status(" ".join(report["notes"]) or "Nothing to fill.", level="warn")
+            return
+        quads = sum(sum(1 for f in p["faces"] if len(f) == 4) for p in report["plans"])
+        msg = "Filled %d hole(s) with %d quads" % (report["holes"], quads)
+        if report["triangles"]:
+            msg += " and %d triangle(s) (odd edge counts)" % report["triangles"]
+        msg += " in %.2fs. One Ctrl+Z undoes it." % (time.time() - t0)
+        if report["notes"]:
+            msg += " " + " ".join(report["notes"])
+        self.set_status(msg, level="warn" if report["notes"] else "fixed")
+        self._sync_from_selection()
+
+    # ============================================================ plumbing
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["PreFileNewOrOpened", lambda: self.preview.forget()]),
+                      cmds.scriptJob(event=["SceneOpened", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["NewSceneOpened", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["Undo", lambda: self._sel_timer.start()]),
+                      cmds.scriptJob(event=["Redo", lambda: self._sel_timer.start()])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def showEvent(self, event):
+        super(QuadFillPanel, self).showEvent(event)
+        self._sel_timer.start()
+
+    def hideEvent(self, event):
+        super(QuadFillPanel, self).hideEvent(event)
+        try:
+            self.preview.clear()
+        except Exception:
+            traceback.print_exc()
+
+    def shutdown(self):
+        self._sel_timer.stop()
+        self._edit_timer.stop()
+        try:
+            self.preview.clear()
+        except Exception:
+            traceback.print_exc()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
 # Category -> tool panels. Add new tools here.
 TOOL_REGISTRY = [
     ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel,
-                  MossIvyPanel]),
+                  MossIvyPanel, QuadFillPanel]),
     ("UV", [SmartUdimPanel]),
 ]
 

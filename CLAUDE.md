@@ -1353,6 +1353,45 @@
       Colours come from `GROUP_PALETTE` via `set_key_palette` (sorted
       keys), not a hash, so groups never look alike.
 
+- **Quad Fill** (Modeling tab; the user, 2026-11-03: "an actually good quad
+  fill hole tool ... bridge everything together with the right edge loops
+  ... it should follow the surface", and "this doesn't make a new mesh ...
+  like a super advanced bridge tool"). Engine `qf_plan` (pure maths on
+  `qf_read`'s data), scene side `qf_selection`, `quad_fill`, `_qf_build`;
+  panel `QuadFillPanel`, preview `QuadFillPreview`.
+  - **Layout:** `qf_corners` scores every (start, side split) of an even
+    loop: capped turns at the 4 corners, minus opposite-side length
+    mismatch, minus 0.5 x |log cell aspect| (side-middle distances over edge
+    counts; without it a circle got 1 x 7). Even holes are always a pure
+    grid; odd ones lose one triangle at the sharpest corner first (all quads
+    is impossible). Rings Auto = 1 for round holes (12+ edges, no corner
+    over 50 degrees) and concave ones (a border turn under -26 degrees: a
+    grid corner at a reflex vertex is a folded quad).
+  - **Shape:** linear Coons (Follow 0) plus Follow x the normal part of two
+    blended cubic lofts. Each loft leaves along its own chord laid into the
+    tangent plane at that end (the border's inward direction over-bulged
+    round holes' corners). Normals come from a quadric fitted to each border
+    vertex's 2-ring (face normals sit half an edge out: too much bulge). The
+    tilt out of the hole's plane is capped at 1.3 x what the curvature
+    across the hole gives, less 0.15 x the larger principal curvature (the
+    fit leaks), so tube ends close flat and spheres stay round (0.2% of r).
+    In the plane the way in is the surface's own, but straight in from the
+    border where the surface stands up: normalising that sliver flipped
+    border normals and folded a 96-edge cap.
+  - **Untangle** (`_qf_untangle`): gradient steps along the surface on
+    corners under ~15 degrees, keeping the best state; corners with all
+    three nodes on the border are skipped (nothing can move them, and they
+    cost 2 s on a 128-edge cap).
+  - **Writes:** polyCloseBorder, polySplit (vertex-to-vertex lines, then one
+    split per row crossing them), polyExtrudeFacet(divisions=rings,
+    thickness 0), one `pnts` tweak, polySoftEdge (new edges 180, the old
+    border 60: a tube's rim stays hard), all with `ch` = the mesh already
+    has history. New ids are found by topology after each step and the
+    result is checked face by face against the plan (else the chunk is
+    undone). Maya puts the new faces of a per-face shaded mesh in
+    initialShadingGroup; `_qf_shade` moves them to the material round the
+    hole.
+
 ## Speed on big assets
 - `expand_members` (MFnSet.getMembers) and `SmartUdimAsset.meshes()`
   (MItDag) use the API: 0.74 s down to 0.08 s per refresh at 3,000
@@ -1710,6 +1749,7 @@ the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
 Corrugated metal: `tests/test_corrugated_roof.py`.
 Moss and Ivy: `tests/test_moss_ivy.py`, GUI `tests/run_gui_moss_ivy.mel`.
+Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
   `cat > file` without a heredoc, hang. Write patch scripts to files and
   run `python script.py`.
