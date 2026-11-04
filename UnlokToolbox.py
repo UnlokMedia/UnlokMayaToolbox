@@ -33041,7 +33041,8 @@ def _sc_attr(root):
 
 
 def sc_data(root):
-    """{"surfaces": [uuid], "udim", "layers": [{"id", "type", "tag", "name", "on", "s", "seeds", "faces"}]}."""
+    """{"surfaces": [uuid], "exclude": [uuid], "udim", "layers": [{"id", "type", "tag", "name", "on", "s",
+    "seeds", "faces"}]} (exclude: meshes / groups inside a surface group, left out of it)."""
     attr = _sc_attr(root)
     data = {}
     if attr:
@@ -33050,6 +33051,7 @@ def sc_data(root):
         except ValueError:
             data = {}
     data.setdefault("surfaces", [])
+    data.setdefault("exclude", [])
     data.setdefault("layers", [])
     data.setdefault("udim", 1001)
     data.setdefault("next", 1 + len(data["layers"]))
@@ -33115,9 +33117,11 @@ def sc_owner(node):
 
 def sc_surfaces(data):
     """The meshes a group scatters onto, now: each stored mesh, and every
-    visible mesh under each stored group (meshes added to it later too),
+    visible mesh under each stored group (meshes added to it later too)
+    but the ones left out of it (exclude: a mesh, or a group inside it),
     never anything inside a scatter group."""
     groups = [g + "|" for g in sc_groups(baked=True)]
+    left_out = _sc_left_out(data)
     out = []
     for uid in data.get("surfaces") or []:
         found = cmds.ls(uid, long=True) or []
@@ -33132,12 +33136,61 @@ def sc_surfaces(data):
             cand = []
             for sh in cmds.ls(shapes, visible=True, long=True) or []:
                 t = cmds.listRelatives(sh, parent=True, fullPath=True)[0]
-                if t not in cand:
+                if t not in cand and not _sc_inside(t, left_out):
                     cand.append(t)
         for t in cand:
             if t not in out and not any((t + "|").startswith(g) for g in groups):
                 out.append(t)
     return out
+
+
+def _sc_left_out(data):
+    """Long names of what's left out of the group's surface groups."""
+    out = []
+    for uid in data.get("exclude") or []:
+        out.extend(cmds.ls(uid, long=True) or [])
+    return out
+
+
+def _sc_inside(node, under):
+    """True when node is one of under or below one of them."""
+    return any(node == u or node.startswith(u + "|") for u in under)
+
+
+def _sc_covering(data, node):
+    """The stored group a node is inside (it's scattered onto through it), else None."""
+    for uid in data.get("surfaces") or []:
+        found = cmds.ls(uid, long=True) or []
+        if found and not _log_shape(found[0]) and node.startswith(found[0] + "|"):
+            return found[0]
+    return None
+
+
+def _sc_include(data, node):
+    """node is scattered onto: back in its surface group when it was left
+    out of it, else (not in one, or inside something left out) a surface
+    of its own."""
+    uid = cmds.ls(node, uuid=True)[0]
+    ex = data.setdefault("exclude", [])
+    if uid in ex:
+        ex.remove(uid)
+    if _sc_covering(data, node) and not _sc_inside(node, _sc_left_out(data)):
+        return
+    if uid not in data["surfaces"]:
+        data["surfaces"].append(uid)
+
+
+def _sc_exclude(data, node):
+    """node isn't scattered onto: its own entry goes, and when it's inside
+    a surface group it's left out of that group (the group stays)."""
+    uid = cmds.ls(node, uuid=True)[0]
+    if uid in data["surfaces"]:
+        data["surfaces"].remove(uid)
+    ex = data.setdefault("exclude", [])
+    if uid not in ex and _sc_covering(data, node) and not _sc_inside(node, _sc_left_out(data)):
+        ex.append(uid)
+    # what's left out of a group that's gone (or was deleted) is forgotten
+    data["exclude"] = [u for u in ex if any(_sc_covering(data, n) for n in cmds.ls(u, long=True) or [])]
 
 
 def sc_area(layer):
@@ -33356,11 +33409,12 @@ def sc_remove_layer(root, lid):
 
 
 def _sc_add_drawn_surfaces(data, drawing):
-    """Meshes a drawing is on that the group doesn't scatter onto yet join its surfaces."""
+    """Meshes a drawing is on that the group doesn't scatter onto yet join
+    its surfaces (drawing on a mesh left out of a group puts it back)."""
     have = set(sc_surfaces(data))
     for node in sc_drawing_meshes(drawing):
         if node not in have and not sc_owner(node)[0] and not _mi_part_of(node):
-            data["surfaces"].append(cmds.ls(node, uuid=True)[0])
+            _sc_include(data, node)
 
 
 def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None):
@@ -33397,16 +33451,18 @@ def sc_move_layer(root, lid, step):
 
 
 def sc_set_surfaces(root, add=(), remove=()):
-    """Add / remove meshes or groups it scatters onto (one Ctrl+Z)."""
+    """Add / remove meshes or groups it scatters onto (one Ctrl+Z).
+    Removing a mesh (or a group) inside a surface group leaves just that
+    out of the group (the user: "add a group, but then click individual
+    things inside to remove ... they'll override just for that one
+    object"); adding it again puts it back."""
     def edit(data):
-        cur = list(data.get("surfaces") or [])
+        for n in remove or ():  # first, so swapping a group for meshes inside it works
+            if n and cmds.objExists(n):
+                _sc_exclude(data, long_name(n))
         for n in add or ():
             if n and cmds.objExists(n) and not sc_owner(n)[0] and not _mi_part_of(n):
-                uid = cmds.ls(n, uuid=True)[0]
-                if uid not in cur:
-                    cur.append(uid)
-        drop = set(cmds.ls(n, uuid=True)[0] for n in remove or () if n and cmds.objExists(n))
-        data["surfaces"] = [u for u in cur if u not in drop]
+                _sc_include(data, long_name(n))
     return _sc_change(root, "Scatter surfaces", edit)
 
 
@@ -33427,12 +33483,16 @@ def sc_update(root, lid=None, change=None, group_change=None):
 
 
 def sc_surface_names(data):
-    """[(uuid, long name or None, "mesh" / "group")] of a group's surfaces."""
+    """[(uuid, long name or None, "mesh" / "group" / "left out")] of a
+    group's surfaces, each group followed by what's left out of it."""
     out = []
+    left = [(u, (cmds.ls(u, long=True) or [None])[0]) for u in data.get("exclude") or []]
     for uid in data.get("surfaces") or []:
         found = cmds.ls(uid, long=True) or []
         node = found[0] if found else None
         out.append((uid, node, "mesh" if node and _log_shape(node) else "group"))
+        if node and not _log_shape(node):
+            out.extend((u, n, "left out") for u, n in left if n and n.startswith(node + "|"))
     return out
 
 
@@ -33972,11 +34032,15 @@ class ScatterPanel(QtWidgets.QWidget):
         self.surf_list = QtWidgets.QListWidget()
         self.surf_list.setMaximumHeight(96)
         self.surf_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.surf_list.setToolTip("What the group grows on. A group (G) is read fresh at every regrow.")
+        self.surf_list.setToolTip("What the group grows on. A group (G) is read fresh at every regrow; "
+                                  "what's left out of it shows under it.")
         card.add(self.surf_list)
-        add_s = secondary_button("Add Selected", "Add the selected meshes / groups to the group being edited.")
+        add_s = secondary_button("Add Selected", "Add the selected meshes / groups to the group being edited "
+                                                 "(or put back what's picked under a group in the list).")
         add_s.clicked.connect(lambda *_: self.add_surfaces())
-        rem_s = secondary_button("Remove", "Remove the surfaces picked in the list (or the selected meshes).")
+        rem_s = secondary_button("Remove", "Remove the surfaces picked in the list (or the selected meshes). "
+                                           "A mesh inside a group it grows on is left out of that group; the "
+                                           "rest of the group stays.")
         rem_s.clicked.connect(lambda *_: self.remove_surfaces())
         card.add(button_row(add_s, rem_s))
         col.addWidget(card)
@@ -34180,9 +34244,14 @@ class ScatterPanel(QtWidgets.QWidget):
                     self._lid = data["layers"][0]["id"] if data["layers"] else None
                 self.group_label.setText("Editing <b>%s</b>." % short_name(self._root))
                 for uid, node, kind in sc_surface_names(data):
-                    item = QtWidgets.QListWidgetItem(("%s%s" % (short_name(node), "  (G)" if kind == "group" else ""))
-                                                     if node else "(deleted)")
+                    if kind == "left out":
+                        item = QtWidgets.QListWidgetItem("      - %s  (left out)" % short_name(node))
+                        item.setForeground(QtGui.QColor(150, 150, 150))
+                    else:
+                        item = QtWidgets.QListWidgetItem(("%s%s" % (short_name(node), "  (G)" if kind == "group"
+                                                                   else "")) if node else "(deleted)")
                     item.setData(QtCore.Qt.UserRole, uid)
+                    item.setData(QtCore.Qt.UserRole + 1, kind)
                     self.surf_list.addItem(item)
                 for layer in data["layers"]:
                     pts, fcs, strokes = sc_area(layer)
@@ -34341,6 +34410,11 @@ class ScatterPanel(QtWidgets.QWidget):
         if not self._alive():
             self.set_status("Select a scatter group (click its box) first, then the meshes to add.", level="warn")
             return
+        back = [n for i in self.surf_list.selectedItems() if i.data(QtCore.Qt.UserRole + 1) == "left out"
+                for n in cmds.ls(i.data(QtCore.Qt.UserRole), long=True)]
+        if back:
+            self._structural("Put %d back in" % len(back), lambda: sc_set_surfaces(self._root, add=back))
+            return
         sel = sc_selection()
         if not sel["surfaces"]:
             self.set_status("Select the meshes or groups to add.", level="warn")
@@ -34351,7 +34425,8 @@ class ScatterPanel(QtWidgets.QWidget):
     def remove_surfaces(self):
         if not self._alive():
             return
-        uids = [i.data(QtCore.Qt.UserRole) for i in self.surf_list.selectedItems()]
+        uids = [i.data(QtCore.Qt.UserRole) for i in self.surf_list.selectedItems()
+                if i.data(QtCore.Qt.UserRole + 1) != "left out"]
         nodes = [n for n in (cmds.ls(u, long=True) for u in uids) for n in n]
         if not nodes:
             nodes = sc_selection()["surfaces"]

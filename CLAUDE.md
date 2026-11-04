@@ -800,7 +800,18 @@
     `<material><tag>_C_scatteredObjects####_GEP` tagged `unlokScatterPart`
     "<layer id>/<part>", `unlokMossIvyVerts`, UV ready / stacked.
     Surfaces: a mesh, or every visible mesh under a stored group, read at
-    each build (`sc_surfaces`; never inside a scatter group).
+    each build (`sc_surfaces`; never inside a scatter group), minus
+    `exclude` (the user, 2026-11-04: "add a group, but then click
+    individual things inside to remove ... they'll override just for that
+    one object"): uuids of meshes / groups inside a stored group left out
+    of it. `sc_set_surfaces` goes through `_sc_exclude` (drops its own
+    entry; inside a stored group (`_sc_covering`) it's excluded; excludes
+    no longer under a stored group are forgotten) and `_sc_include` (out of
+    `exclude`; a surface of its own only when no group covers it, or it's
+    inside something still left out); drawing on a left-out mesh puts it
+    back. `sc_surface_names` lists each group's left-out items after it
+    (kind "left out"); the panel shows them greyed, Add Selected puts list
+    picks back, Remove ignores them.
   - **Undo model:** structure (layers, surfaces, areas, toggles) is an
     UndoChunk on the JSON (`_sc_change`; Delete deletes the layer's parts
     inside it). Geometry and part creation are NoUndo (tool-managed,

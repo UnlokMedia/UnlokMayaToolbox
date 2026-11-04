@@ -12,7 +12,8 @@ layers turn on / off, duplicate, move and delete with one Ctrl+Z each
 (the undo / redo regrows what it built). Live edits stay out of the undo
 queue and only rebuild the layer edited; Bake drops the box and hidden
 parts. Jungle leaves: big single leaves in clusters of 1-3, green and dry
-parts, lying on the surface, along a gutter.
+parts, lying on the surface, along a gutter. Removing a mesh inside the
+Maya group leaves just it out (nothing grows on it), adding it puts it back.
 """
 
 import math
@@ -249,6 +250,44 @@ def run():
     cmds.undo()
     tb["sc_sync"]()
     check("one Ctrl+Z puts the Maya group back", len(tb["sc_surfaces"](tb["sc_data"](root))) == 7)
+
+    # --- leave one mesh of the Maya group out (the group stays), put it back
+    beam = [n for n in nodes if "beam" in n][0]
+
+    def on_beam():
+        return sum(1 for node in tb["sc_parts"](root).values() if cmds.getAttr(node + ".visibility")
+                   for p in points(tb, node)
+                   if p[1] > 1.15 and 1.5 < p[2] < 2.5 and abs(p[0]) < 14.5)
+
+    before = on_beam()
+    tb["sc_set_surfaces"](root, remove=[beam])
+    d = tb["sc_data"](root)
+    meshes = tb["sc_surfaces"](d)
+    check("Remove on a mesh inside a group leaves just it out of the group",
+          len(meshes) == 6 and beam not in meshes and len(d["surfaces"]) == 1 and
+          [k for _, _, k in tb["sc_surface_names"](d)] == ["group", "left out"],
+          "%d meshes, %s" % (len(meshes), [k for _, _, k in tb["sc_surface_names"](d)]))
+    after = on_beam()
+    check("nothing grows on the mesh left out", before > 0 and after == 0, "%d -> %d points on it" % (before, after))
+    cmds.undo()
+    tb["sc_sync"]()
+    check("one Ctrl+Z puts it back in", len(tb["sc_surfaces"](tb["sc_data"](root))) == 7 and on_beam() > 0)
+    cmds.redo()
+    tb["sc_sync"]()
+    tb["sc_set_surfaces"](root, add=[beam])
+    d = tb["sc_data"](root)
+    check("adding it again puts it back in the group (not a surface of its own)",
+          len(tb["sc_surfaces"](d)) == 7 and len(d["surfaces"]) == 1 and not d["exclude"], str(d["exclude"]))
+    tb["sc_set_surfaces"](root, remove=[beam])
+    tb["sc_set_surfaces"](root, remove=[grp])
+    check("removing the group forgets what was left out of it", not tb["sc_data"](root)["exclude"])
+    for _ in range(3):
+        cmds.undo()
+    tb["sc_sync"]()
+    d = tb["sc_data"](root)
+    check("Ctrl+Z steps back through them", len(tb["sc_surfaces"](d)) == 6 and len(d["exclude"]) == 1)
+    cmds.undo()
+    tb["sc_sync"]()
 
     # --- new group undo / redo
     cmds.select(clear=True)

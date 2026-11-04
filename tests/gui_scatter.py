@@ -397,7 +397,8 @@ def drawing(ns, panel, window):
           not cmds.ls("scatterDrawing*", type="transform"))
     cmds.undo()
     panel._after_undo()
-    check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1)
+    check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1,
+          "%d layers, %s" % (len(ns["sc_data"](root)["layers"]), panel.status.text()))
 
 
 def jungle_leaves(ns, panel, window):
@@ -457,6 +458,37 @@ def jungle_leaves(ns, panel, window):
     look((0, 8, -2), (30, 34, 62))
     snap("10_fronds_overview.png")
     close_ups(root, "10_close")
+
+    # --- leave the floor out of the Maya group from the panel, then put it back
+    def low_points():
+        return sum(1 for node in ns["sc_parts"](root).values() if cmds.getAttr(node + ".visibility")
+                   for p in cmds.xform(node + ".vtx[*]", q=True, worldSpace=True, translation=True)[1::3]
+                   if p < 0.5)
+
+    floor_pts = low_points()
+    cmds.select(nodes["floor"])
+    panel._sync_from_selection()
+    panel.remove_surfaces()
+    pump()
+    items = [panel.surf_list.item(i).text() for i in range(panel.surf_list.count())]
+    check("Remove on a mesh inside the group leaves just it out (listed under the group)",
+          len(items) == 2 and "(G)" in items[0] and "floor" in items[1] and "(left out)" in items[1],
+          "%s | %s" % (items, panel.status.text()))
+    check("nothing grows on the floor left out", floor_pts > 0 and low_points() == 0,
+          "%d -> %d points" % (floor_pts, low_points()))
+    for key, node in ns["sc_parts"](root).items():
+        shade_part(node, key.split("/")[1])
+    cmds.undoInfo(stateWithoutFlush=False)
+    cmds.select(clear=True)
+    cmds.undoInfo(stateWithoutFlush=True)
+    window.grab().save(os.path.join(OUT, "11_panel_left_out.png"))
+    look((0, 8, -2), (30, 34, 62))
+    snap("11_floor_left_out.png")
+    panel.surf_list.item(1).setSelected(True)
+    panel.add_surfaces()
+    pump()
+    check("picking it in the list and Add Selected puts it back",
+          panel.surf_list.count() == 1 and low_points() > 0, panel.status.text())
 
 
 def run():

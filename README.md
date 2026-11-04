@@ -736,7 +736,12 @@ you tune them.
    from Selected** (one Ctrl+Z). It's `scatteredObjects0001_GRP`, with a
    wireframe box round it (`scatteredObjects0001_CTL`, never renders):
    click the box in the viewport to edit the group. **Add Selected** /
-   **Remove** change what it grows on.
+   **Remove** change what it grows on. To keep one mesh of a group bare,
+   select it (viewport or Outliner) and press **Remove**: just that mesh
+   (or a group inside it) is left out, listed greyed under the group as
+   *(left out)*, and the rest of the group keeps growing. Pick it in the
+   list and press **Add Selected** (or add it from the viewport) to put it
+   back.
 
    **Or draw instead of selecting:** **Draw on Surfaces**, then drag over
    any meshes (walls, a roof, the floor: nothing needs selecting; a click
@@ -1744,7 +1749,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   crate, and in the gutter) as drifts along them, no grass up the wall, no two parts in one UDIM tile, live edits out of the
   undo queue rebuilding only their layer, layers on / off, Delete,
   Duplicate, Up and surfaces changed with one Ctrl+Z each (the undo /
-  redo regrows), a new group's undo / redo, presets, Bake dropping the box
+  redo regrows), a mesh of the Maya group left out (nothing on it, the
+  rest still grows, Ctrl+Z, put back), a new group's undo / redo, presets, Bake dropping the box
   and empty parts; then drawing: a group from strokes over a dense ground
   and up a wall with nothing selected (leaves only along them, Falloff
   thinning them out, only the faces under the strokes analysed, Width live,
@@ -1762,7 +1768,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   layer, the box picks the group, Delete, Duplicate; then Draw on Surfaces
   over a fresh porch with Ctrl+Z on a stroke, Scatter on Drawing and a
   second layer on the same drawing; then leaf piles and jungle leaves on
-  the same porch, before / after, and fronds live) and saves pictures to
+  the same porch, before / after, fronds live, then the floor left out of
+  the group from the panel and put back from the list) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular
