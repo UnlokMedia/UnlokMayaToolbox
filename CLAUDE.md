@@ -918,7 +918,14 @@
     limit is (rad + qr) x (1 - Grouping gg (0.15 + 0.6 Packing) + Grouping
     (1 - gg) 0.4). Grouping 0 = the even scatter. The panel's "Clumps"
     section (`clump_sec`) shows only for that style (`_style_rows`, from
-    `_show` and the Style field's changed signal).
+    `_show` and the Style field's changed signal). **Heights** (the user:
+    "some that are like more mounds ... on a completely random per blob
+    basis and also on a clumps basis"): `clump_hvar` (h x 1 + 1.5 hvar (r -
+    0.5)), `clump_mounds` (chance 0.4 x Mounds: h x 1.8..3.5, radius x
+    0.85), `clump_ghvar` (a second `_moss_noise3` at Group size, only when
+    > 0: h x 1 + ghvar (1.1 noise + 0.6 Grouping (gg - 0.5))). Their
+    randoms are their own `_rand12(seed, i, 7, 97)`, so changing them never
+    moves the layout; the obstacle cap (0.6 x the room above) still wins.
   - **Specks** (the user, same day: "tiny bits of moss that I could toggle
     on and off ... panels of glass ... bits of dirt or tiny bits of moss
     that have fallen down and stuck to a window"): layer type "Specks",

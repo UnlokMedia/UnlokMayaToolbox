@@ -29163,7 +29163,8 @@ MOSS_DEFAULTS = {
     "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8, "creases": 0.4,
     "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles",
-    "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6}
+    "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6,
+    "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3}
 IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
     "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
@@ -30979,6 +30980,9 @@ class _MossClumps(object):
         self.group = clamp(float(s.get("clump_group", 0.0)), 0.0, 1.0)
         self.gsize = max(1e-4, float(s.get("clump_group_size", 0.3)) / m)
         self.pack = clamp(float(s.get("clump_pack", 0.5)), 0.0, 1.0)
+        self.hvar = clamp(float(s.get("clump_hvar", 0.0)), 0.0, 1.0)
+        self.mounds = clamp(float(s.get("clump_mounds", 0.0)), 0.0, 1.0)
+        self.ghvar = clamp(float(s.get("clump_ghvar", 0.0)), 0.0, 1.0)
         self.cands, self.rows = cands, rows
         self.capped = False
         self.count = 0
@@ -30994,13 +30998,19 @@ class _MossClumps(object):
         # sometimes, so it's not like such an even gap between them all"): one
         # noise lookup per candidate, gg ~ 1 inside a group, 0 in the gaps.
         w, gs, gseed = self.group, self.gsize, self.seed * 31 + 77
-        gmap = {}
+        gmap, hmap = {}, {}
         if w > 0.0:
             for i in order:
                 p = cands[i][0]
                 g = 0.5 + 0.62 * _moss_noise3(p[0] / gs, p[1] / gs, p[2] / gs, gseed)
                 g = clamp((g - 0.38) / 0.24, 0.0, 1.0)
                 gmap[i] = g * g * (3.0 - 2.0 * g)
+        if self.ghvar > 0.0:
+            # Group heights: a second noise at Group size, so whole groups
+            # (and the patches between) are taller or flatter than others
+            for i in order:
+                p = cands[i][0]
+                hmap[i] = _moss_noise3(p[0] / gs + 41.7, p[1] / gs - 13.3, p[2] / gs + 7.9, gseed + 5)
         order.sort(key=lambda i: (-(rows[i][0] + 0.4 * w * gmap.get(i, 0.0)), i))
         cell = 4.0 * R
         room = {}
@@ -31014,6 +31024,10 @@ class _MossClumps(object):
                 continue  # the gaps between groups: mostly bare, a stray cushion or two
             rad = R * (0.45 + 0.75 * pr) * (1.0 + self.var * (r[0] - 0.5))
             rad *= 1.0 + w * (0.3 * gg - 0.15)  # bigger in a group's middle, smaller strays
+            hr = _rand12(self.seed, i, 7, 97)  # heights: own randoms, so the layout above never moves
+            mound = hr[1] < 0.4 * self.mounds
+            if mound:
+                rad *= 0.85
             p, n = c[0], c[1]
             key = (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
             near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
@@ -31030,6 +31044,13 @@ class _MossClumps(object):
                 self.capped = True
                 break
             h = self.H * (0.55 + 0.45 * pr) * (0.8 + 0.5 * row[1]) * (0.8 + 0.4 * r[1])
+            # Height variation (per cushion), Mounds (a few rise tall), Group
+            # heights (per group, and taller towards a group's middle)
+            h *= max(0.2, 1.0 + self.hvar * 1.5 * (hr[0] - 0.5))
+            if mound:
+                h *= 1.8 + 1.7 * hr[2]
+            if self.ghvar > 0.0:
+                h *= max(0.15, 1.0 + self.ghvar * (1.1 * hmap.get(i, 0.0) + 0.6 * w * (gg - 0.5)))
             if o is not None:
                 h = min(h, 0.6 * o)
             if self._clump(i, p, n, rad, h, pr, r):
@@ -31117,7 +31138,7 @@ class _MossClumps(object):
                     z = h * math.sqrt(max(0.0, 1.0 - f ** 2.4))
                     z *= 1.0 + 0.35 * lump * _th_noise(sx + x / rad * 2.5, sy + y / rad * 2.5, self.seed + 47)
                 else:
-                    z = -0.08 * h  # the rim tucks under
+                    z = -0.08 * min(h, self.H)  # the rim tucks under (a tall mound's no deeper)
                 q = (c[0] + t1[0] * x + t2[0] * y, c[1] + t1[1] * x + t2[1] * y, c[2] + t1[2] * x + t2[2] * y)
                 hit = self.surf.closest(q)
                 if hit is not None:
@@ -33957,6 +33978,13 @@ SC_FIELDS = {
                          "Clumps: how big the groups (and the gaps between them) are, in metres."),
     "clump_pack": ("Packing", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                    "Clumps: how tightly a group's cushions crowd together and run into each other."),
+    "clump_hvar": ("Height variation", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                   "Clumps: how much each cushion's height differs from the next, at random (0 = all alike)."),
+    "clump_mounds": ("Mounds", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                     "Clumps: how many cushions rise into tall mounds (about 2-3.5x the height, a little narrower)."),
+    "clump_ghvar": ("Group heights", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Clumps: how much whole groups differ in height (some groups mounded up, others flat), and "
+                    "how much taller a group's middle is. Its patches are Group size across."),
     "clump_size": ("Clump size", _scf(0.005, 3.0, 0.02, 0.4, 3, 0.01),
                    "Size of the moss's cushions and how fine its patches' edges are, in metres."),
     "thickness": ("Thickness", _scf(0.0, 0.5, 0.0, 0.12, 3, 0.005),
@@ -34043,7 +34071,8 @@ _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
     "Moss": [("", True, ["style", "coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands",
                          "capsules"]),
-             ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack"]),
+             ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_hvar", "clump_mounds",
+                               "clump_ghvar"]),
              ("Where it grows", True, _SC_WHERE),
              ("More", False, ["size_var", "strand_length", "droop", "detail"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],

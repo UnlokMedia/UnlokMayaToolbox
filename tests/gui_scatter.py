@@ -353,7 +353,9 @@ def moss_and_specks(ns, panel, window):
     look((0, 1, -6), (10, 9, 6))
     snap("12_moss_clumps_sill.png")
     quiet(lambda: cmds.delete(root))
-    for name, extra in (("even", {"clump_group": 0.0}), ("grouped", {"clump_group": 1.0, "clump_pack": 0.9})):
+    for name, extra in (("even", {"clump_group": 0.0}), ("grouped", {"clump_group": 1.0, "clump_pack": 0.9}),
+                        ("heights", {"clump_group": 0.8, "clump_pack": 0.7, "clump_hvar": 0.8, "clump_mounds": 0.5,
+                                     "clump_ghvar": 0.9})):
         extra["style"] = "Clumps"
         root, dt = grow([nodes["roof"], nodes["sill"], nodes["floor"]], "Moss", "Moss", extra)
         look(*roof)

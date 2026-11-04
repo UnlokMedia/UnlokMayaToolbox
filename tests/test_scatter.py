@@ -632,6 +632,48 @@ def moss_and_specks():
     nb, db, _, _ = floor_spread({"clump_group": 1.0, "clump_group_size": 0.8})
     check("Group size: bigger groups and gaps", db > ds, "dispersion %.2f (0.15 m) -> %.2f (0.8 m)" % (ds, db))
 
+    def floor_heights(extra):
+        """Each floor cushion's height (the floor's top is y = 0), with its 2 dm cell."""
+        flat = {"clump_hvar": 0.0, "clump_mounds": 0.0, "clump_ghvar": 0.0}
+        flat.update(extra)
+        rg, lg = tb["sc_add_layer"](root, "Moss", dict(base, style="Clumps", **flat))
+        ng = tb["sc_parts"](root).get(lg + "/moss")
+        out = []
+        for sh in (leaf_shells(tb, ng) if ng else []):
+            cx = sum(p[0] for p in sh) / len(sh)
+            cz = sum(p[2] for p in sh) / len(sh)
+            lo, hi = min(p[1] for p in sh), max(p[1] for p in sh)
+            if -0.2 < lo < 0.2 and -20 < cx < 20 and -13 < cz < 7:
+                out.append(((int((cx + 20) // 2), int((cz + 13) // 2)), hi))
+        tb["sc_remove_layer"](root, lg)
+        return out
+
+    def cv(vals):
+        m = sum(vals) / float(len(vals))
+        return (sum((v - m) ** 2 for v in vals) / float(len(vals))) ** 0.5 / m if m else 0.0
+
+    def cell_means(hs):
+        cells = {}
+        for k, h in hs:
+            cells.setdefault(k, []).append(h)
+        return [sum(v) / len(v) for v in cells.values() if len(v) >= 3]
+
+    h0 = floor_heights({})
+    h1 = floor_heights({"clump_hvar": 1.0})
+    check("Height variation: cushions differ in height at random", h0 and h1 and cv([h for _, h in h1]) >
+          1.3 * cv([h for _, h in h0]), "spread %.2f -> %.2f" % (cv([h for _, h in h0]), cv([h for _, h in h1])))
+    hm = floor_heights({"clump_mounds": 0.6})
+
+    def tall(hs):
+        s = sorted(h for _, h in hs)
+        return s[int(0.97 * (len(s) - 1))] / s[len(s) // 2]
+
+    check("Mounds: a few rise well above the rest", hm and tall(hm) > 1.4 * tall(h0),
+          "97th percentile %.2fx the median -> %.2fx" % (tall(h0), tall(hm)))
+    hg = floor_heights({"clump_ghvar": 1.0})
+    check("Group heights: whole groups taller or flatter", hg and cv(cell_means(hg)) > 1.5 * cv(cell_means(h0)),
+          "spread between 2 dm cells %.2f -> %.2f" % (cv(cell_means(h0)), cv(cell_means(hg))))
+
     # --- specks on a pane of glass standing on the floor
     glass = box("glassPane", (12, 8, 0.1), (0, 4.0, 4.0), div=1.0)
     t0 = time.time()
