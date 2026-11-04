@@ -807,6 +807,45 @@ tuning big patches and save High / Hero for the patches the camera gets
 close to (three planks: Normal ~30k vertices, High ~320k, Hero ~1M).
 Ivy 0.1 - 0.3 s.
 
+### Modeling > Quad Fill
+
+Fills a hole with clean quads instead of Maya's one n-gon: the edge loops
+carry across to the other side, and the patch follows the surface round it
+(a hole in a sphere fills round, an open tube end closes flat).
+
+1. **Pick the hole:** select one edge on its border (or the whole border,
+   a border vertex, or a face next to it). Pick an edge on each hole to fill
+   several at once.
+2. **Shape:** a teal wireframe previews the fill and follows the settings
+   live.
+   - **Grid:** Smooth lets the lines flow with the border's shape; Straight
+     runs every line dead straight between its two border points (a neat
+     hard-surface grid; Smooth is off). Follow surface still lifts a
+     Straight grid onto a curved surface; at 0 it stays flat.
+   - **Smooth** relaxes the inside so the quads even out (Smooth grid).
+   - **Follow surface:** 1 carries the surrounding curvature across, 0 fills
+     with straight lines from side to side, above 1 bulges more.
+   - **Rings:** loops that follow the border before the grid starts. Auto
+     gives round and concave holes one, holes with corners none.
+   - **Offset** turns the grid round the hole (on an odd hole it moves the
+     triangle); **Span** makes it longer one way and shorter the other.
+   - **Smooth shading** softens the new edges, and the old border where the
+     surface carries on (a tube's rim stays hard).
+3. **Fill Hole.** One Ctrl+Z undoes it.
+
+The border is split into four sides at its best corners, so a hole cut out
+of a grid gets that grid back exactly. An even number of border edges always
+fills as a grid with no poles; an odd number can't be all quads, so one
+triangle closes the sharpest corner. The panel warns before you fill and
+says how to avoid it: split one border edge so the count is even, then
+fill again (Offset moves the triangle). Folded or knife-thin corners (concave
+holes) are opened up automatically.
+
+It fills the mesh itself with Maya's own poly edits: no new mesh, and the
+same node, name, attributes, sets and materials (per-face materials take the
+one round the hole). A mesh without construction history doesn't get any. A
+96-edge hole fills in about 0.2 s.
+
 ### UV > Smart UDIM (in progress)
 
 **Finding your way:** only the step you're on stays open (plus any step
@@ -1617,6 +1656,21 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   layer, the box picks the group, Delete, Duplicate) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
+- `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular
+  (the lost grid comes back exactly), uneven, L-shaped and odd holes in a
+  grid, Offset / Span / Rings variations, a hole in a sphere (within 0.2% of
+  its radius; Follow 0 is flat) and round its pole (a ring), a cylinder's
+  open end (flat, rim stays hard) and side (round); every fill all quads,
+  manifold, wound like the mesh, no folded corners; same node, name, uuid
+  and attributes, no history added, one Ctrl+Z; per-face materials; picking
+  by vertex, face or whole mesh; the preview out of the undo queue and never
+  saved; speed.
+- `tests/gui_quad_fill.py`: drives the Quad Fill panel in a real Maya
+  session (a sphere, a tube end and an uneven grid hole: preview, Offset,
+  Fill Hole, undo / redo, the preview going when you leave the panel) and
+  saves before / preview / after pictures beside Maya's own Fill Hole to
+  `tests/_out/quad_fill`. Launch it like the smoke test below, with
+  `tests/run_gui_quad_fill.mel`.
 - `tests/gui_bevel_resolver.py`: drives the Bevel Resolver panel in a real
   Maya session and saves before / after screenshots (wireframe and smooth
   preview) to `tests/_out/bevel_resolver`. Launch it like the smoke test

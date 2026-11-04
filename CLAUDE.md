@@ -1531,6 +1531,19 @@
     undone). Maya puts the new faces of a per-face shaded mesh in
     initialShadingGroup; `_qf_shade` moves them to the material round the
     hole.
+  - **Grid: Straight** (the user, 2026-11-04: even at Smooth 0 / Follow 0
+    the lines curved; wanted "a really neat hard grid"): a linear Coons
+    patch's iso-lines blend the side curves, so they bend. Straight puts
+    each inner grid node where its two chords (border node to opposite
+    border node, rings first since nodes go in id order) pass closest
+    (`_qf_chords`), then lifts only along the patch normal by Follow (lines
+    stay straight seen along the normal; a sphere hole still fills round).
+    Smooth is skipped (greyed out); untangle still runs on folds.
+  - **Triangles** (same day: "warn the user ... how they can get rid of
+    the tri"): `qf_triangle_advice(plans)` says how many, the odd edge
+    count and the fix (split one border edge, fill again; Offset moves
+    it). The panel shows it in step 3 (amber label, card tone warn), the
+    NEXT banner mentions it, and the status after Fill repeats the fix.
 
 ## Speed on big assets
 - `expand_members` (MFnSet.getMembers) and `SmartUdimAsset.meshes()`

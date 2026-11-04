@@ -272,6 +272,61 @@ def main():
     sizes = [len(mfn(grid).getPolygonVertices(f)) for f in range(mfn(grid).numPolygons)]
     check("the uneven hole is all quads", set(sizes) == {4}, str(sorted(set(sizes))))
 
+    # ---------------------------------------------------- Straight grid: Smooth (left) vs Straight (right)
+    def bent_hole(name, dx):
+        node = cmds.polyPlane(w=10, h=10, sx=10, sy=10, name=name, constructionHistory=False)[0]
+        cmds.delete(["%s.f[%d]" % (node, j * 10 + i) for i in range(3, 7) for j in range(2, 8)])
+        fn = mfn(node)
+        for v in range(fn.numVertices):
+            pt = fn.getPoint(v)
+            x, z = pt.x, pt.z
+            if 1.5 < abs(x) < 2.5 and abs(z) < 3.5 or 2.5 < abs(z) < 3.5 and abs(x) < 2.5:
+                cmds.move(0.35 * math.sin(1.7 * z + x), 0, 0.3 * math.cos(1.3 * x - z), "%s.vtx[%d]" % (node, v),
+                          relative=True)
+        cmds.move(dx, 0, 90, node)
+        shade(node, "testTile", (0.6, 0.6, 0.55))
+        return node
+
+    soft, hard = bent_hole("smoothGrid", -5.5), bent_hole("straightGrid", 5.5)
+    panel.f["rings"].setValue("0")
+    panel.f["smooth"].setValue(0.0)
+    panel.f["follow"].setValue(0.0)
+    cmds.select(border_edge(soft, lambda x, y, z: abs(x + 5.5) < 2.7 and abs(z - 90) < 3.7))
+    panel._sync_from_selection()
+    panel.fill_btn.click()
+    panel.f["grid"].setValue("Straight")
+    panel._replan()  # the edit timer's job
+    check("Straight greys out Smooth", not panel.f["smooth"].isEnabled())
+    cmds.select(border_edge(hard, lambda x, y, z: abs(x - 5.5) < 2.7 and abs(z - 90) < 3.7))
+    panel._sync_from_selection()
+    look((0, 0, 90), (0, 30, 91))
+    snap("11_straight_preview.png")
+    panel.fill_btn.click()
+    quiet(cmds.select, clear=True)
+    pump()
+    snap("12_grid_smooth_left_straight_right.png")
+    panel.reset_settings()
+
+    # ---------------------------------------------------- odd hole: the triangle warning
+    odd = cmds.polyPlane(w=8, h=8, sx=8, sy=8, name="oddHole", constructionHistory=False)[0]
+    cmds.delete(["%s.f[%d]" % (odd, j * 8 + i) for i in range(2, 5) for j in range(3, 5)])
+    cmds.polySubdivideEdge(border_edge(odd, lambda x, y, z: abs(x - 0.5) < 0.1 and 0 < z < 2), divisions=1,
+                           constructionHistory=False)
+    cmds.move(0, 0, 120, odd)
+    cmds.select(border_edge(odd, lambda x, y, z: abs(x) < 3 and abs(z - 120) < 2))
+    panel._sync_from_selection()
+    pump()
+    check("an odd hole warns about the triangle and how to avoid it",
+          not panel.tri_label.isHidden() and "split one border edge" in panel.tri_label.text()
+          and panel.step_fill.tone == "warn", panel.tri_label.text())
+    check("NEXT mentions the triangle", "triangle" in panel.next_banner.text.text(), panel.next_banner.text.text())
+    window.grab().save(os.path.join(OUT, "13_panel_triangle_warning.png"))
+    panel.fill_btn.click()
+    pump()
+    check("after the fill the status says how to get all quads", "Ctrl+Z" in panel.status.text()
+          and "split one border edge" in panel.status.text(), panel.status.text())
+    check("the warning goes once the hole is filled", panel.tri_label.isHidden())
+
     # ---------------------------------------------------- leaving the panel hides the preview
     cmds.select(border_edge(grid, lambda x, y, z: abs(x) > 9))  # the plane's own rim: still a "hole"
     panel._sync_from_selection()

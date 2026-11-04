@@ -31875,6 +31875,9 @@ class ScatterPanel(QtWidgets.QWidget):
 #              surface's curvature backs it up, so an open tube end closes
 #              flat instead of domed. Smooth relaxes the inside along the
 #              surface.
+#   Straight   (Grid) every grid line is the straight chord between its two
+#              border points (each node where its two chords pass closest),
+#              lifted only along the normal by Follow: a hard-surface grid.
 #   Writes     only Maya's own undoable poly edits on the mesh itself
 #              (polyCloseBorder, polySplit, polyExtrudeFacet for the rings,
 #              one vertex tweak): the same node, name, attributes and sets,
@@ -31882,7 +31885,9 @@ class ScatterPanel(QtWidgets.QWidget):
 #   Preview    one hidden wireframe mesh (never saved, out of the undo
 #              queue) that follows the selection and the sliders.
 
-QF_DEFAULTS = {"smooth": 0.25, "follow": 1.0, "rings": "Auto", "offset": 0, "span": 0, "soften": True}
+QF_DEFAULTS = {"grid": "Smooth", "smooth": 0.25, "follow": 1.0, "rings": "Auto", "offset": 0, "span": 0,
+               "soften": True}
+QF_GRIDS = ("Smooth", "Straight")
 QF_RINGS = ("Auto", "0", "1", "2", "3")
 QF_MAX_EDGES = 1000          # longer borders are refused (a mesh's outer rim, not a hole)
 QF_SCAN_EDGES = 200000       # a mesh picked whole is only searched for its hole up to this size
@@ -32215,6 +32220,21 @@ def _qf_normals(hole, order, nrm):
     return out
 
 
+def _qf_chords(p0, p1, q0, q1):
+    """Where the chord p0-p1 and the chord q0-q1 pass closest (the midpoint
+    of their closest points; their crossing on a flat hole), or None when
+    they run parallel."""
+    d1, d2, r = _qf_sub(p1, p0), _qf_sub(q1, q0), _qf_sub(p0, q0)
+    aa, bb, ee = _qf_dot(d1, d1), _qf_dot(d1, d2), _qf_dot(d2, d2)
+    cc, ff = _qf_dot(d1, r), _qf_dot(d2, r)
+    den = aa * ee - bb * bb
+    if den <= 1e-9 * aa * ee or den <= 0.0:
+        return None
+    s = clamp((bb * ff - cc * ee) / den, 0.0, 1.0)
+    t = clamp((aa * ff - bb * cc) / den, 0.0, 1.0)
+    return _qf_lerp(_qf_add(p0, _qf_mul(d1, s)), _qf_add(q0, _qf_mul(d2, t)), 0.5)
+
+
 def _qf_untangle(nodes, faces, fixed, nrm_of, iters=300):
     """Open up folded or knife-thin corners (under ~15 degrees) by moving
     the free nodes (ids >= fixed) along the surface: gradient steps on
@@ -32394,18 +32414,26 @@ def qf_plan(hole, settings=None):
         for j in range(b):
             faces.append((grid[(i, j)], grid[(i + 1, j)], grid[(i + 1, j + 1)], grid[(i, j + 1)]))
 
-    # shape: the flat Coons patch, lifted along its normal toward the curved one
+    # shape: the flat Coons patch (Straight: the chords across), lifted along
+    # its normal toward the curved one. Nodes go in id order, so the rings
+    # (the grid's border) are placed before the chords between them.
     follow = float(st["follow"])
+    straight = st.get("grid") == "Straight"
+    inner = {nid: ij for ij, nid in grid.items() if 0 < ij[0] < a and 0 < ij[1] < b} if straight else {}
     nrms = {}
     for nid in range(n, len(nodes)):
         u, v = dom[nid]
         p = patch.flat(u, v)
+        if nid in inner:
+            i, j = inner[nid]
+            p = _qf_chords(nodes[grid[(i, 0)]], nodes[grid[(i, b)]],
+                           nodes[grid[(0, j)]], nodes[grid[(a, j)]]) or p
         nn = patch.normal(u, v, nrm)
         if follow:
             p = _qf_add(p, _qf_mul(nn, follow * _qf_dot(_qf_sub(patch.curved(u, v), p), nn)))
         nodes[nid] = p
         nrms[nid] = nn
-    iters = int(round(clamp(float(st["smooth"]), 0.0, 1.0) * QF_SMOOTH_ITERS))
+    iters = 0 if straight else int(round(clamp(float(st["smooth"]), 0.0, 1.0) * QF_SMOOTH_ITERS))
     if iters and len(nodes) > n:
         adj = collections.defaultdict(set)
         for f in faces:
@@ -32443,6 +32471,22 @@ def qf_describe(plan):
     if plan["ear"] is not None:
         text += " + 1 triangle (odd edge count)"
     return text
+
+
+def qf_triangle_advice(plans):
+    """What to tell the user when a fill has triangles (holes with an odd
+    number of border edges), and how to get all quads; "" when none."""
+    odd = [p for p in plans if p["ear"] is not None or p["A"] == 0]
+    if not odd:
+        return ""
+    if len(odd) == 1:
+        head = ("This fill has 1 triangle: the hole has %d border edges, and an odd count can't be all quads."
+                % odd[0]["n"])
+    else:
+        head = ("This fill has %d triangles: %d holes have an odd number of border edges, which can't be all "
+                "quads." % (len(odd), len(odd)))
+    return (head + " For all quads, make the count even: split one border edge (or run an edge loop into "
+            "the border), then fill again. Offset moves the triangle.")
 
 
 # ---------------------------------------------------------------- the scene
@@ -32942,7 +32986,7 @@ class QuadFillPanel(QtWidgets.QWidget):
     TOOL_NAME = "Quad Fill"
     TOOL_TIP = "Fill a hole with clean quads: edge loops carried across, following the surface."
 
-    FIELDS = ("smooth", "follow", "rings", "offset", "span", "soften")
+    FIELDS = ("grid", "smooth", "follow", "rings", "offset", "span", "soften")
 
     def __init__(self, parent=None):
         super(QuadFillPanel, self).__init__(parent)
@@ -32998,13 +33042,17 @@ class QuadFillPanel(QtWidgets.QWidget):
         card = self.step_shape = StepCard(2, "Shape", "The teal wireframe is a preview: it follows these live.")
         grid = Section("", header=False)
         self.f = {}
+        self.f["grid"] = ComboField(QF_GRIDS)
+        grid.add_row("Grid", self.f["grid"], "Smooth: the lines flow with the border's shape and can be relaxed "
+                                             "(Smooth). Straight: every line runs dead straight between its two "
+                                             "border points, a neat hard-surface grid (Smooth is off). Follow "
+                                             "surface still lifts it onto a curved surface; at 0 it stays flat.")
         self.f["smooth"] = FloatField(0.0, 1.0, decimals=2, step=0.05)
-        grid.add_row("Smooth", self.f["smooth"], "Relaxes the inside so the quads even out. 0 keeps every line "
-                                                 "dead straight between opposite border points.")
+        grid.add_row("Smooth", self.f["smooth"], "Relaxes the inside so the quads even out (Smooth grid only).")
         self.f["follow"] = FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05)
         grid.add_row("Follow surface", self.f["follow"], "1 carries the surface's curvature across, so a hole in "
-                                                         "a sphere fills round. 0 = straight lines from side to "
-                                                         "side (flat across a flat border). Above 1 bulges more.")
+                                                         "a sphere fills round. 0 = flat across a flat border. "
+                                                         "Above 1 bulges more.")
         card.add(grid)
         lay = Section("Layout", expanded=True)
         self.f["rings"] = ComboField(QF_RINGS)
@@ -33044,6 +33092,10 @@ class QuadFillPanel(QtWidgets.QWidget):
         self.fill_btn.setMinimumHeight(28)
         self.fill_btn.setToolTip("Fill the picked hole(s) with the layout in the preview.")
         self.fill_btn.clicked.connect(lambda *_: self.fill())
+        self.tri_label = hint_label("")
+        self.tri_label.setStyleSheet("color: %s;" % LEVEL_COLORS["warn"])
+        self.tri_label.setVisible(False)
+        card.add(self.tri_label)
         card.add(self.fill_btn)
         col.addWidget(card)
         col.addStretch(1)
@@ -33098,8 +33150,18 @@ class QuadFillPanel(QtWidgets.QWidget):
         self.step_shape.set_state("current" if has else "todo")
         self.step_fill.set_state("current" if has else "todo")
         self.fill_btn.setEnabled(has)
+        self.f["smooth"].setEnabled(st["grid"] != "Straight")
+        advice = qf_triangle_advice([p for _, p in self.plans])
+        self.tri_label.setText(advice)
+        self.tri_label.setVisible(bool(advice))
+        tris = sum(1 for _, p in self.plans if p["ear"] is not None or p["A"] == 0)
+        self.step_fill.set_summary("%d triangle%s (odd edge count)" % (tris, "s" if tris > 1 else "")
+                                   if tris else "", "warn" if tris else None)
         if not has:
             self.next_banner.set_text("Select an edge on the border of the hole to fill.")
+        elif advice:
+            self.next_banner.set_text("Odd edge count: the fill gets a triangle (see step 3). Adjust the preview, "
+                                      "then press <b>Fill Hole</b>.")
         else:
             self.next_banner.set_text("Check the preview, adjust it in step 2, then press <b>Fill Hole</b>.")
         try:
@@ -33131,9 +33193,12 @@ class QuadFillPanel(QtWidgets.QWidget):
         if report["triangles"]:
             msg += " and %d triangle(s) (odd edge counts)" % report["triangles"]
         msg += " in %.2fs. One Ctrl+Z undoes it." % (time.time() - t0)
+        if report["triangles"]:
+            msg += (" For all quads: Ctrl+Z, split one border edge of %s so its edge count is even, and fill "
+                    "again." % ("the hole" if report["triangles"] == 1 else "each odd hole"))
         if report["notes"]:
             msg += " " + " ".join(report["notes"])
-        self.set_status(msg, level="warn" if report["notes"] else "fixed")
+        self.set_status(msg, level="warn" if report["notes"] or report["triangles"] else "fixed")
         self._sync_from_selection()
 
     # ============================================================ plumbing

@@ -257,6 +257,51 @@ def main():
     report = quad_fill()
     common_checks("plane odd", p, nf0, expect_tris=1)
     check("odd: says so", "triangle" in tb["qf_describe"](report["plans"][0]), tb["qf_describe"](report["plans"][0]))
+    advice = tb["qf_triangle_advice"](report["plans"])
+    check("odd: advice names the edge count and the fix", "11 border edges" in advice and "split one border edge"
+          in advice, advice)
+    check("even holes get no triangle advice", not tb["qf_triangle_advice"]([{"ear": None, "A": 2, "n": 8}]))
+
+    # ------------------------------------------- Straight grid: lines dead straight
+    cmds.file(new=True, force=True)
+    p = plane("straightHole", n=10, size=10.0)
+    cmds.delete(["%s.%s" % (p, f) for f in cell_faces(10, [(i, j) for i in range(3, 7) for j in range(2, 8)])])
+    # bend the hole's sides in the plane, so a Coons grid's lines curve
+    for i, (x, y, z) in enumerate(points(p)):
+        if 1.5 < abs(x) < 2.5 and abs(z) < 3.5 or 2.5 < abs(z) < 3.5 and abs(x) < 2.5:
+            cmds.move(0.35 * math.sin(1.7 * z + x), 0, 0.3 * math.cos(1.3 * x - z), "%s.vtx[%d]" % (p, i),
+                      relative=True)
+    nf0 = fn_of(p).numPolygons
+    pick_edge(p, lambda x, y, z: abs(x) < 2.6 and abs(z) < 3.6)
+    picked, _ = qf_selection()
+    hole = qf_read(tb["get_dag_path"](picked[0][0]), picked[0][1][0])
+
+    def bend(plan):
+        g, worst = plan["grid"], 0.0
+        lines = [[g[(i, j)] for j in range(plan["B"] + 1)] for i in range(1, plan["A"])]
+        lines += [[g[(i, j)] for i in range(plan["A"] + 1)] for j in range(1, plan["B"])]
+        for ids in lines:
+            a, b = plan["nodes"][ids[0]], plan["nodes"][ids[-1]]
+            d = [b[k] - a[k] for k in range(3)]
+            ln = math.sqrt(sum(c * c for c in d))
+            for nid in ids[1:-1]:
+                q = [plan["nodes"][nid][k] - a[k] for k in range(3)]
+                t = sum(q[k] * d[k] for k in range(3)) / (ln * ln)
+                worst = max(worst, math.sqrt(sum((q[k] - t * d[k]) ** 2 for k in range(3))) / ln)
+        return worst
+
+    st = {"rings": "0", "smooth": 0.0, "follow": 0.0}
+    smooth_bend = bend(qf_plan(hole, dict(st, grid="Smooth")))
+    straight = qf_plan(hole, dict(st, grid="Straight", smooth=1.0))
+    check("Straight: every grid line runs dead straight between its border points (Smooth ignored)",
+          bend(straight) < 1e-6 and smooth_bend > 1e-3,
+          "straight %.2g of the line's length, smooth grid %.2g" % (bend(straight), smooth_bend))
+    report = quad_fill(settings=dict(st, grid="Straight"))
+    common_checks("plane straight", p, nf0)
+    cmds.undo()
+    pick_edge(p, lambda x, y, z: abs(x) < 2.6 and abs(z) < 3.6)
+    quad_fill(settings={"grid": "Straight"})  # Auto rings, Follow 1
+    common_checks("plane straight auto", p, nf0)
 
     # ------------------------------------------- sphere: follow the curvature
     cmds.file(new=True, force=True)
@@ -315,6 +360,13 @@ def main():
     quad_fill(settings={"follow": 0.0})
     dev0 = max(abs(math.sqrt(sum(c * c for c in q)) - r) for q in points(s)[nv0:])
     check("sphere: Follow 0 is the flat fill", dev0 > 5 * dev, "flat %.3f vs %.3f" % (dev0, dev))
+    cmds.undo()
+    # a Straight grid still lies on the sphere at Follow 1 (lines straight seen along the normal)
+    pick_edge(s, lambda x, y, z: x > 0)
+    quad_fill(settings={"grid": "Straight"})
+    common_checks("sphere straight", s, nf0)
+    devs = max(abs(math.sqrt(sum(c * c for c in q)) - r) for q in points(s)[nv0:])
+    check("sphere straight: follows the curvature (within 1%)", devs < 0.01 * r, "max off-sphere %.3f" % devs)
     cmds.undo()
 
     # round hole at the pole: one ring, then a grid
