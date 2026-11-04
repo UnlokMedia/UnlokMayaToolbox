@@ -301,6 +301,93 @@ def main():
     drawing(ns, panel, window)
     jungle_leaves(ns, panel, window)
     moss_and_specks(ns, panel, window)
+    pause_play(ns, panel, window)
+
+
+def pause_play(ns, panel, window):
+    """Pause, make edits (nothing grows, the changed layers marked), Play
+    grows them, one Ctrl+Z takes the paused edits back."""
+    cmds.file(new=True, force=True)
+    _SG.clear()
+    grp, nodes = quiet(porch)
+    shade(list(nodes.values()), "testWood", (0.42, 0.34, 0.25))
+    cmds.select([nodes["roof"], nodes["sill"], nodes["floor"]])
+    panel._sync_from_selection()
+    panel.start_type.setCurrentIndex(panel.start_type.findText("Moss"))
+    panel._show_layer()
+    panel.new_btn.click()
+    pump()
+    root = panel._root
+    moss = panel._lid
+    panel.add_type.setCurrentIndex(panel.add_type.findText("Leaves"))
+    cmds.select(root)
+    panel.add_layer()
+    pump()
+    leaves = panel._lid
+
+    def verts(lid, part):
+        node = ns["sc_parts"](root).get(lid + "/" + part)
+        return cmds.polyEvaluate(node, vertex=True) if node and cmds.getAttr(node + ".visibility") else 0
+
+    def rows():
+        return [panel.layer_list.item(k).text() for k in range(panel.layer_list.count())]
+
+    v0 = (verts(moss, "moss"), verts(leaves, "litter"))
+    check("Pause shows near the top, live by default", panel.pause_btn.isVisible() and
+          panel.pause_btn.text() == "Pause" and not ns["sc_paused"](), panel.pause_label.text())
+    panel.pause_btn.click()
+    pump()
+    check("Pause: the button turns to Play, the banner says PAUSED", panel.pause_btn.text() == "Play" and
+          panel.next_banner.tag.text() == "PAUSED", panel.next_banner.text.text())
+    item = [panel.layer_list.item(k) for k in range(panel.layer_list.count())
+            if panel.layer_list.item(k).data(QtCore.Qt.UserRole) == leaves][0]
+    item.setCheckState(QtCore.Qt.Unchecked)
+    pump()
+    panel._lid = moss
+    panel._show_layer()
+    t0 = time.time()
+    for value in (0.9, 1.0):
+        panel.f["Moss"]["coverage"].setValue(value)
+        panel._pending.add("coverage")
+        panel._apply_pending()
+    dt = time.time() - t0
+    pump()
+    check("paused edits grow nothing", verts(moss, "moss") == v0[0] and verts(leaves, "litter") == v0[1] and
+          "Play" in panel.status.text(), "%.3fs | %s" % (dt, panel.status.text()))
+    check("the changed layers are marked, and counted", all("(changed)" in r for r in rows()) and
+          "2 layers changed" in panel.pause_label.text(), "%s | %s" % (rows(), panel.pause_label.text()))
+    window.grab().save(os.path.join(OUT, "14_panel_paused.png"))
+    t0 = time.time()
+    panel.pause_btn.click()
+    pump()
+    v1 = (verts(moss, "moss"), verts(leaves, "litter"))
+    check("Play grows the changes, once", v1[0] > v0[0] and v1[1] == 0 and "grew 2 layers" in panel.status.text(),
+          "%s -> %s, %.2fs | %s" % (v0, v1, time.time() - t0, panel.status.text()))
+    check("... and the marks go, live again", not any("(changed)" in r for r in rows()) and
+          panel.pause_btn.text() == "Pause" and panel.next_banner.tag.text() != "PAUSED", str(rows()))
+    window.grab().save(os.path.join(OUT, "14_panel_played.png"))
+    name = cmds.undoInfo(q=True, undoName=True)
+    cmds.undo()
+    panel._after_undo()
+    check("one Ctrl+Z takes Play's edits back", verts(moss, "moss") == v0[0],
+          "%s: %d -> %d" % (name, v1[0], verts(moss, "moss")))
+
+    # a live edit too big to grow quickly: paused with a warning (the edit kept), Play grows it anyway
+    keep = ns["MOSS_WARN_CELLS"]
+    ns["MOSS_WARN_CELLS"] = 1000
+    v2 = verts(moss, "moss")
+    panel.f["Moss"]["coverage"].setValue(0.42)
+    panel._pending.add("coverage")
+    panel._apply_pending()
+    pump()
+    check("a moss edit too big to grow quickly pauses, with a warning", ns["sc_paused"]() and
+          panel.pause_btn.text() == "Play" and "minute or more" in panel.status.text() and
+          verts(moss, "moss") == v2, panel.status.text())
+    window.grab().save(os.path.join(OUT, "14_panel_too_big.png"))
+    panel.pause_btn.click()
+    pump()
+    check("... Play grows it anyway", not ns["sc_paused"]() and verts(moss, "moss") != v2, panel.status.text())
+    ns["MOSS_WARN_CELLS"] = keep
 
 
 def moss_and_specks(ns, panel, window):
@@ -423,7 +510,7 @@ def drawing(ns, panel, window):
 
     panel.start_type.setCurrentIndex(panel.start_type.findText("Moss"))
     panel._show_layer()
-    panel.f["Moss"]["coverage"].setValue(0.7)
+    panel.f["Moss"]["coverage"].setValue(0.42)
     panel.f["Moss"]["draw_width"].setValue(0.4)
     t0 = time.time()
     panel.scatter_draw_btn.click()

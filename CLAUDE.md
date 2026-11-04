@@ -824,6 +824,43 @@
     group (its stamp comes back empty). A scene opened with a stamp is
     taken as built. No placeholder meshes (the user saw the old hidden
     placeholders as planes at the origin).
+  - **Pause / Play** (the user: "hit pause, make a bunch of edits, then
+    hit play, and it would all live update"): `_SC_HOLD` {on, base, seen,
+    force}. `sc_pause()`; while on, `sc_update` and `_sc_change` save the
+    JSON and return `_sc_held` reports ({"held": True}) instead of
+    regrowing; `sc_sync` (undo / redo) grows nothing, it only re-bases a
+    group whose JSON the undo changed. What's changed is derived, not
+    tracked: `sc_pending(root)` compares the JSON with `_SC_LAST` (layer
+    ids added / changed; group: surfaces, UDIM, order, removed, Regrow via
+    `sc_regrow_later`). `sc_play()` regrows every group that differs (the
+    `_SC_BUILT` cache means only changed layers build, once). Undo:
+    `_sc_commit` sets base (NoUndo) then the JSON inside one UndoChunk, so
+    Ctrl+Z restores base and `sc_sync` regrows: "Scatter play" at Play,
+    "Scatter edits" before a structural change made while paused (so no
+    paused live edit is lost to undo). `bake_scatter` regrows pending
+    groups first. New groups still grow. Panel: `pause_btn` / `pause_label`
+    under the banner, PAUSED banner, `(changed)` rows (`_layer_text`,
+    `_mark_paused`), `toggle_pause`.
+  - **Freeze fix** (the user changed one setting on an old scatter after
+    updating and Maya seemed frozen: not old data, the first edit after a
+    scene opened regrew every layer, `_SC_BUILT` being empty, with no
+    window): `sc_build` reads an unchanged layer back from its parts
+    (`_sc_read_layer` / `_sc_read_part`, noted in `_SC_WROTE` so nothing
+    is rewritten) when `_sc_grown_layers` says the parts show it: the
+    layer equals the one in what the group last grew from, the stamp
+    matches (a redone new group has none) and the surfaces' mesh keys
+    match (`_sc_same_surf`, 1e-4: saving rounds them). The group keeps
+    `unlokScatterGrown` (JSON grown from), `unlokScatterCounts` (per
+    layer) and `unlokScatterSurfaces` (mesh keys); `_sc_note` fills
+    `_SC_LAST` / `_SC_SURF` from them the first time a group is touched
+    (older groups: their JSON as saved). Regrow passes readback=False.
+    `sc_regrow` runs in a Progress (Working window after 0.5 s; `_poll()`
+    in the moss / debris / ivy loops) and with `_MI_BUDGET` on for live
+    edits, so `_MossBed` raises `ScatterTooBig` past MOSS_WARN_CELLS
+    (estimated cells: surface area / cell area x the share of blocks
+    that can show moss); Cancelled / ScatterTooBig -> `_sc_stopped`:
+    pause, box fitted, a held report with "stopped". Play, Bake and
+    Regrow pass budget=False.
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass

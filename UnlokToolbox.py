@@ -29770,6 +29770,7 @@ def _moss_field(surf, sampler, s, R):
     n = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * R * R) * 4.5)))
     cands = []
     for i in range(n):
+        _poll()  # a long build: the Working window, Esc / Cancel
         r = _rand12(seed, i, 29, 3)
         p, tn, node, face = sampler.pick(r[0], r[1], r[2])
         if tn[1] < -0.35:
@@ -29878,6 +29879,7 @@ def _mi_gather(surf, sampler, s, R, cands):
     rad = 2.2 * math.sqrt(sampler.total / float(N))  # about 15 neighbours each
     grid = {}
     for i in range(N):
+        _poll()  # a long build: the Working window, Esc / Cancel
         p = cands[i][0]
         grid.setdefault((int(math.floor(p[0] / rad)), int(math.floor(p[1] / rad)), int(math.floor(p[2] / rad))),
                         []).append(i)
@@ -30009,6 +30011,7 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
                           int(math.floor(q[2] / spread))), []).append(q)
     rows = []
     for idx, (p, n, r, near, fine, memo, node, face) in enumerate(cands):
+        _poll()  # a long build: the Working window, Esc / Cancel
         if faces is not None and face not in faces.get(node, ()):
             rows.append(None)
             continue
@@ -30088,6 +30091,12 @@ MOSS_DETAIL = {"Proxy": (1.0, False, 0.0, None, 0, 0),
                "Hero": (0.09, True, 5.0, "leafy", 6, 9)}
 MOSS_SMOOTH = math.cos(math.radians(35.0))  # facets closer than this blend (a stone); sharper edges roll
 MOSS_MAX_CELLS = 2500000  # bed cells looked at; past it the cell grows (reported as capped)
+MOSS_WARN_CELLS = 800000  # a live edit that would look at more stops before it (about a minute): Play grows it
+_MI_BUDGET = {"on": False}  # set by the scatter build for live edits
+
+
+class ScatterTooBig(Exception):
+    """A live edit's build would take too long (about a minute or more): not started."""
 _MI_MOSS_TOPO = collections.OrderedDict()  # mesh state -> triangles with ids, corner normals, neighbours
 
 
@@ -30181,6 +30190,25 @@ def _moss_clip(poly, lines, eps):
 _MI_MOSS_BEDS = collections.OrderedDict()  # bed layout key -> (grid point records, block polygons)
 
 
+def _moss_area(nodes, faces=None):
+    """The area of the meshes' faces (faces: {mesh: face ids}, only those)."""
+    total = 0.0
+    for n in nodes:
+        acc, tris = _mi_triangles(n)
+        if not acc:
+            continue
+        if faces is None:
+            total += acc[-1]
+            continue
+        keep = set(faces.get(n) or ())
+        prev = 0.0
+        for a, t in zip(acc, tris):
+            if t[4] in keep:
+                total += a - prev
+            prev = a
+    return total
+
+
 class _MossBed(object):
     """The moss itself: one continuous shell over the meshes, grown from a
     grid laid on each face's plane (cells Detail x Clump size, aligned to
@@ -30222,6 +30250,7 @@ class _MossBed(object):
         self.cq, self.cn, self.mg, self.oc, self.ob = [], [], [], [], []
         buckets = {}
         for c, row in zip(cands, rows):
+            _poll()  # a long build: the Working window, Esc / Cancel
             i = len(self.cq)
             self.cq.append(c[0])
             self.cn.append(c[1])
@@ -30253,6 +30282,11 @@ class _MossBed(object):
         if area / ((tile / k) ** 2) > MOSS_MAX_CELLS:
             k = max(1, int(tile / math.sqrt(area / MOSS_MAX_CELLS)))
             self.capped = True
+        # cells it will look at: the faces it may grow on (a drawing / picked faces: just those), the
+        # blocks that can show moss as a share of them
+        self.est = _moss_area(surf.nodes, faces) / ((tile / k) ** 2) * len(self.hot) / float(max(1, len(buckets)))
+        if _MI_BUDGET["on"] and self.est > MOSS_WARN_CELLS:
+            raise ScatterTooBig("about %s moss bed cells" % format(int(self.est), ","))
         self.k = k
         self.e = tile / k
         self.near = 0.01 / scene_m_per_unit()
@@ -30500,6 +30534,7 @@ class _MossBed(object):
 
     def _triangle(self, tkey, tri, P, cn, plane, pk, D, check):
         t1, t2, n, dp, specs = plane
+        _poll()  # a long build: the Working window, Esc / Cancel
         e = self.e
         pts2 = [(_rl_dot(P[i], t1), _rl_dot(P[i], t2)) for i in tri[:3]]
         (ax, ay), (bx, by), (cx, cy) = pts2
@@ -30737,6 +30772,7 @@ class _MossDetail(object):
             self.capped = True
         seed = self.seed
         for a, b, c, ar, fn, key in tris:
+            _poll()  # a long build: the Working window, Esc / Cancel
             side = fn[1] < 0.35
             lam_s = ar * dens * keep_s
             lam_h = 2.0 * ar * hang * keep_s if side else 0.0  # about half are gated out (curtains)
@@ -31016,6 +31052,7 @@ class _MossClumps(object):
         room = {}
         per = (1 + self.rings * self.segs) * (1 if self.proxy else 3)
         for i in order:
+            _poll()  # a long build: the Working window, Esc / Cancel
             c, row = cands[i], rows[i]
             pr = math.sqrt(clamp(row[0] / 0.3, 0.0, 1.0))
             r = _rand12(self.seed, i, 5, 91)
@@ -31277,6 +31314,7 @@ def ivy_walk(surf, seeds, s):
     total = 0
     qi = 0
     while qi < len(queue) and total < IVY_MAX_POINTS:
+        _poll()  # a long build: the Working window, Esc / Cancel
         p, n, d, vlen, rad0, gen, vkey, a0 = queue[qi]
         qi += 1
         pts, nrm, free = [p], [n], [False]
@@ -31559,6 +31597,7 @@ def ivy_leaf_mesh(surf, vines, X_list, s, rows):
     xs = (-1.0, 1.0) if rows < 2 else ((-1.0, 0.0, 1.0) if rows < 4 else (-1.0, -0.5, 0.0, 0.5, 1.0))
     cols = len(xs)
     for vi, (vine, X) in enumerate(zip(vines, X_list)):
+        _poll()  # a long build: the Working window, Esc / Cancel
         acc = [0.0]
         for a, b in zip(X, X[1:]):
             acc.append(acc[-1] + _rl_len(_rl_sub(b, a)))
@@ -31746,6 +31785,7 @@ class _DebrisBuild(object):
         lim = float(self.s["slope"])
         cut = math.cos(math.radians(min(90.0, lim + 15.0))) - 1e-6  # past Slope limit + 15 degrees: never
         for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
+            _poll()  # a long build: the Working window, Esc / Cancel
             if row is None or cand[1][1] < cut:
                 continue
             w = clamp((row[0] + 0.05) / 0.25, 0.0, 1.0)
@@ -33092,6 +33132,9 @@ def mi_preset(kind, name):
 SC_ATTR = "unlokScatter"           # string on the group: JSON (surfaces, udim, layers)
 SC_BAKED = "unlokScatterBaked"     # the same after Bake
 SC_STAMP = "unlokScatterStamp"     # string on the group: a token set after each build (a redo resets it)
+SC_GROWN = "unlokScatterGrown"     # string on the group: the JSON its parts were last grown from
+SC_COUNTS = "unlokScatterCounts"   # string on the group: each layer's counts at that build
+SC_SURF = "unlokScatterSurfaces"   # string on the group: its surfaces' mesh keys at that build
 SC_PART = "unlokScatterPart"       # string on a part's shape: "<layer id>/<part>"
 SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
 SC_STEM = "scatteredObjects"
@@ -33132,7 +33175,14 @@ SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5} 
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
 _SC_LAST = {}   # group -> (JSON, stamp) it was last built from
+_SC_SURF = {}   # group -> its surfaces' mesh keys at that build (JSON-like lists)
 _SC_WROTE = {}  # (group, layer id / part) -> what was last written (mesh identity, tiles)
+# Pause (the user: "hit pause, make a bunch of edits, then hit play, and it
+# would all live update"): while on, edits are saved to the groups' JSON and
+# nothing grows. base: group -> the JSON Ctrl+Z goes back to (its last
+# undoable state); seen: group -> the JSON this tool last wrote; force:
+# groups Regrow was pressed for.
+_SC_HOLD = {"on": False, "base": {}, "seen": {}, "force": set()}
 
 
 def sc_type(name):
@@ -33306,19 +33356,128 @@ def _sc_build_layer(layer, surf):
     return {p: _mi_drop_repeats(m) for p, m in parts.items()}, counts
 
 
-def sc_build(root, data, surf=None, only=None):
+def _sc_note(root):
+    """What a group's parts were grown from, the first time this session
+    touches it (a scene just opened): the JSON it was last grown from (a
+    group from before that was stored: its settings, as saved) and its
+    stamp."""
+    if root in _SC_LAST or not is_scatter(root) or not cmds.attributeQuery(SC_STAMP, node=root, exists=True):
+        return
+    stamp = cmds.getAttr(root + "." + SC_STAMP) or ""
+    if stamp:
+        attr = SC_GROWN if cmds.attributeQuery(SC_GROWN, node=root, exists=True) else SC_ATTR
+        _SC_LAST[root] = (cmds.getAttr(root + "." + attr), stamp)
+        _SC_SURF.pop(root, None)
+        if cmds.attributeQuery(SC_SURF, node=root, exists=True):
+            try:
+                _SC_SURF[root] = json.loads(cmds.getAttr(root + "." + SC_SURF) or "null")
+            except ValueError:
+                pass
+
+
+def _sc_same_surf(a, b):
+    """Two surface keys alike: the same meshes and counts, placed and sized
+    the same to about 1e-4 (a scene saved and opened again rounds them)."""
+    a, b = json.loads(json.dumps(a)), json.loads(json.dumps(b))
+    if a is None or b is None or len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
+        if x[:3] != y[:3]:
+            return False
+        if any(abs(p - q) > 1e-4 * max(1.0, abs(p)) for p, q in zip(x[3] + x[4], y[3] + y[4])):
+            return False
+    return True
+
+
+def _sc_set_text(root, attr, text):
+    if not cmds.attributeQuery(attr, node=root, exists=True):
+        cmds.addAttr(root, longName=attr, dataType="string")
+    cmds.setAttr(root + "." + attr, text, type="string")
+
+
+def _sc_grown_layers(root, data, skey):
+    """{layer id: layer} of the on layers the group's parts show now (as
+    last grown; {} when that's unknown, or its surfaces changed since: a
+    mesh added to a surface group, or edited)."""
+    _sc_note(root)
+    known = _SC_SURF.get(root)
+    if known is not None and not _sc_same_surf(known, skey):
+        return {}
+    last = _SC_LAST.get(root)
+    if not last or not cmds.attributeQuery(SC_STAMP, node=root, exists=True) or \
+            (cmds.getAttr(root + "." + SC_STAMP) or "") != last[1]:  # a redone new group: no parts yet
+        return {}
+    try:
+        old = json.loads(last[0] or "{}")
+    except ValueError:
+        return {}
+    if list(old.get("surfaces") or []) != list(data.get("surfaces") or []) or \
+            list(old.get("exclude") or []) != list(data.get("exclude") or []):
+        return {}
+    return dict((l.get("id"), l) for l in old.get("layers", []) if l.get("on", True))
+
+
+def _sc_read_part(node):
+    """A part's mesh as it was written (world points, counts, vertex ids,
+    us, vs, uv ids), or None."""
+    shape = _log_shape(node)
+    if not shape:
+        return None
+    fn = om.MFnMesh(get_dag_path(shape))
+    us, vs = fn.getUVs()
+    counts, conn = fn.getVertices()
+    uvc, uvi = fn.getAssignedUVs()
+    if not len(us) or list(uvc) != list(counts):
+        return None
+    pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    return pts, list(counts), list(conn), list(us), list(vs), list(uvi)
+
+
+def _sc_read_layer(root, layer, counts):
+    """An unchanged layer's parts read back from the scene (instead of
+    growing it again), noted as written. Returns (parts, counts) or None."""
+    parts = sc_parts(root)
+    out, wrote = {}, {}
+    for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
+        key = layer["id"] + "/" + part
+        node = parts.get(key)
+        if node is None or not cmds.getAttr(node + ".visibility"):
+            continue
+        mesh = _sc_read_part(node)
+        if mesh is None:
+            return None
+        out[part] = mesh
+        wrote[(root, key)] = (id(mesh[0]), mesh[3][0], mesh[4][0], len(mesh[1]))
+    _SC_WROTE.update(wrote)
+    c = dict(counts or {})
+    c["read"] = True
+    return out, c
+
+
+def sc_build(root, data, surf=None, only=None, readback=True):
     """Every on layer's parts for a group, from the cache where a layer and
     its surfaces are unchanged (only: layer ids to rebuild regardless),
+    else, when the parts in the scene show it as it is (a scene just
+    opened), read back from them (readback=False: Regrow, grow them all),
     each part in its own UDIM tiles from the group's Start UDIM, in layer
-    order. Returns ({"<id>/<part>": mesh}, {"udims", counts...}, meshes)."""
+    order. Returns ({"<id>/<part>": mesh}, {"udims", counts..., "layers":
+    {id: counts}}, meshes)."""
     meshes = sc_surfaces(data)
     report = {"faces": 0, "capped": False, "clumps": 0, "vines": 0, "leaves": 0, "bunches": 0, "piles": 0,
-              "tufts": 0, "jungle": 0, "specks": 0, "udims": {}, "surfaces": len(meshes)}
+              "tufts": 0, "jungle": 0, "specks": 0, "udims": {}, "surfaces": len(meshes), "layers": {}, "read": 0}
     combined, order = {}, []
     if not meshes:
         return combined, report, meshes
     surf = surf or _MiSurface(meshes)
     skey = tuple(_mi_mesh_key(x) for x in surf.nodes)
+    report["skey"] = skey
+    grown = _sc_grown_layers(root, data, skey) if readback else {}
+    saved = {}
+    if grown and cmds.attributeQuery(SC_COUNTS, node=root, exists=True):
+        try:
+            saved = json.loads(cmds.getAttr(root + "." + SC_COUNTS) or "{}")
+        except ValueError:
+            saved = {}
     for layer in data.get("layers", []):
         lid = layer["id"]
         for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
@@ -33327,12 +33486,17 @@ def sc_build(root, data, surf=None, only=None):
             continue
         key = (root, lid, json.dumps(layer, sort_keys=True), skey)
         hit = _SC_BUILT.get(key) if not (only and lid in only) else None
+        if hit is None and grown.get(lid) == layer and not (only and lid in only):
+            hit = _sc_read_layer(root, layer, saved.get(lid))
         if hit is None:
             hit = _sc_build_layer(layer, surf) if surf.items else ({}, {})
+        if hit is not _SC_BUILT.get(key):
             _SC_BUILT[key] = hit
             while len(_SC_BUILT) > 32:
                 _SC_BUILT.popitem(last=False)
         parts, counts = hit
+        report["layers"][lid] = dict((k, v) for k, v in counts.items() if k != "read")
+        report["read"] += 1 if counts.get("read") else 0
         for part, mesh in parts.items():
             if mesh and mesh[1]:
                 combined[lid + "/" + part] = mesh
@@ -33596,34 +33760,172 @@ def _sc_write(root, data, placed, meshes):
     return faces
 
 
-def sc_regrow(root, only=None):
-    """Grow a group again from its JSON (outside the undo queue). Returns its report."""
+def sc_regrow(root, only=None, readback=True, budget=True):
+    """Grow a group again from its JSON (outside the undo queue), in the
+    Working window (Esc / Cancel stops it). budget: a build that would take
+    a minute or more isn't started (live edits: the user changed one
+    setting on a big scatter and Maya seemed frozen). Stopped, nothing
+    changes and it pauses (the edits are kept: Play grows them). Returns
+    its report ("held" and "stopped" when stopped)."""
+    _sc_note(root)
     data = sc_data(root)
+    _MI_BUDGET["on"] = bool(budget)
+    try:
+        with Progress("Scatter: growing %s" % short_name(root), [("grow", 1)]) as pr:
+            pr.stage("grow", 1, "Growing")
+            with NoUndo():
+                placed, report, meshes = sc_build(root, data, only=only, readback=readback)
+    except (Cancelled, ScatterTooBig) as exc:
+        return _sc_stopped(root, data, exc)
+    finally:
+        _MI_BUDGET["on"] = False
+    layers = report.pop("layers", {})
+    skey = report.pop("skey", None)
     with NoUndo():
-        placed, report, meshes = sc_build(root, data, only=only)
         report["faces"] = _sc_write(root, data, placed, meshes)
         stamp = "%d" % random.randint(1, 1 << 30)
         cmds.setAttr(root + "." + SC_STAMP, stamp, type="string")
-    _SC_LAST[root] = (cmds.getAttr(root + "." + SC_ATTR), stamp)
+        now = cmds.getAttr(root + "." + SC_ATTR)
+        _sc_set_text(root, SC_GROWN, now)
+        _sc_set_text(root, SC_COUNTS, json.dumps(layers, sort_keys=True))
+        if skey is not None:
+            _sc_set_text(root, SC_SURF, json.dumps(skey))
+    _SC_LAST[root] = (now, stamp)
+    if skey is not None:
+        _SC_SURF[root] = json.loads(json.dumps(skey))
     report["root"] = root
     return report
+
+
+def _sc_stopped(root, data, exc):
+    """A build stopped (Cancel, or too big for a live edit): pause, keep the
+    edits, fit the box round what's there. Returns the held report."""
+    sc_pause()
+    with NoUndo():
+        _sc_fit_box(root, sc_box(root), sc_surfaces(data))
+    rep = _sc_held(root)
+    rep["stopped"] = ("it would take a minute or more to grow (%s)" % exc) if isinstance(exc, ScatterTooBig) \
+        else "cancelled"
+    return rep
 
 
 def sc_sync():
     """Regrow every group whose JSON or stamp no longer matches what was
     built (an undo / redo of a structural change, a redo of a new group).
-    Returns the groups regrown."""
+    While paused nothing grows (Play grows it). Returns the groups regrown."""
     done = []
+    hold = _SC_HOLD
     for root in sc_groups():
         now = (cmds.getAttr(root + "." + SC_ATTR), cmds.getAttr(root + "." + SC_STAMP) or "")
         last = _SC_LAST.get(root)
-        if last is None and now[1]:  # opened with the scene: as saved
-            _SC_LAST[root] = now
+        if last is None and now[1]:  # opened with the scene: as last grown
+            _sc_note(root)
+            continue
+        if hold["on"]:
+            if hold["seen"].get(root) != now[0]:  # the undo / redo changed it: Ctrl+Z's state now
+                hold["base"][root] = hold["seen"][root] = now[0]
             continue
         if last != now:
             sc_regrow(root)
             done.append(root)
     return done
+
+
+def sc_paused():
+    return _SC_HOLD["on"]
+
+
+def sc_pause():
+    """Pause live updates: edits (settings, layers, areas, surfaces) are
+    saved to the groups but nothing grows until sc_play."""
+    if not _SC_HOLD["on"]:
+        now = dict((r, cmds.getAttr(r + "." + SC_ATTR)) for r in sc_groups())
+        _SC_HOLD.update(on=True, base=now, seen=dict(now), force=set())
+
+
+def _sc_held(root, before=None):
+    """After an edit saved while paused: note what was written (before: the
+    JSON before a live edit, for Ctrl+Z after Play). Returns its report."""
+    now = cmds.getAttr(root + "." + SC_ATTR)
+    if before is None:  # an undoable edit: Ctrl+Z after Play goes back to here
+        _SC_HOLD["base"][root] = now
+    else:
+        _SC_HOLD["base"].setdefault(root, before)
+    _SC_HOLD["seen"][root] = now
+    return {"root": root, "held": True, "faces": 0, "surfaces": len(sc_surfaces(sc_data(root)))}
+
+
+def _sc_commit(roots, label):
+    """While paused: each group's live edits since its last undoable state
+    go on the undo queue, all as one Ctrl+Z (label) that takes them back."""
+    moved = []
+    for root in roots:
+        now = cmds.getAttr(root + "." + SC_ATTR)
+        old = _SC_HOLD["base"].get(root)
+        if old is not None and old != now:
+            moved.append((root, old, now))
+            _SC_HOLD["base"][root] = now
+    if moved:
+        with UndoChunk(label):
+            for root, old, now in moved:
+                with NoUndo():
+                    cmds.setAttr(root + "." + SC_ATTR, old, type="string")
+                cmds.setAttr(root + "." + SC_ATTR, now, type="string")
+
+
+def sc_regrow_later(roots):
+    """Regrow pressed while paused: the groups grow at Play."""
+    _SC_HOLD["force"].update(roots)
+
+
+def sc_pending(root):
+    """What a group's grown parts lag behind (edits saved while paused):
+    (ids of layers added or changed since it last grew, whether the group
+    itself changed: surfaces, UDIM, layer order, a layer removed, Regrow
+    pressed), or None when it's up to date."""
+    if not is_scatter(root):
+        return None
+    _sc_note(root)
+    forced = root in _SC_HOLD["force"]
+    last = _SC_LAST.get(root)
+    now = cmds.getAttr(root + "." + SC_ATTR) or "{}"
+    if last is None or last[0] == now:
+        return (set(), True) if forced else None
+    try:
+        old, new = json.loads(last[0] or "{}"), json.loads(now)
+    except ValueError:
+        return set(), True
+    was = dict((l.get("id"), l) for l in old.get("layers", []))
+    changed = set(l.get("id") for l in new.get("layers", []) if was.get(l.get("id")) != l)
+
+    def rest(d):
+        return dict((k, v) for k, v in d.items() if k not in ("layers", "next", "version"))
+
+    group = forced or rest(old) != rest(new) or [i for i in was if i not in changed] != [
+        l.get("id") for l in new.get("layers", []) if l.get("id") not in changed]
+    return (changed, group) if changed or group else None
+
+
+def sc_play():
+    """Play: grow every group whose parts lag behind its JSON, each changed
+    layer built once (unchanged layers come from the cache), and put the
+    live edits made while paused on the undo queue as one Ctrl+Z (it takes
+    them back and regrows). Returns the reports of the groups grown."""
+    roots = sc_groups()
+    _sc_commit(roots, "Scatter play")
+    hold = dict(_SC_HOLD)
+    _SC_HOLD.update(on=False, base={}, seen={}, force=set())
+    reps = []
+    for k, root in enumerate(roots):
+        last = _SC_LAST.get(root)
+        now = (cmds.getAttr(root + "." + SC_ATTR), cmds.getAttr(root + "." + SC_STAMP) or "")
+        if root in hold["force"] or (last is not None and last != now):
+            rep = sc_regrow(root, readback=root not in hold["force"], budget=False)
+            reps.append(rep)
+            if rep.get("stopped"):  # cancelled: paused again, the rest wait too
+                _SC_HOLD["force"].update(r for r in roots[k + 1:] if r in hold["force"])
+                break
+    return reps
 
 
 def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None, faces=None, select=True,
@@ -33677,6 +33979,9 @@ def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None
 def _sc_change(root, label, fn):
     """A structural change to a group's JSON (one Ctrl+Z; fn(data) edits it,
     may return parts to delete), then the regrow."""
+    _sc_note(root)
+    if _SC_HOLD["on"]:  # paused live edits before it: their own Ctrl+Z
+        _sc_commit([root], "Scatter edits")
     data = sc_data(root)
     gone = fn(data) or []
     with UndoChunk(label):
@@ -33684,6 +33989,8 @@ def _sc_change(root, label, fn):
         for node in gone:
             if cmds.objExists(node):
                 cmds.delete(node)
+    if _SC_HOLD["on"]:
+        return _sc_held(root)
     return sc_regrow(root)
 
 
@@ -33786,7 +34093,10 @@ def sc_set_surfaces(root, add=(), remove=()):
 def sc_update(root, lid=None, change=None, group_change=None):
     """Live edit (out of the undo queue, like the other tools' sliders): a
     layer's settings (change) or the group's (group_change: udim), then the
-    regrow of that layer. Returns the report."""
+    regrow of that layer (while paused: saved, grown at Play). Returns the
+    report."""
+    _sc_note(root)
+    before = cmds.getAttr(root + "." + SC_ATTR) if _SC_HOLD["on"] else None
     data = sc_data(root)
     if lid and change:
         layer = sc_layer(data, lid)
@@ -33796,6 +34106,8 @@ def sc_update(root, lid=None, change=None, group_change=None):
         data.update(group_change)
     with NoUndo():
         _sc_set(root, data)
+    if _SC_HOLD["on"]:
+        return _sc_held(root, before)
     return sc_regrow(root)
 
 
@@ -33815,7 +34127,12 @@ def sc_surface_names(data):
 
 def bake_scatter(roots):
     """Plain meshes (one Ctrl+Z): empty parts and the box go, the settings
-    move to a hidden attribute. Returns the groups baked."""
+    move to a hidden attribute. Edits saved while paused grow first (it
+    bakes them). Returns the groups baked."""
+    for root in roots:
+        if _SC_HOLD["on"] and sc_pending(root):
+            sc_regrow(root, budget=False)
+            _SC_HOLD["force"].discard(root)
     done = []
     with UndoChunk("Scatter bake"):
         for root in roots:
@@ -34341,6 +34658,21 @@ class ScatterPanel(QtWidgets.QWidget):
                                            "viewport to edit it."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
+        prow = QtWidgets.QHBoxLayout()
+        prow.setSpacing(8)
+        self.pause_btn = secondary_button("Pause", "Pause live updates: make a bunch of edits (settings, layers, "
+                                                   "areas, surfaces, Regrow) and nothing grows; they're saved on the "
+                                                   "groups. Play grows every changed layer once (one Ctrl+Z takes "
+                                                   "the paused edits back). New groups still grow straight away.")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.setMinimumWidth(90)
+        self.pause_btn.clicked.connect(lambda *_: self.toggle_pause())
+        self.pause_label = QtWidgets.QLabel()
+        self.pause_label.setWordWrap(True)
+        self.pause_label.setProperty("unlokHint", True)
+        prow.addWidget(self.pause_btn)
+        prow.addWidget(self.pause_label, 1)
+        tl.addLayout(prow)
         outer.addWidget(top)
         scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
@@ -34622,12 +34954,11 @@ class ScatterPanel(QtWidgets.QWidget):
                     item.setData(QtCore.Qt.UserRole, uid)
                     item.setData(QtCore.Qt.UserRole + 1, kind)
                     self.surf_list.addItem(item)
+                changed = (sc_pending(self._root) or (set(),))[0] if sc_paused() else ()
                 for layer in data["layers"]:
-                    pts, fcs, strokes = sc_area(layer)
-                    extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
-                    if strokes:
-                        extra += "  (drawn, %d stroke%s)" % (strokes, "" if strokes == 1 else "s")
-                    item = QtWidgets.QListWidgetItem(layer.get("name", layer["type"]) + extra)
+                    item = QtWidgets.QListWidgetItem(self._layer_text(layer, layer["id"] in changed))
+                    if layer["id"] in changed:
+                        item.setForeground(QtGui.QColor(240, 200, 112))
                     item.setData(QtCore.Qt.UserRole, layer["id"])
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEditable)
                     item.setCheckState(QtCore.Qt.Checked if layer.get("on", True) else QtCore.Qt.Unchecked)
@@ -34642,7 +34973,67 @@ class ScatterPanel(QtWidgets.QWidget):
             self._filling = False
         self._update_states()
 
+    @staticmethod
+    def _layer_text(layer, changed=False):
+        pts, fcs, strokes = sc_area(layer)
+        extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
+        if strokes:
+            extra += "  (drawn, %d stroke%s)" % (strokes, "" if strokes == 1 else "s")
+        return layer.get("name", layer["type"]) + extra + ("  (changed)" if changed else "")
+
+    def _paused_counts(self):
+        """(layers changed, groups changed otherwise) over every group, while paused."""
+        layers = groups = 0
+        for root in sc_groups():
+            pend = sc_pending(root)
+            if pend:
+                layers += len(pend[0])
+                groups += 1 if pend[1] and not pend[0] else 0
+        return layers, groups
+
+    def _paused_text(self, counts=None):
+        layers, groups = counts or self._paused_counts()
+        bits = []
+        if layers:
+            bits.append("%d layer%s changed" % (layers, "" if layers == 1 else "s"))
+        if groups:
+            bits.append("%d group%s to regrow" % (groups, "" if groups == 1 else "s"))
+        return ", ".join(bits) if bits else "nothing changed yet"
+
+    def _mark_paused(self):
+        """While paused: the changed layers' rows, the Play button and the banner."""
+        if not sc_paused() or not self._alive():
+            self._update_states()
+            return
+        changed = (sc_pending(self._root) or (set(),))[0]
+        data = self._data()
+        self._filling = True
+        try:
+            for k in range(self.layer_list.count()):
+                item = self.layer_list.item(k)
+                layer = sc_layer(data, item.data(QtCore.Qt.UserRole))
+                if layer is None:
+                    continue
+                on = layer["id"] in changed
+                text = self._layer_text(layer, on)
+                if item.text() != text:
+                    item.setText(text)
+                    item.setForeground(QtGui.QColor(240, 200, 112) if on else self.layer_list.palette().text())
+        finally:
+            self._filling = False
+        self._update_states()
+
     def _update_states(self):
+        paused = sc_paused()
+        counts = self._paused_counts() if paused else (0, 0)
+        self.pause_btn.setChecked(paused)
+        self.pause_btn.setText("Play" if paused else "Pause")
+        if bool(self.pause_btn.property("unlokPrimary")) != paused:
+            self.pause_btn.setProperty("unlokPrimary", paused)
+            repolish(self.pause_btn)
+        self.pause_label.setText(("<b>Paused</b> - %s. Play grows %s." % (
+            self._paused_text(counts), "them" if any(counts) else "any you make")) if paused else
+            "Live: edits grow straight away. Pause to make a bunch first.")
         try:
             sel = sc_selection()
         except Exception:
@@ -34664,6 +35055,11 @@ class ScatterPanel(QtWidgets.QWidget):
         if drawing:
             self.next_banner.set_text("Drag over any surfaces to draw (click for a spot). Ctrl+Z takes the last "
                                       "stroke back. Then <b>Scatter on Drawing</b>.", tag="DRAWING", tone="active")
+        elif paused:
+            self.next_banner.set_text("Live updates paused: edits are saved, nothing grows (%s)%s. Press <b>Play</b> "
+                                      "to grow the changes." % (self._paused_text(counts), (
+                                          ". Editing <b>%s</b>" % short_name(root)) if root else ""),
+                                      tag="PAUSED", tone="warn")
         elif n and not root:
             self.next_banner.set_text("Press <b>Scatter on Drawing</b>: a %s group along the %d stroke%s." %
                                       (self.start_type.currentText().lower(), n, "" if n == 1 else "s"))
@@ -34711,6 +35107,18 @@ class ScatterPanel(QtWidgets.QWidget):
         return ", ".join(bits)
 
     def _report(self, verb, rep, t0):
+        if rep.get("stopped"):
+            self.set_status("Paused: %s %s, but %s. Your edits are kept: lower Coverage or Detail, or press "
+                            "<b>Play</b> to grow it anyway (Esc cancels)." % (
+                                verb.lower(), short_name(rep.get("root", self._root or "")), rep["stopped"]),
+                            level="warn")
+            self._mark_paused()
+            return
+        if rep.get("held"):
+            self.set_status("%s %s: paused, so it grows when you press Play." % (
+                verb, short_name(rep.get("root", self._root or ""))), level="warn")
+            self._mark_paused()
+            return
         msg = "%s %s in %.2fs: %s." % (verb, short_name(rep.get("root", self._root or "")), time.time() - t0,
                                       self._counts(rep))
         level = "info"
@@ -34945,11 +35353,46 @@ class ScatterPanel(QtWidgets.QWidget):
         if not roots:
             self.set_status("No scatter groups to regrow.", level="warn")
             return
+        if sc_paused():
+            sc_regrow_later(roots)
+            self.set_status("Paused: %d group(s) regrow when you press Play." % len(roots), level="warn")
+            self._mark_paused()
+            return
         t0 = time.time()
         rep = None
         for root in roots:
-            rep = sc_regrow(root)
+            rep = sc_regrow(root, readback=False, budget=False)
+            if rep.get("stopped"):
+                break
         self._report("Regrew", rep, t0)
+
+    @ui_safe
+    def toggle_pause(self):
+        if not sc_paused():
+            sc_pause()
+            self.set_status("Paused: edits are saved but nothing grows until you press Play.", level="warn")
+            self._refresh()
+            return
+        if self._edit_timer.isActive():  # an edit still waiting: saved with the rest
+            self._edit_timer.stop()
+            self._apply_pending()
+        layers, groups = self._paused_counts()
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            reps = sc_play()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if reps and reps[-1].get("stopped"):
+            self.set_status("Cancelled: paused again, nothing changed. Play grows the edits.", level="warn")
+        elif reps:
+            faces = sum(r.get("faces", 0) for r in reps)
+            self.set_status("Playing: grew %s in %.2fs (%d group(s), %s faces). One Ctrl+Z takes the paused edits "
+                            "back." % (self._paused_text((layers, groups)), time.time() - t0, len(reps),
+                                       format(faces, ",")), level="fixed")
+        else:
+            self.set_status("Playing: nothing had changed while paused.")
+        self._refresh()
 
     @ui_safe
     def select_all(self):
@@ -35019,6 +35462,8 @@ class ScatterPanel(QtWidgets.QWidget):
             done = sc_sync()
             if done:
                 self.set_status("Regrew %d scatter group(s) after the undo / redo." % len(done))
+            elif sc_paused():
+                self.set_status("Undo / redo while paused: grows when you press Play.", level="warn")
             self._refresh()
         except Exception:
             traceback.print_exc()

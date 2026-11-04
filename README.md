@@ -775,6 +775,26 @@ you tune them.
    meshes (the box and any empty part go), **Select All**, the group's
    *Start UDIM*.
 
+**Pause / Play** (top of the panel): when a heavy group makes every
+tweak slow, press **Pause**, make a bunch of edits (settings, presets,
+seeds, layers on / off, added or removed, areas, surfaces, Regrow) and
+nothing grows; they're saved on the groups, the changed layers say
+*(changed)* and the banner says PAUSED with how many. **Play** grows each
+changed layer once (the rest stay as they are) and is one Ctrl+Z, which
+takes the paused edits back. A Ctrl+Z while paused also waits for Play.
+New groups still grow straight away, and Bake grows any paused edits
+first. Left playing, it works as before. A group saved while paused
+catches up the next time you edit it (or press Regrow).
+
+**Big scatters:** a scene opened again (or a scatter from an earlier
+version) grows only the layer you change; the others are read back from
+the scene as they are (**Regrow** grows them all again). A build that
+runs more than half a second shows the Working window: Esc or Cancel
+stops it, nothing changes and the panel pauses with your edits kept. A
+live edit whose moss would take a minute or more isn't started: it
+pauses with a warning; lower Coverage or Detail, or press Play to grow
+it anyway.
+
 A layer's meshes exist only while they hold something: a moss layer with
 no capsules has no capsule mesh. One that empties while you tune it hides
 (keeping any material you gave it) until Bake.
@@ -1786,7 +1806,16 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   on the surface, not in it; Grouping gathering them into groups with bare
   cells between, at next to no cost; Packing and Group size; Height
   variation, Mounds and Group heights each spreading the heights their way) and Specks on a standing glass pane (on both
-  faces, never floating or in it, tiny, Dirt 0 = moss only, High = a shoot).
+  faces, never floating or in it, tiny, Dirt 0 = moss only, High = a shoot);
+  then Pause / Play (paused edits saved, nothing built, the changed layers
+  known; a layer turned off and a Ctrl+Z while paused wait too; Play
+  builds each changed layer once and is one Ctrl+Z, edits before an
+  undoable step their own; Regrow and a new layer wait; Bake grows them
+  first); then a scatter as an earlier version left it, saved and opened
+  in a new session (one setting grows only its layer, the others read
+  back just as growing them gives, meshes and UDIM tiles; a mesh added to
+  its surface group grows them all; a live edit too big to grow quickly
+  pauses, Play grows it).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
@@ -1799,7 +1828,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   preset as a carpet and as Clumps (evenly spaced, grouped, and with varied
   heights and mounds) on a
   fresh porch, and Specks on a window
-  pane) and saves pictures to
+  pane; then Pause, a layer unticked and moss edited with nothing
+  growing, the layers marked (changed), Play growing them and one Ctrl+Z
+  back, a moss edit too big to grow quickly pausing with a warning) and
+  saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular

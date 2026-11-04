@@ -16,11 +16,16 @@ parts, lying on the surface, along a gutter. Removing a mesh inside the
 Maya group leaves just it out (nothing grows on it), adding it puts it back.
 Moss Style Clumps: separate cushions, lighter than the carpet. Specks:
 tiny moss stars and dirt flakes stuck on a standing pane of glass.
+Pause: edits are saved and nothing grows; Play grows each changed layer
+once and is one Ctrl+Z. An old scatter opened again: one setting grows
+only its layer; a live edit too big to grow quickly pauses.
 """
 
+import json
 import math
 import os
 import sys
+import tempfile
 import time
 import traceback
 
@@ -159,7 +164,7 @@ def run():
     check("a live edit stays out of the undo queue", cmds.undoInfo(q=True, undoName=True) == q0, str(q0))
     t0 = time.time()
     tb["_SC_BUILT"].clear()
-    tb["sc_regrow"](root)
+    tb["sc_regrow"](root, readback=False)
     dt_all = time.time() - t0
     check("a live edit rebuilds only its layer", dt_one < 0.8 * dt_all, "%.2fs vs %.2fs for all" % (dt_one, dt_all))
 
@@ -721,11 +726,202 @@ def moss_and_specks():
         n_high, n_norm))
 
 
+def pause():
+    """Pause: edits are saved, nothing grows; Play grows each changed layer
+    once, and one Ctrl+Z takes the paused edits back."""
+    tb = load_toolbox()
+    cmds.undoInfo(state=True, infinity=True)
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    rep = tb["create_scatter_group"]([grp], "Leaves", {"leaves": 12.0, "coverage": 0.7})
+    root = rep["root"]
+    leaves = tb["sc_data"](root)["layers"][0]["id"]
+    _, moss = tb["sc_add_layer"](root, "Moss", {"coverage": 0.4, "strands": 0.0, "capsules": 0.0})
+    _, grass = tb["sc_add_layer"](root, "Grass", {"grass": 0.6, "coverage": 0.4})
+    built = []
+    real = tb["_sc_build_layer"]
+
+    def counting(layer, surf):
+        built.append(layer["id"])
+        return real(layer, surf)
+
+    tb["_sc_build_layer"] = counting
+
+    def verts(lid, part):
+        node = tb["sc_parts"](root).get(lid + "/" + part)
+        return cmds.polyEvaluate(node, vertex=True) if node and cmds.getAttr(node + ".visibility") else 0
+
+    json0 = cmds.getAttr(root + "." + tb["SC_ATTR"])
+    v0 = (verts(leaves, "litter"), verts(moss, "moss"), verts(grass, "grass"))
+    tb["sc_pause"]()
+    t0 = time.time()
+    r1 = tb["sc_update"](root, leaves, {"leaves": 30.0})
+    tb["sc_update"](root, leaves, {"coverage": 0.9})
+    dt = time.time() - t0
+    s = tb["sc_settings"](tb["sc_layer"](tb["sc_data"](root), leaves))
+    check("paused: edits are saved on the layer, nothing grows", r1.get("held") and not built and
+          s["leaves"] == 30.0 and s["coverage"] == 0.9 and verts(leaves, "litter") == v0[0],
+          "%d builds, %.3fs for 2 edits" % (len(built), dt))
+    pend = tb["sc_pending"](root)
+    check("the changed layer is known (and only it)", pend and pend[0] == set([leaves]) and not pend[1], str(pend))
+    tb["sc_set_layer"](root, grass, on=False)
+    gnode = tb["sc_parts"](root)[grass + "/grass"]
+    check("turning a layer off while paused waits for Play too", not built and cmds.getAttr(gnode + ".visibility")
+          and grass in tb["sc_pending"](root)[0])
+    cmds.undo()
+    tb["sc_sync"]()
+    pend = tb["sc_pending"](root)
+    check("Ctrl+Z while paused: nothing grows, the earlier edits stay pending", not built and
+          tb["sc_layer"](tb["sc_data"](root), grass)["on"] and pend and pend[0] == set([leaves]), str(pend))
+    tb["sc_update"](root, moss, {"coverage": 0.8})
+    t0 = time.time()
+    reps = tb["sc_play"]()
+    dt = time.time() - t0
+    check("Play grows each changed layer once (the others from the cache)",
+          sorted(built) == sorted([leaves, moss]) and len(reps) == 1 and not tb["sc_paused"](),
+          "%s, %.2fs" % (built, dt))
+    v1 = (verts(leaves, "litter"), verts(moss, "moss"), verts(grass, "grass"))
+    check("... and the parts show the edits", v1[0] > 1.5 * v0[0] and v1[1] > v0[1] and v1[2] == v0[2],
+          "%s -> %s" % (v0, v1))
+    check("nothing pending after Play", tb["sc_pending"](root) is None)
+    check("Play is one step on the undo queue", cmds.undoInfo(q=True, undoName=True) == "Scatter play",
+          cmds.undoInfo(q=True, undoName=True))
+    cmds.undo()
+    tb["sc_sync"]()
+    check("one Ctrl+Z takes Play's edits back (and regrows)", verts(moss, "moss") == v0[1] and
+          verts(leaves, "litter") == v1[0], "moss %d -> %d points" % (v1[1], verts(moss, "moss")))
+    n = cmds.undoInfo(q=True, undoName=True)
+    cmds.undo()
+    tb["sc_sync"]()
+    check("edits made before a paused undoable step are their own Ctrl+Z", n == "Scatter edits" and
+          cmds.getAttr(root + "." + tb["SC_ATTR"]) == json0 and verts(leaves, "litter") == v0[0],
+          "%s: %d -> %d leaf points" % (n, v1[0], verts(leaves, "litter")))
+    cmds.redo()
+    cmds.redo()
+    tb["sc_sync"]()
+    check("... and Ctrl+Y puts them back", verts(leaves, "litter") == v1[0] and verts(moss, "moss") == v1[1])
+
+    # Regrow and new layers while paused; Bake grows what's pending first
+    tb["sc_pause"]()
+    del built[:]
+    tb["sc_regrow_later"]([root])
+    check("Regrow while paused waits for Play", not built and tb["sc_pending"](root) == (set(), True),
+          str(tb["sc_pending"](root)))
+    r2, ivy = tb["sc_add_layer"](root, "Moss tufts")
+    check("a layer added while paused is pending, no parts yet", r2.get("held") and not built and
+          not any(k.startswith(ivy + "/") for k in tb["sc_parts"](root)) and ivy in tb["sc_pending"](root)[0])
+    tb["sc_update"](root, leaves, {"leaves": 8.0})
+    tb["bake_scatter"]([root])
+    check("Bake while paused grows the pending edits first", leaves in built and ivy in built and
+          verts(leaves, "litter") < v1[0] and any(k.startswith(ivy + "/") for k in tb["sc_parts"](root)),
+          str(built))
+    tb["sc_play"]()
+    tb["_sc_build_layer"] = real
+
+
+def old_scatter():
+    """A scatter made by an earlier version (its layers without the newer
+    keys, nothing noted of what it grew from), saved and opened again in a
+    new session: one setting grows only its layer (the others are read
+    back from the scene, just as growing them would give), never the whole
+    group (the user: "changed one setting and now it seems to have frozen
+    Maya"). A mesh added to its surface group grows them all again. A live
+    edit that would take a minute or more pauses instead."""
+    tb = load_toolbox()
+    cmds.undoInfo(state=True, infinity=True)
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.5})["root"]
+    moss = tb["sc_data"](root)["layers"][0]["id"]
+    _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0})
+    _, grass = tb["sc_add_layer"](root, "Grass", {"grass": 0.6})
+    data = tb["sc_data"](root)
+    for layer in data["layers"]:  # as an earlier version stored it
+        for k in [k for k in layer["s"] if k.startswith(("clump_", "jungle", "speck", "draw_")) or k == "style"]:
+            del layer["s"][k]
+        layer.pop("draw", None)
+    data.pop("exclude", None)
+    cmds.undoInfo(stateWithoutFlush=False)
+    cmds.setAttr(root + "." + tb["SC_ATTR"], json.dumps(data, sort_keys=True), type="string")
+    for attr in (tb["SC_GROWN"], tb["SC_COUNTS"], tb["SC_SURF"]):
+        cmds.deleteAttr(root + "." + attr)
+    cmds.undoInfo(stateWithoutFlush=True)
+    path = os.path.join(tempfile.mkdtemp(), "old_scatter.ma")
+    cmds.file(rename=path)
+    cmds.file(save=True, type="mayaAscii", force=True)
+    cmds.file(new=True, force=True)
+    cmds.file(path, open=True, force=True)
+    tb = load_toolbox()  # a new session: nothing cached
+    cmds.undoInfo(state=True, infinity=True)
+    built = []
+    real = tb["_sc_build_layer"]
+
+    def counting(layer, surf):
+        built.append(layer["id"])
+        return real(layer, surf)
+
+    tb["_sc_build_layer"] = counting
+    parts = [(moss, "moss"), (leaves, "litter"), (grass, "grass")]
+
+    def verts():
+        out = []
+        for lid, part in parts:
+            node = tb["sc_parts"](root).get(lid + "/" + part)
+            out.append(cmds.polyEvaluate(node, vertex=True) if node else 0)
+        return out
+
+    def all_tiles():
+        return dict((k, tiles(tb, n)) for k, n in tb["sc_parts"](root).items() if cmds.getAttr(n + ".visibility"))
+
+    v0 = verts()
+    t0 = time.time()
+    rep = tb["sc_update"](root, leaves, {"coverage": 0.33})
+    dt = time.time() - t0
+    v1 = verts()
+    check("an old scatter opened again: one setting grows only that layer", built == [leaves] and rep["read"] == 2,
+          "%s grown, %d read back, %.2fs" % (built, rep["read"], dt))
+    check("... the others stay as they were, the edit shows", v1[0] == v0[0] and v1[2] == v0[2] and v1[1] != v0[1],
+          "%s -> %s" % (v0, v1))
+    tb["sc_update"](root, grass, {"coverage": 0.31})
+    tiles0, v2 = all_tiles(), verts()
+    tb["_SC_BUILT"].clear()
+    del built[:]
+    tb["sc_regrow"](root, readback=False)
+    check("reading back gives what growing it again does (meshes and UDIM tiles)",
+          sorted(built) == sorted([moss, leaves, grass]) and verts() == v2 and all_tiles() == tiles0,
+          "%s vs %s" % (v2, verts()))
+    saved = json.loads(cmds.getAttr(root + "." + tb["SC_COUNTS"]))
+    check("what it grew from and its counts are kept on the group (for the next session)",
+          saved.get(moss, {}).get("clumps", 0) > 0 and cmds.getAttr(root + "." + tb["SC_GROWN"]) ==
+          cmds.getAttr(root + "." + tb["SC_ATTR"]), str(saved.get(moss)))
+    del built[:]
+    crate = box("crate", (6, 6, 6), (12, 3, -5), tb["sc_surfaces"](tb["sc_data"](root))[0].rsplit("|", 1)[0])
+    tb["sc_update"](root, leaves, {"coverage": 0.29})
+    check("a mesh added to its surface group grows every layer again", sorted(built) == sorted([moss, leaves, grass]),
+          "%s, crate %s" % (built, crate))
+
+    # the budget: a live edit that would take a minute or more pauses, Play grows it anyway
+    keep = tb["MOSS_WARN_CELLS"]
+    tb["MOSS_WARN_CELLS"] = 1000
+    v3 = verts()
+    rep = tb["sc_update"](root, moss, {"coverage": 0.7})
+    s = tb["sc_settings"](tb["sc_layer"](tb["sc_data"](root), moss))
+    check("a live edit too big to grow quickly pauses instead (the edit is kept)", rep.get("stopped") and
+          tb["sc_paused"]() and verts() == v3 and s["coverage"] == 0.7, str(rep.get("stopped")))
+    tb["sc_play"]()
+    check("... and Play grows it anyway", not tb["sc_paused"]() and verts()[0] != v3[0] and
+          tb["sc_pending"](root) is None, "%s -> %s" % (v3, verts()))
+    tb["MOSS_WARN_CELLS"] = keep
+    tb["_sc_build_layer"] = real
+
+
 try:
     run()
     drawing()
     jungle()
     moss_and_specks()
+    pause()
+    old_scatter()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))
