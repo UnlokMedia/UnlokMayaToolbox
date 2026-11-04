@@ -296,8 +296,8 @@ tube, 0.5 s twisted and 0.8 s in 3 strands. A frame of 8 joints takes about
 (Called Thatch Roof before corrugated metal was added.) Roofs from a box: the right shape for
 a cottage, barn, shed, roundhouse or palm hut, covered in **Thatch**, built
 the way thatch is laid, with stacked UVs for straw and leaf textures, or in
-**Corrugated metal** (step 4's *Covering*; see
-[Corrugated metal](#corrugated-metal) below). Work rough to fine: block the roof in on **Proxy**
+**Corrugated metal** or **Clay tiles** (step 4's *Covering*; see
+[Corrugated metal](#corrugated-metal) and [Clay tiles](#clay-tiles) below). Work rough to fine: block the roof in on **Proxy**
 detail (just its shell, instant), get the shape right, then raise
 **Detail** a step at a time; the layout stays put while detail is added.
 
@@ -439,8 +439,9 @@ detail (just its shell, instant), get the shape right, then raise
    - Sizes are fractions of the roof's span (its width across the ridge), so
      settings and presets suit any roof size; tooltips give real-world
      figures for a 5 m span.
-4. **Covering:** **Thatch** (below) or **Corrugated metal** (step 4's
-   controls change to the metal ones; see [Corrugated metal](#corrugated-metal)).
+4. **Covering:** **Thatch** (below), **Corrugated metal** or **Tiles** (step
+   4's controls change to that covering's; see [Corrugated metal](#corrugated-metal)
+   and [Clay tiles](#clay-tiles)).
    Switching keeps both sets of settings, so you can go back and forth.
    Thatch:
    - **Surface:** one closed, displaced mesh with straw grooves running down
@@ -667,6 +668,60 @@ trim Keep UVs. Levels and blockers are thatch only for now.
 
 **Speed:** a clean 16 x 9 m roof takes about 0.9 s, a makeshift one about
 3.5 s (about 460 panels).
+
+#### Clay tiles
+
+Same box, shapes, overhang, Detail, live rebuild, Bake and Upgrade again;
+step 4's **Covering: Tiles** lays clay tiles on battens over a timber
+frame. Sizes are real ones (metres) and work in decimetre scenes. Presets
+set the whole look: **Tiles: terracotta villa (barrel)**, **Tiles: Roman
+(gable)**, **Tiles: plain (English, hipped)** and **Tiles: makeshift village
+shack**.
+
+- **Profile:** **Barrel** (Spanish: curved pans laid channel up, covers
+  laid over the joins between them), **Roman** (a flat pan with a roll on
+  one side, lapping over the next tile) or **Plain** (small flat tiles in
+  courses, every other course shifted half a tile so the joints are
+  bonded). Picking one sets its usual *Length*, *Width*, *Headlap*,
+  *Thickness* and *Rise*. Every tile is a closed solid.
+- **Courses:** laid from the eave up, each hung on its own batten, each
+  course lapping over the one below by *Headlap*. *Into gutter* runs the
+  first course past the eave; *Verge overhang* runs the tiles past a gable.
+- **Clean** (one neat roof) or **Makeshift** (an old village roof):
+  *Slipped* tiles slide down out of their course, *Cracked* ones break in
+  two, *Missing* ones leave a hole (you see the battens and the underlay
+  through it, never sky), *Mismatched* ones are a different tile from
+  another batch (the UVs pick it out), *Messiness* makes the courses uneven
+  and *Sag* bends the frame and everything on it. Each tile rests on
+  whatever is under it, so nothing floats and nothing passes through
+  anything.
+- **Ridge, hips and verges:** round ridge tiles lapping along the ridge
+  (*Ridge tile size*), following it as it sags; hip tiles up each hip, with
+  the tiles under them cut along the hip line; at a gable, *Gable verge*:
+  **Verge tiles** (a row turned down over the edge) or **Undercloak** (a
+  strip under the edge tiles); a lean-to's top edge gets monoridge tiles,
+  rolled over it and down the high side. The tiles under a ridge or hip run on to
+  meet the ones from the other side, so there's no gap to see through.
+- **Underlay:** **Felt**, **Boards**, **Reed mat** or **None**, between the
+  rafters and the battens.
+- **Frame:** battens (*Batten size*), rafters (*Rafter spacing* / *size*;
+  hip rafters and jacks on a hip), a ridge beam and wall plates, *Style*
+  Sawn / Poles / Bamboo, *Crookedness*, and fascia boards.
+- **UVs**, at one real-world density (*Tile size*: metres per UV tile):
+  **Variations** stacks the tiles (each one cut from a random place in
+  the texture) or **All laid out** gives every tile its own place in rows
+  over as many UDIM tiles as it takes. Each part gets its own UDIMs, so
+  nothing on one roof shares UV space except stacked variations.
+
+Roofs hold `clayTile_C_..._GEP` (tiles), `clayTrim_C_..._GEP` (ridge, hip
+and verge tiles), the underlay (`fabricFelt`, `woodBoard` or `grassReed`)
+and the frame next to the other coverings' meshes (hidden while the
+covering is tiles). A part is only made once it has geometry. **With Smart
+UDIM:** stacked tiles are Hands off, all-laid-out tiles and the rest Keep
+UVs.
+
+**Speed:** a clean 16 x 9 m barrel roof takes about 3.4 s, a plain one
+about 4.3 s.
 
 ### Modeling > Scatter
 
@@ -1645,11 +1700,22 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   without overlaps, upright, at the set density), trim UVs, switching an old
   thatch roof to metal and back (the old roof rebuilds exactly as before),
   undo / redo, live edits, following the box, save / reopen, bake and speed.
+- `tests/test_tile_roof.py`: headless clay tile tests. Every roof shape and
+  profile, Clean and Makeshift: no gaps (rays up from inside hit tiles,
+  trim or, through a missing tile, the underlay), every tile a closed
+  solid, nothing passing through anything, the frame and underlay under
+  the tiles, courses exactly a gauge apart from the eave to the ridge with
+  a batten under each, a cover over every barrel joint, bonded plain
+  courses, decimetre sizes, both UV modes (no two parts in one UDIM tile),
+  no empty parts, switching a roof between coverings, undo / redo, live
+  edits, save / reopen, Duplicate, presets and speed.
 - `tests/gui_thatch_roof.py`: drives the Roof panel in a real Maya
   session (box on a house, Make Roof, live edits, following the box, presets,
   the palm presets and Detail levels, the frame, blockers, undo / redo, bake;
   corrugated metal: switching the covering, the rows it shows, profile,
-  sheet rows, Makeshift, All laid out, the metal presets) and saves pictures
+  sheet rows, Makeshift, All laid out, the metal presets; clay tiles: the
+  rows they show, profiles, hips, Makeshift, the underlay, All laid out,
+  the tile presets) and saves pictures
   of every shape and style (palm close-ups, eaves, gables, hips, the roof
   seen from inside and each Detail level) to `tests/_out/thatch_roof`. Launch it like
   the smoke test below, with

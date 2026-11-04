@@ -3,8 +3,9 @@
 Opens the toolbox, drives the Roof panel (box on a house, Make Roof,
 live edits through the fields, the roof following its box, undo / redo with
 the automatic rebuild, bake, corrugated metal: covering switch, modes,
-profile, UVs, a metal preset) and saves pictures of each roof shape and
-thatch style, of metal roofs, and of the panel.
+profile, UVs, a metal preset; clay tiles: covering switch, profiles, ends,
+makeshift, underlay, UVs, a tile preset) and saves pictures of each roof
+shape and thatch style, of metal and tile roofs, and of the panel.
 
 Launch (Maya 2023+), with UNLOK_TEST_DIR set to this folder:
 
@@ -660,6 +661,90 @@ def main():
           inner.minimumSizeHint().width() <= scroll.viewport().width(),
           "needs %d px of %d" % (inner.minimumSizeHint().width(), scroll.viewport().width()))
     cmds.delete(house3)
+
+    # --- clay tiles: a 7 x 5 m house, switched from thatch, then edited
+    house4 = cmds.polyCube(w=70, h=30, d=50, name="tileHouse", constructionHistory=False)[0]
+    cmds.move(-200, 15, 0, house4)
+    cmds.select(house4)
+    panel.create_box()
+    pump()
+    box4 = cmds.ls(selection=True, long=True)[0]
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Gabled cottage"))
+    panel.load_preset()
+    panel.f["covering"].setValue("Thatch")
+    panel._update_rows()
+    panel._sync_from_selection()
+    panel.make_roof()
+    pump()
+    root4 = [r for r in ns["thatch_roofs"]() if ns["thatch_box"](r) == box4][0]
+    edit(covering="Tiles")
+    parts = ns["thatch_parts"](root4)
+    check("Covering: Tiles adds the tile meshes, hides the thatch, and the status counts tiles",
+          ns["thatch_data"](root4)["covering"] == "Tiles" and {"tiles", "tile_trim", "tile_underlay"} <= set(parts) and
+          cmds.getAttr(parts["tiles"] + ".visibility") and not cmds.getAttr(parts["straw"] + ".visibility") and
+          " tiles" in panel.status.text(), panel.status.text())
+    check("tile rows show, thatch and metal rows hide", not panel._rows["t_profile"][1].isHidden() and
+          not panel.f["t_mode"].isHidden() and panel._rows["thickness"][1].isHidden() and
+          panel._rows["m_pitch"][1].isHidden() and panel.f["m_mode"].isHidden() and panel.f["style"].isHidden() and
+          panel.tmk_sec.isHidden() and not panel.ttrim_sec.isHidden() and panel.trim_sec.isHidden())
+    edit(detail="High")
+    cmds.select(clear=True)
+    frame_on([root4, house4], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("40_tiles_barrel_gable.png")
+    frame_on(parts["tiles"], direction=(0.3, 0.35, 1.0), dist=0.35)
+    snap("41_tiles_barrel_close.png")
+    frame_on([root4, house4], direction=(0.5, -0.35, 1.3), dist=0.9)
+    snap("42_tiles_below.png")
+    scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
+    scroll.ensureWidgetVisible(panel.f["covering"], 0, 0)
+    window.grab().save(os.path.join(OUT, "43_panel_tiles.png"))
+    inner = scroll.widget()
+    check("the panel fits the window with tile rows (no sideways scroll)",
+          inner.minimumSizeHint().width() <= scroll.viewport().width(),
+          "needs %d px of %d" % (inner.minimumSizeHint().width(), scroll.viewport().width()))
+    panel.f["t_profile"].setValue("Plain")
+    panel._queue("t_profile")
+    panel._apply_pending()
+    pump()
+    data = ns["thatch_data"](root4)
+    check("picking Plain sets its tile sizes", data["t_profile"] == "Plain" and abs(data["t_length"] - 0.265) < 1e-9 and
+          abs(panel.f["t_headlap"].value() - 0.065) < 1e-9, panel.status.text())
+    edit(end_a="Hip", end_b="Hip")
+    frame_on([root4, house4], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("44_tiles_plain_hip.png")
+    edit(t_profile="Roman", t_length=0.42, t_width=0.33, t_headlap=0.075, t_thickness=0.015, t_rise=0.045,
+         end_a="Gable", end_b="Gable")
+    frame_on([root4, house4], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("45_tiles_roman_gable.png")
+    edit(t_mode="Makeshift", t_missing=0.06)
+    check("Makeshift shows its section, rebuilds and counts missing tiles", not panel.tmk_sec.isHidden() and
+          ns["thatch_data"](root4)["t_mode"] == "Makeshift" and "missing" in panel.status.text(), panel.status.text())
+    frame_on([root4, house4], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("46_tiles_makeshift.png")
+    frame_on([root4, house4], direction=(0.5, -0.35, 1.3), dist=0.9)
+    snap("47_tiles_makeshift_below.png")
+    edit(t_underlay="Reed mat")
+    under = ns["thatch_parts"](root4).get("tile_underlay")
+    check("a reed mat underlay renames its mesh", under is not None and "grassReed" in under, str(under))
+    edit(t_uv_mode="All laid out")
+    sh = ns["_log_shape"](ns["thatch_parts"](root4)["tiles"])
+    check("All laid out: the tiles aren't stacked, and the status counts UV tiles",
+          not cmds.getAttr(sh + "." + ns["UV_STACKED_ATTR"]) and "UVs in" in panel.status.text(),
+          panel.status.text())
+    panel.preset_combo.setCurrentIndex(panel.preset_combo.findText("Tiles: terracotta villa (barrel)"))
+    panel.load_preset()
+    pump()
+    data = ns["thatch_data"](root4)
+    check("the terracotta villa preset loads (whole tile look)", data["covering"] == "Tiles" and
+          data["t_mode"] == "Clean" and data["t_profile"] == "Barrel" and data["end_a"] == "Hip" and
+          "on 1 roof" in panel.status.text(), panel.status.text())
+    frame_on([root4, house4], direction=(1.0, 0.7, 1.3), dist=1.2)
+    snap("48_tiles_villa.png")
+    edit(covering="Corrugated")
+    parts = ns["thatch_parts"](root4)
+    check("switching tiles to metal hides the tiles", cmds.getAttr(parts["sheets"] + ".visibility") and
+          not cmds.getAttr(parts["tiles"] + ".visibility"), panel.status.text())
+    cmds.delete(house4)
 
     # --- bake
     cmds.select(root2)

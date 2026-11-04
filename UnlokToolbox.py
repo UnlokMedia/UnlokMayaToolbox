@@ -20183,7 +20183,7 @@ THATCH_STACK_LAYOUTS = ("UDIM tiles", "Atlas columns")
 # edges) with the profile across it; laps nest (clean) or rest on what's
 # under them (makeshift, a height raster per face).
 
-ROOF_COVERINGS = ("Thatch", "Corrugated")
+ROOF_COVERINGS = ("Thatch", "Corrugated", "Tiles")
 METAL_MODES = ("Clean", "Makeshift")
 METAL_PROFILES = ("Sine", "Box")
 METAL_UV_MODES = ("Variations", "All laid out")
@@ -20201,6 +20201,30 @@ METAL_DEFAULTS = {
     "m_rafter_spacing": 0.9, "m_rafter_size": 0.15, "m_frame_style": "Sawn", "m_frame_wobble": 0.15,
     "m_fascia": True, "m_mess": 1.0, "m_panel_size": 1.0, "m_patches": 0.3, "m_dents": 0.4, "m_lift": 0.4,
     "m_sag": 0.0, "m_uv_mode": "Variations", "m_uv_tile": 4.0,
+}
+
+# --------------------------------------------------------- clay tiles
+# The third covering (covering "Tiles"): clay tiles on battens over the same
+# box, shapes and frame. Sizes are real metres (t_ keys), like the metal's.
+TILE_PROFILES = ("Barrel", "Roman", "Plain")  # pan + cover (Spanish), flat pan + roll, flat in bonded courses
+TILE_MODES = ("Clean", "Makeshift")
+TILE_VERGES = ("Verge tiles", "Undercloak")
+TILE_UNDERLAYS = ("Felt", "Boards", "Reed mat", "None")
+TILE_UV_MODES = METAL_UV_MODES
+# length, width, headlap, thickness, rise (m): a Spanish barrel, a Roman pan-and-roll, an English plain tile
+TILE_PROFILE_SIZES = {"Barrel": (0.45, 0.2, 0.1, 0.015, 0.07), "Roman": (0.42, 0.33, 0.075, 0.015, 0.045),
+                      "Plain": (0.265, 0.165, 0.065, 0.012, 0.004)}
+TILE_PART_MATERIALS = (("tiles", "clayTile"), ("tile_trim", "clayTrim"), ("tile_underlay", "fabricFelt"),
+                       ("frame", "woodFrame"))
+TILE_UNDERLAY_MATERIALS = {"Felt": "fabricFelt", "Boards": "woodBoard", "Reed mat": "grassReed"}
+TILE_MAX_VERTS = 3000000
+TILE_DEFAULTS = {
+    "t_mode": "Clean", "t_profile": "Barrel", "t_length": 0.45, "t_width": 0.2, "t_headlap": 0.1,
+    "t_thickness": 0.015, "t_rise": 0.07, "t_gutter": 0.05, "t_verge_over": 0.05, "t_ridge": True, "t_hip": True,
+    "t_verge": "Verge tiles", "t_ridge_size": 0.13, "t_underlay": "Felt",
+    "t_mess": 1.0, "t_slipped": 0.06, "t_cracked": 0.05, "t_missing": 0.03, "t_mismatch": 0.15, "t_sag": 0.0,
+    "t_batten_size": 0.025, "t_rafter_spacing": 0.45, "t_rafter_size": 0.15, "t_frame_style": "Sawn",
+    "t_frame_wobble": 0.1, "t_fascia": True, "t_uv_mode": "Variations", "t_uv_tile": 2.0,
 }
 THATCH_DEFAULTS = {
     "covering": "Thatch", "shape": "Ridge", "ridge": "Auto", "end_a": "Hip", "end_b": "Hip", "verge_a": "Hanging",
@@ -20223,6 +20247,7 @@ THATCH_DEFAULTS = {
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
+THATCH_DEFAULTS.update(TILE_DEFAULTS)
 THATCH_KEYS = tuple(sorted(THATCH_DEFAULTS))
 # How the thatch is made. A preset resets everything else to the defaults; of these it only sets the ones it
 # names (a shape preset keeps your style, pieces and stacks; a look preset sets them).
@@ -20233,7 +20258,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
-                    "dried_var", "covering", "udim") + tuple(sorted(METAL_DEFAULTS))
+                    "dried_var", "covering", "udim") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -20274,6 +20299,23 @@ THATCH_PRESETS = {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Corrugated", "m_mode": "Makeshift",
         "m_mess": 1.2, "m_panel_size": 0.9, "m_patches": 0.5, "m_dents": 0.6, "m_lift": 0.6, "m_sag": 0.6,
         "m_frame_style": "Poles", "m_frame_wobble": 0.8, "m_fascia": False},
+    # clay tiles (whole looks: covering, mode and profile)
+    "Tiles: terracotta villa (barrel)": {
+        "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "covering": "Tiles", "t_mode": "Clean",
+        "t_profile": "Barrel"},
+    "Tiles: Roman (gable)": {
+        "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Tiles", "t_mode": "Clean",
+        "t_profile": "Roman", "t_length": 0.42, "t_width": 0.33, "t_headlap": 0.075, "t_thickness": 0.015,
+        "t_rise": 0.045},
+    "Tiles: plain (English, hipped)": {
+        "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "covering": "Tiles", "t_mode": "Clean",
+        "t_profile": "Plain", "t_length": 0.265, "t_width": 0.165, "t_headlap": 0.065, "t_thickness": 0.012,
+        "t_rise": 0.004, "t_verge": "Undercloak"},
+    "Tiles: makeshift village shack": {
+        "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "covering": "Tiles", "t_mode": "Makeshift",
+        "t_profile": "Barrel", "t_mess": 1.2, "t_slipped": 0.08, "t_cracked": 0.08, "t_missing": 0.05,
+        "t_mismatch": 0.3, "t_sag": 0.6, "t_frame_style": "Poles", "t_frame_wobble": 0.8, "t_fascia": False,
+        "t_underlay": "Reed mat"},
     "Palm: nipa shingles (neat)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.15, "sag": 0.1,
         "lumps": 0.2, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
@@ -24264,6 +24306,1615 @@ def metal_build(frame, s, blockers=None):
     return out
 
 
+# --------------------------------------------------------- clay tiles
+# The third covering (covering "Tiles"): clay tiles hung on battens over the
+# same box, shapes, frame and live rebuild. Each roof face (the metal's
+# _mt_faces: planes clipped against each other, cut along the hips) gets
+# courses from the eave up at the gauge; every tile hangs on its batten at
+# the head and rests on the course under it at the tail. A height raster
+# per face (_TlRaster) records what has been laid: each tile pivots on its
+# batten down onto it, so laps, covers on pans, rolls over the next tile's
+# lip and (makeshift) slipped, turned and mismatched tiles all sit on what is
+# under them and nothing passes through anything. Ridge and hip tiles are
+# tapered half-rounds lapping along their line (hips cut round the ridge),
+# gables get verge tiles or an undercloak, and an underlay under the battens
+# shows where a tile is missing. Sizes are real metres (t_ keys).
+
+
+class _TlRaster(object):
+    """What is laid on one face so far: the highest top above the face plane
+    on a grid of cells in face coordinates (a, s), cells aligned to the
+    tiles' columns and courses so clean tiles all rest alike. mask: cells
+    whose centre is on the face. A cone's raster wraps round in a."""
+
+    def __init__(self, face, ca, cs, a0, s0, a1, s1, wrap=0.0):
+        self.ca, self.cs = ca, cs
+        self.a0, self.s0 = a0, s0
+        self.wrap = wrap
+        self.na = max(2, int(math.ceil((a1 - a0) / ca - 1e-6))) if not wrap else max(2, int(round(wrap / ca)))
+        if wrap:
+            self.ca = ca = wrap / self.na
+        self.ns = max(2, int(math.ceil((s1 - s0) / cs - 1e-6)) + 1)
+        self.h = [0.0] * (self.na * self.ns)
+        if face.cone:
+            lo, hi = face.s_range
+            self.mask = [lo - cs <= s0 + (j + 0.5) * cs <= hi + cs for j in range(self.ns) for _ in range(self.na)]
+            return
+        edges = face.tl_edges
+        mask = []
+        for j in range(self.ns):
+            s = s0 + (j + 0.5) * cs
+            for i in range(self.na):
+                a = a0 + (i + 0.5) * ca
+                ok = True
+                for pa, ps, na_, ns_ in edges:
+                    if (a - pa) * na_ + (s - ps) * ns_ < -1e-9:
+                        ok = False
+                        break
+                mask.append(ok)
+        self.mask = mask
+
+    def index(self, a, s):
+        i = int(math.floor((a - self.a0) / self.ca))
+        j = int(math.floor((s - self.s0) / self.cs))
+        if self.wrap:
+            i %= self.na
+        if 0 <= i < self.na and 0 <= j < self.ns:
+            return j * self.na + i
+        return -1
+
+    def box_max(self, a_lo, a_hi, s_lo, s_hi):
+        """The highest top over cells in a box (face coordinates)."""
+        best = 0.0
+        i0 = int(math.floor((a_lo - self.a0) / self.ca))
+        i1 = int(math.floor((a_hi - self.a0) / self.ca))
+        j0 = max(0, int(math.floor((s_lo - self.s0) / self.cs)))
+        j1 = min(self.ns - 1, int(math.floor((s_hi - self.s0) / self.cs)))
+        h, na = self.h, self.na
+        if self.wrap and i1 - i0 >= na:  # all the way round
+            i0, i1 = 0, na - 1
+        elif not self.wrap:
+            i0, i1 = max(0, i0), min(na - 1, i1)
+        for j in range(j0, j1 + 1):
+            row = j * na
+            for i in range(i0, i1 + 1):
+                if self.wrap:
+                    ii = i % na
+                elif 0 <= i < na:
+                    ii = i
+                else:
+                    continue
+                v = h[row + ii]
+                if v > best:
+                    best = v
+        return best
+
+
+def _tl_face_setup(face, F):
+    """Per face: inward edge normals of its polygon (clipping, the raster's
+    mask) and a fast point function: planar faces are O + a A + s V + y N."""
+    if not face.cone:
+        poly = face.poly
+        n = len(poly)
+        cx = sum(p[0] for p in poly) / float(n)
+        cy = sum(p[1] for p in poly) / float(n)
+        edges, mids = [], []
+        for i in range(n):
+            p, q = poly[i], poly[(i + 1) % n]
+            nx, ny = -(q[1] - p[1]), q[0] - p[0]
+            ln = math.hypot(nx, ny)
+            if ln < 1e-12:
+                continue
+            nx, ny = nx / ln, ny / ln
+            if (cx - p[0]) * nx + (cy - p[1]) * ny < 0.0:
+                nx, ny = -nx, -ny
+            edges.append((p[0], p[1], nx, ny))
+            mids.append((0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1])))
+        face.tl_edges = edges
+        face.tl_mids = mids
+    else:
+        face.tl_edges = []
+        face.tl_mids = []
+    face.tl_grow = [0.0] * len(face.tl_edges)
+    if face.planar and not face.cone:
+        d, m, k = face.d, face.m, face.k
+        o = (face.c / m * d[0], 0.0, face.c / m * d[1])
+        A, V, N = face.A3, face.V3, face.N
+
+        def point(a, s, ys):
+            bx, by, bz = o[0] + a * A[0] + s * V[0], s * V[1], o[2] + a * A[2] + s * V[2]
+            return [(bx + N[0] * y, by + N[1] * y, bz + N[2] * y) for y in ys]
+    else:
+        def point(a, s, ys):
+            base, nrm, _, _ = face.frame(a, s)
+            return [(base[0] + nrm[0] * y, base[1] + nrm[1] * y, base[2] + nrm[2] * y) for y in ys]
+    face.tl_point = point
+
+
+def _tl_crest_grow(faces, k, F=None):
+    """Per face edge shared with another face over a ridge or hip:
+    tan(half the angle between their normals), so a tile y above its face
+    reaches the plane halfway between them y * grow past the edge (where
+    the two sides' tiles meet under the ridge / hip tiles). A lean-to's top
+    edge: as far as the wall's plane straight up from it. 0 elsewhere."""
+    tol = 0.03 * k
+    flat = [f for f in faces if not f.cone]
+    for f in flat:
+        grow = []
+        for (pa, ps, nx, ny), (ma, ms) in zip(f.tl_edges, f.tl_mids):
+            base = f.tl_point(ma, ms, (0.0,))[0]
+            n1 = f.frame(ma, ms)[1]
+            out_ = f.tl_point(ma - nx * 0.1 * k, ms - ny * 0.1 * k, (0.0,))[0]
+            g = 0.0
+            for f2 in flat:
+                if f2 is f:
+                    continue
+                a2, s2 = f2.coords(base[0], base[2])
+                if any((a2 - qa) * mx + (s2 - qs) * my < -tol for qa, qs, mx, my in f2.tl_edges):
+                    continue
+                p2 = f2.tl_point(a2, s2, (0.0,))[0]
+                if abs(p2[1] - base[1]) > tol:
+                    continue
+                o2a, o2s = f2.coords(out_[0], out_[2])
+                if f2.tl_point(o2a, o2s, (0.0,))[0][1] > out_[1] - 1e-6:
+                    continue  # a valley, not a crest
+                c = clamp(_rl_dot(n1, f2.frame(a2, s2)[1]), -1.0, 1.0)
+                if c < 0.9999:
+                    g = math.sqrt((1.0 - c) / (1.0 + c))
+                break
+            else:
+                if F is not None and F.shape == "Lean-to" and base[1] > F.H - tol:
+                    e = _rl_norm(_rl_sub(out_, base))
+                    w = _rl_norm((e[0], 0.0, e[2]))
+                    ew = _rl_dot(e, w)
+                    if ew > 1e-6:
+                        g = max(0.0, -_rl_dot(n1, w) / ew)
+            grow.append(g)
+        f.tl_grow = grow
+
+
+def _tl_clip_seg(edges, p0, p1, grow=None, lift=0.0):
+    """(f0, f1) of the segment p0 -> p1 (face coordinates) inside a convex
+    polygon given by its inward edge normals, or None. grow / lift: each
+    edge moved out by grow[i] * lift (crest edges, _tl_crest_grow)."""
+    f0, f1 = 0.0, 1.0
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    for ei, (pa, ps, nx, ny) in enumerate(edges):
+        num = (p0[0] - pa) * nx + (p0[1] - ps) * ny
+        if grow is not None:
+            num += grow[ei] * lift
+        den = dx * nx + dy * ny
+        if abs(den) < 1e-14:
+            if num < -1e-9:
+                return None
+            continue
+        f = -num / den
+        if den > 0.0:
+            if f > f0:
+                f0 = f
+        elif f < f1:
+            f1 = f
+        if f0 > f1:
+            return None
+    return f0, f1
+
+
+def _tl_sizes(s, F, mpu, level):
+    """Every tile size in scene units, plus the look's switches."""
+    k = 1.0 / max(1e-9, mpu)
+    prof = s["t_profile"] if s["t_profile"] in TILE_PROFILES else "Barrel"
+    mode = s["t_mode"] if s["t_mode"] in TILE_MODES else "Clean"
+    ln = clamp(float(s["t_length"]), 0.1, 1.2) * k
+    w = clamp(float(s["t_width"]), 0.06, 0.8) * k
+    lap = clamp(float(s["t_headlap"]), 0.02, 0.6 * ln / k) * k
+    plain = prof == "Plain"
+    gauge = (ln - lap) / (2.0 if plain else 1.0)
+    t = clamp(float(s["t_thickness"]), 0.004, 0.05) * k
+    rise = clamp(float(s["t_rise"]), 0.0, 0.25) * k
+    mk = mode == "Makeshift" and level > 0
+    mess = clamp(float(s["t_mess"]), 0.0, 2.0) if mk else 0.0
+    gap = (0.0015 + 0.001 * mess) * k
+    jit = 0.004 * k * mess  # plain tiles' sideways play (their joints open by up to this either side)
+    side = 0.0
+    if prof == "Barrel":
+        pitch = 0.9 * w + max(0.04 * k, 0.25 * w)  # pan to pan
+    elif prof == "Roman":
+        side = max(0.02 * k, 0.09 * w)  # the lip under the next tile's roll
+        pitch = w - side
+    else:
+        pitch = w + 0.003 * k + 2.0 * jit
+    segs = {"Barrel": (2, 4, 8, 12, 16), "Roman": (2, 4, 6, 9, 12), "Plain": (1, 1, 1, 2, 3)}[prof][level]
+    rr = clamp(float(s["t_ridge_size"]), 0.05, 0.3) * k
+    rlen = max(0.3 * k, 3.4 * rr)
+    rlap = 0.075 * k
+    rt = 1.1 * t
+    slack = 0.004 * k  # room for the next ridge tile to sit a little lower than the last (a sagging ridge)
+    dr = (rt + gap + slack) * rlen / (rlen - rlap) + gap
+    return {
+        "mpu": mpu, "k": k, "profile": prof, "mode": mode, "mk": mk, "mess": mess, "len": ln, "w": w, "lap": lap,
+        "gauge": gauge, "t": t, "rise": rise, "gap": gap, "jit": jit, "side": side, "pitch": pitch,
+        "segs": segs, "plain": plain, "level": level,
+        "roll_w": max(2.0 * side + 0.01 * k, 0.24 * w), "joint": 0.003 * k,
+        "gutter": clamp(float(s["t_gutter"]), 0.0, 0.3) * k, "verge": clamp(float(s["t_verge_over"]), 0.0, 0.2) * k,
+        "ragged": 0.0, "cut_gap": 0.01 * k, "weather": "End A", "cap_rho": min(0.35, 0.3 * k / max(1e-6, F.R)),
+        "rr": rr, "rlen": rlen, "rlap": rlap, "rt": rt, "dr": dr, "slack": slack, "nib": 0.03 * k,
+        "slipped": clamp(float(s["t_slipped"]), 0.0, 1.0) if mk else 0.0,
+        "cracked": clamp(float(s["t_cracked"]), 0.0, 1.0) if mk else 0.0,
+        "missing": clamp(float(s["t_missing"]), 0.0, 1.0) if mk else 0.0,
+        "mismatch": clamp(float(s["t_mismatch"]), 0.0, 1.0) if mk else 0.0,
+        "underlay": s["t_underlay"] if s["t_underlay"] in TILE_UNDERLAYS else "Felt",
+        "batten": clamp(float(s["t_batten_size"]), 0.01, 0.1) * k,
+        "rafter_sp": max(0.2, float(s["t_rafter_spacing"])) * k, "rafter": max(0.03, float(s["t_rafter_size"])) * k,
+        "fascia": 0.2 * k, "fascia_t": 0.025 * k, "uv_tile": max(0.25, float(s["t_uv_tile"])) * k,
+        "verge_kind": s["t_verge"] if s["t_verge"] in TILE_VERGES else "Verge tiles",
+    }
+
+
+TILE_BINS = 48  # profile look-up bins across a tile (a raster cell's top / underside over its width)
+
+
+def _tl_profile(kind, sz, rise=None, t=None, w=None):
+    """A tile's cross-section: columns X across (-1..1 at half width hw),
+    each with its top height Y (at the widest), vertical thickness TV (so it
+    is t thick across the section) and arc length A from x = -1; sh lifts
+    the lot so the lowest underside point is 0. Barrel pans / covers scale
+    their heights with the width (tapered). kind: pan, cover, roman, plain,
+    flat (a verge tile's top)."""
+    rise = sz["rise"] if rise is None else rise
+    t = sz["t"] if t is None else t
+    w = sz["w"] if w is None else w
+    hw = 0.5 * w
+    segs = sz["segs"]
+    notch = None
+    if kind in ("pan", "cover"):
+        n = max(2, segs)
+        X = [-1.0 + 2.0 * i / n for i in range(n + 1)]
+        Y = [rise * x * x if kind == "pan" else rise * (1.0 - x * x) for x in X]
+    elif kind == "roman":
+        side, r2 = sz["side"], min(sz["roll_w"], 0.6 * w)
+        he = min(rise, 2.0 * t + 2.0 * sz["gap"] + 0.002 * sz["k"] * sz["mess"])
+        uls = [0.0, side, max(side + 1e-4 * sz["k"], w - r2)]
+        ys = [0.0, 0.0, 0.0]
+        n = max(2, segs)
+        for i in range(1, n + 1):
+            xi = i / float(n)
+            uls.append(w - r2 + r2 * xi)
+            if xi <= 0.5:
+                ys.append(rise * math.sin(math.pi * xi) ** 2)
+            else:
+                ys.append(he + (rise - he) * math.cos(math.pi * (xi - 0.5)) ** 2)
+        X = [2.0 * u / w - 1.0 for u in uls]
+        Y = ys
+        notch = (2.0 * side / w - 1.0 + 1e-6, sz["lap"] + sz["gap"] + 0.01 * sz["k"])
+    else:
+        n = max(1, segs)
+        X = [-1.0 + 2.0 * i / n for i in range(n + 1)]
+        Y = [0.0] * len(X)
+    m = len(X)
+    TV = []
+    for i in range(m):
+        sl = []
+        for a, b in ((i - 1, i), (i, i + 1)):
+            if 0 <= a and b < m:
+                du = (X[b] - X[a]) * hw
+                if du > 1e-12:
+                    sl.append((Y[b] - Y[a]) / du)
+        g = sum(sl) / len(sl) if sl else 0.0
+        TV.append(min(3.0 * t, t * math.sqrt(1.0 + g * g)))
+    sh = max(tv - y for tv, y in zip(TV, Y))
+    A = [0.0]
+    for i in range(1, m):
+        A.append(A[-1] + math.hypot((X[i] - X[i - 1]) * hw, Y[i] - Y[i - 1]))
+    # bins: the highest top, lowest top and thickest wall over each 1/48 of the width (exact for the polyline)
+    nb = TILE_BINS
+    ymax, ymin, tvmax = [], [], []
+    for b in range(nb):
+        x0 = -1.0 + 2.0 * b / nb
+        x1 = x0 + 2.0 / nb
+        vals = [_tl_interp(X, Y, x0), _tl_interp(X, Y, x1)] + [Y[i] for i in range(m) if x0 < X[i] < x1]
+        tvs = [_tl_interp(X, TV, x0), _tl_interp(X, TV, x1)] + [TV[i] for i in range(m) if x0 < X[i] < x1]
+        ymax.append(max(vals))
+        ymin.append(min(vals))
+        tvmax.append(max(tvs))
+    return {"kind": kind, "X": X, "Y": Y, "TV": TV, "sh": sh, "A": A, "scale": kind in ("pan", "cover"),
+            "ymax": ymax, "ymin": ymin, "tvmax": tvmax, "notch": notch, "top": max(Y) + sh, "t": t, "hw": hw}
+
+
+def _tl_interp(X, Y, x):
+    n = len(X)
+    if x <= X[0]:
+        return Y[0]
+    if x >= X[-1]:
+        return Y[-1]
+    lo, hi = 0, n - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if X[mid] <= x:
+            lo = mid
+        else:
+            hi = mid
+    f = (x - X[lo]) / (X[hi] - X[lo]) if X[hi] > X[lo] else 0.0
+    return Y[lo] + (Y[hi] - Y[lo]) * f
+
+
+def _tl_cells(ras, tl, P, overlap):
+    """The raster cells under a tile, each with what the tile has over it:
+    [(index, top above its base line, underside above it, v0, v1)] (its
+    highest top and lowest underside over the cell). overlap: every cell it
+    touches (pans, covers, rolls); else only cells whose centre it covers
+    (plain tiles butting their neighbours)."""
+    cs, sn = math.cos(tl["rot"]), math.sin(tl["rot"])
+    ln = tl["len"]
+    hl = 0.5 * ln
+    ac, scc = tl["ac"], tl["b"] + hl
+    hw0, hw1 = tl["hw0"], tl["hw1"]
+    hwm = max(hw0, hw1)
+    ca, cs_ = ras.ca, ras.cs
+    acs, asn = abs(cs), abs(sn)
+    eu = 0.5 * (ca * acs + cs_ * asn)
+    ev = 0.5 * (ca * asn + cs_ * acs)
+    ra = hwm * acs + hl * asn + ca
+    rs = hwm * asn + hl * acs + cs_
+    i0 = int(math.floor((ac - ra - ras.a0) / ca))
+    i1 = int(math.floor((ac + ra - ras.a0) / ca))
+    j0 = max(0, int(math.floor((scc - rs - ras.s0) / cs_)))
+    j1 = min(ras.ns - 1, int(math.floor((scc + rs - ras.s0) / cs_)))
+    na = ras.na
+    wrap = ras.wrap
+    mask = ras.mask
+    nb = TILE_BINS
+    half = 0.5 * nb
+    ymax, ymin, tvmax = P["ymax"], P["ymin"], P["tvmax"]
+    sh = P["sh"]
+    scale = P["scale"]
+    notch = P["notch"] if tl.get("notch", True) else None
+    dhw = (hw1 - hw0) / ln
+    out = []
+    for j in range(j0, j1 + 1):
+        ds = ras.s0 + (j + 0.5) * cs_ - scc
+        row = j * na
+        for i in range(i0, i1 + 1):
+            if wrap:
+                q = row + i % na
+            elif 0 <= i < na:
+                q = row + i
+            else:
+                continue
+            if not mask[q]:
+                continue
+            da = ras.a0 + (i + 0.5) * ca - ac
+            u = da * cs + ds * sn
+            v = -da * sn + ds * cs + hl
+            if overlap:
+                if v + ev < 0.0 or v - ev > ln:
+                    continue
+            elif v < 0.0 or v > ln:
+                continue
+            vc = 0.0 if v < 0.0 else (ln if v > ln else v)
+            hw = hw0 + dhw * vc
+            au = u if u >= 0.0 else -u
+            if overlap:
+                if au - eu > hw:
+                    continue
+            elif au > hw:
+                continue
+            x0 = (u - eu) / hw
+            x1 = (u + eu) / hw
+            if notch is not None and u / hw < notch[0] and v < notch[1]:
+                continue
+            b0 = int((x0 + 1.0) * half)
+            b1 = int((x1 + 1.0) * half)
+            b0 = 0 if b0 < 0 else (nb - 1 if b0 >= nb else b0)
+            b1 = 0 if b1 < 0 else (nb - 1 if b1 >= nb else b1)
+            if b0 == b1:
+                yx, yn, tv = ymax[b0], ymin[b0], tvmax[b0]
+            else:
+                yx = max(ymax[b0:b1 + 1])
+                yn = min(ymin[b0:b1 + 1])
+                tv = max(tvmax[b0:b1 + 1])
+            sc = hw / hwm if scale else 1.0
+            out.append((q, yx * sc + sh, yn * sc - tv + sh, v - ev if v - ev > 0.0 else 0.0,
+                        v + ev if v + ev < ln else ln))
+    return out
+
+
+def _tl_rest(ras, cells, tl, gap, camb=0.0):
+    """How high a tile lies (its base line at the head and the tail): it
+    hangs on its batten (the face plane) at the head and pivots down until
+    its underside sits on what's under it (a gap clear). A tile cut short
+    at its head (tl["piv"]: the top course, along a hip) has no batten
+    there: it keeps a whole tile's tilt (at most a few thicknesses), lifted
+    flat if it must, and only its own part counts (the ridge / hip tiles
+    hold it). Pivoting at the cut end tipped short tails up into the ridge."""
+    H = ras.h
+    ln = tl["len"]
+    cut = tl.get("piv")
+    hl = 0.8 * ln
+    yh = gap
+    low = []
+    t_min = None
+    for q, tmax, bmin, v0, v1 in cells:
+        r = H[q]
+        if cut:
+            if v0 >= cut:
+                continue
+            t_min = tmax - bmin if t_min is None else min(t_min, tmax - bmin)
+        if r <= 0.0:
+            continue
+        if camb:
+            bmin += camb * min(math.sin(math.pi * v0 / ln), math.sin(math.pi * v1 / ln))
+        need = r - bmin + gap
+        if v1 > ln:
+            v1 = ln
+        if v1 >= hl:
+            if need > yh:
+                yh = need
+        else:
+            low.append((need, v1))
+    yt = yh
+    for need, v1 in low:
+        if need > yh:
+            y = yh + (need - yh) / (1.0 - v1 / ln)
+            if y > yt:
+                yt = y
+    if cut and low:
+        dmax = 3.0 * ((t_min or 0.0) + gap)
+        if yt - yh > dmax:
+            yh = max([yh] + [need - dmax * (1.0 - v1 / ln) for need, v1 in low])
+            yt = yh + dmax
+    return yh, yt
+
+
+def _tl_record(ras, cells, tl, yh, yt, camb=0.0):
+    H = ras.h
+    ln = tl["len"]
+    cut = tl.get("piv")
+    d = yt - yh
+    for q, tmax, bmin, v0, v1 in cells:
+        if cut and v0 >= cut:
+            continue
+        top = yh + d * (1.0 - v0 / ln) + tmax
+        if camb:
+            top += camb * (1.0 if v0 < 0.5 * ln < v1 else max(math.sin(math.pi * v0 / ln),
+                                                              math.sin(math.pi * v1 / ln)))
+        if top > H[q]:
+            H[q] = top
+
+
+def _tl_columns(face, tl, P, lift=None):
+    """A tile's columns cut to its face: [(x, f0, f1)] (each column a
+    straight line from the tail to the head; f0..f1 the part on the face),
+    with extra columns where the face's edges cross the tail and the head
+    and at its corners inside the tile, so a hip cut is exact. lift(x):
+    the column's underside height, to run it on past ridge / hip edges to
+    where it meets the other side (_tl_crest_grow)."""
+    ln = tl["len"]
+    hl = 0.5 * ln
+    hw0, hw1 = tl["hw0"], tl["hw1"]
+    cs, sn = math.cos(tl["rot"]), math.sin(tl["rot"])
+    ac, scc = tl["ac"], tl["b"] + hl
+
+    def to_face(u, v):
+        dv = v - hl
+        return ac + u * cs - dv * sn, scc + u * sn + dv * cs
+    xs = list(P["X"])
+    edges = face.tl_edges
+    notch = P["notch"] if tl.get("notch", True) else None
+    if notch is not None:
+        xs.append(notch[0] + 0.004)
+    lo_v = tl.get("v_lo", 0.0)
+    hi_v = tl.get("v_hi", ln)
+    if edges:
+        poly = face.poly
+        npoly = len(poly)
+        clipped = False
+        for x in (-1.0, 1.0):
+            p0, p1 = to_face(x * hw0, 0.0), to_face(x * hw1, ln)
+            r = _tl_clip_seg(edges, p0, p1)
+            if r is None or r[0] > 1e-9 or r[1] < 1.0 - 1e-9:
+                clipped = True
+        p0, p1 = to_face(-hw0, 0.0), to_face(hw0, 0.0)
+        r = _tl_clip_seg(edges, p0, p1)
+        if r is None or r[0] > 1e-9 or r[1] < 1.0 - 1e-9:
+            clipped = True
+        if clipped:
+            for v_e, hw_e in ((0.0, hw0), (ln, hw1)):
+                ta, tb = to_face(-hw_e, v_e), to_face(hw_e, v_e)
+                for i in range(npoly):
+                    p, q = poly[i], poly[(i + 1) % npoly]
+                    # where edge p-q crosses the tile's tail / head line ta-tb
+                    d1 = (tb[0] - ta[0], tb[1] - ta[1])
+                    d2 = (q[0] - p[0], q[1] - p[1])
+                    den = d1[0] * d2[1] - d1[1] * d2[0]
+                    if abs(den) < 1e-14:
+                        continue
+                    f = ((p[0] - ta[0]) * d2[1] - (p[1] - ta[1]) * d2[0]) / den
+                    g = ((p[0] - ta[0]) * d1[1] - (p[1] - ta[1]) * d1[0]) / den
+                    if 0.0 < f < 1.0 and 0.0 <= g <= 1.0:
+                        xs.append(2.0 * f - 1.0)
+            for pa, ps in poly:
+                da, ds = pa - ac, ps - scc
+                u = da * cs + ds * sn
+                v = -da * sn + ds * cs + hl
+                if 0.0 < v < ln:
+                    hw = hw0 + (hw1 - hw0) * v / ln
+                    if abs(u) < hw:
+                        xs.append(u / hw)
+    xs = sorted(set(round(x, 9) for x in xs if -1.0 <= x <= 1.0))
+    cols = []
+    for x in xs:
+        f0, f1 = lo_v / ln, hi_v / ln
+        if notch is not None and x < notch[0]:
+            f0 = max(f0, notch[1] / ln)
+        if edges:
+            if lift is not None:
+                r = _tl_clip_seg(edges, to_face(x * hw0, 0.0), to_face(x * hw1, ln), face.tl_grow,
+                                 max(0.0, lift(x)))
+            else:
+                r = _tl_clip_seg(edges, to_face(x * hw0, 0.0), to_face(x * hw1, ln))
+            if r is None:
+                continue
+            f0, f1 = max(f0, r[0]), min(f1, r[1])
+        if f1 - f0 > 1e-4:
+            cols.append((x, f0, f1))
+    return cols
+
+
+def _tl_lift_fn(tl, P, yh):
+    """x -> a column's underside height at the tile's head (for _tl_columns' crest growth)."""
+    X, Y, TV = P["X"], P["Y"], P["TV"]
+    hw0, hw1 = tl["hw0"], tl["hw1"]
+    sc = hw1 / max(hw0, hw1) if P["scale"] else 1.0
+    sh = P["sh"]
+
+    def lift(x):
+        return yh + _tl_interp(X, Y, x) * sc + sh - _tl_interp(X, TV, x)
+    return lift
+
+
+def _tl_emit(M, f, tl, P, yh, yt, rows, inf, camb, cols, sz, stats):
+    """One tile's mesh: whole, or a cracked tile's two pieces (the lower one slid down a little)."""
+    if not tl.get("crack"):
+        _tl_tile_mesh(M, f, tl, P, yh, yt, rows, inf, camb, cols)
+        return
+    fc, slope, slide = tl["crack"]
+    ln = tl["len"]
+    hw = 0.5 * (tl["hw0"] + tl["hw1"])
+    lo_cols, hi_cols = [], []
+    g2 = 0.5 * sz["gap"] / ln
+    for x, f0, f1 in cols:
+        fcut = clamp(fc + slope * x * hw / ln, 0.15, 0.85)
+        if fcut - g2 - f0 > 1e-3:
+            lo_cols.append((x, f0, min(f1, fcut - g2)))
+        if f1 - fcut - g2 > 1e-3:
+            hi_cols.append((x, max(f0, fcut + g2), f1))
+    lift = slide * (yt - yh) / ln + sz["gap"]
+    if len(lo_cols) >= 2:
+        _tl_tile_mesh(M, f, tl, P, yh + lift, yt + lift, rows, inf, camb, lo_cols, slide=slide)
+    if len(hi_cols) >= 2:
+        _tl_tile_mesh(M, f, tl, P, yh, yt, rows, dict(inf, key=inf["key"] + 1), camb, hi_cols)
+    stats["cracked"] += 1
+
+
+def _tl_crest_cut(face, tl, P, yh, yt, cols, grown, crests, gap, camb=0.0):
+    """Columns run on to where they meet the other side (grown) but each
+    stopped where its top would pass into a ridge / hip tile (crests:
+    _tl_trim's pieces), never shorter than it was (cols)."""
+    if not crests:
+        return cols
+    ln = tl["len"]
+    hl = 0.5 * ln
+    hw0, hw1 = tl["hw0"], tl["hw1"]
+    hwm = max(hw0, hw1)
+    cs, sn = math.cos(tl["rot"]), math.sin(tl["rot"])
+    ac, scc = tl["ac"], tl["b"] + hl
+    X, Y = P["X"], P["Y"]
+    sc_on = P["scale"]
+    sh = P["sh"]
+    d = yt - yh
+    point = face.tl_point
+    old = {round(x, 9): f1 for x, f0, f1 in cols}
+
+    def blocked(p):
+        for O, D, B, Xa, L, ra, rb, rt, th1, th2 in crests:
+            w = _rl_sub(p, O)
+            tt = _rl_dot(w, D)
+            if tt < -gap or tt > L + gap:
+                continue
+            rad = _rl_sub(w, _rl_mul(D, tt))
+            dist = _rl_len(rad)
+            ro = ra + (rb - ra) * clamp(tt / max(1e-9, L), 0.0, 1.0)
+            if dist < ro - rt - gap:  # under it (outside it too: a step may cross its whole thickness)
+                continue
+            ang = math.atan2(_rl_dot(rad, B), _rl_dot(rad, Xa))
+            if th1 - 0.05 <= ang <= th2 + 0.05:
+                return True
+        return False
+    out = []
+    for x, f0, f1 in grown:
+        base = old.get(round(x, 9))
+        if base is None:
+            base = min([c[2] for c in cols] or [f1])
+        if f1 <= base + 1e-6:
+            out.append((x, f0, f1))
+            continue
+        yx = _tl_interp(X, Y, x)
+        good = base
+        nst = max(10, min(60, int(math.ceil((f1 - base) * ln / max(1e-9, 0.5 * P["t"])))))
+        for i in range(1, nst + 1):
+            ff = base + (f1 - base) * i / float(nst)
+            v = ln * ff
+            hw = hw0 + (hw1 - hw0) * ff
+            u = x * hw
+            sc = hw / hwm if sc_on else 1.0
+            ytop = yh + d * (1.0 - ff) + yx * sc + sh + (camb * math.sin(math.pi * ff) if camb else 0.0)
+            dv = v - hl
+            p = point(ac + u * cs - dv * sn, scc + u * sn + dv * cs, (ytop + gap,))[0]
+            if blocked(p):
+                break
+            good = ff
+        out.append((x, f0, good))
+    return out
+
+
+def _tl_tile_mesh(M, face, tl, P, yh, yt, rows, info, camb=0.0, cols=None, slide=0.0):
+    """One tile as a closed solid (rows along it, its columns across, the
+    underside its vertical thickness under the top). Returns its point
+    count or 0 when nothing of it is on the face."""
+    if cols is None:
+        cols = _tl_columns(face, tl, P)
+    if len(cols) < 2:
+        return 0
+    ln = tl["len"]
+    hl = 0.5 * ln
+    hw0, hw1 = tl["hw0"], tl["hw1"]
+    hwm = max(hw0, hw1)
+    cs, sn = math.cos(tl["rot"]), math.sin(tl["rot"])
+    ac, scc = tl["ac"], tl["b"] + hl
+    X, Y, TV, A, sh = P["X"], P["Y"], P["TV"], P["A"], P["sh"]
+    a_mid = 0.5 * A[-1]
+    scale = P["scale"]
+    point = face.tl_point
+    prof = [(x, _tl_interp(X, Y, x), _tl_interp(X, TV, x), _tl_interp(X, A, x) - a_mid, f0, f1)
+            for x, f0, f1 in cols]
+    top, bot, U, V = [], [], [], []
+    d = yt - yh
+    for f in rows:
+        rt, rb, ru, rv = [], [], [], []
+        for x, yx, tv, ax, f0, f1 in prof:
+            ff = f0 + (f1 - f0) * f
+            v = ln * ff
+            hw = hw0 + (hw1 - hw0) * ff
+            sc = hw / hwm if scale else 1.0
+            u = x * hw
+            ytop = yh + d * (1.0 - ff) + yx * sc + sh
+            if camb:
+                ytop += camb * math.sin(math.pi * ff)
+            dv = v - hl - slide
+            a = ac + u * cs - dv * sn
+            s = scc + u * sn + dv * cs
+            pt, pb = point(a, s, (ytop, ytop - tv))
+            rt.append(pt)
+            rb.append(pb)
+            ru.append(ax * sc)
+            rv.append(v - slide)
+        top.append(rt)
+        bot.append(rb)
+        U.append(ru)
+        V.append(rv)
+    nh = face.frame(ac, scc)[1]
+    _mt_solid(M, top, bot, U, V, P["t"], nh, info)
+    return len(cols) * len(rows) * 2
+
+
+def _tl_layout(F, faces, sz, seed, stacks):
+    """Every tile, in laying order, per face: courses from the eave up (the
+    same heights round a hip), columns from the face's laying end. Barrel:
+    all pans, then the covers over their joints; Roman: each course from
+    its far end back, so every roll comes down over the lip laid before it;
+    Plain: an eave course of short tiles, then bonded courses. Makeshift:
+    uneven courses, turned / shifted / slipped / cracked / missing /
+    mismatched tiles. Returns (tiles, {face: course tails})."""
+    prof = sz["profile"]
+    k = sz["k"]
+    mk = sz["mk"]
+    mess = sz["mess"]
+    ms = F.ms
+    k_main = math.sqrt(1.0 + ms * ms)
+    tiles = []
+    courses = {}
+    w, pitch = sz["w"], sz["pitch"]
+    for fi, f in enumerate(faces):
+        (a_lo, a_hi), (s_lo, s_hi) = f.a_range, f.s_range
+        ratio = 1.0 if f.cone else (ms / k_main) * (f.k / f.m)
+        g = sz["gauge"] * ratio
+        ln = max(sz["len"], g * (2.0 if sz["plain"] else 1.0) + 0.5 * sz["lap"])
+        lap = ln - g * (2.0 if sz["plain"] else 1.0)
+        bs = []
+        i = 0
+        while True:
+            b = s_lo + i * g
+            if b >= s_hi - 0.005 * k:
+                break
+            if mk and i > 0:
+                b += (_rand12(seed + 7121, fi, i, 0)[0] - 0.5) * 0.35 * lap * min(1.0, mess)
+            bs.append(b)
+            i += 1
+        courses[fi] = bs
+        ring = 2.0 * math.pi * f.Re if f.cone else 0.0
+        n_cone = None
+        per_kind = {}  # kind -> [tile] (barrel lays all pans before the covers)
+        for ci, b in enumerate(bs):
+            qa = 1.0
+            if f.cone:  # fanned tiles: a whole number round each course, fewer as the courses get smaller
+                rho = max(0.05, 1.0 - (b + 0.5 * ln) / f.slope)
+                if n_cone is None or ring * rho / n_cone < 0.72 * pitch:
+                    n_cone = max(6, int(round(ring * rho / pitch)))
+                qa = ring / n_cone / pitch  # a-units per metre across (a is the angle x R: tiles fan with the slot)
+                ncol = n_cone
+                c0 = 0.0
+            else:
+                ncol = int(math.ceil((a_hi - a_lo) / pitch - 1e-6)) + 1
+                c0 = a_lo
+            pa = ring / n_cone if f.cone else pitch  # column pitch in a
+            items = []
+            if prof == "Barrel":
+                for j in range(ncol + (0 if f.cone else 1)):
+                    if not f.cone and c0 + j * pa - 0.5 * pa > a_hi:
+                        break
+                    items.append(("pan", c0 + (j + 0.5) * pa, j))
+                    items.append(("cover", c0 + j * pa, j))
+            elif prof == "Roman":
+                for j in range(ncol):
+                    items.append(("roman", c0 + j * pa + 0.5 * w * (qa if f.cone else 1.0), j))
+                items.reverse()
+            else:
+                rows_ = [(ci, b, ln, 0.0)]
+                if ci == 0:  # the eave course: short tiles under the first, joints staggered
+                    rows_.insert(0, (-1, b, g + sz["lap"], 0.5))
+                for cj, bb, lln, extra in rows_:
+                    off = (0.5 * ((cj + 1) % 2) if cj >= 0 else extra) * pa
+                    xs = []
+                    j = 0
+                    while True:
+                        left = c0 - off + j * pa
+                        if not f.cone and left > a_hi:
+                            break
+                        if f.cone and j >= ncol:
+                            break
+                        xs.append(left)
+                        j += 1
+                    for j, left in enumerate(xs):
+                        wid = pa
+                        if not f.cone and j == len(xs) - 2 and a_hi - xs[-1] < 0.3 * pa:
+                            wid = pa + (a_hi - xs[-1]) + 0.5 * sz["joint"]  # a tile and a half, no sliver
+                        if not f.cone and j == len(xs) - 1 and a_hi - left < 0.3 * pa and len(xs) > 1:
+                            continue
+                        items.append(("plain", left + 0.5 * wid, j, cj, bb, lln, wid))
+            for it in items:
+                kind, a_c, j = it[0], it[1], it[2]
+                cj, bb, lln, wid = (it[3], it[4], it[5], it[6]) if kind == "plain" else (ci, b, ln, None)
+                # even: a cracked tile's upper piece is key + 1 (its own UV randoms, never the next tile's)
+                key = 2 * ((fi * 1009 + cj + 7) * 100003 + j * 7 + ("pan", "cover", "roman", "plain").index(kind))
+                R = _rand12(seed + 6271, fi * 131 + (cj + 3), j, ("pan", "cover", "roman", "plain").index(kind))
+                if kind == "pan":
+                    hw0, hw1 = 0.4 * w, 0.5 * w
+                elif kind == "cover":
+                    hw0, hw1 = 0.5 * w, 0.4 * w
+                elif kind == "roman":
+                    hw0 = hw1 = 0.5 * w
+                else:  # wid is already in a-units (a slot); the joint and its play are metres
+                    hw0 = hw1 = 0.5 * (wid - (sz["joint"] + 2.0 * sz["jit"]) * qa)
+                if f.cone and kind != "plain":
+                    hw0 *= qa
+                    hw1 *= qa
+                tl = {"face": fi, "kind": kind, "ac": a_c, "b": bb, "len": lln, "hw0": hw0, "hw1": hw1, "rot": 0.0,
+                      "key": key, "R": R, "course": cj, "col": j, "stack": min(stacks - 1, int(R[11] * stacks)),
+                      "rise": sz["rise"], "t": sz["t"]}
+                if mk:
+                    tl["missing"] = R[0] < sz["missing"] * (0.3 + 1.4 * (0.5 + 0.5 * _th_noise(
+                        a_c / (1.2 * k), bb / (1.2 * k), seed + 77)))
+                    turn = {"pan": 1.6, "cover": 1.6, "roman": 0.5, "plain": 0.5}[kind]
+                    tl["rot"] = math.radians((R[1] - 0.5) * 2.0 * turn * mess)
+                    shift = {"pan": 0.012, "cover": 0.012, "roman": 0.003, "plain": 0.0}[kind] * k * mess
+                    if kind == "plain":  # the turn and the shift together stay inside the joint's play
+                        play = max(0.0, sz["jit"] - 0.5 * lln * abs(math.sin(tl["rot"])))
+                        tl["ac"] += (R[2] - 0.5) * 2.0 * play
+                    else:
+                        tl["ac"] += (R[2] - 0.5) * 2.0 * shift
+                    tl["b"] += (R[3] - 0.5) * 0.12 * sz["lap"] * mess
+                    if R[4] < sz["slipped"]:
+                        tl["b"] -= (0.3 + 1.0 * R[5]) * sz["lap"]
+                        tl["rot"] *= 1.8
+                        tl["slipped"] = True
+                    if R[6] < sz["cracked"]:
+                        tl["crack"] = (0.35 + 0.3 * R[7], (R[8] - 0.5) * 0.5, (0.004 + 0.012 * R[9]) * k)
+                    if R[10] < sz["mismatch"]:
+                        Q = _rand12(seed + 6277, key, 1, 2)
+                        sc_w = 1.0 + (Q[0] - 0.5) * 0.08
+                        if kind != "plain":
+                            tl["hw0"] *= sc_w
+                            tl["hw1"] *= sc_w
+                        tl["len"] *= 1.0 + (Q[1] - 0.5) * 0.06
+                        tl["rise"] = sz["rise"] * (0.85 + 0.3 * Q[2])
+                        tl["t"] = sz["t"] * (1.0 + 0.3 * Q[3])
+                        tl["odd"] = True
+                        if stacks > 1:
+                            tl["stack"] = stacks - 1
+                per_kind.setdefault(kind, []).append(tl)
+        for kind in ("pan", "cover", "roman", "plain"):
+            tiles.extend(per_kind.get(kind, []))
+    return tiles, courses
+
+
+def _tl_crest_piece(M, c0, c1, n1, n2, h1, h2, r_a, r_b, yc, t, segs, info, clip=None, rows=2):
+    """One ridge / hip tile: a half-round from crest point c0 (radius r_a)
+    to c1 (r_b) round the crest line (its centre yc up the bisector), each
+    edge resting on a face's covering (h1 / h2 above that face's plane),
+    t thick (inner circle t smaller, its edges on the coverings too).
+    clip(p0, p1) -> how far along each column line (0..1) the tile may go
+    (round a ridge it would pass into). Returns 1 when built."""
+    D = _rl_norm(_rl_sub(c1, c0))
+    B = _rl_norm(_rl_add(n1, n2))
+    X = _rl_sub(n1, _rl_mul(B, _rl_dot(n1, B)))
+    X = _rl_norm(_rl_sub(X, _rl_mul(D, _rl_dot(X, D))))
+    a1, b1 = _rl_dot(X, n1), _rl_dot(B, n1)
+    a2, b2 = _rl_dot(X, n2), _rl_dot(B, n2)
+    p1, p2 = math.atan2(b1, a1), math.atan2(b2, a2)
+    n = max(4, segs)
+    top, bot, U, V = [], [], [], []
+    along = 0.0
+    length = _rl_len(_rl_sub(c1, c0))
+    for r in range(rows):
+        f = r / float(rows - 1)
+        C = _rl_lerp(c0, c1, f)
+        O = _rl_add(C, _rl_mul(B, yc))
+        rad = r_a + (r_b - r_a) * f
+        arcs = []
+        for rho in (rad, rad - t):
+            e1 = clamp((h1 - yc * b1) / rho, -1.0, 1.0)
+            e2 = clamp((h2 - yc * b2) / rho, -1.0, 1.0)
+            th1 = p1 - math.acos(e1)
+            th2 = p2 + math.acos(e2)
+            pts = []
+            for q in range(n + 1):
+                th = th1 + (th2 - th1) * q / float(n)
+                pts.append(_rl_add(O, _rl_add(_rl_mul(X, rho * math.cos(th)), _rl_mul(B, rho * math.sin(th)))))
+            arcs.append((pts, th1, th2))
+        top.append(arcs[0][0])
+        bot.append(arcs[1][0])
+        th1, th2 = arcs[0][1], arcs[0][2]
+        U.append([rad * (th1 + (th2 - th1) * q / float(n)) for q in range(n + 1)])
+        V.append([f * length] * (n + 1))
+    if clip is not None:  # each column only as far as it may go (from its first row)
+        for q in range(n + 1):
+            fe = min(clip(top[0][q], top[-1][q]), clip(bot[0][q], bot[-1][q]))
+            if fe < 1.0:
+                fe = max(0.002, fe)
+                for r in range(1, rows):
+                    g = fe * r / float(rows - 1)
+                    top[r][q] = _rl_lerp(top[0][q], top[-1][q], g)
+                    bot[r][q] = _rl_lerp(bot[0][q], bot[-1][q], g)
+                    V[r][q] = g * length
+    # outward at the first quad (the winding test looks there): away from the axis, not up
+    q = 0
+    O0 = _rl_add(c0, _rl_mul(B, yc))
+    mid = _rl_lerp(_rl_lerp(top[0][q], top[0][q + 1], 0.5), _rl_lerp(top[1][q], top[1][q + 1], 0.5), 0.5)
+    rad_dir = _rl_sub(mid, O0)
+    rad_dir = _rl_norm(_rl_sub(rad_dir, _rl_mul(D, _rl_dot(rad_dir, D))))
+    _mt_solid(M, top, bot, U, V, t, rad_dir, info)
+    return 1
+
+
+def _tl_stop_end(M, c, D, n1, n2, h1, h2, rad, yc, t, segs, info):
+    """A ridge end's closure: a half disc standing in the tile's mouth,
+    just inside its inner circle, resting on both coverings. D points out of
+    the tile."""
+    B = _rl_norm(_rl_add(n1, n2))
+    X = _rl_sub(n1, _rl_mul(B, _rl_dot(n1, B)))
+    X = _rl_norm(_rl_sub(X, _rl_mul(D, _rl_dot(X, D))))
+    a1, b1 = _rl_dot(X, n1), _rl_dot(B, n1)
+    a2, b2 = _rl_dot(X, n2), _rl_dot(B, n2)
+    p1, p2 = math.atan2(b1, a1), math.atan2(b2, a2)
+    e1 = clamp((h1 - yc * b1) / rad, -1.0, 1.0)
+    e2 = clamp((h2 - yc * b2) / rad, -1.0, 1.0)
+    th1, th2 = p1 - math.acos(e1), p2 + math.acos(e2)
+    n = max(4, segs)
+    O = _rl_add(c, _rl_mul(B, yc))
+    front, back, U, V = [[], []], [[], []], [[], []], [[], []]
+    for q in range(n + 1):
+        th = th1 + (th2 - th1) * q / float(n)
+        rim = _rl_add(O, _rl_add(_rl_mul(X, rad * math.cos(th)), _rl_mul(B, rad * math.sin(th))))
+        # straight down the bisector onto the higher of the two coverings' planes
+        lo = []
+        for nn, h in ((n1, h1), (n2, h2)):
+            den = _rl_dot(B, nn)
+            if den > 1e-6:
+                lo.append((h - _rl_dot(_rl_sub(rim, c), nn)) / den)
+        drop = min(0.0, max(lo)) if lo else 0.0
+        foot = _rl_add(rim, _rl_mul(B, drop))
+        for r, p in enumerate((foot, rim)):
+            front[r].append(p)
+            back[r].append(_rl_sub(p, _rl_mul(D, t)))
+            U[r].append(rad * th)
+            V[r].append(_rl_dot(_rl_sub(p, c), B))
+    _mt_solid(M, front, back, U, V, t, D, info)
+
+
+def _tl_box(M, face, a0, a1, s0, s1, y0, y1, info, ncol=2, nrow=2, ripple=None):
+    """A slab on a face (face coordinates a0..a1 x s0..s1, y0..y1 off the
+    plane), cut to the face's polygon: a closed solid. ripple(a) -> extra
+    height (a reed mat's canes). Returns 1 when built."""
+    edges = face.tl_edges
+    xs = [a0 + (a1 - a0) * i / float(max(1, ncol - 1)) for i in range(max(2, ncol))]
+    if edges:
+        for pa, ps in face.poly:
+            if a0 < pa < a1:
+                xs.append(pa)
+    xs = sorted(set(xs))
+    cols = []
+    for a in xs:
+        lo, hi = s0, s1
+        if edges:
+            r = _tl_clip_seg(edges, (a, s0), (a, s1))
+            if r is None:
+                continue
+            lo, hi = s0 + (s1 - s0) * r[0], s0 + (s1 - s0) * r[1]
+        if hi - lo > 1e-5:
+            cols.append((a, lo, hi))
+    if len(cols) < 2:
+        return 0
+    point = face.tl_point
+    top, bot, U, V = [], [], [], []
+    for r in range(max(2, nrow)):
+        f = r / float(max(2, nrow) - 1)
+        rt, rb, ru, rv = [], [], [], []
+        for a, lo, hi in cols:
+            s = lo + (hi - lo) * f
+            up = ripple(a) if ripple else 0.0
+            pt, pb = point(a, s, (y1 + up, y0 + up))
+            rt.append(pt)
+            rb.append(pb)
+            ru.append(a)
+            rv.append(s)
+        top.append(rt)
+        bot.append(rb)
+        U.append(ru)
+        V.append(rv)
+    nh = face.frame(0.5 * (cols[0][0] + cols[-1][0]), 0.5 * (cols[0][1] + cols[0][2]))[1]
+    _mt_solid(M, top, bot, U, V, max(1e-4, y1 - y0), nh, info)
+    return 1
+
+
+def _tl_verges(face):
+    """A face's gable verges: [(a of the edge, s0, s1, inward)] (edges of
+    its polygon running straight up the slope at its a ends)."""
+    if face.cone:
+        return []
+    (a_lo, a_hi), _ = face.a_range, face.s_range
+    out = []
+    poly = face.poly
+    n = len(poly)
+    eps = 1e-6 * max(1.0, a_hi - a_lo)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        if abs(p[0] - q[0]) > eps * 10:
+            continue
+        if abs(p[0] - a_lo) < eps * 10:
+            out.append((a_lo, min(p[1], q[1]), max(p[1], q[1]), 1.0))
+        elif abs(p[0] - a_hi) < eps * 10:
+            out.append((a_hi, min(p[1], q[1]), max(p[1], q[1]), -1.0))
+    return out
+
+
+
+
+
+
+def _tl_trim(M, F, faces, rasters, courses, sz, s, seed, stacks, crests=None):
+    """Ridge tiles, hip tiles (cut round the ridge), verge tiles or an
+    undercloak, a cone's cap. Returns how many pieces; crests (a list)
+    gets each ridge / hip tile's solid for _tl_crest_cut: (centre, D, B,
+    X, length, outer radius at each end, thickness, angle range)."""
+    k = sz["k"]
+    gap = sz["gap"]
+    rr, rlen, rlap, rt, dr = sz["rr"], sz["rlen"], sz["rlap"], sz["rt"], sz["dr"]
+    segs = max(6, min(16, sz["segs"] + 4)) if sz["level"] > 1 else 6
+    n_pieces = [0]
+    reach = 1.05 * rr
+
+    def hgt(x, z):
+        return F.height(x, z)
+
+    def crest_pt(x, z):
+        return (x, hgt(x, z), z)
+
+    def lift_along(fis, p0, p1, extra=0.0):
+        """Highest covering top near the plan line p0 -> p1 on these faces (each face's own)."""
+        out = []
+        n = max(2, int(math.ceil(math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / (0.05 * k))) + 1)
+        for fi in fis:
+            f, ras = faces[fi], rasters[fi]
+            best = 0.0
+            for i in range(n):
+                g = i / float(n - 1)
+                x, z = p0[0] + (p1[0] - p0[0]) * g, p0[1] + (p1[1] - p0[1]) * g
+                a, s_ = f.coords(x, z)
+                best = max(best, ras.box_max(a - reach, a + reach, s_ - reach - extra, s_ + reach))
+            out.append(best + gap)
+        return out
+
+    def info(kind):
+        return {"kind": kind, "stack": 0, "pa_arc": 0.01 * k, "key": seed * 31 + n_pieces[0]}
+
+    def lay_line(p_from, p_to, fa, fb, extra=(), clip=None, stop_start=True, stop_end=True, h_from=None,
+                 h_to=None, wall=None):
+        """Tapered tiles along a crest (plan points p_from -> p_to, following the roof's height there; h_from /
+        h_to: the crest's height at the ends instead, straight between), each wide end over the last one's
+        narrow end, each resting on the tiles under it (the highest near it on faces fa / fb, and the faces in
+        extra), never lower than the last by more than the slack its taper leaves. wall: an outward normal in
+        place of face fb (a monoridge: the roll comes down over a lean-to's top edge onto the wall below it).
+        Returns the tiles' axes [(c0, c1, D, B, yc, r)]."""
+        n = max(2, int(math.ceil(math.hypot(p_to[0] - p_from[0], p_to[1] - p_from[1]) / (0.05 * k))) + 1)
+        pl = [(p_from[0] + (p_to[0] - p_from[0]) * i / float(n - 1),
+               p_from[1] + (p_to[1] - p_from[1]) * i / float(n - 1)) for i in range(n)]
+        cr = []
+        for i, (x, z) in enumerate(pl):
+            if h_from is not None and h_to is not None:
+                h = h_from + (h_to - h_from) * i / float(n - 1)
+            else:
+                h = hgt(x, z)
+            cr.append((x, h, z))
+        arc = [0.0]
+        for p, q in zip(cr, cr[1:]):
+            arc.append(arc[-1] + _rl_len(_rl_sub(q, p)))
+        total = arc[-1]
+        if total < 1e-6:
+            return []
+
+        def at(d):
+            i = min(n - 2, max(0, bisect.bisect_right(arc, d) - 1))
+            f = clamp((d - arc[i]) / max(1e-12, arc[i + 1] - arc[i]), 0.0, 1.0)
+            return _rl_lerp(cr[i], cr[i + 1], f), (pl[i][0] + (pl[i + 1][0] - pl[i][0]) * f,
+                                                   pl[i][1] + (pl[i + 1][1] - pl[i][1]) * f)
+        r1, r0 = rr, rr - dr
+        rm = 0.5 * (r0 + r1) - rt
+        drop = 0.8 * sz["slack"]
+        axes = []
+        a = 0.0
+        prev = None
+        last = None
+        while a < total - 1e-6:
+            b = min(total, a + rlen)
+            ca, pa_ = at(a)
+            cb, pb_ = at(b)
+            na_ = faces[fa].frame(*faces[fa].coords(pa_[0], pa_[1]))[1]
+            if wall is None:
+                nb_ = faces[fb].frame(*faces[fb].coords(pa_[0], pa_[1]))[1]
+                ha, hb = lift_along((fa, fb), pa_, pb_)
+            else:
+                nb_ = wall
+                ha, hb = lift_along((fa,), pa_, pb_)[0], gap
+            for fe in extra:
+                he = lift_along((fe,), pa_, pb_)[0]
+                ha, hb = max(ha, he), max(hb, he)
+            if prev is not None:
+                ha, hb = max(ha, prev[0] - drop), max(hb, prev[1] - drop)
+            prev = (ha, hb)
+            D = _rl_norm(_rl_sub(cb, ca))
+            B = _rl_norm(_rl_add(na_, nb_))
+            X = _rl_sub(na_, _rl_mul(B, _rl_dot(na_, B)))
+            X = _rl_norm(_rl_sub(X, _rl_mul(D, _rl_dot(X, D))))
+            ycs = []
+            for nn, h in ((na_, ha), (nb_, hb)):
+                ai, bi = abs(_rl_dot(X, nn)), _rl_dot(B, nn)
+                if bi > 1e-6:
+                    ycs.append((h - rm * ai) / bi)
+            yc = max(ycs) if ycs else 0.0
+            rb_ = r1 - (r1 - r0) * (b - a) / rlen
+            _tl_crest_piece(M, ca, cb, na_, nb_, ha, hb, r1, rb_, yc, rt, segs, info("ridge"), clip=clip)
+            n_pieces[0] += 1
+            axes.append((ca, cb, D, B, yc, r1 + gap))
+            if crests is not None:
+                Xc = _rl_sub(na_, _rl_mul(B, _rl_dot(na_, B)))
+                Xc = _rl_norm(_rl_sub(Xc, _rl_mul(D, _rl_dot(Xc, D))))
+                p1_ = math.atan2(_rl_dot(B, na_), _rl_dot(Xc, na_))
+                p2_ = math.atan2(_rl_dot(B, nb_), _rl_dot(Xc, nb_))
+                rho_ = max(1e-6, min(r1, rb_) - rt)
+                th1_ = p1_ - math.acos(clamp((ha - yc * _rl_dot(B, na_)) / rho_, -1.0, 1.0))
+                th2_ = p2_ + math.acos(clamp((hb - yc * _rl_dot(B, nb_)) / rho_, -1.0, 1.0))
+                crests.append((_rl_add(ca, _rl_mul(B, yc)), D, B, Xc, _rl_len(_rl_sub(cb, ca)), r1, rb_, rt,
+                               th1_, th2_))
+            if a == 0.0 and stop_start:
+                _tl_stop_end(M, _rl_add(ca, _rl_mul(D, 0.004 * k)), _rl_mul(D, -1.0), na_, nb_, ha + gap, hb + gap,
+                             r1 - rt - gap, yc, 0.6 * rt, segs, info("stop"))
+                n_pieces[0] += 1
+            last = (cb, rb_, D, na_, nb_, ha, hb, yc)
+            if b >= total:
+                break
+            a = b - rlap
+        if stop_end and last:
+            cb, rb_, D, na_, nb_, ha, hb, yc = last
+            _tl_stop_end(M, _rl_sub(cb, _rl_mul(D, 0.004 * k + 0.6 * rt)), D, na_, nb_, ha + gap, hb + gap,
+                         rb_ - rt - gap, yc, 0.6 * rt, segs, info("stop"))
+            n_pieces[0] += 1
+        return axes
+
+    def face_of(kind, d=None, end=None):
+        for fi, f in enumerate(faces):
+            if f.kind != kind:
+                continue
+            if kind == "side" and d is not None and f.d[1] * d < 0:
+                continue
+            if kind == "end" and f.end != end:
+                continue
+            return fi
+        return None
+
+    def cyl_clip(axes):
+        """A column line may run until it would pass into the ridge's tiles (each one's outer cylinder,
+        along its length)."""
+        cyls = []
+        for c0, c1, D, B, yc, r in axes:
+            cyls.append((_rl_add(c0, _rl_mul(B, yc)), D, r + gap, -2.0 * gap, _rl_len(_rl_sub(c1, c0)) + 2.0 * gap))
+
+        def one(p0, p1, o, D, R, lo, hi):
+            w0 = _rl_sub(p0, o)
+            d = _rl_sub(p1, p0)
+            t0, td = _rl_dot(w0, D), _rl_dot(d, D)
+            if abs(td) < 1e-12:
+                if not (lo <= t0 <= hi):
+                    return 1.0
+                f_lo, f_hi = -1e9, 1e9
+            else:
+                fa_, fb_ = (lo - t0) / td, (hi - t0) / td
+                f_lo, f_hi = min(fa_, fb_), max(fa_, fb_)
+            wp = _rl_sub(w0, _rl_mul(D, t0))
+            dp = _rl_sub(d, _rl_mul(D, td))
+            qa, qb, qc = _rl_dot(dp, dp), 2.0 * _rl_dot(wp, dp), _rl_dot(wp, wp) - R * R
+            if qa < 1e-14:
+                if qc > 0.0:
+                    return 1.0
+                r_lo, r_hi = -1e9, 1e9
+            else:
+                disc = qb * qb - 4.0 * qa * qc
+                if disc <= 0.0:
+                    return 1.0
+                sq = math.sqrt(disc)
+                r_lo, r_hi = (-qb - sq) / (2.0 * qa), (-qb + sq) / (2.0 * qa)
+            e0, e1 = max(f_lo, r_lo, 0.0), min(f_hi, r_hi, 1.0)
+            if e0 >= e1 or e0 >= 1.0:
+                return 1.0
+            return max(0.0, e0 - 0.004 * k / max(1e-9, _rl_len(d)))
+
+        def clip(p0, p1):
+            best = 1.0
+            for c in cyls:
+                f = one(p0, p1, *c)
+                if f < best:
+                    best = f
+            return best
+        return clip
+
+    def plane_clip(point, normal, keep_gap):
+        """Columns stop before crossing a plane (normal towards the side they keep)."""
+        def clip(p0, p1):
+            d0 = _rl_dot(_rl_sub(p0, point), normal) - keep_gap
+            d1 = _rl_dot(_rl_sub(p1, point), normal) - keep_gap
+            if d1 >= 0.0 or d0 <= 0.0:
+                return 1.0 if d1 >= 0.0 else 0.0
+            return d0 / (d0 - d1)
+        return clip
+
+    def both(*clips):
+        clips = [c for c in clips if c]
+        if not clips:
+            return None
+        return lambda p0, p1: min(c(p0, p1) for c in clips)
+
+    ends = F.ends
+    ridge_axes = []
+    if F.cone:
+        if s["t_ridge"]:
+            f = faces[0]
+            rc = sz["cap_rho"] * 1.05
+            s_c = (1.0 - rc) * f.slope
+            hc = rasters[0].box_max(-1e9, 1e9, s_c - 0.1 * k, 1e9) + gap
+            secs, nrms = [], []
+            n_ang = 48
+
+            def nrm_at(x, z):
+                e = 0.01 * k
+                hx = (hgt(x + e, z) - hgt(x - e, z)) / (2.0 * e)
+                hz = (hgt(x, z + e) - hgt(x, z - e)) / (2.0 * e)
+                return _rl_norm((-hx, 1.0, -hz))
+            for q in range(n_ang + 1):
+                th = 2.0 * math.pi * q / n_ang
+                sec, nn_ = [], []
+                for g in (1.0, 0.75, 0.5, 0.25, 0.0):  # closed over the apex
+                    x, z = F.L * rc * g * math.cos(th), F.W * rc * g * math.sin(th)
+                    nn = nrm_at(x, z) if g > 0.1 else _rl_norm(_rl_add(nrm_at(x, z), (0.0, 1.0, 0.0)))
+                    up = hc + rt
+                    hp = hgt(x, z)
+                    sec.append((x + nn[0] * up, hp + nn[1] * up, z + nn[2] * up))
+                    nn_.append(nn)
+                secs.append(sec)
+                nrms.append(nn_)
+            _mt_strip(M, secs, nrms, {"t": rt, "k": k}, (0.0, 1.0, 0.0), info("cap"))
+            n_pieces[0] += 1
+        return n_pieces[0]
+    # the ridge (and a bonnet over two hips meeting before it)
+    if F.shape == "Ridge" and s["t_ridge"]:
+        e_hip = []
+        for end in ends:
+            if end is None:
+                e_hip.append(None)
+            else:
+                e_hip.append(clamp(1.05 * rr / max(0.3, end[4]) + 0.03 * k, 0.05 * k, 0.6 * k))
+        lo = (-ends[1][3] - e_hip[1]) if ends[1] else F.x0 - sz["verge"] - 0.04 * k
+        hi = (ends[0][3] + e_hip[0]) if ends[0] else F.x1 + sz["verge"] + 0.04 * k
+        fa, fb = face_of("side", 1.0), face_of("side", -1.0)
+        if fa is not None and fb is not None:
+            # past a hip's apex the ridge rides over the hip end's tiles too
+            extra = [fe for fe in (face_of("end", end=e) for e in (0, 1) if ends[e]) if fe is not None]
+            flat = not (F.warp or F.ridge_sag)
+            ridge_axes = lay_line((lo, 0.0), (hi, 0.0), fa, fb, extra, h_from=F.H if flat else None,
+                                  h_to=F.H if flat else None)
+    # a lean-to's top edge: monoridge tiles, rolled over it and down the wall it stands against (else the
+    # top course's ends showed sky and the battens past them)
+    if F.shape == "Lean-to" and s["t_ridge"]:
+        lo = -ends[1][3] if ends[1] else F.x0 - sz["verge"] - 0.04 * k
+        hi = ends[0][3] if ends[0] else F.x1 + sz["verge"] + 0.04 * k
+        fa = face_of("side")
+        if fa is not None and hi > lo:
+            flat = not (F.warp or F.ridge_sag)
+            ridge_axes = lay_line((lo, F.z0), (hi, F.z0), fa, None, h_from=F.H if flat else None,
+                                  h_to=F.H if flat else None, wall=(0.0, 0.0, -1.0))
+    # hips
+    if s["t_hip"]:
+        rclip = cyl_clip(ridge_axes) if ridge_axes else None
+        for e, end in enumerate(ends):
+            if end is None:
+                continue
+            sign, me, h0 = end[0], end[1], end[2]
+            fe = face_of("end", end=e)
+            for zs in ((1.0, -1.0) if F.shape == "Ridge" else (1.0,)):
+                fs = face_of("side", zs) if F.shape == "Ridge" else face_of("side")
+                if fe is None or fs is None:
+                    continue
+
+                def hip_xz(h, sign=sign, me=me, h0=h0, zs=zs):
+                    if F.shape == "Ridge":
+                        return sign * (F.L - (h - h0) / me), zs * (F.H - h) / F.ms
+                    return sign * (F.L - (h - h0) / me), F.z0 + (F.H - h) / F.ms
+                ez = sz["gutter"] / math.sqrt(1.0 + F.ms ** 2)
+                exe = sz["gutter"] / math.sqrt(1.0 + me * me)
+                x_ext = (F.x1 + exe) if sign > 0 else (exe - F.x0)
+                h_low = max(F.H - F.ms * ((F.z1 + ez) if F.shape == "Ridge" else (F.z1 + ez - F.z0)),
+                            h0 + me * (F.L - x_ext))
+                if h0 > 1e-6:
+                    h_low = max(h_low, h0 - 0.02 * k)
+                pb, pt_ = hip_xz(h_low), hip_xz(F.H)
+                flat = not (F.warp or F.ridge_sag)
+                clips = [rclip]
+                if F.shape == "Ridge":  # mitred against the other hip of this end
+                    clips.append(plane_clip((0.0, 0.0, 0.0), (0.0, 0.0, zs), 0.5 * gap))
+                else:  # a lean-to's hip stops at its top edge
+                    clips.append(plane_clip((0.0, 0.0, F.z0), (0.0, 0.0, 1.0), gap))
+                if ends[1 - e] is not None:  # two hips' ends meeting (a pyramid): not past the middle
+                    xm = 0.5 * (ends[0][3] - ends[1][3])
+                    clips.append(plane_clip((xm, 0.0, 0.0), (sign, 0.0, 0.0), 0.5 * gap))
+                lay_line(pb, pt_, fs, fe, clip=both(*clips), stop_start=True, stop_end=False,
+                         h_from=h_low if flat else None, h_to=F.H if flat else None)
+    # gable verges: verge tiles (an L over the edge, its flange outside) or an undercloak under the tiles' edge
+    flat = _tl_profile("plain", dict(sz, segs=1))
+    vclip = cyl_clip(ridge_axes) if ridge_axes else None
+    for fi, f in enumerate(faces):
+        for a_e, s0, s1, inward in _tl_verges(f):
+            if sz["verge_kind"] == "Undercloak":
+                s_ = s0
+                i = 0
+                while s_ < s1 - 0.01 * k:
+                    s_b = min(s1, s_ + 0.265 * k)
+                    a_in = a_e + inward * max(0.01 * k, sz["verge"] - 0.006 * k)
+                    a_out = a_e + inward * 0.004 * k
+                    n_pieces[0] += _tl_box(M, f, min(a_in, a_out), max(a_in, a_out), s_, s_b - 0.004 * k,
+                                           -0.012 * k - 0.0015 * k, -0.0015 * k, info("undercloak"))
+                    s_ = s_b
+                    i += 1
+                continue
+            wv = max(0.08 * k, 0.6 * sz["pitch"])
+            drop = 0.07 * k
+            ras = rasters[fi]
+            bs = courses.get(fi, [])
+            ln = sz["len"]
+            for ci, b in enumerate(bs):
+                if b >= s1 - 0.01 * k:
+                    break
+                g = (bs[ci + 1] - b) if ci + 1 < len(bs) else sz["gauge"]
+                step = (rt + gap) * ln / max(1e-6, g)
+                tl = {"face": fi, "kind": "verge", "ac": a_e + inward * 0.5 * wv, "b": b, "len": ln,
+                      "hw0": 0.5 * wv, "hw1": 0.5 * wv, "rot": 0.0, "notch": False}
+                cells = _tl_cells(ras, tl, flat, True)
+                yh, yt = _tl_rest(ras, cells, tl, gap)
+                _tl_record(ras, cells, tl, yh, yt)
+                top, bot, U, V = [], [], [], []
+                s_hi = min(s1, b + ln)
+                for f_ in (0.0, 1.0):
+                    v = (s_hi - b) * f_
+                    sv = b + v
+                    yb = yh + (yt - yh) * (1.0 - v / ln)
+                    dlt = step * (1.0 - v / ln)
+                    a_f = a_e - inward * (gap + dlt)  # the flange's inner face
+                    pts_t = [(a_e + inward * wv, yb + rt), (a_f - inward * rt, yb + rt), (a_f - inward * rt, -drop)]
+                    pts_b = [(a_e + inward * wv, yb), (a_f, yb), (a_f, -drop)]
+                    rt_, rb_ = [], []
+                    for (aa, yy), (ab, yb2) in zip(pts_t, pts_b):
+                        rt_.append(f.tl_point(aa, sv, (yy,))[0])
+                        rb_.append(f.tl_point(ab, sv, (yb2,))[0])
+                    acc = [0.0]
+                    for p, q in zip(pts_t, pts_t[1:]):
+                        acc.append(acc[-1] + math.hypot(q[0] - p[0], q[1] - p[1]))
+                    top.append(rt_)
+                    bot.append(rb_)
+                    U.append(acc)
+                    V.append([v] * 3)
+                if vclip:
+                    for q in range(3):
+                        fe_ = min(vclip(top[0][q], top[1][q]), vclip(bot[0][q], bot[1][q]))
+                        if fe_ < 1.0:
+                            fe_ = max(0.002, fe_)
+                            top[1][q] = _rl_lerp(top[0][q], top[1][q], fe_)
+                            bot[1][q] = _rl_lerp(bot[0][q], bot[1][q], fe_)
+                            V[1][q] = V[1][q] * fe_
+                _mt_solid(M, top, bot, U, V, rt, f.frame(a_e, b)[1], info("verge"))
+                n_pieces[0] += 1
+    return n_pieces[0]
+
+
+def _tl_underlay(M, F, faces, sz, seed, depth_top):
+    """The underlay under the battens (depth_top under the face planes):
+    felt in 1 m strips, sarking boards across the rafters or a reed mat
+    (canes down the slope). Returns its thickness (0: none)."""
+    kind = sz["underlay"]
+    if kind == "None":
+        return 0.0
+    k = sz["k"]
+    th = {"Felt": 0.002, "Boards": 0.02, "Reed mat": 0.012}[kind] * k
+    y1 = -depth_top
+    y0 = y1 - th
+    mk = sz["mk"]
+    for fi, f in enumerate(faces):
+        if f.cone:
+            (a_lo, a_hi) = (0.0, 2.0 * math.pi * f.Re)
+        else:
+            a_lo, a_hi = f.a_range
+        s_lo, s_hi = f.s_range
+        if kind == "Boards":
+            bw, blen = 0.15 * k, 3.6 * k
+        else:
+            bw, blen = 1.0 * k, 3.0 * k
+        s_ = s_lo
+        row = 0
+        while s_ < s_hi - 1e-6:
+            s_b = min(s_hi, s_ + bw)
+            off = (_rand12(seed + 991, fi, row, 0)[0] * blen) if kind == "Boards" else 0.0
+            a = a_lo - off
+            while a < a_hi - 1e-6:
+                a_b = min(a_hi, a + blen)
+                a0 = max(a_lo, a)
+                if a_b - a0 > 1e-4 * k:
+                    ncol = 2 if (f.planar and not f.cone) else max(2, int(math.ceil((a_b - a0) / (0.3 * k))) + 1)
+                    nrow = 2 if (f.planar and not f.cone) else max(2, int(math.ceil((s_b - s_) / (0.3 * k))) + 1)
+                    ripple = None
+                    if kind == "Reed mat" and sz["level"] >= 2:
+                        pitch = 0.016 * k
+                        ncol = max(ncol, int(math.ceil((a_b - a0) / (0.5 * pitch))) + 1)
+                        amp = 0.004 * k
+
+                        def ripple(aa, pitch=pitch, amp=amp):
+                            return amp * math.sin(math.pi * aa / pitch) ** 2
+                    joint = 0.0005 * k if kind == "Boards" else 0.0
+                    sag = 0.0
+                    if mk and kind != "Boards":
+                        sag = 0.0
+                    _tl_box(M, f, a0, a_b - joint, s_, s_b - joint, y0 - sag, y1 - sag,
+                            {"kind": "underlay", "stack": 0, "pa_arc": 0.01 * k, "key": fi * 7919 + row * 131 + int(a)},
+                            ncol=ncol, nrow=nrow, ripple=ripple)
+                a = a_b
+            s_ = s_b
+            row += 1
+    return th
+
+
+def tile_build(frame, s, blockers=None):
+    """A clay tile roof (pure maths): {"tiles", "tile_trim", "tile_underlay",
+    "frame": meshes in world space or None, "pieces": tiles laid, "capped",
+    "field", "level", "clay": {"tiles", "missing", "slipped", "cracked",
+    "trim", "courses", "gauge", "tiles_uv"}}."""
+    mpu = frame.get("mpu") or scene_m_per_unit()
+    level = THATCH_DETAILS.index(s["detail"]) if s.get("detail") in THATCH_DETAILS else 2
+    seed = int(s["seed"])
+    fs = dict(s)
+    sag = clamp(float(s["t_sag"]), 0.0, 2.0)
+    fs.update({"softness": 0.0, "sag": 0.0, "lumps": 0.0, "warp": 0.35 * sag, "ridge_sag": 0.6 * sag,
+               "ragged": 0.0, "gaps": 0.0, "levels": 1, "lip": 0.0, "top": 0.0, "thickness": 0.002,
+               "strands": 0.0, "pattern": "Straight", "verge_a": "Hanging", "verge_b": "Hanging"})
+    F = ThatchField(frame["L"], frame["W"], frame["H"], fs)
+    sz = _tl_sizes(s, F, mpu, level)
+    faces = _mt_faces(F, sz, "Clean")
+    for f in faces:
+        _tl_face_setup(f, F)
+    stacks = max(1, int(s["stacks"]))
+    k = sz["k"]
+    _tl_crest_grow(faces, k, F)
+    M = _MtMesh()
+    TR = _MtMesh()
+    UL = _MtMesh()
+    out = {"pieces": 0, "capped": False, "field": F, "level": level, "underlay": None, "straw": None,
+           "tiles": None, "tile_trim": None, "tile_underlay": None, "frame": None}
+    stats = {"tiles": 0, "missing": 0, "slipped": 0, "cracked": 0, "trim": 0, "courses": 0,
+             "gauge": round(sz["gauge"] / k, 4), "tiles_uv": 0}
+    profs = {}
+    if level == 0:  # Proxy: one slab per face, as thick as the covering
+        pr = _tl_profile({"Barrel": "cover", "Roman": "roman", "Plain": "plain"}[sz["profile"]], sz)
+        hc = pr["top"] + (sz["t"] + sz["gap"]) * sz["len"] / max(1e-6, sz["gauge"])
+        if sz["profile"] == "Barrel":
+            hc += sz["rise"]
+        for fi, f in enumerate(faces):
+            if f.cone:
+                ring = 2.0 * math.pi * f.Re
+                _tl_box(M, f, 0.0, ring, f.s_range[0], f.s_range[1], 0.0, hc,
+                        {"kind": "proxy", "stack": 0, "pa_arc": 0.01 * k, "key": fi}, ncol=49, nrow=4)
+            else:
+                _tl_box(M, f, f.a_range[0], f.a_range[1], f.s_range[0], f.s_range[1], 0.0, hc,
+                        {"kind": "proxy", "stack": 0, "pa_arc": 0.01 * k, "key": fi},
+                        ncol=2 if f.planar else 12, nrow=2 if f.planar else 8)
+        uv = _mt_uv_layout(M, dict(sz, uv_tile=4.0 * sz["uv_tile"]), {"m_uv_mode": "All laid out", "stacks": 1,
+                                                                    "stack_layout": "UDIM tiles"}, seed)
+        out["tiles"] = _th_to_world(frame, M.mesh()) if M.counts else None
+        stats["tiles_uv"] = uv.get("tiles", 0)
+        out["clay"] = stats
+        return out
+    for kind in ("pan", "cover", "roman", "plain"):
+        profs[kind] = _tl_profile(kind, sz)
+    tiles, courses = _tl_layout(F, faces, sz, seed, stacks)
+    stats["courses"] = max([len(c) for c in courses.values()] or [0])
+    # rasters: cells lined up with the columns and courses (clean tiles all rest alike)
+    rasters = []
+    for fi, f in enumerate(faces):
+        across = sz["pitch"] / (8.0 if sz["plain"] else 16.0)
+        along = sz["gauge"] / max(1, int(math.ceil(sz["gauge"] / (0.05 * k))))
+        if f.cone:
+            ring = 2.0 * math.pi * f.Re
+            ras = _TlRaster(f, across, along, 0.0, f.s_range[0] - 0.02 * k, ring, f.s_range[1] + 0.5 * k, wrap=ring)
+        else:
+            m_ = 0.6 * k
+            a0 = f.a_range[0] - math.ceil(m_ / across) * across
+            s0 = f.s_range[0] - 0.02 * k
+            ras = _TlRaster(f, across, along, a0, s0, f.a_range[1] + m_, f.s_range[1] + m_)
+        # the eave course's tails lie on a tilting fillet at the steady lap height
+        pr = profs["plain" if sz["plain"] else ("roman" if sz["profile"] == "Roman" else "pan")]
+        tvmax = max(pr["TV"])
+        fill = (tvmax + sz["gap"]) * sz["len"] / max(1e-6, sz["gauge"]) - sz["gap"]
+        jf = int(math.floor((f.s_range[0] + 0.3 * sz["gauge"] - ras.s0) / ras.cs))
+        for j in range(0, max(0, jf) + 1):
+            for i in range(ras.na):
+                q = j * ras.na + i
+                if q < len(ras.h) and ras.mask[q]:
+                    ras.h[q] = max(ras.h[q], fill)
+        rasters.append(ras)
+    rows_by = {"pan": (0.0, 1.0), "cover": (0.0, 1.0), "roman": (0.0, 1.0),
+               "plain": (0.0, 0.5, 1.0) if level >= 2 else (0.0, 1.0)}
+    if not all(f.planar for f in faces) or any(f.cone for f in faces):
+        rows_by = {kk: (0.0, 0.33, 0.67, 1.0) for kk in rows_by}
+    camb_of = {"plain": sz["rise"] if sz["plain"] else 0.0}
+    over = False
+    deferred = []  # top tiles at a ridge / hip: run on under the ridge / hip tiles once those are laid
+    for tl in tiles:
+        if tl.get("missing"):
+            stats["missing"] += 1
+            continue
+        f = faces[tl["face"]]
+        ras = rasters[tl["face"]]
+        kind = tl["kind"]
+        P = profs[kind]
+        if tl.get("odd"):
+            P = _tl_profile(kind, sz, rise=tl["rise"], t=tl["t"])
+        camb = camb_of.get(kind, 0.0)
+        cols = _tl_columns(f, tl, P)
+        if len(cols) < 2:
+            continue
+        top_f = max(c[2] for c in cols)
+        if top_f < 0.97:  # cut short at its head: it hangs from where it ends
+            tl["piv"] = max(0.25, top_f) * tl["len"]
+        cells = _tl_cells(ras, tl, P, kind != "plain")
+        yh, yt = _tl_rest(ras, cells, tl, sz["gap"], camb)
+        inf = {"kind": "tile", "stack": tl["stack"], "pa_arc": 0.01 * k, "key": tl["key"]}
+        rows = rows_by[kind]
+        _tl_record(ras, cells, tl, yh, yt + (sz["gap"] if tl.get("crack") else 0.0), camb)
+        stats["tiles"] += 1
+        stats["slipped"] += 1 if tl.get("slipped") else 0
+        if any(f.tl_grow) and any(c[2] < 0.999 for c in cols):
+            grown = _tl_columns(f, tl, P, lift=_tl_lift_fn(tl, P, yh))
+            if len(grown) != len(cols) or any(g[2] > c[2] + 1e-6 for g, c in zip(grown, cols)):
+                deferred.append((tl, f, P, yh, yt, rows, inf, camb, cols, grown))
+                continue
+        _tl_emit(M, f, tl, P, yh, yt, rows, inf, camb, cols, sz, stats)
+        if len(M.pts) > TILE_MAX_VERTS:
+            over = True
+            break
+    crests = []
+    stats["trim"] = _tl_trim(TR, F, faces, rasters, courses, sz, s, seed, stacks, crests)
+    for tl, f, P, yh, yt, rows, inf, camb, cols, grown in deferred:
+        if len(M.pts) > TILE_MAX_VERTS:
+            over = True
+            break
+        _tl_emit(M, f, tl, P, yh, yt, rows, inf, camb,
+                 _tl_crest_cut(f, tl, P, yh, yt, cols, grown, crests, sz["gap"], camb), sz, stats)
+    # the frame: battens under every course's head, rafters, ridge beam, plates (and fascia / barge boards)
+    rb = sz["batten"] / 1.5
+    clear = 0.0005 * k
+    ul_top = clear + 1.5 * rb + 0.0015 * k
+    ul_th = _tl_underlay(UL, F, faces, sz, seed, ul_top)
+    if s["frame"]:
+        G = _th_grid(F, 60)
+        span = F.span
+        main = 0
+        for fi, f in enumerate(faces):
+            if f.kind in ("side", "cone"):
+                main = fi
+                break
+        fm_ = faces[main]
+        heights = []
+        for b in courses.get(main, []):
+            sb = b + sz["len"] - sz["nib"]
+            if sb > fm_.s_range[1] - 0.02 * k:
+                break
+            heights.append(sb / fm_.slope * F.H if fm_.cone else sb * fm_.m / fm_.k)
+        sf = dict(s)
+        sf.update({"frame_style": s["t_frame_style"] if s["t_frame_style"] in THATCH_FRAME_STYLES else "Sawn",
+                   "frame_wobble": float(s["t_frame_wobble"]), "rafter_spacing": sz["rafter_sp"] / span,
+                   "rafter_size": sz["rafter"] / (1.3 * span), "batten_size": 2.0 * rb / span,
+                   "battens": "Every course", "_purlins": [h / F.H for h in heights if h > 0.0]})
+        members = _th_frame_members(F, G, sf, -0.25 * rb + clear)
+        rr_ = 0.5 * sf["rafter_size"] * span
+        rafter_top = clear - 0.25 * rb + 2.0 * rb - 0.3 * rr_
+        room = (ul_top + ul_th + 0.003 * k) - rafter_top if ul_th else 0.0
+        drop = 0.9 * max(F.ms, max([e[1] for e in F.ends if e] or [0.0]))
+        for m in members:
+            d = 0.0
+            if m["kind"] in ("rafter", "jack", "hip", "beam", "plate"):
+                d = max(0.0, room)
+            if m["kind"] == "hip":
+                d += drop * m["r0"]
+            if d:
+                m["path"] = [(p[0] - n[0] * d, p[1] - n[1] * d, p[2] - n[2] * d) for p, n in zip(m["path"], m["nrm"])]
+        if s["t_fascia"]:
+            extra = _mt_extra_members(F, sz, s)
+            low = ul_top + ul_th + 0.003 * k
+            for m in extra:
+                m["path"] = [(p[0] - n[0] * low, p[1] - n[1] * low, p[2] - n[2] * low) for p, n in zip(m["path"], m["nrm"])]
+            members += extra
+        fm = _th_frame_mesh(F, members, sf)
+        out["frame"] = _th_to_world(frame, fm) if fm else None
+    s_uv = {"m_uv_mode": s["t_uv_mode"] if s["t_uv_mode"] in TILE_UV_MODES else "Variations", "stacks": stacks,
+            "stack_layout": s["stack_layout"]}
+    uv = _mt_uv_layout(M, sz, s_uv, seed)
+    _mt_uv_layout(TR, sz, dict(s_uv, stacks=1), seed + 1)
+    if UL.counts:
+        ul_mode = s_uv["m_uv_mode"] if sz["underlay"] == "Boards" else "All laid out"
+        _mt_uv_layout(UL, dict(sz, uv_tile=2.0 * sz["uv_tile"]), dict(s_uv, m_uv_mode=ul_mode, stacks=1), seed + 2)
+    stats["tiles_uv"] = uv.get("tiles", 0)
+    out["pieces"] = stats["tiles"]
+    out["capped"] = over
+    out["clay"] = stats
+    out["tiles"] = _th_to_world(frame, M.mesh()) if M.counts else None
+    out["tile_trim"] = _th_to_world(frame, TR.mesh()) if TR.counts else None
+    out["tile_underlay"] = _th_to_world(frame, UL.mesh()) if UL.counts else None
+    return out
+
+
 def thatch_build(frame, settings, blockers=None):
     """Everything a roof is made of (pure maths): {"straw": mesh,
     "underlay": mesh or None, "pieces", "capped", "field"} with meshes as
@@ -24274,6 +25925,8 @@ def thatch_build(frame, settings, blockers=None):
     s.update(settings or {})
     if s["covering"] == "Corrugated":
         return _roof_udims(metal_build(frame, s, blockers), s["udim"])
+    if s["covering"] == "Tiles":
+        return _roof_udims(tile_build(frame, s, blockers), s["udim"])
     s, level, under_res = _th_detail(s)
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
     F.blockers = _th_blockers_in_roof(frame, blockers)
@@ -24318,7 +25971,7 @@ def thatch_build(frame, settings, blockers=None):
     return _roof_udims(out, s["udim"])
 
 
-ROOF_UDIM_ORDER = ("straw", "sheets", "sticks", "underlay", "trim", "fixings", "frame")
+ROOF_UDIM_ORDER = ("straw", "sheets", "tiles", "sticks", "underlay", "trim", "tile_trim", "tile_underlay", "fixings", "frame")
 
 
 def _roof_udims(out, start=1001, order=None):
@@ -25384,17 +27037,30 @@ def _th_write(root, frame, s, built):
         _th_suffix(parts["frame"], bool(s["frame_subd"]))
     if built.get("sticks") and "sticks" not in parts and built.get("straw"):  # a roof from before the sticks
         built = dict(built, straw=_th_join(built["straw"], built["sticks"]))  # part (Upgrade adds it)
+    if "tile_underlay" in parts:
+        _tl_underlay_name(parts["tile_underlay"], s["t_underlay"])
+    tiles = s["covering"] == "Tiles"
     for part, node in thatch_parts(root).items():  # again: the frame may have been renamed
         shape = _log_shape(node)
         mesh = built.get(part)
         used = bool(mesh and mesh[1])
-        count = _rope_fill(shape, mesh if used else _th_placeholder(frame))
-        cmds.setAttr(shape + "." + THATCH_VERTS, count)
+        if not used and (tiles or part in TILE_PARTS):  # a tile roof's parts only exist with geometry: an
+            fn = om.MFnMesh(get_dag_path(shape))         # emptied one is only hidden (Bake deletes it)
+            if fn.numVertices == 4 and fn.numPolygons == 1:
+                cmds.setAttr(shape + "." + THATCH_VERTS, 4)  # its seed plane (a redo): not stale
+        else:
+            count = _rope_fill(shape, mesh if used else _th_placeholder(frame))
+            cmds.setAttr(shape + "." + THATCH_VERTS, count)
         if cmds.getAttr(node + ".visibility") != used:
             cmds.setAttr(node + ".visibility", used)
         if part in ROOF_STACKED_PARTS and cmds.attributeQuery(UV_STACKED_ATTR, node=shape, exists=True):
-            cmds.setAttr(shape + "." + UV_STACKED_ATTR, s["style"] != "Surface" if part == "straw" else
-                         (part in ("fixings", "sticks") or s["m_uv_mode"] != "All laid out"))
+            if part in TILE_PARTS:
+                on = s["t_uv_mode"] != "All laid out" and (part != "tile_underlay" or s["t_underlay"] == "Boards")
+            elif part == "straw":
+                on = s["style"] != "Surface"
+            else:
+                on = part in ("fixings", "sticks") or s["m_uv_mode"] != "All laid out"
+            cmds.setAttr(shape + "." + UV_STACKED_ATTR, on)
         if used:
             faces += len(mesh[1])
     return faces
@@ -25407,16 +27073,38 @@ def _th_join(a, b):
             list(a[3]) + list(b[3]), list(a[4]) + list(b[4]), list(a[5]) + [i + ub for i in b[5]])
 
 
-ROOF_STACKED_PARTS = ("straw", "sheets", "fixings", "sticks")  # parts whose UVs can be stacked (UV_STACKED_ATTR)
+ROOF_STACKED_PARTS = ("straw", "sheets", "fixings", "sticks", "tiles", "tile_trim", "tile_underlay")  # UVs can
+TILE_PARTS = ("tiles", "tile_trim", "tile_underlay")  # be stacked (UV_STACKED_ATTR); the tiles' own parts
 
 
 def roof_parts(covering):
-    """(part, material) of the meshes a roof with this covering has."""
+    """(part, material) of the meshes a roof with this covering has (can have, for Tiles: only the ones
+    with geometry are made)."""
+    if covering == "Tiles":
+        return TILE_PART_MATERIALS
     return METAL_PART_MATERIALS if covering == "Corrugated" else THATCH_PART_MATERIALS
 
 
+def _roof_required(covering):
+    """The parts a roof with this covering must have up front (Tiles: none, they're made when they get
+    geometry: update_thatch_roofs)."""
+    return () if covering == "Tiles" else roof_parts(covering)
+
+
 def _roof_stem(covering):
-    return "metalRoof" if covering == "Corrugated" else "thatchRoof"
+    return {"Corrugated": "metalRoof", "Tiles": "tileRoof"}.get(covering, "thatchRoof")
+
+
+def _tl_underlay_name(node, kind):
+    """The tile underlay's mesh is named for what it is (fabricFelt, woodBoard, grassReed)."""
+    want = TILE_UNDERLAY_MATERIALS.get(kind)
+    name = short_name(node)
+    if not want:
+        return node
+    for mat in TILE_UNDERLAY_MATERIALS.values():
+        if mat != want and name.startswith(mat + "_"):
+            return long_name(cmds.rename(node, want + name[len(mat):]))
+    return node
 
 
 def _th_make_part(root, num, part, material, stem="thatchRoof"):
@@ -25438,7 +27126,7 @@ def _th_make_part(root, num, part, material, stem="thatchRoof"):
 def _roof_number(root):
     """The number in a roof's names (its group, else a part), for new parts."""
     for node in [root] + list(thatch_parts(root).values()):
-        found = re.search(r"(?:thatch|metal)Roof(\d+)", short_name(node))
+        found = re.search(r"(?:thatch|metal|tile)Roof(\d+)", short_name(node))
         if found:
             return int(found.group(1))
     return 1
@@ -25450,7 +27138,7 @@ def _roof_add_parts(root, covering):
     have = thatch_parts(root)
     num = _roof_number(root)
     added = 0
-    for part, material in roof_parts(covering):
+    for part, material in _roof_required(covering):
         if part not in have:
             _th_make_part(root, num, part, material, _roof_stem(covering))
             added += 1
@@ -25473,7 +27161,7 @@ def roof_ensure_parts(coverings):
     they lack, in one Ctrl+Z (nothing when none is missing). Returns the
     roofs that got meshes."""
     need = [r for r, c in coverings.items()
-            if is_thatch_roof(r) and any(p not in thatch_parts(r) for p, _ in roof_parts(c))]
+            if is_thatch_roof(r) and any(p not in thatch_parts(r) for p, _ in _roof_required(c))]
     if need:
         with UndoChunk("Roof covering"):
             for root in need:
@@ -25489,7 +27177,7 @@ def thatch_needs_upgrade(root):
     have = thatch_parts(root)
     data = thatch_data(root)
     return int(data.get("version") or 0) < THATCH_VERSION or \
-        any(part not in have for part, _ in roof_parts(data.get("covering")))
+        any(part not in have for part, _ in _roof_required(data.get("covering")))
 
 
 def upgrade_thatch_roofs(roots):
@@ -25534,6 +27222,8 @@ def make_thatch_roof(box, settings=None, select=False):
         data["version"] = THATCH_VERSION
         cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
         for part, material in roof_parts(s["covering"]):
+            if s["covering"] == "Tiles" and not (built.get(part) and built[part][1]):
+                continue  # a tile roof's parts only exist with geometry
             _th_make_part(root, num, part, material, stem)
         if select:
             cmds.select(root, replace=True)
@@ -25542,7 +27232,7 @@ def make_thatch_roof(box, settings=None, select=False):
         for node in thatch_parts(root).values():
             cmds.xform(node, centerPivots=True)
     return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces,
-            "metal": built.get("metal")}
+            "metal": built.get("metal"), "clay": built.get("clay")}
 
 
 def update_thatch_roofs(changes, split=True):
@@ -25557,6 +27247,7 @@ def update_thatch_roofs(changes, split=True):
     if split:
         thatch_split_copies([r for r in changes if is_thatch_roof(r)])
     changes = _th_spread_links(changes)
+    todo = []
     for root, change in changes.items():
         if not is_thatch_roof(root):
             continue
@@ -25582,6 +27273,21 @@ def update_thatch_roofs(changes, split=True):
         data["box_frame"] = frame
         data["blocker_boxes"] = boxes
         data["self"] = _th_uuid(root)
+        todo.append((root, data, s, frame, built))
+    # a tile roof's parts are made when they first get geometry (one Ctrl+Z; not while redoing)
+    new = []
+    for root, data, s, frame, built in todo:
+        if s["covering"] == "Tiles":
+            have = thatch_parts(root)
+            new += [(root, part, mat, s["covering"]) for part, mat in roof_parts("Tiles")
+                    if part not in have and built.get(part) and built[part][1]]
+    if new and split:
+        with UndoChunk("Roof covering"):
+            for root, part, mat, cov in new:
+                if part == "tile_underlay":
+                    mat = TILE_UNDERLAY_MATERIALS.get(thatch_data(root).get("t_underlay"), mat)
+                _th_make_part(root, _roof_number(root), part, mat, _roof_stem(cov))
+    for root, data, s, frame, built in todo:
         with NoUndo():
             cmds.setAttr(root + "." + THATCH_SETTINGS, json.dumps(data, sort_keys=True), type="string")
             report["faces"] += _th_write(root, frame, s, built)
@@ -25591,6 +27297,11 @@ def update_thatch_roofs(changes, split=True):
             mt = report.setdefault("metal", {"sheets": 0, "fixings": 0, "tiles": 0})
             for key in mt:
                 mt[key] = (max if key == "tiles" else (lambda a, b: a + b))(mt[key], built["metal"].get(key, 0))
+        if built.get("clay"):
+            cl = report.setdefault("clay", {"tiles": 0, "missing": 0, "slipped": 0, "cracked": 0, "trim": 0,
+                                            "tiles_uv": 0})
+            for key in cl:
+                cl[key] = (max if key == "tiles_uv" else (lambda a, b: a + b))(cl[key], built["clay"].get(key, 0))
         report["done"].append(root)
         if s["frame"] and "frame" not in thatch_parts(root):
             report["no_frame"].append(root)  # made before roofs had a frame mesh
@@ -25664,6 +27375,10 @@ def bake_thatch(roofs):
             if box:
                 boxes.add(box)
             blockers.update(thatch_blockers(root))
+            if thatch_data(root).get("covering") == "Tiles":  # no empty parts on a baked tile roof
+                for node in thatch_parts(root).values():
+                    if not cmds.getAttr(node + ".visibility"):
+                        cmds.delete(node)
             if cmds.attributeQuery(THATCH_BAKED, node=root, exists=True):
                 cmds.deleteAttr(root + "." + THATCH_BAKED)
             cmds.renameAttr(root + "." + THATCH_SETTINGS, THATCH_BAKED)
@@ -25698,6 +27413,8 @@ def thatch_preset(name):
     s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
     if over.get("covering") == "Corrugated":
         s.update(METAL_DEFAULTS)  # a metal look sets every metal setting
+    elif over.get("covering") == "Tiles":
+        s.update(TILE_DEFAULTS)  # a tile look sets every tile setting
     elif "style" in over:
         s["covering"] = "Thatch"  # a thatch look
     s.update(over)
@@ -25986,7 +27703,19 @@ def duplicate_thatch_roof(root, link=False, offset=None):
 
 
 def _roof_counts(report):
-    """', 12 sheets, 340 screws, UVs in 3 tiles' for a metal roof's report, ', N pieces' for thatch."""
+    """', 12 sheets, 340 screws, UVs in 3 tiles' for a metal roof's report, ', 1,204 tiles (12 missing)'
+    for clay tiles, ', N pieces' for thatch."""
+    cl = report.get("clay")
+    if cl:
+        text = ", %s tiles" % "{:,}".format(cl["tiles"])
+        odd = ["%d %s" % (cl[k], k) for k in ("missing", "slipped", "cracked") if cl.get(k)]
+        if odd:
+            text += " (%s)" % ", ".join(odd)
+        if cl.get("trim"):
+            text += ", %s ridge / hip / verge pieces" % "{:,}".format(cl["trim"])
+        if cl.get("tiles_uv"):
+            text += ", UVs in %d tile%s" % (cl["tiles_uv"], "" if cl["tiles_uv"] == 1 else "s")
+        return text
     mt = report.get("metal")
     if mt:
         text = ", %s sheets" % "{:,}".format(mt["sheets"])
@@ -26001,8 +27730,9 @@ def _roof_counts(report):
 class ThatchRoofPanel(QtWidgets.QWidget):
     TOOL_NAME = "Roof"
     TOOL_TIP = "Roofs from a box: gable, hip or half-hip ends, lean-to or cone, thatched (a surface, straw " \
-               "planes / 3D pieces, leaf panels or palm fronds) or corrugated metal (clean sheets or makeshift " \
-               "panels), on their timber frame, with laid-out UVs, from a quick proxy up to hero detail."
+               "planes / 3D pieces, leaf panels or palm fronds), corrugated metal (clean sheets or makeshift " \
+               "panels) or clay tiles (barrel, Roman or plain; clean or makeshift), on their timber frame, with " \
+               "laid-out UVs, from a quick proxy up to hero detail."
 
     def __init__(self, parent=None):
         super(ThatchRoofPanel, self).__init__(parent)
@@ -26058,7 +27788,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         tl.setContentsMargins(6, 0, 6, 0)
         tl.setSpacing(6)
         tl.addWidget(ToolHeader("Roof", "Draw a box over the walls, press Make Roof, then shape it live: the "
-                                        "ends, the ridge, and the covering: thatch or corrugated metal."))
+                                        "ends, the ridge, and the covering: thatch, corrugated metal or clay "
+                                        "tiles."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
         outer.addWidget(top)
@@ -26066,7 +27797,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         outer.addWidget(scroll, 1)
         self.f = {}
         self._rows = {}
-        self._group = {}  # key -> "thatch" / "metal" / "both": which covering shows it
+        self._group = {}  # key -> "thatch" / "metal" / "tiles" / "both": which covering shows it
         group = ["both"]
 
         def row(grid, key, label, widget, tip):
@@ -26298,14 +28029,17 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         group[0] = "both"
 
         # ---- 4. covering
-        card = self.step_thatch = StepCard(4, "Covering", "Thatch (a surface, or straw / leaves laid in courses) or "
+        card = self.step_thatch = StepCard(4, "Covering", "Thatch (a surface, or straw / leaves laid in courses), "
                                                           "corrugated metal (sheets laid eave to ridge, capped and "
-                                                          "screwed down). Shape it on Proxy, then raise Detail.")
+                                                          "screwed down) or clay tiles (hung on battens in courses, "
+                                                          "ridge and hip tiles). Shape it on Proxy, then raise "
+                                                          "Detail.")
         self.f["covering"] = SegmentField(ROOF_COVERINGS)
         self.f["covering"].setToolTip("Thatch: straw, leaf panels or palm fronds over an underlay.\nCorrugated: "
                                       "metal sheets on purlins, with ridge / hip cappings, barge flashings and "
-                                      "screws. Switching keeps the other covering's meshes (hidden) and its "
-                                      "settings, so you can switch back.")
+                                      "screws.\nTiles: clay tiles on battens over an underlay, with ridge, hip "
+                                      "and verge tiles. Switching keeps the other covering's meshes (hidden) and "
+                                      "its settings, so you can switch back.")
         card.add(self.f["covering"])
         self.f["m_mode"] = SegmentField(METAL_MODES)
         self.f["m_mode"].setToolTip("Clean: big aligned sheets, exact side laps (in whole corrugations) and end laps "
@@ -26315,6 +28049,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                     "anything.")
         self._group["m_mode"] = "metal"
         card.add(self.f["m_mode"])
+        self.f["t_mode"] = SegmentField(TILE_MODES)
+        self.f["t_mode"].setToolTip("Clean: every tile in its course, joints bonded, each hung on its batten and "
+                                    "lying on the course under it.\nMakeshift: an old, patched roof: slipped, "
+                                    "cracked, missing and mismatched tiles, uneven courses, a sagging frame (see "
+                                    "Makeshift tiles). Holes show the battens and underlay, never sky.")
+        self._group["t_mode"] = "tiles"
+        card.add(self.f["t_mode"])
         group[0] = "thatch"
         self.f["style"] = SegmentField(THATCH_STYLES)
         self._group["style"] = "thatch"
@@ -26366,6 +28107,29 @@ class ThatchRoofPanel(QtWidgets.QWidget):
               "On: every sheet, capping and flashing is its top surface only (no underside, no edges): about half "
               "the faces, for a thin-walled / two-sided shader. Laps keep a Thickness gap, so they don't "
               "flicker. Off: closed solids.")
+        group[0] = "tiles"
+        row(sec, "t_profile", "Profile", SegmentField(TILE_PROFILES),
+            "Barrel: Spanish pan and cover tiles, tapered half-rounds, the covers convex up over the pans' joints."
+            "\nRoman: a flat pan with a roll on one side, the roll over the next tile's lip.\nPlain: small flat "
+            "tiles in bonded courses, every tile on two others (English). Picking one sets its usual sizes.")
+        row(sec, "t_length", "Length", FloatField(0.1, 1.2, 0.2, 0.6, decimals=3, step=0.005),
+            "Tile length down the slope (metres).")
+        row(sec, "t_width", "Width", FloatField(0.06, 0.8, 0.1, 0.4, decimals=3, step=0.005),
+            "Tile width (metres; a barrel pan's head, its tail is narrower).")
+        row(sec, "t_headlap", "Headlap", FloatField(0.02, 0.4, 0.05, 0.15, decimals=3, step=0.005),
+            "How far each course laps over the one below (metres). The gauge (batten spacing) is length - headlap "
+            "(plain tiles: half that, every tile lies on two).")
+        row(sec, "t_thickness", "Thickness", FloatField(0.004, 0.05, 0.008, 0.025, decimals=4, step=0.001),
+            "Tile thickness (metres). Every tile is a closed solid.")
+        row(sec, "t_rise", "Rise", FloatField(0.0, 0.25, 0.0, 0.12, decimals=3, step=0.002),
+            "How tall the curve is (metres): a barrel's arch, a Roman tile's roll, a plain tile's camber along it.")
+        row(sec, "t_gutter", "Into gutter", FloatField(0.0, 0.3, 0.0, 0.15, decimals=3, step=0.005),
+            "How far the bottom course reaches past the eave (metres).")
+        row(sec, "t_verge_over", "Verge overhang", FloatField(0.0, 0.2, 0.0, 0.1, decimals=3, step=0.005),
+            "How far the tiles reach past a gable verge (metres).")
+        row(sec, "t_underlay", "Underlay", SegmentField(TILE_UNDERLAYS, columns=2),
+            "What's under the battens, seen through missing tiles and from inside: Felt (1 m strips of roofing "
+            "felt), Boards (sarking boards), Reed mat, or None (sky). A mesh of its own, named for it.")
         group[0] = "thatch"
         row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
             "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
@@ -26423,6 +28187,34 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "m_sag", "Sag", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
             "An old roof's crooked frame: the slopes twist and the ridge sags (clean roofs too).")
         card.add(sec)
+        group[0] = "tiles"
+        sec = self.tmk_sec = Section("Makeshift tiles", expanded=True)
+        row(sec, "t_mess", "Messiness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How uneven it all is: courses wander, tiles turned and shifted (never into each other).")
+        row(sec, "t_slipped", "Slipped", FloatField(0.0, 1.0, 0.0, 0.3, decimals=3, step=0.01),
+            "Share of tiles slipped down off their batten (lying on the course below, more turned).")
+        row(sec, "t_cracked", "Cracked", FloatField(0.0, 1.0, 0.0, 0.3, decimals=3, step=0.01),
+            "Share of tiles cracked across: two pieces, the lower one slid a little.")
+        row(sec, "t_missing", "Missing", FloatField(0.0, 1.0, 0.0, 0.3, decimals=3, step=0.01),
+            "Share of tiles gone (in clumps): the battens and underlay show through.")
+        row(sec, "t_mismatch", "Mismatched", FloatField(0.0, 1.0, 0.0, 0.6, decimals=3, step=0.01),
+            "Share of odd replacement tiles: a little bigger or smaller, flatter or rounder, thicker (on the "
+            "last UV stack, so they can get another texture).")
+        row(sec, "t_sag", "Sag", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "An old roof's crooked frame: the slopes twist and the ridge sags (clean roofs too).")
+        card.add(sec)
+        sec = self.ttrim_sec = Section("Ridge, hips and verges", expanded=False)
+        check(sec, "t_ridge", "Ridge tiles (a cap on a cone)",
+              "Half-round ridge tiles lapping along the ridge, a stop end at each end.")
+        check(sec, "t_hip", "Hip tiles", "Half-round tiles up each hip, over the tiles cut along the hip line, "
+                                         "cut round the ridge where they meet it.")
+        row(sec, "t_verge", "Gable verge", SegmentField(TILE_VERGES),
+            "Verge tiles: an L-shaped tile on each course over the gable edge, its flange down the side.\n"
+            "Undercloak: a strip of flat tiles under the tiles' edge (bedded verge).")
+        row(sec, "t_ridge_size", "Ridge tile size", FloatField(0.05, 0.3, 0.08, 0.2, decimals=3, step=0.005),
+            "Radius of the ridge and hip tiles (metres).")
+        card.add(sec)
+        group[0] = "metal"
         sec = self.trim_sec = Section("Trim and fixings", expanded=False)
         check(sec, "m_ridge_cap", "Ridge capping (a roll-top along the ridge, a cap on a cone)",
               "Capping lengths lapping along the ridge, its wings over both slopes.")
@@ -26547,6 +28339,19 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "How crooked the members are. 0: straight.")
         check(sec, "m_fascia", "Fascia and barge boards",
               "Boards along the eaves and up the gable verges, under the sheets' edges.")
+        group[0] = "tiles"
+        row(sec, "t_frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
+            "Sawn: rectangular timber (the usual under tiles).\nPoles / Bamboo: a makeshift frame.")
+        row(sec, "t_batten_size", "Batten size", FloatField(0.01, 0.1, 0.015, 0.05, decimals=3, step=0.001),
+            "Batten depth (metres). A batten under every course's head, at the gauge.")
+        row(sec, "t_rafter_spacing", "Rafter spacing", FloatField(0.2, 2.0, 0.3, 0.9, decimals=2, step=0.05),
+            "Distance between rafters (metres).")
+        row(sec, "t_rafter_size", "Rafter size", FloatField(0.03, 0.4, 0.1, 0.25, decimals=3, step=0.005),
+            "Rafter depth (metres); the ridge beam is 1.4x, hip rafters 1.3x.")
+        row(sec, "t_frame_wobble", "Crookedness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How crooked the members are. 0: straight.")
+        check(sec, "t_fascia", "Fascia and barge boards",
+              "Boards along the eaves and up the gable verges, under the tiles' edges and the underlay.")
         group[0] = "both"
         self.f["frame_subd"] = CheckField("Sub-D topology (support loops, quad caps)")
         self.f["frame_subd"].setToolTip("For smoothing / subdivision at render: 8-sided members, support edges "
@@ -26569,6 +28374,14 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "sheet. Either way at one real-world density.")
         row(sec, "m_uv_tile", "Tile size", FloatField(0.5, 12.0, 1.0, 8.0, decimals=2, step=0.1),
             "How many metres of sheet one UV tile holds (both ways): the texel density.")
+        group[0] = "tiles"
+        row(sec, "t_uv_mode", "Tiles", SegmentField(TILE_UV_MODES),
+            "Variations: every tile on one of the stacks below, each at a random spot, so neighbours differ "
+            "(mismatched tiles on the last stack): one texture per stack.\nAll laid out: every tile (top and "
+            "underside) its own place in neat rows, filling as many UDIM tiles as it takes. Either way at one "
+            "real-world density; the ridge / hip / verge tiles and the underlay get tiles of their own.")
+        row(sec, "t_uv_tile", "Tile size", FloatField(0.25, 8.0, 0.5, 4.0, decimals=2, step=0.05),
+            "How many metres of tile one UV tile holds (both ways): the texel density.")
         group[0] = "both"
         row(sec, "stacks", "Stacks", IntField(1, 16, 1, 8),
             "Every piece has the same UVs. With 2+ stacks each piece picks one at random: one straw texture per "
@@ -26658,6 +28471,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def _update_rows(self):
         s = self._settings()
         metal = s["covering"] == "Corrugated"
+        tiles = s["covering"] == "Tiles"
+        thatch = not (metal or tiles)
+        cov = "metal" if metal else ("tiles" if tiles else "thatch")
         cone = s["shape"] == "Cone"
         ends = (s["end_a"], s["end_b"])
         three = s["style"] == "3D Pieces"
@@ -26685,31 +28501,37 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         shown["m_fix_every"] = s["m_fixings"]
         shown["m_trim_drape"] = s["m_mode"] == "Makeshift"
         shown["m_weather"] = not cone
-        shown["stack_layout"] = not metal or s["m_uv_mode"] == "Variations"
-        if not metal and surface:  # one surface: nothing to stack
-            shown["stack_layout"] = False
+        shown["t_verge"] = not cone and (s["shape"] == "Lean-to" or "Gable" in ends or "Half-hip" in ends)
+        shown["t_verge_over"] = shown["t_verge"]
+        shown["stack_layout"] = (s["m_uv_mode"] == "Variations") if metal else (
+            (s["t_uv_mode"] == "Variations") if tiles else not surface)
         shown["stacks"] = shown["stack_layout"]
         for key, (label, widget) in self._rows.items():
             grp = self._group.get(key, "both")
-            on = shown.get(key, True) and (grp == "both" or (grp == "metal") == metal)
+            on = shown.get(key, True) and grp in ("both", cov)
             label.setVisible(on)
             widget.setVisible(on)
         for key in ("m_full_length", "m_ridge_cap", "m_fixings", "m_fascia", "m_mode", "m_single"):
             self.f[key].setVisible(metal)
         self.f["m_hip_cap"].setVisible(metal and not cone and ends != ("Gable", "Gable"))
         self.f["m_barge"].setVisible(metal and not cone)
-        self.f["style"].setVisible(not metal)
-        self.f["mirror"].setVisible(not metal)
+        for key in ("t_mode", "t_ridge", "t_fascia"):
+            self.f[key].setVisible(tiles)
+        self.f["t_hip"].setVisible(tiles and not cone and ends != ("Gable", "Gable"))
+        self.f["style"].setVisible(thatch)
+        self.f["mirror"].setVisible(thatch)
         surface = s["style"] == "Surface"
-        self.under_sec.setVisible(not metal and not surface)
+        self.under_sec.setVisible(thatch and not surface)
         self.stack_sec.setVisible(True)
-        self.more_sec.setVisible(not metal)
+        self.more_sec.setVisible(thatch)
         self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
         self.trim_sec.setVisible(metal)
+        self.tmk_sec.setVisible(tiles and s["t_mode"] == "Makeshift")
+        self.ttrim_sec.setVisible(tiles)
         for sec in (self.mk_sec, self.levels_sec, self.cap_sec, self.block_sec):
-            sec.setVisible(not metal)  # metal has its own makeshift controls; levels / blockers: thatch only
+            sec.setVisible(thatch)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
         for key in ("ridge_fronds", "sticks"):
-            self.f[key].setVisible(palm and not metal)
+            self.f[key].setVisible(palm and thatch)
 
     def target(self):
         """The roof being edited (selected, or the last one), or None."""
@@ -26797,6 +28619,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                     if abs(self.f[k].value() - v) > 1e-9:
                         self.f[k].setValue(v)
                         self._pending.add(k)
+        if key == "t_profile":  # a tile profile comes with its usual sizes
+            sizes = TILE_PROFILE_SIZES.get(self.f["t_profile"].value())
+            if sizes:
+                for k, v in zip(("t_length", "t_width", "t_headlap", "t_thickness", "t_rise"), sizes):
+                    if abs(self.f[k].value() - v) > 1e-9:
+                        self.f[k].setValue(v)
+                        self._pending.add(k)
         self._update_rows()
         self._pending.add(key)
         self._edit_timer.start()
@@ -26831,15 +28660,20 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         msg = "%s %d roof(s) in %.2fs: %s faces" % (verb, len(report["done"]), time.time() - t0,
                                                    "{:,}".format(report["faces"]))
         metal = self.f["covering"].value() == "Corrugated"
+        tiles = self.f["covering"].value() == "Tiles"
         msg += _roof_counts(report) + "."
         if self.f["detail"].value() == "Proxy" and metal:
             msg += " Proxy: flat sheets. Raise Detail for the corrugations (screws from Medium)."
+        elif self.f["detail"].value() == "Proxy" and tiles:
+            msg += " Proxy: a slab per roof face. Raise Detail for the tiles."
         elif self.f["detail"].value() == "Proxy" and self.f["style"].value() != "Surface":
             msg += " Proxy: just the shell. Raise Detail for the thatch once the shape is right."
         level = "info"
         if report["capped"]:
             if metal:
                 msg += " Capped at %s vertices: lower Detail or raise Panel size." % "{:,}".format(METAL_MAX_VERTS)
+            elif tiles:
+                msg += " Capped at %s vertices: lower Detail or use bigger tiles." % "{:,}".format(TILE_MAX_VERTS)
             else:
                 msg += " Capped at %s vertices: lower Density or raise Width / Length." % "{:,}".format(THATCH_MAX_VERTS)
             level = "warn"

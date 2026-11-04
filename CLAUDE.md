@@ -711,6 +711,71 @@
     - Tests: `tests/test_corrugated_roof.py` (gap rays, closed solids, ray
       enter / leave order for interpenetration, frame under metal, UVs),
       metal block in `tests/gui_thatch_roof.py`.
+  - **Clay tiles** (covering "Tiles", 2026-11-04; brief from the parent
+    session: barrel / Roman / plain, courses on battens, ridge / hip /
+    verge tiles, Clean and Makeshift, holes show battens and underlay,
+    never sky; the user picked an Underlay setting, Felt default). Engine
+    `tile_build` (pure maths, like `metal_build`); `t_*` keys
+    (`TILE_DEFAULTS`, metres, look keys), `_tl_sizes` scales by
+    `scene_m_per_unit()` (sizes carry `slack` 4 mm for ridge laps). Parts
+    `TILE_PART_MATERIALS` (tiles `clayTile`, tile_trim `clayTrim`,
+    tile_underlay named by `TILE_UNDERLAY_MATERIALS` via
+    `_tl_underlay_name`, frame); groups `tileRoof####` (`_roof_stem`);
+    the panel's rows are group "tiles", sections `tmk_sec` (Makeshift
+    tiles) and `ttrim_sec` (Ridge, hips and verges); picking a profile sets
+    `TILE_PROFILE_SIZES`. Parts exist only with geometry (`roof_ensure_parts`).
+    - **Faces:** `_mt_faces` (Clean) + `_tl_face_setup` (edges as inward
+      normals `tl_edges`, mids, `tl_grow`). On a cone `a` is angle x Re:
+      tiles fan with the slot, so a-widths go through `qa = ring / n_cone /
+      pitch` (a-units per metre across). Plain widths take `qa` once only
+      (scaled twice, then an extra `/rho`, the course overlapped itself and
+      the rest-solver stair-stepped to 1e36).
+    - **Laying:** `_tl_layout` gives every tile in laying order (Barrel:
+      pans then covers over their joints; Roman: each course from its far
+      end back so every roll laps the lip laid before it; Plain: a short
+      eave course then bonded courses). Per face a `_TlRaster` (top heights
+      over the face plane, cells aligned to columns / courses) records
+      what's laid; each tile reads its cells (`_tl_cells`) and rests on
+      them through `_tl_rest(yh head, yt tail)`, then `_tl_record`s itself.
+      A tile cut at its head (`tl["piv"]`, the top course) only reads cells
+      below the cut, levers over its full length, and its tilt is capped at
+      3 x (thickness + gap) (a short lever tipped top-course tails up 0.9 m
+      and floated the ridge).
+    - **Crest growth** (`_tl_crest_grow`): an edge shared over a ridge or hip
+      gets `grow = tan(half the angle between the normals)`; a lean-to's
+      top edge grows to the vertical wall plane. `_tl_clip_seg(grow, lift)`
+      lets a tile y above its face run past the edge by y x grow, to the
+      bisector plane where the other side's tiles meet it. Barrel covers sit
+      high: without it the sky showed under the ridge tiles. Tiles whose
+      grown columns differ are deferred until `_tl_trim` has laid the
+      ridge / hip pieces (`crests` descriptors), then cut against them by
+      `_tl_crest_cut` (10 samples from the old to the grown edge, stopping
+      where a crest solid blocks).
+    - **Ridge / hips** (`_tl_trim`): `lay_line` lays crest tiles piece by
+      piece along a (sagging) crest, each lifted over what's under it
+      (never below the previous less 0.8 slack, so laps stack); hips stop
+      at the ridge (`_tl_stop_end`), and `cyl_clip(axes)` cuts hip tiles
+      against the ridge's pieces. Verges `_tl_verges`: Verge tiles or
+      Undercloak. A lean-to's top edge gets monoridge tiles: `lay_line(...,
+      wall=(0, 0, -1))`, the roll from the slope over the edge onto the
+      box's high face (like the metal's top barge); without them the top
+      course's ends showed sky and the battens past them.
+    - **Makeshift:** slipped / cracked (two solids, `_tl_emit`; the upper
+      piece is key + 1, so tile keys are even) / missing / mismatched
+      (slightly other sizes), uneven courses; `t_sag` feeds the
+      field's warp / ridge sag so frame, battens and tiles all sag together.
+      `_tl_underlay` (Felt / Boards / Reed mat) sits under the battens.
+    - **Test notes** (`tests/test_tile_roof.py`): the ray enter / leave
+      check uses each hit triangle's normal (a long, slightly twisted wall
+      quad on a ridge tile folds along its diagonal, and a grazing ray
+      crossed both halves under one polygon normal), merges coincident hits
+      only when they face the same way (two tiles touching is an out and
+      an in) and lets overlaps under 1 mm (0.01 units, the raster's
+      resolution: courses under a cone's cap) count as touching; grazing threshold
+      |n.y| < 0.002 (slanted edge walls are entered through); UV overlap
+      boxes skip shells filling under half their box (the edge strips
+      along tapered sides and crack lines); the eave check allows the
+      normal offset.
 - **Scatter** (Modeling tab; replaces the Moss and Ivy panel. The user,
   2026-11-03: "it just kind of controls everything at once, I have grass
   and leaves appearing on vertical walls ... a 'build a scatter group' and
@@ -1944,7 +2009,7 @@ with `tests/run_gui_smoke.mel` (see README) and check the screenshots in
 the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 (pictures of every shape and style in `tests/_out/thatch_roof`). A scripted
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
-Corrugated metal: `tests/test_corrugated_roof.py`.
+Corrugated metal: `tests/test_corrugated_roof.py`. Clay tiles: `tests/test_tile_roof.py`.
 Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
