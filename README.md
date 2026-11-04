@@ -692,7 +692,7 @@ you tune them.
    (**Add Layer on Drawing**), so moss and leaves can follow one drawing.
    **Clear** forgets the drawing (layers keep what was drawn for them).
 2. **Layers:** **Add Layer** of any type (Moss, Grass, Leaves, Leaf piles,
-   Moss tufts, Ivy); two of a type are fine (a moss that keeps to flat
+   Jungle leaves, Moss tufts, Ivy); two of a type are fine (a moss that keeps to flat
    rooftops and a second, sparse one that grows anywhere). Tick a layer to
    turn it on or off, double-click to rename, **Duplicate** (a new seed),
    **Delete**, **Up** / **Down**. Each is one Ctrl+Z. To say where a layer
@@ -762,7 +762,7 @@ geometry above Proxy) lying over the surface like shingles, cupped, its
 tip curled.
 Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
 
-**Grass**, **Leaves**, **Leaf piles** and **Moss tufts** gather where
+**Grass**, **Leaves**, **Leaf piles**, **Jungle leaves** and **Moss tufts** gather where
 litter would, by the same field as moss (*Coverage*, the *Where it
 gathers* weights, a picked area), per square metre where they gather:
 - *Grass*: bunches of dry grass blades lying every which way (*Combed*:
@@ -777,11 +777,26 @@ gathers* weights, a picked area), per square metre where they gather:
 - *Leaf piles*: in a crease a drift along it, in a corner pushed into it,
   in the open a round mound; each leaf lying along the pile at its own
   depth, a few strays round it.
+- *Jungle leaves*: big fallen leaves, each about the size of a small leaf
+  pile (*Leaf length*), one to *Per cluster* that came down together:
+  fanned out from where they landed, or in a gutter / along a wall's foot
+  one after another along it, pushed up to the wall. Each one drapes over
+  the surface: its sides ride up a gutter's sides, it hangs past an edge
+  and turns up a wall it runs into. *Shape*: Paddle (long and blunt, torn
+  along its veins), Broad (wide, a heart-shaped base), Frond (a fallen
+  palm frond), Mixed (one kind per cluster). *Green*: how many are fresh
+  (a little cupped, folded on the midrib); the rest are dried, rolled in
+  from the edges, tip lifted, crumpled (*Leaf curl*), in their own part
+  (`leafJungleDry`). *Tears*: splits along the veins, missing frond
+  leaflets. Each leaf fills its UVs (stacked), the outline cut in the
+  geometry.
 - *Moss tufts*: tiny clumps of moss, a few small rounded cushions run
   together, lumpy on top, wrapped onto the surface.
 Presets: Grass: Dry grass, Grass mat, Sparse tufts. Leaves: Dead leaves,
 Autumn carpet, A few strays. Leaf piles: Leaf piles, Gutters and wall
-bases, Big heaps. Moss tufts: Moss tufts, Crevice tufts.
+bases, Big heaps. Jungle leaves: Fallen jungle leaves, Fresh and green, Dry
+and torn, Single big leaves, Palm fronds. Moss tufts: Moss tufts, Crevice
+tufts.
 
 **Detail** is how close the camera gets, and how heavy the moss is:
 
@@ -1668,14 +1683,20 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   and up a wall with nothing selected (leaves only along them, Falloff
   thinning them out, only the faces under the strokes analysed, Width live,
   the drawing following its mesh, leaves kept off the wall while moss
-  climbs it, Use Drawing / Duplicate / Clear Area, ivy vines along it).
+  climbs it, Use Drawing / Duplicate / Clear Area, ivy vines along it);
+  then Jungle leaves: big single leaves about Leaf length across, one piece
+  each, green and dry in their own parts, lying on the yard (never in it,
+  never floating, none up the wall), Per cluster 3 giving clusters of 1-3,
+  Green 1 leaving no dry part, every shape at every Detail, and in a gutter
+  lying along it and riding up its sides.
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
   a layer unticked and back with one Ctrl+Z, a part clicked picks its
   layer, the box picks the group, Delete, Duplicate; then Draw on Surfaces
   over a fresh porch with Ctrl+Z on a stroke, Scatter on Drawing and a
-  second layer on the same drawing) and saves pictures to
+  second layer on the same drawing; then leaf piles and jungle leaves on
+  the same porch, before / after, and fronds live) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular

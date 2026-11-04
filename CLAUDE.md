@@ -798,6 +798,27 @@
     the strokes (`spread`). Settings `SC_DRAW_DEFAULTS` (draw_width metres,
     draw_falloff, draw_follow) on every type; the panel's Drawing section
     shows for a drawn layer.
+  - **Jungle leaves** (the user, 2026-11-04: "instead of piles of small
+    leaves ... large jungle leaves, like one or two or three of them at a
+    time ... the size of a whole small leaf pile"): layer type "Jungle
+    leaves", debris kind 5 (`DEBRIS_GATHER` 2), keys `jungle` (clusters per
+    square metre; 0 in `DEBRIS_DEFAULTS`, so old Debris groups build as
+    before), `jungle_size` (metres), `jungle_cluster`, `jungle_shape`
+    (`JUNGLE_SHAPES`), `jungle_green`, `jungle_tear`, plus `curl`. Parts
+    `green` / `dry` (`leafJungle` / `leafJungleDry`, stacked UVs);
+    `SC_DEBRIS_OUT` maps a type to several (debris mesh, part) pairs.
+    `_jungle`: 1 to Cluster leaves (uniform), moved up to a wall like a
+    pile, spaced by `_room` (0.45 L sqrt(k)); in a crease (`_along`) one
+    after another along it, else fanned. `_big_leaf` = leaf space (x across,
+    f along in leaf lengths, z up) from `_blade_local` (rows follow the
+    veins: f += |x| x slant, Broad's lobes reach back by a notch term; dry =
+    rolled round a circle keeping the width, tears duplicate a row's outer
+    vertices for the strip above, shifted a little) or `_frond_local`
+    (rachis strip u 0..0.08, leaflets u 0.1..1 all on the same UVs), mapped
+    along `_leaf_spine` (walked over the surface, level then bending down
+    past an edge, sliding up a wall a ray hits); points off the midrib are
+    pushed out of the surface when it's under them, else hang (sag ~ lat^2).
+    Detail `JUNGLE_DETAIL` (rows, columns, leaflet rows).
   - `_mi_drop_repeats` cleans faces that repeat a vertex (the moss bed
     makes a few on the porch scene; Maya drops them and `assignUVs` fails).
   - Not done (phases agreed with the user): an influence brush per layer (own stamp

@@ -27337,7 +27337,8 @@ DEBRIS_DEFAULTS = {
     "coverage": 0.5, "spread": 0.4, "slope": 45.0, "crevices": 0.8, "edges": 0.3, "patchiness": 0.7,
     "patch_size": 0.8, "creases": 0.7, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
     "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
-    "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5,
+    "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
+    "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS, "Debris": DEBRIS_DEFAULTS}
 MI_PRESET_SKIP = ("seed", "udim")
@@ -29604,7 +29605,13 @@ DEBRIS_DETAIL = {"Proxy": (6, 3.0, 2, (3, 2), (2, 6)),
 DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first row)
 DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
 DEBRIS_PILE_LEAVES = 400  # most leaves in one round pile (a drift along a crease: twice that)
-DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0}  # how much grass, leaves, piles, tufts crowd into creases
+DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0}  # how much grass, leaves, piles, tufts, big leaves
+# crowd into creases
+# Big jungle leaves (the user, 2026-11-04: "instead of piles of small leaves ... large jungle leaves, like one or
+# two or three of them at a time ... the size of a whole small leaf pile"). Detail: blade rows, columns, frond
+# leaflet rows.
+JUNGLE_DETAIL = {"Proxy": (6, 4, 2), "Normal": (16, 8, 4), "High": (26, 12, 6), "Hero": (40, 16, 8)}
+JUNGLE_SHAPES = ("Mixed", "Paddle", "Broad", "Frond")
 
 
 def _debris_field(s):
@@ -29636,7 +29643,10 @@ class _DebrisBuild(object):
         self.columns = s["stack_layout"] == MI_STACK_LAYOUTS[1]
         self.lift = 0.001 / m  # what rests on the surface sits this far off it
         self.G, self.L, self.T = _mi_mesh(), _mi_mesh(), _mi_mesh()
-        self.counts = {"bunches": 0, "leaves": 0, "piles": 0, "tufts": 0}
+        self.J, self.JD = _mi_mesh(), _mi_mesh()  # big leaves: green, dry
+        self.jungle_grid = JUNGLE_DETAIL[detail]
+        self.jungle_at = {}  # cell -> [(centre, radius)] of the big leaf clusters so far
+        self.counts = {"bunches": 0, "leaves": 0, "piles": 0, "tufts": 0, "jungle": 0}
         self.capped = False
         fs = _debris_field(s)
         self.R = DEBRIS_FIELD_R / m
@@ -29736,6 +29746,8 @@ class _DebrisBuild(object):
             else:
                 t1, _ = _mi_frame(n, r[2] * 6.2832)
             self._leaf(p, n, t1, self._size("leaf_size", r[3]), r, 0.0)
+        for p, n, r, margin, ci in self._spots(float(s["jungle"]), 5):
+            self._jungle(p, n, r, ci)
         for p, n, r, margin, ci in self._spots(float(s["tufts"]), 4):
             self._tuft(p, n, r)
         return self
@@ -30072,6 +30084,288 @@ class _DebrisBuild(object):
             self._leaf(hit[1], nl, lt1, self._size("leaf_size", rr[6]), rr, depth)
         return True
 
+    # ------------------------------------------------------- jungle leaves
+    def _room(self, store, c, rad, cell):
+        """True (and c kept in store) when nothing kept there yet is within
+        0.9 x the two radii; False when c would land on one. cell: the
+        store's grid size, the same for every call (>= 0.9 x 2 x the
+        biggest radius)."""
+        key = (int(math.floor(c[0] / cell)), int(math.floor(c[1] / cell)), int(math.floor(c[2] / cell)))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q, rq in store.get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                        if _rl_len(_rl_sub(c, q)) < 0.9 * (rad + rq):
+                            return False
+        store.setdefault(key, []).append((c, rad))
+        return True
+
+    def _jungle(self, c, n, r, ci=-1):
+        """A few big fallen jungle leaves (1 to Cluster) that came down
+        together: fanned out from where they landed, or, in a crease (a
+        gutter, the foot of a wall), one after another along it, pushed up
+        to the wall; each draped over the surface (_big_leaf)."""
+        s = self.s
+        L0 = float(s["jungle_size"]) / self.m
+        most = max(1, int(s["jungle_cluster"]))
+        k = 1 + min(most - 1, int(r[3] * most))
+        gi = self._gather(ci) if ci >= 0 else None
+        if gi is not None and gi[1] is not None and abs(gi[3]) > 0.15 and gi[0] * self.creases > 0.1:
+            side = _rl_mul(gi[1], 1.0 if gi[3] > 0.0 else -1.0)  # towards the wall
+            for f in (0.3, 0.2, 0.1):
+                hit = self.surf.closest(_rl_add(c, _rl_mul(side, L0 * f * min(1.0, 1.5 * abs(gi[3])))))
+                if hit is not None and _rl_dot(hit[2], n) > 0.7:
+                    c, n = hit[1], hit[2]
+                    break
+        if not self._room(self.jungle_at, c, 0.45 * L0 * math.sqrt(k), 0.9 * L0 * math.sqrt(most) + 1e-6):
+            return
+        shape = s["jungle_shape"]
+        if shape not in JUNGLE_SHAPES[1:]:  # Mixed: one kind per cluster
+            shape = JUNGLE_SHAPES[1] if r[5] < 0.45 else (JUNGLE_SHAPES[2] if r[5] < 0.8 else JUNGLE_SHAPES[3])
+        a = self._along(n, gi, (r[0] * 7.77) % 1.0, 1.6)
+        if a is not None:
+            main = a if r[6] < 0.5 else _rl_mul(a, -1.0)
+        else:
+            main, _ = _mi_frame(n, r[2] * 6.2832)
+        fan = 0.45 + 0.6 * r[7]
+        for i in range(k):
+            rr = _rand12(self.seed, int(r[8] * 1e6) + i, 8, 83)
+            L = L0 * (1.0 + self.var * (rr[2] - 0.5) * 1.2)
+            if a is not None:  # one after another along the crease, middles spread along it
+                d = _mi_rotate(main, n, (rr[0] - 0.5) * 0.35)
+                at = _rl_add(c, _rl_mul(main, (i - 0.5 * (k - 1)) * 0.55 * L0))
+                at = _rl_add(at, _rl_mul(d, -0.5 * L))
+            else:  # fanned out from about where they landed
+                d = _mi_rotate(main, n, (i - 0.5 * (k - 1)) * fan + (rr[0] - 0.5) * 0.4)
+                at = _rl_add(c, _rl_add(_rl_mul(d, -0.1 * L), _rl_mul(_rl_cross(n, d), (rr[1] - 0.5) * 0.12 * L)))
+            hit = self.surf.closest(at)
+            if hit is None or _rl_dot(hit[2], n) < 0.5:
+                continue
+            green = rr[3] < float(s["jungle_green"])
+            self._big_leaf(hit[1], hit[2], d, L, rr, shape, green, i * 0.03 * L0)
+
+    def _big_leaf(self, base, n, d, L, r, shape, green, lift):
+        """One big leaf from its stalk at base, heading d: its outline (leaf
+        space: x across and f along, in leaf lengths; z up off the ground)
+        laid along a spine walked over the surface (_leaf_spine), the sides
+        pushed out of the surface (they ride up a gutter's sides) or hanging
+        past an edge."""
+        pts_l, quads, uvs = (self._frond_local if shape == JUNGLE_SHAPES[3] else self._blade_local)(r, shape, green)
+        mesh = self.J if green else self.JD
+        if not pts_l or self._full(mesh, len(pts_l)):
+            return
+        self.counts["jungle"] += 1
+        steps = self.jungle_grid[0]
+        spine = self._leaf_spine(base, n, d, L, steps, 0.12 if green else 0.06)
+        stack = min(self.stacks - 1, int(r[4] * self.stacks))
+        sag = 0.9 if green else 0.4
+        lifted = self.lift + lift
+        pts, counts, conn, us, vs, uvi = mesh
+        b = len(pts)
+        surf = None if self.proxy else self.surf
+        for (x, f, z), (u, v) in zip(pts_l, uvs):
+            fk = clamp(f, 0.0, 1.0) * steps
+            i = min(steps - 1, int(fk))
+            t = fk - i
+            (pa, da, na), (pb, db, nb) = spine[i], spine[i + 1]
+            S = _rl_add(pa, _rl_mul(_rl_sub(pb, pa), t))
+            D = _rl_norm(_rl_add(_rl_mul(da, 1.0 - t), _rl_mul(db, t)), da)
+            N = _rl_norm(_rl_add(_rl_mul(na, 1.0 - t), _rl_mul(nb, t)), na)
+            X = _rl_norm(_rl_cross(D, N), _rl_any_perp(N))
+            over = (f - clamp(f, 0.0, 1.0)) * L  # past the tip / behind the stalk: straight on
+            p = _rl_add(_rl_add(S, _rl_mul(D, over)), _rl_add(_rl_mul(X, x * L), _rl_mul(N, z * L + lifted)))
+            if surf is not None and abs(x) * L > 4.0 * self.lift:
+                hit = surf.closest(p)
+                if hit is not None:
+                    off = _rl_sub(p, hit[1])
+                    h = _rl_dot(off, hit[2])
+                    lat = _rl_len(_rl_sub(off, _rl_mul(hit[2], h)))
+                    if lat < 0.2 * abs(x) * L + self.lift:
+                        if h < self.lift:  # into the surface (a gutter's side): onto it
+                            p = _rl_add(p, _rl_mul(hit[2], self.lift - h))
+                    else:  # out past an edge: it hangs
+                        p = (p[0], p[1] - min(lat, sag * lat * lat / (0.25 * L)), p[2])
+            pts.append(p)
+            u, v = self._uv(u, v, stack)
+            us.append(u)
+            vs.append(v)
+        for q in quads:
+            counts.append(4)
+            conn.extend(b + j for j in q)
+            uvi.extend(b + j for j in q)
+
+    def _leaf_spine(self, base, n, d, L, steps, stiff):
+        """steps + 1 (point, along, normal) a leaf's midrib takes from base:
+        over the surface, level past an edge then bending down (stiff: how
+        fast), and turning up a wall it runs into."""
+        surf = self.surf
+        d = _rl_norm(_rl_sub(d, _rl_mul(n, _rl_dot(d, n))), _mi_frame(n)[0])
+        step = L / float(steps)
+        p, nrm = base, n
+        out = [(p, d, nrm)]
+        free = 0
+        for k in range(steps):
+            if not free:
+                q = _rl_add(p, _rl_mul(d, step))
+                hit = surf.closest(q)
+                if hit is not None:
+                    off = _rl_sub(q, hit[1])
+                    h = _rl_dot(off, hit[2])
+                    if _rl_len(_rl_sub(off, _rl_mul(hit[2], h))) < 0.35 * step and _rl_dot(hit[2], nrm) > 0.2:
+                        nd = _rl_sub(hit[1], p)
+                        d = _rl_norm(_rl_sub(nd, _rl_mul(hit[2], _rl_dot(nd, hit[2]))), d)
+                        p, nrm = hit[1], hit[2]
+                        out.append((p, d, nrm))
+                        continue
+            free += 1
+            side = _rl_cross(d, nrm)
+            if free > 1:
+                d = _rl_norm((d[0], d[1] - stiff, d[2]), (0.0, -1.0, 0.0))
+            hit = surf.ray(_rl_add(p, _rl_mul(nrm, 2.0 * self.lift)), d, step)
+            if hit is not None:  # against a wall: it rides up / along it
+                dn = _rl_sub(d, _rl_mul(hit[2], _rl_dot(d, hit[2])))
+                d = _rl_norm(_rl_add(dn, (0.0, 0.5, 0.0)) if _rl_len(dn) < 0.3 else dn, (0.0, 1.0, 0.0))
+            p = _rl_add(p, _rl_mul(d, step))
+            nrm = _rl_norm(_rl_cross(side, d), nrm)
+            out.append((p, d, nrm))
+        return out
+
+    def _blade_local(self, r, shape, green):
+        """A whole leaf's points (x, f, z), quads and UVs (0..1 over the
+        outline). Paddle: long, blunt, veins running out and forward (rows
+        follow them), torn along them from the edge in (Tears); Broad: wide,
+        a heart-shaped base whose lobes reach back past the stalk, pointed
+        tip, the odd tear. Green ones cup a little and fold on the midrib;
+        dry ones (x0.85 wide) roll in from the edges, lift at the tip and
+        crumple (Leaf curl)."""
+        rows, cols, _ = self.jungle_grid
+        cols += cols % 2
+        paddle = shape == JUNGLE_SHAPES[1]
+        curl = clamp(float(self.s["curl"]), 0.0, 2.0) * (0.35 if green else 1.0)
+        tear = clamp(float(self.s["jungle_tear"]), 0.0, 1.0)
+        W = (0.17 if paddle else 0.33) * (1.0 if green else 0.85) * (0.85 + 0.3 * r[4])
+        st = 0.06 if paddle else 0.1
+        slant = 0.5 if paddle else 0.25
+        notch = 0.0 if paddle else 0.9
+        roll = curl * (0.25 + 0.5 * r[5]) * (1.0 if green else 2.2)
+        fold = (0.1 + 0.15 * r[6]) * (1.0 if green else 0.5)
+        tip = curl * (r[7] - 0.2) * 0.25
+        crum = 0.0 if self.proxy else 0.004 + (0.0 if green else 0.02 * curl)
+        wave = 0.0 if self.proxy or not green else 0.006 + 0.01 * r[8]
+        sx, sy = r[10] * 50.0, r[11] * 50.0
+        tears = {}  # (row, side) -> how far in from the edge (fraction of the half width)
+        rate = tear * ((0.35 if green else 0.6) if paddle else (0.08 if green else 0.15))
+        for k in range(3, rows - 2):
+            for sd in (-1, 1):
+                rr = _rand12(self.seed, int(r[9] * 1e6) + k * 2 + (sd > 0), 9, 89)
+                if rr[0] < rate:
+                    tears[(k, sd)] = 0.35 + 0.65 * rr[1]
+        grid, base_uv = [], []
+        for k in range(rows + 1):
+            g = 0.0 if not k else (k - 1) / float(rows - 1)
+            if not k:
+                w = 0.01
+            elif paddle:
+                w = W * max(0.0, math.sin(math.pi * min(1.0, 0.04 + 0.96 * g))) ** 0.3 * (1.0 - 0.15 * g)
+            else:
+                w = W * max(0.0, math.sin(math.pi * (0.12 + 0.88 * g))) ** 0.55 * (1.15 - 0.45 * g) * (1.0 - g ** 6)
+            w = max(w, 0.004)
+            th = roll * min(1.0, w / max(1e-6, W))  # radians the edge turns (narrow ends roll less)
+            for j in range(cols + 1):
+                t = -1.0 + 2.0 * j / float(cols)
+                x = t * w
+                f = (0.0 if not k else st + (1.0 - st) * g) + abs(x) * (slant - notch * (1.0 - g) ** 3)
+                if th > 1e-3:  # rolled round a circle (the width along it kept)
+                    rho = w / th
+                    xp, z = rho * math.sin(x / rho), rho * (1.0 - math.cos(x / rho))
+                else:
+                    xp, z = x, 0.0
+                z += fold * abs(xp) + tip * max(0.0, f - 0.65) ** 2 / 0.35 + wave * math.sin(f * 40.0 + sx) * abs(t)
+                if not green:
+                    z += curl * 0.05 * (max(0.0, 0.2 - f) / 0.2) ** 2
+                if crum:
+                    z += crum * _th_noise(sx + x * 9.0, sy + f * 9.0, self.seed + 51) * (0.3 + abs(t))
+                grid.append([xp, f, z])
+                base_uv.append((x, f))
+        lo = min(q[2] for q in grid)
+        for q in grid:
+            q[2] -= lo  # resting on its lowest point
+        fs = [q[1] for q in base_uv]
+        f0, f1 = min(fs), max(fs)
+        Wu = max(1e-6, max(abs(q[0]) for q in base_uv))
+        pts = [tuple(q) for q in grid]
+        uvs = [(0.5 + 0.48 * x / Wu, (f - f0) / max(1e-6, f1 - f0)) for x, f in base_uv]
+        top = {}  # (row, column) -> the copy the strip above a tear uses
+        for (k, sd), depth in tears.items():
+            rr = _rand12(self.seed, int(r[9] * 1e6) + k * 2 + (sd > 0), 9, 97)
+            for j in range(cols + 1):
+                t = -1.0 + 2.0 * j / float(cols)
+                if t * sd <= 0.0 or abs(t) <= 1.0 - depth + 1e-9:
+                    continue
+                o = (abs(t) - (1.0 - depth)) / depth  # 0 where the tear ends, 1 at the edge
+                x, f, z = pts[k * (cols + 1) + j]
+                top[(k, j)] = len(pts)
+                pts.append((x, f + (0.004 + 0.008 * rr[2]) * o, z + 0.012 * rr[3] * o))
+                uvs.append(uvs[k * (cols + 1) + j])
+        quads = []
+        for k in range(rows):
+            for j in range(cols):
+                a = top.get((k, j), k * (cols + 1) + j)
+                b = top.get((k, j + 1), k * (cols + 1) + j + 1)
+                quads.append((a, b, (k + 1) * (cols + 1) + j + 1, (k + 1) * (cols + 1) + j))
+        return pts, quads, uvs
+
+    def _frond_local(self, r, shape, green):
+        """A fallen palm frond: a rachis (a narrow strip, u 0..0.08) with
+        leaflets along both sides angled forward, longest mid-frond (each
+        on u 0.1..1, all on the same UVs); green leaflets lie flat with a
+        crease, dry ones roll up; a few are missing (Tears)."""
+        rows, _, lrows = self.jungle_grid
+        pairs = max(6, rows)
+        curl = clamp(float(self.s["curl"]), 0.0, 2.0) * (0.35 if green else 1.0)
+        tear = clamp(float(self.s["jungle_tear"]), 0.0, 1.0)
+        pts, quads, uvs = [], [], []
+        for k in range(rows + 1):  # rachis
+            f = k / float(rows)
+            w = 0.012 * (1.0 - 0.6 * f)
+            pts.extend(((-w, f, 0.0), (w, f, 0.0)))
+            uvs.extend(((0.0, f), (0.08, f)))
+        for k in range(rows):
+            quads.append((2 * k, 2 * k + 1, 2 * k + 3, 2 * k + 2))
+        wl = 0.022 if green else 0.016
+        th = curl * (0.4 if green else 1.6)  # how far each leaflet's edges turn up
+        for i in range(pairs):
+            for sd in (-1.0, 1.0):
+                rr = _rand12(self.seed, int(r[9] * 1e6) + i * 2 + (sd > 0), 10, 101)
+                if rr[0] < tear * (0.1 if green else 0.25):
+                    continue
+                g = (i + 0.5) / pairs
+                f0 = 0.12 + 0.86 * g
+                ell = 0.34 * max(0.0, math.sin(math.pi * (0.08 + 0.84 * g))) ** 0.8 * (0.85 + 0.3 * rr[1])
+                ang = 0.75 + (rr[2] - 0.5) * 0.25
+                dx, df = sd * math.sin(ang), math.cos(ang)
+                px, pf = math.cos(ang), -sd * math.sin(ang)  # across the leaflet (x, f orientation kept)
+                b = len(pts)
+                for m in range(lrows + 1):
+                    t = m / float(lrows)
+                    cx, cf = sd * 0.01 + t * ell * dx, f0 + t * ell * df
+                    half = wl * max(0.15, math.sin(math.pi * min(1.0, 0.15 + 0.85 * t)) ** 0.7)
+                    for c in (-1.0, 0.0, 1.0):
+                        o = c * half
+                        if th > 1e-3 and c:
+                            rho = half / th
+                            o, z = rho * math.sin(o / rho), rho * (1.0 - math.cos(o / rho))
+                        else:
+                            z = 0.0
+                        z += 0.25 * abs(o)
+                        pts.append((cx + px * o, cf + pf * o, z))
+                        uvs.append((0.1 + 0.9 * (0.5 + 0.48 * c), t))
+                for m in range(lrows):
+                    for c in range(2):
+                        a = b + m * 3 + c
+                        quads.append((a, a + 1, a + 4, a + 3))
+        return pts, quads, uvs
+
     # --------------------------------------------------------------- tufts
     def _tuft(self, c, n, r):
         """A tiny clump of moss: a few small cushions run together (one at
@@ -30148,12 +30442,14 @@ class _DebrisBuild(object):
 
 def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
-    leaves (scattered and in piles), "tufts": tiny moss cushions,
-    "bunches", "leaves_n", "piles", "tufts_n", "capped"} (world space)."""
+    leaves (scattered and in piles), "tufts": tiny moss cushions, "jungle" /
+    "jungle_dry": big leaves, green / dried, "bunches", "leaves_n", "piles",
+    "tufts_n", "jungle_n", "capped"} (world space)."""
     s = mi_settings_only("Debris", s)
     surf = surf or _MiSurface(nodes)
-    empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "bunches": 0, "leaves_n": 0,
-             "piles": 0, "tufts_n": 0, "capped": False}
+    empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "jungle": _mi_mesh(),
+             "jungle_dry": _mi_mesh(), "bunches": 0, "leaves_n": 0, "piles": 0, "tufts_n": 0, "jungle_n": 0,
+             "capped": False}
     if not surf.items or float(s["coverage"]) <= 0.0:
         return empty
     if draw is not None:
@@ -30162,8 +30458,9 @@ def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     if not sampler.total:
         return empty
     b = _DebrisBuild(surf, sampler, s, seeds, faces, draw).build()
-    return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "bunches": b.counts["bunches"],
-            "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
+    return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "jungle": tuple(b.J),
+            "jungle_dry": tuple(b.JD), "bunches": b.counts["bunches"], "leaves_n": b.counts["leaves"],
+            "piles": b.counts["piles"], "tufts_n": b.counts["tufts"], "jungle_n": b.counts["jungle"],
             "capped": b.capped}
 
 
@@ -30667,13 +30964,19 @@ SC_TYPES = collections.OrderedDict([
     ("Leaf piles", {"parts": (("piles", "leafPile"),),
                     "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl"),
                     "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}}),
+    ("Jungle leaves", {"parts": (("green", "leafJungle"), ("dry", "leafJungleDry")),
+                       "keys": SC_DEBRIS_COMMON + ("jungle", "jungle_size", "jungle_cluster", "jungle_shape",
+                                                   "jungle_green", "jungle_tear", "curl"),
+                       "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
                     "over": {"slope": 60.0, "tufts": 6.0}}),
     ("Ivy", {"parts": (("stems", "ivyStem"), ("leaves", "ivyLeaf")),
              "keys": tuple(k for k in IVY_DEFAULTS if k != "udim"), "over": {}})])
-SC_DEBRIS_ITEMS = {"Grass": "grass", "Leaves": "leaves", "Leaf piles": "piles", "Moss tufts": "tufts"}
-SC_DEBRIS_OUT = {"Grass": ("grass", "grass"), "Leaves": ("litter", "litter"), "Leaf piles": ("litter", "piles"),
-                 "Moss tufts": ("tufts", "tufts")}  # debris_build's mesh -> the layer's part
+SC_DEBRIS_ITEMS = {"Grass": "grass", "Leaves": "leaves", "Leaf piles": "piles", "Moss tufts": "tufts",
+                   "Jungle leaves": "jungle"}
+SC_DEBRIS_OUT = {"Grass": (("grass", "grass"),), "Leaves": (("litter", "litter"),),
+                 "Leaf piles": (("litter", "piles"),), "Moss tufts": (("tufts", "tufts"),),
+                 "Jungle leaves": (("jungle", "green"), ("jungle_dry", "dry"))}  # debris_build's mesh -> part
 SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
@@ -30845,10 +31148,9 @@ def _sc_build_layer(layer, surf):
             if t2 != typ:
                 ds[key] = 0.0
         out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw)
-        src, part = SC_DEBRIS_OUT[typ]
-        parts = {part: out.get(src)}
+        parts = {part: out.get(src) for src, part in SC_DEBRIS_OUT[typ]}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
-                  "tufts": out.get("tufts_n", 0)}
+                  "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0)}
     counts["capped"] = bool(out.get("capped"))
     return {p: _mi_drop_repeats(m) for p, m in parts.items()}, counts
 
@@ -30860,7 +31162,7 @@ def sc_build(root, data, surf=None, only=None):
     order. Returns ({"<id>/<part>": mesh}, {"udims", counts...}, meshes)."""
     meshes = sc_surfaces(data)
     report = {"faces": 0, "capped": False, "clumps": 0, "vines": 0, "leaves": 0, "bunches": 0, "piles": 0,
-              "tufts": 0, "udims": {}, "surfaces": len(meshes)}
+              "tufts": 0, "jungle": 0, "udims": {}, "surfaces": len(meshes)}
     combined, order = {}, []
     if not meshes:
         return combined, report, meshes
@@ -30883,7 +31185,7 @@ def sc_build(root, data, surf=None, only=None):
         for part, mesh in parts.items():
             if mesh and mesh[1]:
                 combined[lid + "/" + part] = mesh
-        for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts"):
+        for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts", "jungle"):
             report[k] += counts.get(k, 0)
         report["capped"] = report["capped"] or counts.get("capped", False)
     placed = _roof_udims(dict(combined), int(data.get("udim") or 1001), order=order)
@@ -31028,7 +31330,7 @@ def _sc_make_part(root, layer, part, material):
     cmds.setAttr(shape + "." + SC_PART, layer["id"] + "/" + part, type="string")
     cmds.addAttr(shape, longName=MI_VERTS, attributeType="long", defaultValue=0)
     cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
-    if part in MI_STACKED_PARTS or part == "piles":
+    if part in MI_STACKED_PARTS or part in ("piles", "green", "dry"):
         cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=True)
     return node
 
@@ -31359,6 +31661,12 @@ SC_PRESETS = {
         ("Gutters and wall bases", {"coverage": 0.3, "piles": 2.0, "pile_size": 0.3, "creases": 1.3,
                                     "patchiness": 0.4}),
         ("Big heaps", {"piles": 0.4, "pile_size": 0.8})]),
+    "Jungle leaves": collections.OrderedDict([
+        ("Fallen jungle leaves", {}),
+        ("Fresh and green", {"jungle_green": 0.9, "curl": 0.3, "jungle_tear": 0.25}),
+        ("Dry and torn", {"jungle_green": 0.1, "curl": 1.2, "jungle_tear": 0.8}),
+        ("Single big leaves", {"jungle_cluster": 1, "jungle_size": 0.6, "jungle": 0.4}),
+        ("Palm fronds", {"jungle_shape": "Frond", "jungle_size": 1.2, "jungle_cluster": 2, "jungle": 0.25})]),
     "Moss tufts": collections.OrderedDict([
         ("Moss tufts", {}),
         ("Crevice tufts", {"tufts": 25.0, "tuft_size": 0.03, "crevices": 1.0, "patchiness": 0.8})])}
@@ -31477,6 +31785,20 @@ SC_FIELDS = {
              "How dried the leaves are: edges curled up, ends lifted, folded, crumpled."),
     "tufts": ("Tufts", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Tiny moss cushions per square metre."),
     "tuft_size": ("Tuft size", _scf(0.005, 0.5, 0.01, 0.1, 3, 0.005), "How wide a moss tuft is, in metres."),
+    # jungle leaves
+    "jungle": ("Clusters", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
+               "Clusters of big leaves per square metre where they gather."),
+    "jungle_size": ("Leaf length", _scf(0.05, 5.0, 0.1, 1.5, 2, 0.01),
+                    "How long a big leaf is, in metres (about a small leaf pile's size)."),
+    "jungle_cluster": ("Per cluster", lambda: IntField(1, 6, 1, 6),
+                       "Most leaves that came down together (1 = single leaves)."),
+    "jungle_shape": ("Shape", lambda: SegmentField(JUNGLE_SHAPES),
+                     "Paddle: long and blunt, torn along its veins. Broad: wide, a heart-shaped base. Frond: a "
+                     "fallen palm frond. Mixed: one kind per cluster."),
+    "jungle_green": ("Green", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                     "How many are fresh and green; the rest are dried (their own part: rolled in, crumpled)."),
+    "jungle_tear": ("Tears", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "How torn they are: splits along the veins, missing frond leaflets."),
     # ivy
     "vines": ("Vines", lambda: IntField(1, 64, 1, 20),
               "How many vines: automatic seeds at the bottom of the meshes, or shared between the picked points."),
@@ -31520,6 +31842,11 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
                    ("More", False, ["size_var", "detail"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
+    "Jungle leaves": [("", True, ["coverage", "spread", "jungle", "jungle_size", "jungle_cluster", "jungle_shape",
+                                  "jungle_green"]),
+                      ("Where it gathers", True, _SC_WHERE + ["mess"]),
+                      ("More", False, ["curl", "jungle_tear", "size_var", "detail"]),
+                      ("UVs", False, ["stacks", "stack_layout"])],
     "Moss tufts": [("", True, ["coverage", "spread", "tufts", "tuft_size"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
                    ("More", False, ["size_var", "detail"]),
@@ -32104,7 +32431,7 @@ class ScatterPanel(QtWidgets.QWidget):
     def _counts(self, rep):
         bits = []
         for key, word in (("clumps", "moss clumps"), ("bunches", "grass bunches"), ("leaves", "leaves"),
-                          ("piles", "piles"), ("tufts", "tufts"), ("vines", "vines")):
+                          ("piles", "piles"), ("tufts", "tufts"), ("jungle", "big leaves"), ("vines", "vines")):
             if rep.get(key):
                 bits.append("%s %s" % (format(rep[key], ","), word))
         bits.append("%s faces" % format(rep.get("faces", 0), ","))

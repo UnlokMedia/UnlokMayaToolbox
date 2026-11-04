@@ -112,7 +112,8 @@ PART_COLOURS = {"moss": ("testMoss", (0.12, 0.22, 0.05)), "strands": ("testStran
                 "capsules": ("testSpore", (0.35, 0.15, 0.06)), "grass": ("testGrass", (0.55, 0.47, 0.30)),
                 "litter": ("testLitter", (0.45, 0.26, 0.10)), "piles": ("testPile", (0.55, 0.30, 0.10)),
                 "tufts": ("testTuft", (0.14, 0.28, 0.05)), "stems": ("testStem", (0.24, 0.17, 0.10)),
-                "leaves": ("testLeaf", (0.07, 0.20, 0.04))}
+                "leaves": ("testLeaf", (0.07, 0.20, 0.04)), "green": ("testJungle", (0.10, 0.32, 0.06)),
+                "dry": ("testJungleDry", (0.50, 0.36, 0.16))}
 
 
 def shade_part(node, part):
@@ -297,6 +298,7 @@ def main():
     cmds.select(clear=True)
     shoot("04_piles_only")
     drawing(ns, panel, window)
+    jungle_leaves(ns, panel, window)
 
 
 def drawing(ns, panel, window):
@@ -396,6 +398,65 @@ def drawing(ns, panel, window):
     cmds.undo()
     panel._after_undo()
     check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1)
+
+
+def jungle_leaves(ns, panel, window):
+    """Before / after on a fresh porch: Leaf piles (Gutters and wall bases),
+    then Jungle leaves from the panel (its own settings), then fronds."""
+    cmds.file(new=True, force=True)
+    _SG.clear()
+    grp, nodes = quiet(porch)
+    shade(list(nodes.values()), "testWood", (0.42, 0.34, 0.25))
+
+    def grow(typ, preset):
+        cmds.select(grp)
+        panel._sync_from_selection()
+        panel.start_type.setCurrentIndex(panel.start_type.findText(typ))
+        panel._show_layer()
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText(preset))
+        panel.load_preset()
+        t0 = time.time()
+        panel.new_btn.click()
+        pump()
+        root = panel._root
+        for key, node in ns["sc_parts"](root).items():
+            shade_part(node, key.split("/")[1])
+        cmds.undoInfo(stateWithoutFlush=False)  # (quiet() would put the selection back)
+        cmds.select(clear=True)
+        cmds.undoInfo(stateWithoutFlush=True)
+        return root, time.time() - t0
+
+    def close_ups(root, prefix):
+        """A close look at the first leaf of each part (its stalk is vertex 0)."""
+        for key, node in sorted(ns["sc_parts"](root).items()):
+            p = cmds.pointPosition(node + ".vtx[0]", world=True)
+            look(tuple(p), (p[0] + 7.0, p[1] + 9.0, p[2] + 11.0))
+            snap("%s_%s.png" % (prefix, key.split("/")[1]))
+
+    root, _ = grow("Leaf piles", "Gutters and wall bases")
+    shoot("08_before_piles")
+    quiet(lambda: cmds.delete(root))
+    root, dt = grow("Jungle leaves", "Fallen jungle leaves")
+    rep = panel.status.text()
+    check("Jungle leaves: a group of big fallen leaves from the panel", "big leaves" in rep, "%.2fs | %s" % (dt, rep))
+    check("Jungle leaves have their own settings (Shape, Per cluster, Green)",
+          not panel.f["Jungle leaves"]["jungle_shape"].isHidden() and
+          panel.f["Jungle leaves"]["jungle_cluster"].value() == 3)
+    window.grab().save(os.path.join(OUT, "09_panel_jungle.png"))
+    shoot("09_after_jungle")
+    close_ups(root, "09_close")
+    panel.f["Jungle leaves"]["jungle_shape"].setValue("Frond")
+    panel.f["Jungle leaves"]["jungle_size"].setValue(1.0)
+    for key in ("jungle_shape", "jungle_size"):
+        panel._queue("Jungle leaves", key)
+    panel._apply_pending()
+    for key, node in ns["sc_parts"](root).items():
+        shade_part(node, key.split("/")[1])
+    check("Shape Frond is live", ns["sc_settings"](ns["sc_layer"](ns["sc_data"](root), panel._lid))["jungle_shape"] ==
+          "Frond", panel.status.text())
+    look((0, 8, -2), (30, 34, 62))
+    snap("10_fronds_overview.png")
+    close_ups(root, "10_close")
 
 
 def run():

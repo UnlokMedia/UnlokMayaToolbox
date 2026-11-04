@@ -11,7 +11,8 @@ gutter (drifts along them), gives every part its own UDIM tiles, and its
 layers turn on / off, duplicate, move and delete with one Ctrl+Z each
 (the undo / redo regrows what it built). Live edits stay out of the undo
 queue and only rebuild the layer edited; Bake drops the box and hidden
-parts.
+parts. Jungle leaves: big single leaves in clusters of 1-3, green and dry
+parts, lying on the surface, along a gutter.
 """
 
 import math
@@ -382,9 +383,142 @@ def drawing():
     check("ivy on a drawing starts its vines along it", rep["vines"] >= 4, "%d vines (branches too)" % rep["vines"])
 
 
+def leaf_shells(tb, node):
+    """Each separate piece of a part's mesh: [points] (a Paddle / Broad leaf is one piece)."""
+    fn = om.MFnMesh(tb["get_dag_path"](tb["_log_shape"](node)))
+    pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    counts, ids = fn.getVertices()
+    up = list(range(len(pts)))
+
+    def find(a):
+        while up[a] != a:
+            up[a] = up[up[a]]
+            a = up[a]
+        return a
+
+    k = 0
+    for c in counts:
+        r0 = find(ids[k])
+        for i in ids[k + 1:k + c]:
+            ri = find(i)
+            if ri != r0:
+                up[ri] = r0
+        k += c
+    groups = {}
+    for i, p in enumerate(pts):
+        groups.setdefault(find(i), []).append(p)
+    return list(groups.values())
+
+
+def jungle():
+    """Big jungle leaves: single big leaves the size of a small pile, 1-3 to
+    a cluster, green and dry ones in their own parts, lying on the yard
+    (riding up a gutter's sides, along it), never up the wall."""
+    tb = load_toolbox()
+    sn = tb["short_name"]
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    L = 4.5  # 0.45 m in decimetres
+
+    t0 = time.time()
+    rep = tb["create_scatter_group"]([grp], "Jungle leaves", {"jungle": 1.5, "jungle_cluster": 1, "coverage": 0.6,
+                                                              "jungle_shape": "Paddle", "jungle_size": 0.45,
+                                                              "jungle_green": 0.5})
+    dt = time.time() - t0
+    root = rep["root"]
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+    parts = tb["sc_parts"](root)
+    check("a Jungle leaves layer grows big leaves", rep["jungle"] >= 6, "%d leaves, %.2fs" % (rep["jungle"], dt))
+    check("green and dry leaves are their own parts", sorted(sn(n) for n in parts.values()) ==
+          ["leafJungleDry_C_scatteredObjects0001_GEP", "leafJungle_C_scatteredObjects0001_GEP"],
+          str(sorted(sn(n) for n in parts.values())))
+    shells = leaf_shells(tb, parts[lid + "/green"]) + leaf_shells(tb, parts[lid + "/dry"])
+    sizes = []
+    for sh in shells:
+        xs, zs = [p[0] for p in sh], [p[2] for p in sh]
+        sizes.append(math.hypot(max(xs) - min(xs), max(zs) - min(zs)))
+    sizes.sort()
+    mid = sizes[len(sizes) // 2] if sizes else 0.0
+    check("one leaf per cluster at Per cluster 1, each one piece", len(shells) == rep["jungle"],
+          "%d pieces, %d leaves" % (len(shells), rep["jungle"]))
+    check("each is big: about Leaf length (a small pile's size)", 0.75 * L < mid < 1.35 * L,
+          "median %.2f dm across (Leaf length %.1f dm)" % (mid, L))
+    pts = points(tb, parts[lid + "/green"]) + points(tb, parts[lid + "/dry"])
+    surf = tb["_MiSurface"](nodes)
+    inside = high = on_wall = 0
+    for p in pts[::3]:
+        c = surf.closest(p)
+        if c is None:
+            continue
+        if tb["_rl_dot"](tb["_rl_sub"](p, c[1]), c[2]) < -0.05:
+            inside += 1
+        if c[0] > 0.3 * L:
+            high += 1
+        if abs(c[2][1]) < 0.5 and 4.0 < p[1] < 14.5 and p[2] < -12.0:
+            on_wall += 1
+    n3 = len(pts[::3])
+    check("they lie on the surface, never in it", inside <= 0.01 * n3 and high <= 0.05 * n3,
+          "%d of %d inside, %d floating" % (inside, n3, high))
+    check("no big leaves up the wall", on_wall <= 0.01 * n3, "%d of %d" % (on_wall, n3))
+    check("big leaves grow fast", dt < 6.0, "%.2fs" % dt)
+
+    # --- 1 to 3 to a cluster
+    base = rep["jungle"]
+    made = {}
+    for most in (1, 3):
+        r3, l3 = tb["sc_add_layer"](root, "Jungle leaves", {"jungle": 2.0, "jungle_cluster": most, "coverage": 0.6,
+                                                             "jungle_shape": "Paddle", "jungle_size": 0.45})
+        made[most] = r3["jungle"] - base
+        tb["sc_remove_layer"](root, l3)
+    check("Per cluster 3 drops clusters of 1-3", 1.4 * made[1] < made[3] < 3.05 * made[1],
+          "%d leaves vs %d single" % (made[3], made[1]))
+
+    # --- all green: no dry part
+    r1, l1 = tb["sc_add_layer"](root, "Jungle leaves", {"jungle": 1.5, "jungle_green": 1.0, "coverage": 0.6})
+    p1 = tb["sc_parts"](root)
+    check("Green 1: every leaf in the green part", (l1 + "/green") in p1 and (l1 + "/dry") not in p1,
+          str(sorted(k for k in p1 if k.startswith(l1))))
+    tb["sc_remove_layer"](root, l1)
+
+    # --- every shape, every Detail
+    counts = {}
+    for shape in ("Paddle", "Broad", "Frond"):
+        for detail in ("Proxy", "Normal", "Hero"):
+            r, lx = tb["sc_add_layer"](root, "Jungle leaves", {"jungle": 1.0, "jungle_cluster": 1, "coverage": 0.6,
+                                                               "jungle_shape": shape, "detail": detail,
+                                                               "jungle_green": 1.0})
+            node = tb["sc_parts"](root).get(lx + "/green")
+            counts[(shape, detail)] = (cmds.polyEvaluate(node, vertex=True) if node else 0) / float(max(
+                1, r["jungle"] - base))
+            tb["sc_remove_layer"](root, lx)
+    check("every shape builds, Detail adds points", all(counts[(s, "Proxy")] < counts[(s, "Normal")] <
+                                                        counts[(s, "Hero")] for s in ("Paddle", "Broad", "Frond")),
+          ", ".join("%s %s %d" % (s, d, counts[(s, d)]) for s, d in sorted(counts)))
+
+    # --- along the gutter
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    gutter = [n for n in nodes if "gutter" in n]
+    rep = tb["create_scatter_group"](gutter, "Jungle leaves", {"jungle": 4.0, "jungle_cluster": 2, "coverage": 0.9,
+                                                               "jungle_shape": "Paddle", "creases": 1.5,
+                                                               "jungle_size": 0.45, "jungle_green": 1.0})
+    root = rep["root"]
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+    shells = leaf_shells(tb, tb["sc_parts"](root)[lid + "/green"])
+    along = 0
+    for sh in shells:
+        xs, zs = [p[0] for p in sh], [p[2] for p in sh]
+        along += (max(xs) - min(xs)) > 1.5 * (max(zs) - min(zs))
+    check("in a gutter they lie along it", shells and along >= 0.7 * len(shells),
+          "%d of %d along" % (along, len(shells)))
+    ys = [p[1] for sh in shells for p in sh if 7.3 < p[2] < 8.7]
+    check("riding up its sides, not through them", ys and min(ys) > 0.55, "lowest %.2f" % (min(ys) if ys else 0))
+
+
 try:
     run()
     drawing()
+    jungle()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))
