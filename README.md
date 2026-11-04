@@ -682,6 +682,15 @@ you tune them.
    wireframe box round it (`scatteredObjects0001_CTL`, never renders):
    click the box in the viewport to edit the group. **Add Selected** /
    **Remove** change what it grows on.
+
+   **Or draw instead of selecting:** **Draw on Surfaces**, then drag over
+   any meshes (walls, a roof, the floor: nothing needs selecting; a click
+   is a single spot). Ctrl+Z takes the last stroke back, Ctrl+Y puts it
+   back, Enter or Esc stops. **Scatter on Drawing** makes a group of the
+   *Start with* type along the strokes (the meshes under them become its
+   surfaces); with a group open it adds a layer on the drawing instead
+   (**Add Layer on Drawing**), so moss and leaves can follow one drawing.
+   **Clear** forgets the drawing (layers keep what was drawn for them).
 2. **Layers:** **Add Layer** of any type (Moss, Grass, Leaves, Leaf piles,
    Moss tufts, Ivy); two of a type are fine (a moss that keeps to flat
    rooftops and a second, sparse one that grows anywhere). Tick a layer to
@@ -689,12 +698,19 @@ you tune them.
    **Delete**, **Up** / **Down**. Each is one Ctrl+Z. To say where a layer
    goes, pick components and press **Use Picked Area**: **faces** = only on
    those faces; **vertices or edges** = a clump round each picked point,
-   out to *Spread* (ivy: vines start there). **Clear Area** frees it again.
+   out to *Spread* (ivy: vines start there); **Use Drawing** = along the
+   strokes drawn now. **Clear Area** frees it again.
    Clicking a layer's mesh in the viewport edits that layer.
 3. **Layer settings** (live, out of the undo queue like the other tools'
    sliders): every layer has its own *Coverage*, *Slope limit*, *Crevices*,
    *Creases*, *Avoid edges*, patches, sizes, Detail and seed; presets per
-   type (and your own: **Save...**).
+   type (and your own: **Save...**). A drawn layer also has *Drawing*:
+   *Width* (how far from the strokes, in metres), *Falloff* (how much of
+   that fades out: 0 = a hard edge) and *Follow surface* (0 = evenly along
+   the strokes, 1 = only where it would grow anyway; grass and leaves still
+   never go past their Slope limit). Only the faces under a drawing are
+   looked at, so a stroke over a detailed shack stays quick, and the
+   drawing moves with the meshes it's on.
 4. **Finish:** **Regrow** after editing the meshes, **Bake** keeps plain
    meshes (the box and any empty part go), **Select All**, the group's
    *Start UDIM*.
@@ -1648,12 +1664,18 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   undo queue rebuilding only their layer, layers on / off, Delete,
   Duplicate, Up and surfaces changed with one Ctrl+Z each (the undo /
   redo regrows), a new group's undo / redo, presets, Bake dropping the box
-  and empty parts.
+  and empty parts; then drawing: a group from strokes over a dense ground
+  and up a wall with nothing selected (leaves only along them, Falloff
+  thinning them out, only the faces under the strokes analysed, Width live,
+  the drawing following its mesh, leaves kept off the wall while moss
+  climbs it, Use Drawing / Duplicate / Clear Area, ivy vines along it).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
   a layer unticked and back with one Ctrl+Z, a part clicked picks its
-  layer, the box picks the group, Delete, Duplicate) and saves pictures to
+  layer, the box picks the group, Delete, Duplicate; then Draw on Surfaces
+  over a fresh porch with Ctrl+Z on a stroke, Scatter on Drawing and a
+  second layer on the same drawing) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular

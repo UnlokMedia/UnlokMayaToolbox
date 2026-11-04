@@ -774,10 +774,33 @@
     envelope (1 - t^2) x a banked profile (crest 0.5 e bank towards the
     wall), tilted along both slopes, half of them along the drift. Too
     short a spine: a round pile. Piles skip a spot inside one already made.
+  - **Drawing** (the user: "click draw on any surface and then draw a
+    curve / line over surfaces (undoable as you go), then hit 'scatter on
+    drawing' ... control falloff"): `ScatterDrawer` (a `SurfacePathDrawer`
+    with its own context `unlokScatterDrawCtx`; `press_at` never falls back
+    to a plane, every visible mesh but scatter groups' counts, no grazed
+    filter) keeps strokes [(world point, mesh shape)] shown as
+    reference-display curves (NoUndo, doNotWrite) until Clear; Ctrl+Z / Y,
+    Enter, Esc through `_ThatchPickKeys` (its remove_last / redo_point /
+    finish / cancel). A layer's `draw` = {"t": mesh uuids, "k": [[[mesh
+    index, local x, y, z]]]} (`sc_store_drawing`, `sc_drawing`: follows the
+    meshes; thinned past `SC_DRAW_MAX_POINTS`); `create_scatter_group` /
+    `sc_add_layer` / `sc_set_layer(drawing=)` add the meshes under it to the
+    surfaces in the same Ctrl+Z. `_MiDrawing(strokes, width, falloff,
+    follow, nodes)`: stroke points densified to Width / 6 in a grid; `faces`
+    = faces within Width (whole meshes culled by world box; small triangles
+    by centroid + radius, big ones by exact point-triangle distance), cached
+    in `_MI_DRAW_MASKS`; `prof` = 1 inside Width (1 - Falloff), smoothstep
+    to 0 at Width. `_moss_margins(draw=)`: margin = 0.5 + Follow (score -
+    0.5) + noise - (1 - coverage) + prof - 0.5. `_MiSampler(faces=)` samples
+    only masked faces (picked faces too, since this) and its `key` goes in
+    the spots / field / gather cache keys. Ivy: Vines spread evenly along
+    the strokes (`spread`). Settings `SC_DRAW_DEFAULTS` (draw_width metres,
+    draw_falloff, draw_follow) on every type; the panel's Drawing section
+    shows for a drawn layer.
   - `_mi_drop_repeats` cleans faces that repeat a vertex (the moss bed
     makes a few on the porch scene; Maya drops them and `assignUVs` fails).
-  - Not done (phases agreed with the user): draw on surfaces + scatter on
-    the drawing with falloff (2), an influence brush per layer (own stamp
+  - Not done (phases agreed with the user): an influence brush per layer (own stamp
     brush; Artisan per-vertex maps tested fine but need dense meshes) (3),
     bundles / variants per layer (palm, jungle foliage, pine cones; the
     user's own meshes as a layer type) (4), group presets (5); converting

@@ -16,6 +16,7 @@ Outputs go to $UNLOK_TEST_OUT (default: tests/_out/scatter).
 """
 
 import json
+import math
 import os
 import time
 import traceback
@@ -23,9 +24,9 @@ import traceback
 import maya.cmds as cmds
 
 try:
-    from PySide2 import QtCore, QtWidgets
+    from PySide2 import QtCore, QtGui, QtWidgets
 except ImportError:
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 
 HERE = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.environ["UNLOK_TEST_DIR"]
 TOOLBOX = os.environ.get("UNLOK_TOOLBOX") or os.path.join(os.path.dirname(HERE), "UnlokToolbox.py")
@@ -48,8 +49,12 @@ def pump(n=5):
 def snap(name, width=1400, height=900):
     path = os.path.join(OUT, name)
     cmds.refresh(force=True)
-    cmds.playblast(frame=[cmds.currentTime(q=True)], format="image", compression="png", completeFilename=path,
-                   viewer=False, showOrnaments=False, percent=100, widthHeight=(width, height), offScreen=True)
+    cmds.undoInfo(stateWithoutFlush=False)  # a playblast mustn't come between the test's edits and its undos
+    try:
+        cmds.playblast(frame=[cmds.currentTime(q=True)], format="image", compression="png", completeFilename=path,
+                       viewer=False, showOrnaments=False, percent=100, widthHeight=(width, height), offScreen=True)
+    finally:
+        cmds.undoInfo(stateWithoutFlush=True)
     return path
 
 
@@ -291,6 +296,106 @@ def main():
         ns["sc_set_layer"](root, lid, on=False)
     cmds.select(clear=True)
     shoot("04_piles_only")
+    drawing(ns, panel, window)
+
+
+def drawing(ns, panel, window):
+    """Draw on Surfaces over a fresh porch (nothing selected), Ctrl+Z a
+    stroke, Scatter on Drawing (moss), add leaves on the same drawing."""
+    cmds.file(new=True, force=True)
+    _SG.clear()  # the new scene has none of the test shaders
+    grp, nodes = porch()
+    shade(list(nodes.values()), "testWood", (0.42, 0.34, 0.25))
+    cmds.select(clear=True)
+    panel._sync_from_selection()
+    look((0, 10, -4), (26, 36, 58))
+
+    def to_screen(p):
+        r = ns["omui"].M3dView.active3dView().worldToView(ns["om"].MPoint(p[0], p[1], p[2]))
+        return r[0], r[1]
+
+    def stroke(pts):
+        xs = [to_screen(p) for p in pts]
+        panel.drawer.press_at(*xs[0])
+        for x, y in xs[1:]:
+            panel.drawer.drag_at(x, y)
+        panel.drawer.release()
+        pump()
+
+    panel.draw_btn.click()
+    pump()
+    check("Draw on Surfaces starts the drawing tool", panel.drawer.is_active() and
+          panel.draw_btn.text() == "Stop Drawing")
+    stroke([(x, 24.6, -8.0) for x in range(-22, 23, 2)])                                        # along the roof
+    stroke([(x, 0.2, 8.0) for x in range(-22, 12, 2)])                                          # across the floor
+    stroke([(8 + 3 * math.sin(y * 0.5), y, -11.9) for y in range(2, 20)])                      # up the wall
+    stroke([(x, 0.2, 14.0) for x in range(-10, 10, 2)])                                         # a mistake
+    n_before = len(panel.drawer.strokes)
+    undo_name = cmds.undoInfo(q=True, undoName=True)
+    ev = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+    QtWidgets.QApplication.sendEvent(ns["maya_main_window"](), ev)
+    pump(10)
+    check("Ctrl+Z while drawing takes the last stroke back (not Maya's undo)",
+          n_before == 4 and len(panel.drawer.strokes) == 3 and cmds.undoInfo(q=True, undoName=True) == undo_name,
+          "%d -> %d strokes" % (n_before, len(panel.drawer.strokes)))
+    meshes = sorted(ns["short_name"](m) for m in panel.drawer.meshes())
+    check("the strokes landed on the meshes under them (floor, wall)", {"floor", "shackWall"} <= set(meshes),
+          str(meshes))
+    window.grab().save(os.path.join(OUT, "05_panel_drawing.png"))
+    snap("05_drawing.png")
+
+    panel.start_type.setCurrentIndex(panel.start_type.findText("Moss"))
+    panel._show_layer()
+    panel.f["Moss"]["coverage"].setValue(0.7)
+    panel.f["Moss"]["draw_width"].setValue(0.4)
+    t0 = time.time()
+    panel.scatter_draw_btn.click()
+    pump()
+    roots = ns["sc_groups"]()
+    root = roots[0] if roots else None
+    data = ns["sc_data"](root) if root else {"layers": []}
+    check("Scatter on Drawing makes a group from the strokes alone",
+          len(roots) == 1 and len(data["layers"]) == 1 and ns["sc_area"](data["layers"][0])[2] == 3 and
+          not panel.drawer.is_active(), "%.2fs | %s" % (time.time() - t0, panel.status.text()))
+    check("its surfaces are the meshes drawn on", sorted(ns["short_name"](n) for n in ns["sc_surfaces"](data)) ==
+          meshes, str(sorted(ns["short_name"](n) for n in ns["sc_surfaces"](data))))
+    check("the Drawing settings show for a drawn layer", not panel.draw_sec["Moss"].isHidden())
+    panel.start_type.setCurrentIndex(panel.start_type.findText("Leaves"))
+    panel._update_states()
+    check("with a group open it adds a layer on the drawing", panel.scatter_draw_btn.text() == "Add Layer on Drawing")
+    panel.scatter_draw_btn.click()
+    pump()
+    data = ns["sc_data"](root)
+    leaves = data["layers"][-1]["id"]
+    check("a leaves layer along the same strokes", len(data["layers"]) == 2 and
+          data["layers"][-1]["type"] == "Leaves" and ns["sc_area"](data["layers"][-1])[2] == 3)
+    panel.f["Leaves"]["leaves"].setValue(40.0)
+    panel.f["Leaves"]["draw_width"].setValue(0.6)
+    panel._queue("Leaves", "leaves")
+    panel._queue("Leaves", "draw_width")
+    panel._apply_pending()
+    check("Width is live", ns["sc_settings"](ns["sc_layer"](ns["sc_data"](root), leaves))["draw_width"] == 0.6)
+    for key, node in ns["sc_parts"](root).items():
+        shade_part(node, key.split("/")[1])
+    cmds.undoInfo(stateWithoutFlush=False)  # a deselect mustn't come between the layer and the Ctrl+Z below
+    cmds.select(clear=True)
+    cmds.undoInfo(stateWithoutFlush=True)
+    window.grab().save(os.path.join(OUT, "06_panel_drawn_layer.png"))
+    look((0, 10, -4), (26, 36, 58))
+    snap("06_drawn_overview.png")
+    look((2, 8, -10), (16, 18, 14))
+    snap("06_drawn_wall.png")
+    look((0, 22, -5), (10, 40, 18))
+    snap("06_drawn_roof.png")
+    panel.clear_drawing()
+    pump()
+    look((0, 10, -4), (26, 36, 58))
+    snap("07_drawing_cleared.png")
+    check("Clear removes the strokes and their lines", not panel.drawer.strokes and
+          not cmds.ls("scatterDrawing*", type="transform"))
+    cmds.undo()
+    panel._after_undo()
+    check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1)
 
 
 def run():

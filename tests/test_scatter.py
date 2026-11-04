@@ -281,8 +281,110 @@ def run():
                                             if cmds.getAttr(n + ".visibility")))
 
 
+def drawing():
+    """Scatter on a drawing: strokes over a dense ground and up a wall, no
+    meshes selected."""
+    tb = load_toolbox()
+    sn = tb["short_name"]
+    cmds.file(new=True, force=True)
+    ground = cmds.ls(cmds.polyPlane(w=400, h=400, sx=150, sy=150, name="ground", constructionHistory=False)[0],
+                     long=True)[0]
+    wall = box("bigWall", (200, 15, 2), (0, 7.5, -31))
+    box("farBox", (10, 10, 10), (150, 5, 150))
+    gshape = tb["_log_shape"](ground)
+    wshape = tb["_log_shape"](wall)
+    line = [((x, 0.0, 0.0), gshape) for x in range(-100, 101, 2)]
+    up = [((20.0, y * 0.5, -30.0), wshape) for y in range(1, 26)]
+
+    def leaf_points(root, lid, part="litter"):
+        node = tb["sc_parts"](root).get(lid + "/" + part)
+        return points(tb, node) if node and cmds.getAttr(node + ".visibility") else []
+
+    cmds.select(clear=True)
+    t0 = time.time()
+    rep = tb["create_scatter_group"]([], "Leaves", {"leaves": 30.0, "coverage": 0.8, "draw_width": 0.5,
+                                                    "draw_falloff": 0.5, "draw_follow": 0.0}, drawing=[line])
+    dt = time.time() - t0
+    root = rep["root"]
+    data = tb["sc_data"](root)
+    lid = data["layers"][0]["id"]
+    check("a drawing makes a group on the meshes under it, nothing selected",
+          [sn(n) for n in tb["sc_surfaces"](data)] == ["ground"] and tb["sc_area"](data["layers"][0])[2] == 1,
+          str([sn(n) for n in tb["sc_surfaces"](data)]))
+    pts = leaf_points(root, lid)
+    off = [p for p in pts if abs(p[2]) > 6.0 or abs(p[0]) > 106.0]
+    check("leaves only along the drawing (Width 0.5 m)", pts and len(off) <= 0.005 * len(pts),
+          "%d of %d off it" % (len(off), len(pts)))
+    check("they fill it", rep["leaves"] > 150, "%d leaves" % rep["leaves"])
+    inner = sum(1 for p in pts if abs(p[2]) < 1.5) / 1.5
+    outer = sum(1 for p in pts if 3.5 < abs(p[2]) < 5.0) / 1.5
+    check("Falloff thins it out towards the edge", inner > 1.5 * max(1.0, outer), "%.0f vs %.0f" % (inner, outer))
+    draw = tb["_MiDrawing"]([[p for p, _ in line]], 5.0, 0.5, 0.0, [ground])
+    nf = cmds.polyEvaluate(ground, face=True)
+    check("only the faces under the drawing are analysed", 0 < len(draw.faces.get(ground, ())) < 0.1 * nf,
+          "%d of %d faces" % (len(draw.faces.get(ground, ())), nf))
+    check("a drawing over a dense mesh grows fast", dt < 6.0, "%.2fs" % dt)
+
+    tb["sc_update"](root, lid, {"draw_width": 1.0})
+    pts = leaf_points(root, lid)
+    check("a wider Width reaches further (live)", max(abs(p[2]) for p in pts) > 7.0,
+          "%.1f" % max(abs(p[2]) for p in pts))
+    tb["sc_update"](root, lid, {"draw_width": 0.5, "draw_falloff": 0.0})
+    pts = leaf_points(root, lid)
+    inner = sum(1 for p in pts if abs(p[2]) < 1.5) / 1.5
+    outer = sum(1 for p in pts if 3.0 < abs(p[2]) < 4.5) / 1.5
+    check("Falloff 0 is even out to a hard edge", outer > 0.6 * inner, "%.0f vs %.0f" % (inner, outer))
+
+    cmds.move(50, 0, 0, ground, relative=True)
+    tb["sc_regrow"](root)
+    pts = leaf_points(root, lid)
+    check("the drawing follows its mesh", pts and min(p[0] for p in pts) > -56.0 and max(p[0] for p in pts) > 145.0,
+          "x %.1f..%.1f" % (min(p[0] for p in pts), max(p[0] for p in pts)))
+    cmds.move(-50, 0, 0, ground, relative=True)
+    tb["sc_regrow"](root)
+
+    # --- a stroke up a wall: leaves stay at its foot, moss climbs it; the wall joins the surfaces
+    rep, wl = tb["sc_add_layer"](root, "Leaves", {"leaves": 30.0, "coverage": 0.9, "draw_follow": 0.0},
+                                 drawing=[up])
+    check("a mesh drawn on joins the surfaces (same Ctrl+Z)",
+          sorted(sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))) == ["bigWall", "ground"])
+    high = [p for p in leaf_points(root, wl) if p[1] > 2.0]
+    check("leaves don't climb a wall drawn on (Slope limit)", not high, "%d up the wall" % len(high))
+    rep, ml = tb["sc_add_layer"](root, "Moss", {"coverage": 0.8, "draw_follow": 0.0, "strands": 0.0,
+                                                "capsules": 0.0}, drawing=[up])
+    mpts = leaf_points(root, ml, "moss")
+    check("moss grows up the wall along the stroke", mpts and max(p[1] for p in mpts) > 9.0 and
+          all(abs(p[0] - 20.0) < 7.0 for p in mpts), "top %.1f" % (max(p[1] for p in mpts) if mpts else 0))
+    cmds.undo()
+    tb["sc_sync"]()
+    check("one Ctrl+Z takes the drawn moss layer away", len(tb["sc_data"](root)["layers"]) == 2)
+
+    # --- Use Drawing / Clear Area
+    other = [((x, 0.0, 60.0), gshape) for x in range(-40, 41, 2)]
+    tb["sc_set_layer"](root, lid, drawing=[other, line])
+    check("Use Drawing gives a layer new strokes", tb["sc_area"](tb["sc_layer"](tb["sc_data"](root), lid))[2] == 2 and
+          any(p[2] > 54.0 for p in leaf_points(root, lid)))
+    cmds.undo()
+    tb["sc_sync"]()
+    check("one Ctrl+Z puts the old drawing back",
+          tb["sc_area"](tb["sc_layer"](tb["sc_data"](root), lid))[2] == 1 and
+          not any(p[2] > 54.0 for p in leaf_points(root, lid)))
+    rep, cp = tb["sc_add_layer"](root, None, copy_of=lid)
+    check("Duplicate keeps the drawing", tb["sc_area"](tb["sc_layer"](tb["sc_data"](root), cp))[2] == 1)
+    tb["sc_set_layer"](root, cp, area=([], {}), drawing=[])
+    pts = leaf_points(root, cp)
+    check("Clear Area lets it grow everywhere again", pts and max(abs(p[2]) for p in pts) > 50.0)
+
+    # --- ivy: vines start along the drawing
+    cmds.select(clear=True)
+    foot = [((x, 0.0, -29.5), gshape) for x in range(-60, 61, 4)]
+    rep = tb["create_scatter_group"]([wall], "Ivy", {"vines": 4, "length": 1.0}, drawing=[foot])
+    check("ivy on a drawing starts its vines along it", rep["vines"] >= 4, "%d vines (branches too)" % rep["vines"])
+
+
 try:
     run()
+    drawing()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

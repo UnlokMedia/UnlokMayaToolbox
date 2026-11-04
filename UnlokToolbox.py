@@ -27577,12 +27577,28 @@ def _mi_triangles(node):
 
 
 class _MiSampler(object):
-    """Area-weighted random points over several meshes."""
+    """Area-weighted random points over several meshes (faces: only those
+    faces {mesh: face ids}, so a picked area or a drawing is sampled as
+    densely as a whole mesh would be; key tells the caches apart)."""
 
-    def __init__(self, nodes):
+    def __init__(self, nodes, faces=None):
         self.parts, self.total = [], 0.0
+        self.key = None if faces is None else tuple(sorted((n, len(v), hash(frozenset(v)))
+                                                           for n, v in faces.items()))
         for node in nodes:
             acc, tris = _mi_triangles(node)
+            if faces is not None:
+                keep = faces.get(node)
+                if not keep:
+                    continue
+                kt, ka, run, prev = [], [], 0.0, 0.0
+                for t, a in zip(tris, acc):
+                    if t[4] in keep:
+                        run += a - prev
+                        kt.append(t)
+                        ka.append(run)
+                    prev = a
+                tris, acc = kt, ka
             if tris:
                 self.parts.append((self.total, acc, tris, node))
                 self.total += acc[-1]
@@ -27603,6 +27619,182 @@ class _MiSampler(object):
             r1, r2 = 1.0 - r1, 1.0 - r2
         return (a[0] + (b[0] - a[0]) * r1 + (c[0] - a[0]) * r2, a[1] + (b[1] - a[1]) * r1 + (c[1] - a[1]) * r2,
                 a[2] + (b[2] - a[2]) * r1 + (c[2] - a[2]) * r2), n, node, f
+
+
+_MI_DRAW_MASKS = collections.OrderedDict()  # (meshes, drawing, width) -> faces within reach
+
+
+def _mi_tri_dist2(p, a, b, c):
+    """Squared distance from p to the triangle abc (closest point by region)."""
+    ab, ac, ap = _rl_sub(b, a), _rl_sub(c, a), _rl_sub(p, a)
+    d1, d2 = _rl_dot(ab, ap), _rl_dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        q = a
+    else:
+        bp = _rl_sub(p, b)
+        d3, d4 = _rl_dot(ab, bp), _rl_dot(ac, bp)
+        cp = _rl_sub(p, c)
+        d5, d6 = _rl_dot(ab, cp), _rl_dot(ac, cp)
+        vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+        if d3 >= 0.0 and d4 <= d3:
+            q = b
+        elif d6 >= 0.0 and d5 <= d6:
+            q = c
+        elif vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+            q = _rl_add(a, _rl_mul(ab, d1 / (d1 - d3)))
+        elif vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+            q = _rl_add(a, _rl_mul(ac, d2 / (d2 - d6)))
+        elif va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+            q = _rl_add(b, _rl_mul(_rl_sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))))
+        else:
+            den = 1.0 / (va + vb + vc)
+            q = _rl_add(a, _rl_add(_rl_mul(ab, vb * den), _rl_mul(ac, vc * den)))
+    d = _rl_sub(p, q)
+    return _rl_dot(d, d)
+
+
+class _MiDrawing(object):
+    """Where a drawn layer goes: strokes over the surfaces (world polylines),
+    out to Width from them, the outer Falloff part fading out; Follow is how
+    much the surface's own score still shapes it. faces: the faces within
+    Width of a stroke on the given meshes (the only ones sampled, so a
+    drawing over a detailed shack only analyses what's under it)."""
+
+    def __init__(self, strokes, width, falloff, follow, nodes):
+        self.width = max(1e-4, float(width))
+        self.falloff = clamp(float(falloff), 0.0, 1.0)
+        self.follow = clamp(float(follow), 0.0, 1.0)
+        self.strokes = [list(st) for st in strokes if st]
+        total = sum(_rl_len(_rl_sub(b, a)) for st in self.strokes for a, b in zip(st, st[1:]))
+        step = max(self.width / 6.0, total / 20000.0, 1e-6)
+        pts = []
+        for st in self.strokes:
+            pts.append(tuple(st[0]))
+            for a, b in zip(st, st[1:]):
+                n = int(_rl_len(_rl_sub(b, a)) / step)
+                for k in range(1, n + 1):
+                    pts.append(_rl_lerp(a, b, k / float(n + 1)) if k <= n else tuple(b))
+                pts.append(tuple(b))
+        self.pts = pts
+        self.cell = self.width
+        self.grid = {}
+        for p in pts:
+            self.grid.setdefault(self._key(p), []).append(p)
+        self.key = (len(pts), round(self.width, 9), hash(tuple((round(p[0], 4), round(p[1], 4), round(p[2], 4))
+                                                              for p in pts[::7])))
+        self.faces = self._mask(nodes) if pts else {}
+
+    def _key(self, p):
+        c = self.cell
+        return int(math.floor(p[0] / c)), int(math.floor(p[1] / c)), int(math.floor(p[2] / c))
+
+    def dist(self, p, reach=None):
+        """Distance from p to the nearest stroke point (looked for out to
+        reach, default Width; farther: a big number)."""
+        reach = self.width if reach is None else reach
+        r = int(math.ceil(reach / self.cell))
+        kx, ky, kz = self._key(p)
+        best = reach * reach * 4.0 + 1.0
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    for q in self.grid.get((kx + dx, ky + dy, kz + dz), ()):
+                        e0, e1, e2 = p[0] - q[0], p[1] - q[1], p[2] - q[2]
+                        d = e0 * e0 + e1 * e1 + e2 * e2
+                        if d < best:
+                            best = d
+        return math.sqrt(best)
+
+    def prof(self, p):
+        """1 on the strokes (and out to Width x (1 - Falloff)), easing to 0 at Width."""
+        d = self.dist(p)
+        core = self.width * (1.0 - self.falloff)
+        if d <= core:
+            return 1.0
+        if d >= self.width:
+            return 0.0
+        t = (d - core) / max(1e-9, self.width - core)
+        return 1.0 - t * t * (3.0 - 2.0 * t)
+
+    def spread(self, count):
+        """count points spread evenly along the strokes (ivy: where vines start)."""
+        segs = [(a, b, _rl_len(_rl_sub(b, a))) for st in self.strokes for a, b in zip(st, st[1:])]
+        total = sum(L for _, _, L in segs)
+        if count <= 0 or not self.strokes:
+            return []
+        if total <= 0.0:
+            return [tuple(st[0]) for st in self.strokes][:count]
+        out, acc, k = [], 0.0, 0
+        for i in range(count):
+            want = (i + 0.5) / count * total
+            while k < len(segs) - 1 and acc + segs[k][2] < want:
+                acc += segs[k][2]
+                k += 1
+            a, b, L = segs[k]
+            out.append(_rl_lerp(a, b, clamp((want - acc) / max(L, 1e-9), 0.0, 1.0)))
+        return out
+
+    def _mask(self, nodes):
+        key = (tuple(_mi_mesh_key(x) for x in nodes), self.key)
+        hit = _MI_DRAW_MASKS.get(key)
+        if hit is not None:
+            return hit
+        w = self.width
+        lo = [min(p[k] for p in self.pts) - w for k in range(3)]
+        hi = [max(p[k] for p in self.pts) + w for k in range(3)]
+        out = {}
+        for node in nodes:
+            bb = _mi_world_box(node)
+            if bb is not None and any(bb[k] > hi[k] or bb[k + 3] < lo[k] for k in range(3)):
+                continue  # nowhere near the drawing: its triangles aren't looked at
+            keep = set()
+            for a, b, c, n, f in _mi_triangles(node)[1]:
+                if f in keep:
+                    continue
+                if (max(a[0], b[0], c[0]) < lo[0] or min(a[0], b[0], c[0]) > hi[0] or
+                        max(a[1], b[1], c[1]) < lo[1] or min(a[1], b[1], c[1]) > hi[1] or
+                        max(a[2], b[2], c[2]) < lo[2] or min(a[2], b[2], c[2]) > hi[2]):
+                    continue
+                g = ((a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0)
+                rad = max(_rl_len(_rl_sub(a, g)), _rl_len(_rl_sub(b, g)), _rl_len(_rl_sub(c, g)))
+                if rad <= 2.0 * w:  # small: the nearest stroke point to its middle, within Width + its size
+                    if self.dist(g, w + rad) <= w + rad:
+                        keep.add(f)
+                    continue
+                tlo = [min(a[k], b[k], c[k]) - w for k in range(3)]  # big (a wall in two triangles): exact
+                thi = [max(a[k], b[k], c[k]) + w for k in range(3)]
+                w2 = w * w
+                for q in self.pts:
+                    if (tlo[0] <= q[0] <= thi[0] and tlo[1] <= q[1] <= thi[1] and tlo[2] <= q[2] <= thi[2] and
+                            _mi_tri_dist2(q, a, b, c) <= w2):
+                        keep.add(f)
+                        break
+            if keep:
+                out[node] = keep
+        _MI_DRAW_MASKS[key] = out
+        while len(_MI_DRAW_MASKS) > 8:
+            _MI_DRAW_MASKS.popitem(last=False)
+        return out
+
+
+def _mi_world_box(node):
+    """A mesh's world bounding box [x0, y0, z0, x1, y1, z1], or None."""
+    shape = _log_shape(node) if cmds.objectType(node, isAType="transform") else node
+    dag = get_dag_path(shape) if shape else None
+    if dag is None:
+        return None
+    bb = om.MFnDagNode(dag).boundingBox
+    bb.transformUsing(dag.inclusiveMatrix())
+    return [bb.min.x, bb.min.y, bb.min.z, bb.max.x, bb.max.y, bb.max.z]
+
+
+def _mi_mask_and(a, b):
+    """Two face masks ({mesh: face ids}, None = every face) together."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return {n: a[n] & b[n] for n in a if n in b and a[n] & b[n]}
 
 
 def _mi_frame(n, ang=0.0):
@@ -27632,7 +27824,8 @@ def _moss_spots(surf, sampler, s, R):
     coverage, slope, crevices and the other weights only re-score them."""
     seed = int(s["seed"])
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
-    key = (tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9), round(float(s["patch_size"]), 6), detail)
+    key = (tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9), round(float(s["patch_size"]), 6), detail,
+           sampler.key)
     hit = _MI_MOSS_CACHE.get(key)
     if hit is not None:
         return hit
@@ -27725,7 +27918,7 @@ def _moss_field(surf, sampler, s, R):
     RA = _moss_reach(R)
     spots = _moss_spots(surf, sampler, s, RA)
     key = ("field", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
-           round(float(s["patch_size"]), 6), detail)
+           round(float(s["patch_size"]), 6), detail, sampler.key)
     hit = _MI_MOSS_CACHE.get(key)
     if hit is not None:
         return spots, hit
@@ -27836,7 +28029,7 @@ def _mi_gather(surf, sampler, s, R, cands):
     seed = int(s["seed"])
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
     key = ("gather", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
-           round(float(s["patch_size"]), 6), detail)
+           round(float(s["patch_size"]), 6), detail, sampler.key)
     hit = _MI_MOSS_CACHE.get(key)
     if hit is not None:
         return hit
@@ -27953,12 +28146,14 @@ def _mi_gather_near(grid, rad, cands, p):
     return best
 
 
-def _moss_margins(surf, sampler, s, seeds=None, faces=None):
+def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     """(spots, candidates, rows): where each candidate sits in the coverage
     field, rows[i] = (margin, shelter, edge), None when a picked-faces mask
     leaves it out. margin > 0 is inside a patch (more = further in): the
     analysed spots' scores round it, plus fine noise for a ragged edge, less
-    1 - Coverage. Seeds (picked points) lead with nearness, out to Spread.
+    1 - Coverage. Seeds (picked points) lead with nearness, out to Spread;
+    a drawing (_MiDrawing) leads with its profile (full on the strokes, none
+    past Width), the score counting by its Follow.
     Creases add where things collect (gutters, corners, the foot of walls),
     only where it faces up."""
     m = scene_m_per_unit()
@@ -27986,7 +28181,9 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None):
             occ += spots[j][3] * w
             edge += spots[j][4] * w
         margin = sc / tw + rag * fine - thr
-        if seeds:  # nearness to a picked point leads; the spot's own score still shapes the clump
+        if draw is not None:
+            margin = 0.5 + draw.follow * (sc / tw - 0.5) + rag * fine - thr + draw.prof(p) - 0.5
+        elif seeds:  # nearness to a picked point leads; the spot's own score still shapes the clump
             kx, ky, kz = int(math.floor(p[0] / spread)), int(math.floor(p[1] / spread)), int(math.floor(p[2] / spread))
             d = min([_rl_len(_rl_sub(p, q)) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                      for q in sgrid.get((kx + dx, ky + dy, kz + dz), ())] or [spread * 2.0])
@@ -28911,7 +29108,7 @@ class _MossDetail(object):
             uvi.extend((top_i, a2 + j, a2 + j1))
 
 
-def moss_build(nodes, s, surf=None, seeds=None, faces=None):
+def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     """Grow a moss patch on meshes: {"moss": the bed, "strands": shoots and
     hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
     space). Detail sets how fine the bed is and what stands out of it."""
@@ -28920,10 +29117,12 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None):
     empty = {"moss": _mi_mesh(), "strands": _mi_mesh(), "capsules": _mi_mesh(), "clumps": 0, "capped": False}
     if not surf.items or float(s["coverage"]) <= 0.0:
         return empty
-    sampler = _MiSampler(surf.nodes)
+    if draw is not None:
+        faces = _mi_mask_and(faces, draw.faces)
+    sampler = _MiSampler(surf.nodes, faces)
     if not sampler.total:
         return empty
-    spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces)
+    spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces, draw)
     bed = _MossBed(surf, s, cands, rows, faces).build()
     det = _MossDetail(bed, s).build()
     return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C),
@@ -29366,7 +29565,7 @@ def ivy_leaf_mesh(surf, vines, X_list, s, rows):
     return tuple(M), leaves, capped
 
 
-def ivy_build(nodes, s, seeds=None, surf=None):
+def ivy_build(nodes, s, seeds=None, surf=None, draw=None):
     """Grow ivy on meshes from seeds (world points; none: Vines automatic
     seeds at the bottom of the meshes): {"stems": mesh, "leaves": mesh,
     "vines", "leaves_n", "capped"} (world space)."""
@@ -29376,6 +29575,8 @@ def ivy_build(nodes, s, seeds=None, surf=None):
     empty = {"stems": _mi_mesh(), "leaves": _mi_mesh(), "vines": 0, "leaves_n": 0, "capped": False}
     if not surf.items:
         return empty
+    if not seeds and draw is not None:  # a drawing: Vines spread along the strokes
+        seeds = draw.spread(max(1, int(s["vines"])))
     if not seeds:
         sampler = _MiSampler(surf.nodes)
         seeds = _ivy_auto_seeds(surf, sampler, max(1, int(s["vines"])), int(s["seed"]),
@@ -29420,7 +29621,7 @@ def _debris_field(s):
 class _DebrisBuild(object):
     """Grass, leaves, piles and tufts on the meshes (world space)."""
 
-    def __init__(self, surf, sampler, s, seeds=None, faces=None):
+    def __init__(self, surf, sampler, s, seeds=None, faces=None, draw=None):
         m = scene_m_per_unit()
         self.m = m
         self.surf = surf
@@ -29439,7 +29640,7 @@ class _DebrisBuild(object):
         self.capped = False
         fs = _debris_field(s)
         self.R = DEBRIS_FIELD_R / m
-        _, self.cands, self.rows = _moss_margins(surf, sampler, fs, seeds, faces)
+        _, self.cands, self.rows = _moss_margins(surf, sampler, fs, seeds, faces, draw)
         self.creases = clamp(float(s["creases"]), 0.0, 2.0)
         self.gat, self.ggrid, self.gcell = _mi_gather(surf, sampler, fs, self.R, self.cands) if self.creases else \
             (None, {}, 1.0)
@@ -29945,7 +30146,7 @@ class _DebrisBuild(object):
                 uvi.extend(quad)
 
 
-def debris_build(nodes, s, surf=None, seeds=None, faces=None):
+def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
     leaves (scattered and in piles), "tufts": tiny moss cushions,
     "bunches", "leaves_n", "piles", "tufts_n", "capped"} (world space)."""
@@ -29955,10 +30156,12 @@ def debris_build(nodes, s, surf=None, seeds=None, faces=None):
              "piles": 0, "tufts_n": 0, "capped": False}
     if not surf.items or float(s["coverage"]) <= 0.0:
         return empty
-    sampler = _MiSampler(surf.nodes)
+    if draw is not None:
+        faces = _mi_mask_and(faces, draw.faces)
+    sampler = _MiSampler(surf.nodes, faces)
     if not sampler.total:
         return empty
-    b = _DebrisBuild(surf, sampler, s, seeds, faces).build()
+    b = _DebrisBuild(surf, sampler, s, seeds, faces, draw).build()
     return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "bunches": b.counts["bunches"],
             "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
             "capped": b.capped}
@@ -30438,6 +30641,10 @@ def mi_preset(kind, name):
 # (keeping its material) and Bake removes it. Structure (layers, surfaces, areas, toggles) is undoable JSON;
 # geometry is built through the API outside the undo queue and rebuilt whenever the JSON and what was built
 # differ (after an undo / redo).
+# Drawing (the user: "click draw on any surface and then draw a curve / line over surfaces (undoable as you
+# go), then hit 'scatter on drawing' ... control falloff"): a layer may hold strokes (points local to the mesh
+# each was drawn on, so they follow it); the layer then goes Width round them, fading over Falloff, and only
+# the faces within reach are analysed (_MiDrawing).
 
 SC_ATTR = "unlokScatter"           # string on the group: JSON (surfaces, udim, layers)
 SC_BAKED = "unlokScatterBaked"     # the same after Bake
@@ -30467,6 +30674,8 @@ SC_TYPES = collections.OrderedDict([
 SC_DEBRIS_ITEMS = {"Grass": "grass", "Leaves": "leaves", "Leaf piles": "piles", "Moss tufts": "tufts"}
 SC_DEBRIS_OUT = {"Grass": ("grass", "grass"), "Leaves": ("litter", "litter"), "Leaf piles": ("litter", "piles"),
                  "Moss tufts": ("tufts", "tufts")}  # debris_build's mesh -> the layer's part
+SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
+SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
 _SC_LAST = {}   # group -> (JSON, stamp) it was last built from
 _SC_WROTE = {}  # (group, layer id / part) -> what was last written (mesh identity, tiles)
@@ -30482,6 +30691,7 @@ def sc_defaults(typ):
     base = MOSS_DEFAULTS if typ == "Moss" else (IVY_DEFAULTS if typ == "Ivy" else DEBRIS_DEFAULTS)
     out = {k: base[k] for k in SC_TYPES[typ]["keys"]}
     out.update(SC_TYPES[typ]["over"])
+    out.update(SC_DRAW_DEFAULTS)
     return out
 
 
@@ -30507,7 +30717,71 @@ def _sc_new_layer(data, typ, settings=None, name=None):
     s = sc_defaults(typ)
     s.update({k2: v for k2, v in (settings or {}).items() if k2 in s})
     return {"id": "L%d" % n, "type": typ, "tag": tag, "on": True, "s": s,
-            "name": name or (typ + (" " + tag if tag else "")), "seeds": [], "faces": {}}
+            "name": name or (typ + (" " + tag if tag else "")), "seeds": [], "faces": {}, "draw": {}}
+
+
+def sc_store_drawing(strokes):
+    """Strokes [[(world point, mesh it was drawn on), ...], ...] as a layer's
+    "draw": {"t": [mesh uuids], "k": [[[mesh index, local x, y, z], ...]]}
+    (local to the mesh, so the drawing follows it; points on no mesh, or a
+    deleted one, are dropped; thinned evenly past SC_DRAW_MAX_POINTS)."""
+    total = sum(len(st) for st in strokes or ())
+    every = max(1, int(math.ceil(total / float(SC_DRAW_MAX_POINTS))))
+    uids, index, mats, out = [], {}, {}, []
+    for st in strokes or ():
+        pts = [q for q in st if q[1]]
+        if every > 1:
+            pts = pts[::every] + ([pts[-1]] if pts and (len(pts) - 1) % every else [])
+        row = []
+        for p, mesh in pts:
+            node = mesh
+            if cmds.objExists(node) and cmds.objectType(node, isAType="shape"):
+                node = cmds.listRelatives(node, parent=True, fullPath=True)[0]
+            if node not in mats:
+                dag = get_dag_path(node) if cmds.objExists(node) else None
+                mats[node] = dag.inclusiveMatrixInverse() if dag is not None else None
+                if dag is not None:
+                    index[node] = len(uids)
+                    uids.append(cmds.ls(node, uuid=True)[0])
+            if mats[node] is None:
+                continue
+            lp = om.MPoint(p[0], p[1], p[2]) * mats[node]
+            row.append([index[node], round(lp.x, 5), round(lp.y, 5), round(lp.z, 5)])
+        if row:
+            out.append(row)
+    return {"t": uids, "k": out} if out else {}
+
+
+def sc_drawing(layer):
+    """A layer's strokes in world space now ([[point, ...], ...])."""
+    draw = layer.get("draw") or {}
+    mats = []
+    for uid in draw.get("t") or []:
+        found = cmds.ls(uid, long=True) or []
+        mats.append(get_dag_path(found[0]).inclusiveMatrix() if found else None)
+    out = []
+    for row in draw.get("k") or []:
+        st = []
+        for ti, x, y, z in row:
+            if 0 <= ti < len(mats) and mats[ti] is not None:
+                w = om.MPoint(x, y, z) * mats[ti]
+                st.append((w.x, w.y, w.z))
+        if st:
+            out.append(st)
+    return out
+
+
+def sc_drawing_meshes(strokes):
+    """The meshes (transforms) a drawing's strokes were drawn on."""
+    out = []
+    for st in strokes or ():
+        for _, mesh in st:
+            if mesh and cmds.objExists(mesh):
+                node = cmds.listRelatives(mesh, parent=True, fullPath=True)[0] if \
+                    cmds.objectType(mesh, isAType="shape") else long_name(mesh)
+                if node not in out:
+                    out.append(node)
+    return out
 
 
 # --------------------------------------------------------------- build
@@ -30548,17 +30822,20 @@ def _sc_build_layer(layer, surf):
     s = sc_settings(layer)
     seeds = mi_seed_points(layer) or None
     faces = mi_face_mask(layer)
+    strokes = sc_drawing(layer)
+    draw = _MiDrawing(strokes, float(s["draw_width"]) / scene_m_per_unit(), s["draw_falloff"], s["draw_follow"],
+                      surf.nodes) if strokes else None
     counts = {}
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
         ms.update(s)
-        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces)
+        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw)
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["clumps"] = out.get("clumps", 0)
     elif typ == "Ivy":
         ivs = dict(IVY_DEFAULTS)
         ivs.update(s)
-        out = ivy_build(surf.nodes, ivs, seeds, surf=surf)
+        out = ivy_build(surf.nodes, ivs, seeds, surf=surf, draw=draw)
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["vines"], counts["leaves"] = out.get("vines", 0), out.get("leaves_n", 0)
     else:
@@ -30567,7 +30844,7 @@ def _sc_build_layer(layer, surf):
         for t2, key in SC_DEBRIS_ITEMS.items():
             if t2 != typ:
                 ds[key] = 0.0
-        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces)
+        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw)
         src, part = SC_DEBRIS_OUT[typ]
         parts = {part: out.get(src)}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
@@ -30728,8 +31005,9 @@ def sc_surfaces(data):
 
 
 def sc_area(layer):
-    """(picked points, picked face count) of a layer."""
-    return len(layer.get("seeds") or []), sum(len(v) for v in (layer.get("faces") or {}).values())
+    """(picked points, picked face count, strokes drawn) of a layer."""
+    return (len(layer.get("seeds") or []), sum(len(v) for v in (layer.get("faces") or {}).values()),
+            len((layer.get("draw") or {}).get("k") or []))
 
 
 # --------------------------------------------------------------- scene
@@ -30842,10 +31120,13 @@ def sc_sync():
     return done
 
 
-def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None, faces=None, select=True):
+def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None, faces=None, select=True,
+                         drawing=None):
     """A new scatter group on meshes / groups with one layer (one Ctrl+Z):
     scatteredObjects####_GRP, its box, and the layer's parts. points /
-    faces: the layer's area. Returns the report (with "root")."""
+    faces: the layer's area; drawing: strokes it goes along (their meshes
+    are surfaces too). Returns the report (with "root")."""
+    surfaces = list(surfaces or ()) + sc_drawing_meshes(drawing)
     nodes = []
     for s in surfaces or ():
         if s and cmds.objExists(s) and not sc_owner(s)[0] and not _mi_part_of(s):
@@ -30860,6 +31141,7 @@ def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None
     meshes = sc_surfaces(data)
     layer["seeds"] = _mi_store_seeds(list(points or [])[:MI_MAX_SEEDS], meshes)
     layer["faces"] = _mi_store_faces(faces) if layer["type"] != "Ivy" else {}
+    layer["draw"] = sc_store_drawing(drawing)
     data["layers"].append(layer)
     with UndoChunk("New scatter group"):
         num = _th_free_number(SC_STEM + "%04d_GRP")
@@ -30899,9 +31181,11 @@ def _sc_change(root, label, fn):
     return sc_regrow(root)
 
 
-def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None):
+def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None, drawing=None):
     """Add a layer (one Ctrl+Z): a type's defaults (or settings), or a copy
-    of another layer (copy_of: its id; a new seed). Returns (report, id)."""
+    of another layer (copy_of: its id; a new seed); drawing: strokes it goes
+    along (meshes they're on that the group doesn't scatter onto yet are
+    added). Returns (report, id)."""
     made = []
 
     def edit(data):
@@ -30911,12 +31195,16 @@ def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_
                                   name=src.get("name", src["type"]) + " copy")
             layer["s"]["seed"] = int(layer["s"].get("seed", 1)) + 1
             layer["seeds"], layer["faces"] = list(src.get("seeds") or []), dict(src.get("faces") or {})
+            layer["draw"] = json.loads(json.dumps(src.get("draw") or {}))
         else:
             layer = _sc_new_layer(data, layer_type, settings)
             if points:
                 layer["seeds"] = _mi_store_seeds(list(points)[:MI_MAX_SEEDS], sc_surfaces(data))
             if faces and layer["type"] != "Ivy":
                 layer["faces"] = _mi_store_faces(faces)
+            if drawing:
+                _sc_add_drawn_surfaces(data, drawing)
+                layer["draw"] = sc_store_drawing(drawing)
         data["layers"].append(layer)
         made.append(layer["id"])
     rep = _sc_change(root, "Add scatter layer", edit)
@@ -30931,8 +31219,17 @@ def sc_remove_layer(root, lid):
     return _sc_change(root, "Remove scatter layer", edit)
 
 
-def sc_set_layer(root, lid, on=None, name=None, area=None):
-    """Turn a layer on / off, rename it, or set its area (points, faces) (one Ctrl+Z)."""
+def _sc_add_drawn_surfaces(data, drawing):
+    """Meshes a drawing is on that the group doesn't scatter onto yet join its surfaces."""
+    have = set(sc_surfaces(data))
+    for node in sc_drawing_meshes(drawing):
+        if node not in have and not sc_owner(node)[0] and not _mi_part_of(node):
+            data["surfaces"].append(cmds.ls(node, uuid=True)[0])
+
+
+def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None):
+    """Turn a layer on / off, rename it, set its area (points, faces) or its
+    drawing (strokes; [] clears it) (one Ctrl+Z)."""
     def edit(data):
         layer = sc_layer(data, lid)
         if layer is None:
@@ -30946,6 +31243,10 @@ def sc_set_layer(root, lid, on=None, name=None, area=None):
             meshes = sc_surfaces(data)
             layer["seeds"] = _mi_store_seeds(list(points or [])[:MI_MAX_SEEDS], meshes)
             layer["faces"] = _mi_store_faces(faces) if layer["type"] != "Ivy" else {}
+        if drawing is not None:
+            if drawing:
+                _sc_add_drawn_surfaces(data, drawing)
+            layer["draw"] = sc_store_drawing(drawing)
     return _sc_change(root, "Scatter layer", edit)
 
 
@@ -31191,7 +31492,16 @@ SC_FIELDS = {
     "stem_width": ("Stem width", _scf(0.001, 0.3, 0.002, 0.05, 3, 0.001), "Stem diameter at the base, in metres."),
     "leaf_var": ("Leaf variation", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "How much leaves differ in size."),
     "stem_tiles": ("Stem tiles", lambda: IntField(1, 16, 1, 8), "UDIM tiles the stems are laid out in."),
+    "draw_width": ("Width", _scf(0.005, 50.0, 0.02, 2.0, 3, 0.01),
+                   "How far from the drawn strokes it goes, in metres."),
+    "draw_falloff": ("Falloff", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                     "How much of the Width fades out (0 = a hard edge, 1 = thinning out from the stroke)."),
+    "draw_follow": ("Follow surface", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "How much the surface still decides inside the drawing (slope, crevices, patchiness): 0 = "
+                    "evenly along the strokes, 1 = only where it would grow anyway. Grass and leaves never go "
+                    "past their Slope limit."),
 }
+_SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
     "Moss": [("", True, ["coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands", "capsules"]),
@@ -31217,6 +31527,192 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
     "Ivy": [("", True, ["vines", "length", "climb", "wander", "branching", "leaf_size", "leaf_density"]),
             ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
+for _t in SC_LAYOUT:
+    SC_LAYOUT[_t].insert(1, _SC_DRAWING)  # shown when the layer has a drawing
+
+
+
+
+SC_DRAW_CTX = "unlokScatterDrawCtx"
+
+
+class ScatterDrawer(SurfacePathDrawer):
+    """Draw on Surfaces (the Scatter panel): drag over any visible mesh (not
+    a scatter group's own) to draw a stroke on it; a stroke may run across
+    many meshes, a click is a single spot. Strokes stay as orange lines
+    (outside the undo queue, never saved) until cleared, so several layers
+    can go on one drawing. While drawing, Ctrl+Z / Backspace / Delete takes
+    the last stroke back (Maya's undo never sees it), Ctrl+Y / Ctrl+Shift+Z
+    puts it back, Enter or Esc stops drawing (the strokes stay)."""
+
+    def __init__(self, on_change=None):
+        super(ScatterDrawer, self).__init__(on_stroke=lambda *a: None, get_smoothing=lambda: 0,
+                                            exclude_roots=lambda: sc_groups())
+        self.on_change = on_change
+        self.strokes = []   # [[(world point, mesh shape path), ...], ...]
+        self.curves = []    # the line showing each stroke
+        self.undone = []    # (stroke, ) taken back, newest last: what Ctrl+Y puts back
+        self._filter = None
+
+    # ---------------------------------------------------------- tool
+    def activate(self, surfaces=None):
+        if cmds.draggerContext(SC_DRAW_CTX, exists=True):
+            cmds.deleteUI(SC_DRAW_CTX)
+        cmds.draggerContext(SC_DRAW_CTX, pressCommand=self._press, dragCommand=self._drag,
+                            releaseCommand=self._release, finalize=self._finalize, space="screen",
+                            cursor="crossHair", undoMode="step")
+        cmds.setToolTo(SC_DRAW_CTX)
+        self._ensure_preview()
+        if self._filter is None:
+            self._filter = _ThatchPickKeys(self)
+            QtWidgets.QApplication.instance().installEventFilter(self._filter)
+        self._changed()
+
+    @staticmethod
+    def is_active():
+        try:
+            return cmds.currentCtx() == SC_DRAW_CTX
+        except RuntimeError:
+            return False
+
+    def deactivate(self):
+        self._stop_keys()
+        if self.is_active():
+            cmds.setToolTo("selectSuperContext")
+        self._changed()
+
+    def shutdown(self):
+        self.deactivate()
+        self.clear()
+        try:
+            self._delete_preview()
+        except Exception:
+            pass
+        if cmds.draggerContext(SC_DRAW_CTX, exists=True):
+            cmds.deleteUI(SC_DRAW_CTX)
+
+    def _stop_keys(self):
+        if self._filter is not None:
+            try:
+                QtWidgets.QApplication.instance().removeEventFilter(self._filter)
+            except RuntimeError:
+                pass
+            self._filter = None
+
+    def _finalize(self):  # the user picked another tool
+        try:
+            self._stop_keys()
+            self._delete_preview()
+        except Exception:
+            pass
+        QtCore.QTimer.singleShot(0, _guarded_call(self._changed))
+
+    def _changed(self):
+        if self.on_change is not None:
+            self.on_change()
+
+    # ------------------------------------------------------ strokes
+    def _press(self):
+        try:
+            x, y, _ = cmds.draggerContext(SC_DRAW_CTX, q=True, anchorPoint=True)
+            self.press_at(x, y, cmds.draggerContext(SC_DRAW_CTX, q=True, modifier=True))
+        except Exception:
+            traceback.print_exc()
+
+    def _drag(self):
+        try:
+            x, y, _ = cmds.draggerContext(SC_DRAW_CTX, q=True, dragPoint=True)
+            self.drag_at(x, y)
+        except Exception:
+            traceback.print_exc()
+
+    def press_at(self, x, y, mod="none"):
+        """Start a stroke: only meshes count (nothing is drawn on empty space)."""
+        self._reset()
+        self.anchor = (x, y)
+        self._ensure_preview()
+        self.straight = mod == "shift"
+        self.candidates = self._make_candidates(self._candidate_meshes(use_forced=False))
+        self.last_screen = (x, y)
+        p = self._cast(x, y)
+        if p is not None:
+            self.points.append(p)
+
+    def release(self):
+        try:
+            if self.straight and self.last_drag is not None and self.anchor is not None:
+                self.points = self._line_points(self.last_drag[0], self.last_drag[1], 6.0)
+            self._set_preview_visible(False)
+            stroke = []
+            for p, mesh in self.points:
+                if mesh is not None and (not stroke or _rl_len(_rl_sub((p.x, p.y, p.z), stroke[-1][0])) > 1e-4):
+                    stroke.append(((p.x, p.y, p.z), mesh))
+            if stroke:
+                self.strokes.append(stroke)
+                self.curves.append(self._show(stroke))
+                self.undone = []
+                self._changed()
+        finally:
+            self.points = []
+            self.anchor = None
+
+    def add_stroke(self, stroke):
+        """A stroke from a script: [(world point, mesh), ...]."""
+        self.strokes.append(list(stroke))
+        self.curves.append(self._show(stroke))
+        self.undone = []
+        self._changed()
+
+    def _show(self, stroke):
+        pts = [p for p, _ in stroke]
+        if len(pts) == 1:  # a single spot: a short tick up from it
+            pts = [pts[0], (pts[0][0], pts[0][1] + 0.02 / scene_m_per_unit(), pts[0][2])]
+        with NoUndo(), PreserveSelection():
+            curve = long_name(cmds.curve(degree=1, point=pts, name="scatterDrawing1"))
+            shape = cmds.listRelatives(curve, shapes=True, fullPath=True)[0]
+            for node in (curve, shape):
+                om.MFnDependencyNode(get_dag_path(node).node()).setDoNotWrite(True)  # never saved
+            cmds.setAttr(curve + ".hiddenInOutliner", 1)
+            cmds.setAttr(shape + ".overrideEnabled", 1)
+            cmds.setAttr(shape + ".overrideRGBColors", 1)
+            cmds.setAttr(shape + ".overrideColorRGB", 1.0, 0.6, 0.15)
+            cmds.setAttr(shape + ".lineWidth", 3.0)
+            if cmds.attributeQuery("alwaysDrawOnTop", node=shape, exists=True):
+                cmds.setAttr(shape + ".alwaysDrawOnTop", 1)
+        return curve
+
+    def _hide(self, curve):
+        with NoUndo():
+            if curve and cmds.objExists(curve):
+                cmds.delete(curve)
+
+    def remove_last(self):
+        if self.strokes:
+            self.undone.append(self.strokes.pop())
+            self._hide(self.curves.pop())
+            self._changed()
+
+    def redo_point(self):
+        if self.undone:
+            stroke = self.undone.pop()
+            self.strokes.append(stroke)
+            self.curves.append(self._show(stroke))
+            self._changed()
+
+    def finish(self):
+        self.deactivate()
+
+    def cancel(self):
+        self.deactivate()
+
+    def clear(self):
+        for c in self.curves:
+            self._hide(c)
+        self.strokes, self.curves, self.undone = [], [], []
+        self._changed()
+
+    def meshes(self):
+        return sc_drawing_meshes(self.strokes)
 
 
 class ScatterPanel(QtWidgets.QWidget):
@@ -31243,6 +31739,8 @@ class ScatterPanel(QtWidgets.QWidget):
         self._undo_timer.setSingleShot(True)
         self._undo_timer.setInterval(50)
         self._undo_timer.timeout.connect(_guarded(self._undo_timer, self._after_undo))
+        self.drawer = ScatterDrawer(on_change=lambda: self._drawing_changed())
+        self.draw_sec = {}
         self._build()
         self._install_jobs()
 
@@ -31292,6 +31790,22 @@ class ScatterPanel(QtWidgets.QWidget):
         self.new_btn.setMinimumHeight(28)
         self.new_btn.clicked.connect(lambda *_: self.new_group())
         card.add(self.new_btn)
+        self.draw_btn = secondary_button("Draw on Surfaces", "Draw strokes over any meshes (no need to select "
+                                                             "them): drag to draw, click for a spot. Ctrl+Z takes "
+                                                             "the last stroke back, Ctrl+Y puts it back, Enter or "
+                                                             "Esc stops drawing.")
+        self.draw_btn.setCheckable(True)
+        self.draw_btn.clicked.connect(lambda *_: self.toggle_drawing())
+        self.scatter_draw_btn = secondary_button("Scatter on Drawing", "A new scatter group (or, while one is "
+                                                                       "being edited, a new layer in it) of the "
+                                                                       "Start with type along the strokes; the "
+                                                                       "meshes under them become its surfaces.")
+        self.scatter_draw_btn.clicked.connect(lambda *_: self.scatter_on_drawing())
+        clear_d = secondary_button("Clear", "Clear the drawing (layers keep what was drawn for them).")
+        clear_d.clicked.connect(lambda *_: self.clear_drawing())
+        card.add(button_row(self.draw_btn, self.scatter_draw_btn, clear_d))
+        self.draw_label = hint_label("")
+        card.add(self.draw_label)
         self.group_label = hint_label("")
         card.add(self.group_label)
         self.surf_list = QtWidgets.QListWidget()
@@ -31339,9 +31853,13 @@ class ScatterPanel(QtWidgets.QWidget):
         pick = secondary_button("Use Picked Area", "The layer grows only on the picked faces, or round the picked "
                                                    "vertices (ivy: vines start there).")
         pick.clicked.connect(lambda *_: self.set_area())
-        clear = secondary_button("Clear Area", "The layer grows everywhere it likes again.")
+        use_d = secondary_button("Use Drawing", "The layer goes along the strokes drawn now (Draw on Surfaces), "
+                                                "out to its Width.")
+        use_d.clicked.connect(lambda *_: self.set_drawing())
+        clear = secondary_button("Clear Area", "The layer grows everywhere it likes again (picked area and "
+                                               "drawing).")
         clear.clicked.connect(lambda *_: self.set_area(clear=True))
-        card.add(button_row(pick, clear))
+        card.add(button_row(pick, use_d, clear))
         col.addWidget(card)
 
         # ---- 3. layer settings
@@ -31410,6 +31928,8 @@ class ScatterPanel(QtWidgets.QWidget):
         self.f[typ] = {}
         for title, expanded, keys in SC_LAYOUT[typ]:
             sec = Section(title, expanded=expanded, header=bool(title))
+            if title == _SC_DRAWING[0]:
+                self.draw_sec[typ] = sec
             for key in keys:
                 label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
                 widget = make()
@@ -31477,6 +31997,9 @@ class ScatterPanel(QtWidgets.QWidget):
         for t, box in self.box.items():
             box.setVisible(t == typ)
         layer = self._layer()
+        drawn = sc_area(layer)[2] if layer is not None else bool(self.drawer.strokes)
+        for t, sec in self.draw_sec.items():
+            sec.setVisible(bool(drawn))
         if layer is not None:
             self._show(typ, sc_settings(layer))
             self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
@@ -31501,8 +32024,10 @@ class ScatterPanel(QtWidgets.QWidget):
                     item.setData(QtCore.Qt.UserRole, uid)
                     self.surf_list.addItem(item)
                 for layer in data["layers"]:
-                    pts, fcs = sc_area(layer)
+                    pts, fcs, strokes = sc_area(layer)
                     extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
+                    if strokes:
+                        extra += "  (drawn, %d stroke%s)" % (strokes, "" if strokes == 1 else "s")
                     item = QtWidgets.QListWidgetItem(layer.get("name", layer["type"]) + extra)
                     item.setData(QtCore.Qt.UserRole, layer["id"])
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEditable)
@@ -31524,11 +32049,26 @@ class ScatterPanel(QtWidgets.QWidget):
         except Exception:
             sel = {"surfaces": [], "points": [], "faces": {}}
         root = self._alive()
+        drawing = self.drawer.is_active()
+        n = len(self.drawer.strokes)
+        self.draw_btn.setChecked(drawing)
+        self.draw_btn.setText("Stop Drawing" if drawing else "Draw on Surfaces")
+        self.scatter_draw_btn.setEnabled(bool(n))
+        self.scatter_draw_btn.setText("Add Layer on Drawing" if root and n else "Scatter on Drawing")
+        self.draw_label.setText(("Drawing: %d stroke%s." % (n, "" if n == 1 else "s")) +
+                                (" Ctrl+Z takes the last back, Enter stops." if drawing else "") if n or drawing
+                                else "")
         self.step_group.set_state("done" if root else "current")
         self.step_layers.set_state("current" if root else "todo")
         self.step_look.set_state("current" if root and self._lid else "todo")
         self.step_finish.set_state("todo")
-        if root:
+        if drawing:
+            self.next_banner.set_text("Drag over any surfaces to draw (click for a spot). Ctrl+Z takes the last "
+                                      "stroke back. Then <b>Scatter on Drawing</b>.", tag="DRAWING", tone="active")
+        elif n and not root:
+            self.next_banner.set_text("Press <b>Scatter on Drawing</b>: a %s group along the %d stroke%s." %
+                                      (self.start_type.currentText().lower(), n, "" if n == 1 else "s"))
+        elif root:
             name = (self._layer() or {}).get("name", "")
             self.next_banner.set_text("Editing <b>%s</b>%s. Changes in step 3 show straight away; Add Selected "
                                       "puts the selected meshes / groups in it." %
@@ -31685,12 +32225,63 @@ class ScatterPanel(QtWidgets.QWidget):
         if self._alive() and self._lid:
             self._structural("Moved a layer in", lambda: sc_move_layer(self._root, self._lid, step))
 
+    def _drawing_changed(self):
+        try:
+            self._show_layer()
+            self._update_states()
+        except Exception:
+            traceback.print_exc()
+
+    @ui_safe
+    def toggle_drawing(self):
+        if self.drawer.is_active():
+            self.drawer.deactivate()
+        else:
+            self.drawer.activate()
+            self.set_status("Draw over the surfaces; Ctrl+Z takes the last stroke back, Enter or Esc stops.")
+
+    @ui_safe
+    def clear_drawing(self):
+        self.drawer.clear()
+
+    @ui_safe
+    def scatter_on_drawing(self):
+        strokes = list(self.drawer.strokes)
+        if not strokes:
+            self.set_status("Draw on the surfaces first (Draw on Surfaces).", level="warn")
+            return
+        self.drawer.deactivate()
+        typ = self.start_type.currentText()
+        s = self._settings(typ)
+        if self._alive():
+            self._structural("Added a drawn %s layer to" % typ.lower(),
+                             lambda: sc_add_layer(self._root, typ, s, drawing=strokes))
+            return
+        rep = self._structural("Grew", lambda: create_scatter_group([], typ, s, drawing=strokes))
+        self._root = rep["root"]
+        self._lid = sc_data(self._root)["layers"][0]["id"]
+        self._refresh()
+
+    @ui_safe
+    def set_drawing(self):
+        if not (self._alive() and self._lid):
+            self.set_status("Pick a layer of a scatter group first.", level="warn")
+            return
+        strokes = list(self.drawer.strokes)
+        if not strokes:
+            self.set_status("Draw on the surfaces first (Draw on Surfaces).", level="warn")
+            return
+        self.drawer.deactivate()
+        self._structural("New drawing in", lambda: sc_set_layer(self._root, self._lid, drawing=strokes))
+
     @ui_safe
     def set_area(self, clear=False):
         if not (self._alive() and self._lid):
             return
         if clear:
-            area = ([], {})
+            self._structural("Cleared the area in", lambda: sc_set_layer(self._root, self._lid, area=([], {}),
+                                                                         drawing=[]))
+            return
         else:
             points, faces = mi_moss_picks()
             if not points and not faces:
@@ -31838,6 +32429,10 @@ class ScatterPanel(QtWidgets.QWidget):
     def shutdown(self):
         for timer in (self._sel_timer, self._edit_timer, self._undo_timer):
             timer.stop()
+        try:
+            self.drawer.shutdown()
+        except Exception:
+            traceback.print_exc()
         reg = _registry()["jobs"]
         for job in self._jobs:
             try:
