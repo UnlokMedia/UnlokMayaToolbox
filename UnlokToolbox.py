@@ -29163,7 +29163,7 @@ MOSS_DEFAULTS = {
     "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8, "creases": 0.4,
     "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles",
-    "style": "Carpet"}
+    "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6}
 IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
     "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
@@ -30976,6 +30976,9 @@ class _MossClumps(object):
         self.mess = clamp(float(s["mess"]), 0.0, 2.0)
         self.seed = int(s["seed"])
         self.tile = max(1e-4, float(s["uv_tile"]) / m)
+        self.group = clamp(float(s.get("clump_group", 0.0)), 0.0, 1.0)
+        self.gsize = max(1e-4, float(s.get("clump_group_size", 0.3)) / m)
+        self.pack = clamp(float(s.get("clump_pack", 0.5)), 0.0, 1.0)
         self.cands, self.rows = cands, rows
         self.capped = False
         self.count = 0
@@ -30987,7 +30990,18 @@ class _MossClumps(object):
         R, cands, rows = self.R, self.cands, self.rows
         cover = 0.05 / self.m
         order = [i for i, row in enumerate(rows) if row is not None and row[0] > 0.0]
-        order.sort(key=lambda i: (-rows[i][0], i))
+        # Grouping (the user, 2026-11-04: "more that are like clumped together
+        # sometimes, so it's not like such an even gap between them all"): one
+        # noise lookup per candidate, gg ~ 1 inside a group, 0 in the gaps.
+        w, gs, gseed = self.group, self.gsize, self.seed * 31 + 77
+        gmap = {}
+        if w > 0.0:
+            for i in order:
+                p = cands[i][0]
+                g = 0.5 + 0.62 * _moss_noise3(p[0] / gs, p[1] / gs, p[2] / gs, gseed)
+                g = clamp((g - 0.38) / 0.24, 0.0, 1.0)
+                gmap[i] = g * g * (3.0 - 2.0 * g)
+        order.sort(key=lambda i: (-(rows[i][0] + 0.4 * w * gmap.get(i, 0.0)), i))
         cell = 4.0 * R
         room = {}
         per = (1 + self.rings * self.segs) * (1 if self.proxy else 3)
@@ -30995,13 +31009,20 @@ class _MossClumps(object):
             c, row = cands[i], rows[i]
             pr = math.sqrt(clamp(row[0] / 0.3, 0.0, 1.0))
             r = _rand12(self.seed, i, 5, 91)
+            gg = gmap.get(i, 0.0)
+            if w > 0.0 and r[9] < w * (1.0 - gg) * 0.9:
+                continue  # the gaps between groups: mostly bare, a stray cushion or two
             rad = R * (0.45 + 0.75 * pr) * (1.0 + self.var * (r[0] - 0.5))
+            rad *= 1.0 + w * (0.3 * gg - 0.15)  # bigger in a group's middle, smaller strays
             p, n = c[0], c[1]
             key = (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
             near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                     for q in room.get((key[0] + dx, key[1] + dy, key[2] + dz), ())]
-            if any(_rl_len(_rl_sub(p, q)) < rad + qr for q, qr in near):
-                continue  # scattered: cushions don't overlap (a clump's own domes run together)
+            # in a group cushions crowd and run into each other (Packing), in
+            # the gaps they keep further apart; Grouping 0 = no overlap, even
+            lim = 1.0 - w * gg * (0.15 + 0.6 * self.pack) + w * (1.0 - gg) * 0.4
+            if any(_rl_len(_rl_sub(p, q)) < lim * (rad + qr) for q, qr in near):
+                continue
             o = _moss_obstacle(self.surf, p, n, c[5], R)
             if o is not None and o < cover:
                 continue
@@ -33929,6 +33950,13 @@ SC_FIELDS = {
     "style": ("Style", lambda: SegmentField(MOSS_STYLES),
               "Carpet: one continuous bed of moss over the surface. Clumps: separate moss cushions scattered where "
               "it grows (lighter; bigger and taller deeper in a patch). Shoots, strands and capsules grow on both."),
+    "clump_group": ("Grouping", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Clumps: how much the cushions gather into groups, with bare gaps between the groups "
+                    "(0 = evenly spaced)."),
+    "clump_group_size": ("Group size", _scf(0.01, 5.0, 0.05, 1.5, 3, 0.01),
+                         "Clumps: how big the groups (and the gaps between them) are, in metres."),
+    "clump_pack": ("Packing", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                   "Clumps: how tightly a group's cushions crowd together and run into each other."),
     "clump_size": ("Clump size", _scf(0.005, 3.0, 0.02, 0.4, 3, 0.01),
                    "Size of the moss's cushions and how fine its patches' edges are, in metres."),
     "thickness": ("Thickness", _scf(0.0, 0.5, 0.0, 0.12, 3, 0.005),
@@ -34015,6 +34043,7 @@ _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
     "Moss": [("", True, ["style", "coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands",
                          "capsules"]),
+             ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack"]),
              ("Where it grows", True, _SC_WHERE),
              ("More", False, ["size_var", "strand_length", "droop", "detail"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
@@ -34260,6 +34289,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._undo_timer.timeout.connect(_guarded(self._undo_timer, self._after_undo))
         self.drawer = ScatterDrawer(on_change=lambda: self._drawing_changed())
         self.draw_sec = {}
+        self.clump_sec = {}
         self._build()
         self._install_jobs()
 
@@ -34415,6 +34445,8 @@ class ScatterPanel(QtWidgets.QWidget):
             for key, widget in self.f[typ].items():
                 widget.setValue(sc_defaults(typ)[key])
                 widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
+            if "style" in self.f[typ]:
+                self.f[typ]["style"].changed.connect(lambda t=typ: self._style_rows(t))
         col.addWidget(card)
 
         # ---- 4. finish
@@ -34453,6 +34485,8 @@ class ScatterPanel(QtWidgets.QWidget):
             sec = Section(title, expanded=expanded, header=bool(title))
             if title == _SC_DRAWING[0]:
                 self.draw_sec[typ] = sec
+            if title == "Clumps":
+                self.clump_sec[typ] = sec
             for key in keys:
                 label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
                 widget = make()
@@ -34503,6 +34537,7 @@ class ScatterPanel(QtWidgets.QWidget):
     def _show(self, typ, settings):
         for key, widget in self.f[typ].items():
             widget.setValue(settings.get(key, sc_defaults(typ).get(key)))
+        self._style_rows(typ)
 
     def _fill_presets(self):
         typ = self._type()
@@ -34528,7 +34563,14 @@ class ScatterPanel(QtWidgets.QWidget):
             self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
         else:
             self.step_look.title.setText("Settings for the first layer (%s)" % typ)
+        self._style_rows(typ)
         self._fill_presets()
+
+    def _style_rows(self, typ):
+        """The Clumps section only shows for moss grown as Clumps."""
+        sec = self.clump_sec.get(typ)
+        if sec is not None:
+            sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[1])
 
     def _refresh(self):
         """Lists, settings and banner from the scene."""

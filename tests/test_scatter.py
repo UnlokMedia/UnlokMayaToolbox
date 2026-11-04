@@ -596,6 +596,42 @@ def moss_and_specks():
     check("the cushions sit on the surface, not in it", pts and inside <= 0.01 * len(pts),
           "%d of %d inside" % (inside, len(pts)))
 
+    def floor_spread(extra):
+        """Cushions (dome centres) on the floor counted in 2 dm cells: the
+        index of dispersion (variance / mean) is about 1 for random, under 1
+        for evenly spaced, well over 1 when they gather into groups."""
+        t0 = time.time()
+        rg, lg = tb["sc_add_layer"](root, "Moss", dict(base, style="Clumps", **extra))
+        dt = time.time() - t0
+        ng = tb["sc_parts"](root).get(lg + "/moss")
+        counts = {}
+        for sh in (leaf_shells(tb, ng) if ng else []):
+            cx = sum(p[0] for p in sh) / len(sh)
+            cy = sum(p[1] for p in sh) / len(sh)
+            cz = sum(p[2] for p in sh) / len(sh)
+            if cy < 0.4 and -20 < cx < 20 and -13 < cz < 7:
+                k = (int((cx + 20) // 2), int((cz + 13) // 2))
+                counts[k] = counts.get(k, 0) + 1
+        vals = [counts.get((i, j), 0) for i in range(20) for j in range(10)]
+        mean = sum(vals) / float(len(vals))
+        var = sum((v - mean) ** 2 for v in vals) / float(len(vals))
+        empty = sum(1 for v in vals if v == 0)
+        tb["sc_remove_layer"](root, lg)
+        return sum(vals), (var / mean if mean else 0.0), empty, dt  # the group report sums every layer
+
+    n0, d0, e0, t0_ = floor_spread({"clump_group": 0.0})
+    n1, d1, e1, t1_ = floor_spread({"clump_group": 1.0})
+    check("Grouping: cushions gather into groups, bare gaps between",
+          d1 > 1.5 * d0 and e1 > e0, "dispersion %.2f -> %.2f, empty cells %d -> %d, %d -> %d cushions on the floor" % (
+              d0, d1, e0, e1, n0, n1))
+    check("grouping costs next to nothing", t1_ < 1.5 * t0_ + 0.5, "%.2fs vs %.2fs" % (t1_, t0_))
+    nl, _, _, _ = floor_spread({"clump_group": 1.0, "clump_pack": 0.0})
+    nh, _, _, _ = floor_spread({"clump_group": 1.0, "clump_pack": 1.0})
+    check("Packing crowds a group's cushions together", nh > 1.15 * nl, "%d -> %d cushions on the floor" % (nl, nh))
+    ns, ds, _, _ = floor_spread({"clump_group": 1.0, "clump_group_size": 0.15})
+    nb, db, _, _ = floor_spread({"clump_group": 1.0, "clump_group_size": 0.8})
+    check("Group size: bigger groups and gaps", db > ds, "dispersion %.2f (0.15 m) -> %.2f (0.8 m)" % (ds, db))
+
     # --- specks on a pane of glass standing on the floor
     glass = box("glassPane", (12, 8, 0.1), (0, 4.0, 4.0), div=1.0)
     t0 = time.time()

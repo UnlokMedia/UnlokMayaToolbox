@@ -805,7 +805,11 @@ cushions instead of the bed: scattered where the moss would grow, bigger and
 taller deeper in a patch and where it's sheltered, each one to three lumpy
 domes run together and laid onto the surface (never under a wall standing on
 it). Much lighter than the carpet (well under half its faces), and
-shoots, capsules and hanging strands grow on the cushions too. Out of the bed stand *Shoots* (how tall:
+shoots, capsules and hanging strands grow on the cushions too. The
+**Clumps** section (shown for that style) art-directs how they're spread:
+*Grouping* gathers them into groups with bare gaps between (0 = evenly
+spaced), *Group size* is how big the groups and gaps are (metres), and
+*Packing* how tightly a group's cushions crowd and run into each other. Out of the bed stand *Shoots* (how tall:
 *Shoot length*), *Capsules* (thin stalks with nodding spore capsules, in
 fruiting clusters) and, where the moss faces sideways or down (over an
 eave, down a wall), hanging strands (*Hanging*). All real geometry, no
@@ -1775,7 +1779,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   Green 1 leaving no dry part, every shape at every Detail, and in a gutter
   lying along it and riding up its sides; then moss Style Clumps (separate
   cushions about Clump size, fewer faces than the carpet, shoots on them,
-  on the surface, not in it) and Specks on a standing glass pane (on both
+  on the surface, not in it; Grouping gathering them into groups with bare
+  cells between, at next to no cost; Packing and Group size) and Specks on a standing glass pane (on both
   faces, never floating or in it, tiny, Dirt 0 = moss only, High = a shoot).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
@@ -1786,7 +1791,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   second layer on the same drawing; then leaf piles and jungle leaves on
   the same porch, before / after, fronds live, then the floor left out of
   the group from the panel and put back from the list; then the moss
-  preset as a carpet and as Clumps on a fresh porch, and Specks on a window
+  preset as a carpet and as Clumps (evenly spaced and grouped too) on a
+  fresh porch, and Specks on a window
   pane) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.

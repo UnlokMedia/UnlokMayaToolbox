@@ -346,12 +346,22 @@ def moss_and_specks(ns, panel, window):
     clumps = sum(cmds.polyEvaluate(n, face=True) for k, n in ns["sc_parts"](root).items() if k.endswith("/moss"))
     check("Moss Style Clumps from the panel: separate cushions, lighter than the carpet",
           "moss clumps" in rep and 0 < clumps < carpet, "%d faces vs %d | %.2fs | %s" % (clumps, carpet, dt, rep))
+    check("the Clumps section shows for Clumps only", not panel.clump_sec["Moss"].isHidden())
     window.grab().save(os.path.join(OUT, "12_panel_moss_clumps.png"))
     look(*roof)
     snap("12_moss_clumps.png")
     look((0, 1, -6), (10, 9, 6))
     snap("12_moss_clumps_sill.png")
     quiet(lambda: cmds.delete(root))
+    for name, extra in (("even", {"clump_group": 0.0}), ("grouped", {"clump_group": 1.0, "clump_pack": 0.9})):
+        extra["style"] = "Clumps"
+        root, dt = grow([nodes["roof"], nodes["sill"], nodes["floor"]], "Moss", "Moss", extra)
+        look(*roof)
+        snap("12_moss_clumps_%s.png" % name)
+        quiet(lambda: cmds.delete(root))
+    panel.f["Moss"]["style"].setValue("Carpet")
+    panel._style_rows("Moss")
+    check("... and hides for Carpet", panel.clump_sec["Moss"].isHidden())
 
     root, dt = grow([glass], "Specks", "Moss and dirt specks")
     rep = panel.status.text()

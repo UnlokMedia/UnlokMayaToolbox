@@ -908,7 +908,17 @@
     satellites, laid by closest point. `_fit` tests rim points (x1.1) at
     full, 0.65 and 0.4 radius with `_covered` (a ray out hits within 1 cm,
     or a back face): the first clear size wins, else no cushion (moss went
-    under the porch wall). Count = cushions placed.
+    under the porch wall). Count = cushions placed. **Grouping** (the
+    user: "more that are like clumped together sometimes, so it's not like
+    such an even gap", with controls for the noise): `clump_group`,
+    `clump_group_size` (metres), `clump_pack`. One `_moss_noise3` per
+    candidate at Group size gives gg (eased, ~1 in a group); candidates are
+    sorted by margin + 0.4 Grouping gg, thinned in the gaps (r[9] < Grouping
+    (1 - gg) 0.9), bigger in a group's middle, and the no-overlap test's
+    limit is (rad + qr) x (1 - Grouping gg (0.15 + 0.6 Packing) + Grouping
+    (1 - gg) 0.4). Grouping 0 = the even scatter. The panel's "Clumps"
+    section (`clump_sec`) shows only for that style (`_style_rows`, from
+    `_show` and the Style field's changed signal).
   - **Specks** (the user, same day: "tiny bits of moss that I could toggle
     on and off ... panels of glass ... bits of dirt or tiny bits of moss
     that have fallen down and stuck to a window"): layer type "Specks",
