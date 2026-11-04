@@ -752,7 +752,7 @@ you tune them.
    (**Add Layer on Drawing**), so moss and leaves can follow one drawing.
    **Clear** forgets the drawing (layers keep what was drawn for them).
 2. **Layers:** **Add Layer** of any type (Moss, Grass, Leaves, Leaf piles,
-   Jungle leaves, Moss tufts, Ivy); two of a type are fine (a moss that keeps to flat
+   Jungle leaves, Moss tufts, Specks, Ivy); two of a type are fine (a moss that keeps to flat
    rooftops and a second, sparse one that grows anywhere). Tick a layer to
    turn it on or off, double-click to rename, **Duplicate** (a new seed),
    **Delete**, **Up** / **Down**. Each is one Ctrl+Z. To say where a layer
@@ -800,7 +800,12 @@ size*). *Coverage* sets where the patches are; their edges are ragged
 moss: thicker inside a patch and in sheltered spots (*Thickness*), packed
 cushions with creases between them (*Lumps*), rolling over plank edges and
 filling inside corners, tucking under at its edges, never into geometry
-above it or pressed against it. Out of the bed stand *Shoots* (how tall:
+above it or pressed against it. *Style* **Clumps** grows separate moss
+cushions instead of the bed: scattered where the moss would grow, bigger and
+taller deeper in a patch and where it's sheltered, each one to three lumpy
+domes run together and laid onto the surface (never under a wall standing on
+it). Much lighter than the carpet (well under half its faces), and
+shoots, capsules and hanging strands grow on the cushions too. Out of the bed stand *Shoots* (how tall:
 *Shoot length*), *Capsules* (thin stalks with nodding spore capsules, in
 fruiting clusters) and, where the moss faces sideways or down (over an
 eave, down a wall), hanging strands (*Hanging*). All real geometry, no
@@ -852,11 +857,19 @@ gathers* weights, a picked area), per square metre where they gather:
   geometry.
 - *Moss tufts*: tiny clumps of moss, a few small rounded cushions run
   together, lumpy on top, wrapped onto the surface.
+- *Specks*: set dressing, separate from any moss: tiny bits of moss (the
+  moss's little stars, a stem and star at High) and flakes of dirt stuck
+  to the surface, in little clusters (*Specks* per square metre, *Speck
+  size*, *Per cluster*, *Cluster spread*). *Dirt* is how many are dirt
+  flakes (their own part, `dirtSpeck`; the moss bits are `mossSpeck`).
+  Slope limit 90 by default, so they stick to upright glass and walls too,
+  both faces of a pane.
 Presets: Grass: Dry grass, Grass mat, Sparse tufts. Leaves: Dead leaves,
 Autumn carpet, A few strays. Leaf piles: Leaf piles, Gutters and wall
 bases, Big heaps. Jungle leaves: Fallen jungle leaves, Fresh and green, Dry
 and torn, Single big leaves, Palm fronds. Moss tufts: Moss tufts, Crevice
-tufts.
+tufts. Specks: Moss and dirt specks, Dirty glass, Fallen moss bits, A few
+specks.
 
 **Detail** is how close the camera gets, and how heavy the moss is:
 
@@ -1760,7 +1773,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   each, green and dry in their own parts, lying on the yard (never in it,
   never floating, none up the wall), Per cluster 3 giving clusters of 1-3,
   Green 1 leaving no dry part, every shape at every Detail, and in a gutter
-  lying along it and riding up its sides.
+  lying along it and riding up its sides; then moss Style Clumps (separate
+  cushions about Clump size, fewer faces than the carpet, shoots on them,
+  on the surface, not in it) and Specks on a standing glass pane (on both
+  faces, never floating or in it, tiny, Dirt 0 = moss only, High = a shoot).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
@@ -1769,7 +1785,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   over a fresh porch with Ctrl+Z on a stroke, Scatter on Drawing and a
   second layer on the same drawing; then leaf piles and jungle leaves on
   the same porch, before / after, fronds live, then the floor left out of
-  the group from the panel and put back from the list) and saves pictures to
+  the group from the panel and put back from the list; then the moss
+  preset as a carpet and as Clumps on a fresh porch, and Specks on a window
+  pane) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular

@@ -14,6 +14,8 @@ queue and only rebuild the layer edited; Bake drops the box and hidden
 parts. Jungle leaves: big single leaves in clusters of 1-3, green and dry
 parts, lying on the surface, along a gutter. Removing a mesh inside the
 Maya group leaves just it out (nothing grows on it), adding it puts it back.
+Moss Style Clumps: separate cushions, lighter than the carpet. Specks:
+tiny moss stars and dirt flakes stuck on a standing pane of glass.
 """
 
 import math
@@ -554,10 +556,98 @@ def jungle():
     check("riding up its sides, not through them", ys and min(ys) > 0.55, "lowest %.2f" % (min(ys) if ys else 0))
 
 
+def moss_and_specks():
+    """Moss Style Clumps: separate small cushions (lighter than the carpet),
+    shoots on them, on the surface. Specks: tiny moss stars and dirt flakes
+    stuck on a standing glass pane, both faces, never floating or inside."""
+    tb = load_toolbox()
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    R = 0.6  # Clump size 0.06 m in decimetres
+    base = {"coverage": 0.6, "slope": 35.0, "detail": "Normal"}
+    rep = tb["create_scatter_group"]([grp], "Moss", dict(base))
+    root = rep["root"]
+    carpet_lid = tb["sc_data"](root)["layers"][0]["id"]
+    carpet = cmds.polyEvaluate(tb["sc_parts"](root)[carpet_lid + "/moss"], face=True)
+    t0 = time.time()
+    rc, lid = tb["sc_add_layer"](root, "Moss", dict(base, style="Clumps"))
+    dt = time.time() - t0
+    parts = tb["sc_parts"](root)
+    node = parts.get(lid + "/moss")
+    shells = leaf_shells(tb, node) if node else []
+    faces = cmds.polyEvaluate(node, face=True) if node else 0
+    check("Style Clumps: separate moss cushions", rc["clumps"] >= 30 and len(shells) >= 30,
+          "%d clumps, %d pieces, %.2fs" % (rc["clumps"], len(shells), dt))
+    wide = 0.0
+    for sh in shells:
+        xs, ys, zs = [p[0] for p in sh], [p[1] for p in sh], [p[2] for p in sh]
+        wide = max(wide, max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)))
+    check("each cushion is about Clump size", wide < 5.0 * R, "widest %.2f dm (Clump size %.1f dm)" % (wide, R))
+    check("lighter than the carpet", 0 < faces < carpet, "%d faces vs the carpet's %d" % (faces, carpet))
+    check("shoots grow on the cushions", (lid + "/strands") in parts and
+          cmds.polyEvaluate(parts[lid + "/strands"], vertex=True) > 100)
+    surf = tb["_MiSurface"](nodes)
+    inside = 0
+    pts = points(tb, node)[::4] if node else []
+    for p in pts:
+        c = surf.closest(p)
+        if c is not None and tb["_rl_dot"](tb["_rl_sub"](p, c[1]), c[2]) < -0.05:
+            inside += 1
+    check("the cushions sit on the surface, not in it", pts and inside <= 0.01 * len(pts),
+          "%d of %d inside" % (inside, len(pts)))
+
+    # --- specks on a pane of glass standing on the floor
+    glass = box("glassPane", (12, 8, 0.1), (0, 4.0, 4.0), div=1.0)
+    t0 = time.time()
+    rs = tb["create_scatter_group"]([glass], "Specks", {"specks": 60.0})
+    dt = time.time() - t0
+    sroot = rs["root"]
+    sl = tb["sc_data"](sroot)["layers"][0]["id"]
+    sp = tb["sc_parts"](sroot)
+    check("Specks: tiny moss and dirt bits stuck on glass", rs["specks"] >= 40 and
+          sorted(k.split("/")[1] for k in sp) == ["dirt", "specks"], "%d specks, %s, %.2fs" % (
+              rs["specks"], sorted(sp), dt))
+    gs = tb["_MiSurface"]([glass])
+    far = inside = front = back = 0
+    allp = points(tb, sp[sl + "/specks"]) + points(tb, sp[sl + "/dirt"])
+    for p in allp:
+        c = gs.closest(p)
+        if c is None:
+            continue
+        d = tb["_rl_dot"](tb["_rl_sub"](p, c[1]), c[2])
+        if d < -0.002:
+            inside += 1
+        if tb["_rl_len"](tb["_rl_sub"](p, c[1])) > 0.12:
+            far += 1
+        if c[2][2] > 0.9:
+            front += 1
+        elif c[2][2] < -0.9:
+            back += 1
+    check("specks lie on the glass (never floating, never in it)", allp and far == 0 and inside == 0,
+          "%d points: %d off it, %d in it" % (len(allp), far, inside))
+    check("on both faces of the standing pane", front > 0 and back > 0, "%d front, %d back" % (front, back))
+    size = 0.0
+    for sh in leaf_shells(tb, sp[sl + "/dirt"]):
+        xs, ys, zs = [p[0] for p in sh], [p[1] for p in sh], [p[2] for p in sh]
+        size = max(size, max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)))
+    check("they're tiny (about Speck size)", 0.0 < size < 0.12, "biggest flake %.3f dm" % size)
+    r1, l1 = tb["sc_add_layer"](sroot, "Specks", {"specks": 30.0, "speck_dirt": 0.0})
+    p1 = tb["sc_parts"](sroot)
+    check("Dirt 0: moss specks only", (l1 + "/specks") in p1 and (l1 + "/dirt") not in p1,
+          str(sorted(k for k in p1 if k.startswith(l1))))
+    r2, l2 = tb["sc_add_layer"](sroot, "Specks", {"specks": 30.0, "detail": "High", "speck_dirt": 0.0})
+    n_norm = cmds.polyEvaluate(p1[l1 + "/specks"], vertex=True) / float(max(1, r1["specks"] - rs["specks"]))
+    n_high = cmds.polyEvaluate(tb["sc_parts"](sroot)[l2 + "/specks"], vertex=True) / float(
+        max(1, r2["specks"] - r1["specks"]))
+    check("High: a tiny shoot (stem and star), not just a star", n_high > n_norm, "%.1f vs %.1f points a speck" % (
+        n_high, n_norm))
+
+
 try:
     run()
     drawing()
     jungle()
+    moss_and_specks()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

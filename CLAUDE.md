@@ -895,6 +895,31 @@
     past an edge, sliding up a wall a ray hits); points off the midrib are
     pushed out of the surface when it's under them, else hang (sag ~ lat^2).
     Detail `JUNGLE_DETAIL` (rows, columns, leaflet rows).
+  - **Moss Style** (the user, 2026-11-04: the carpet "can become a bit
+    heavy ... it doesn't always have to be one object ... a scattered thing
+    instead of this growth. Or maybe there's a setting to toggle"): `style`
+    (`MOSS_STYLES` Carpet / Clumps, default Carpet, so old groups build as
+    before). `moss_build` swaps `_MossBed` for `_MossClumps`, which has the
+    same interface (pts, dirs, hf, core, faces_out, R, capped, count,
+    mesh()), so `_MossDetail` grows on it unchanged. Candidates with margin
+    > 0, best first; radius / height from the margin (pr) and shelter;
+    spacing grid (cell 4 R), cushions never overlap; each is a dome
+    (`MOSS_CLUMP_GRID` rings x segments by Detail) plus up to two
+    satellites, laid by closest point. `_fit` tests rim points (x1.1) at
+    full, 0.65 and 0.4 radius with `_covered` (a ray out hits within 1 cm,
+    or a back face): the first clear size wins, else no cushion (moss went
+    under the porch wall). Count = cushions placed.
+  - **Specks** (the user, same day: "tiny bits of moss that I could toggle
+    on and off ... panels of glass ... bits of dirt or tiny bits of moss
+    that have fallen down and stuck to a window"): layer type "Specks",
+    debris kind 6, keys `specks` (clusters per square metre, 0 in
+    `DEBRIS_DEFAULTS`), `speck_size`, `speck_dirt`, `speck_cluster`,
+    `speck_spread`; type defaults Slope limit 90, Edges 0. Parts `specks` /
+    `dirt` (`mossSpeck` / `dirtSpeck`, stacked). `_DebrisBuild` keeps a
+    `_MossDetail(None, ms)` (no bed; strand length = speck size) and
+    `_specks` calls its `_shoot` per moss speck; `_dirt` is a jagged flat
+    fan (5-9 sides, slight dome, disc UVs) lifted 0.2 mm. The slope cut is
+    `cos(limit) - 1e-6`, so a limit of 90 keeps upright faces.
   - `_mi_drop_repeats` cleans faces that repeat a vertex (the moss bed
     makes a few on the porch scene; Maya drops them and `assignUVs` fails).
   - Not done (phases agreed with the user): an influence brush per layer (own stamp

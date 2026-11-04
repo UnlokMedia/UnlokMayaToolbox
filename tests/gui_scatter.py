@@ -113,7 +113,8 @@ PART_COLOURS = {"moss": ("testMoss", (0.12, 0.22, 0.05)), "strands": ("testStran
                 "litter": ("testLitter", (0.45, 0.26, 0.10)), "piles": ("testPile", (0.55, 0.30, 0.10)),
                 "tufts": ("testTuft", (0.14, 0.28, 0.05)), "stems": ("testStem", (0.24, 0.17, 0.10)),
                 "leaves": ("testLeaf", (0.07, 0.20, 0.04)), "green": ("testJungle", (0.10, 0.32, 0.06)),
-                "dry": ("testJungleDry", (0.50, 0.36, 0.16))}
+                "dry": ("testJungleDry", (0.50, 0.36, 0.16)), "specks": ("testSpeck", (0.16, 0.30, 0.05)),
+                "dirt": ("testDirt", (0.22, 0.15, 0.08))}
 
 
 def shade_part(node, part):
@@ -299,6 +300,68 @@ def main():
     shoot("04_piles_only")
     drawing(ns, panel, window)
     jungle_leaves(ns, panel, window)
+    moss_and_specks(ns, panel, window)
+
+
+def moss_and_specks(ns, panel, window):
+    """Moss as a carpet, then as Clumps (before / after) on a fresh porch;
+    then Specks on a window pane in front of the shack's wall."""
+    cmds.file(new=True, force=True)
+    _SG.clear()
+    grp, nodes = quiet(porch)
+    shade(list(nodes.values()), "testWood", (0.42, 0.34, 0.25))
+    glass = quiet(lambda: box("windowGlass", (16, 10, 0.1), (0, 9, -11.7), div=1.0))
+    shade([glass], "testGlass", (0.62, 0.74, 0.80))
+
+    def grow(sel, typ, preset, extra=None):
+        cmds.select(sel)
+        panel._sync_from_selection()
+        panel.start_type.setCurrentIndex(panel.start_type.findText(typ))
+        panel._show_layer()
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText(preset))
+        panel.load_preset()
+        for key, value in (extra or {}).items():
+            panel.f[typ][key].setValue(value)
+        t0 = time.time()
+        panel.new_btn.click()
+        pump()
+        root = panel._root
+        for key, node in ns["sc_parts"](root).items():
+            shade_part(node, key.split("/")[1])
+        cmds.undoInfo(stateWithoutFlush=False)
+        cmds.select(clear=True)
+        cmds.undoInfo(stateWithoutFlush=True)
+        return root, time.time() - t0
+
+    roof = (0, 22, -5), (10, 40, 18)
+    root, dt = grow([nodes["roof"], nodes["sill"], nodes["floor"]], "Moss", "Moss")
+    carpet = sum(cmds.polyEvaluate(n, face=True) for k, n in ns["sc_parts"](root).items() if k.endswith("/moss"))
+    look(*roof)
+    snap("12_moss_carpet.png")
+    look((0, 1, -6), (10, 9, 6))
+    snap("12_moss_carpet_sill.png")
+    quiet(lambda: cmds.delete(root))
+    root, dt = grow([nodes["roof"], nodes["sill"], nodes["floor"]], "Moss", "Moss", {"style": "Clumps"})
+    rep = panel.status.text()
+    clumps = sum(cmds.polyEvaluate(n, face=True) for k, n in ns["sc_parts"](root).items() if k.endswith("/moss"))
+    check("Moss Style Clumps from the panel: separate cushions, lighter than the carpet",
+          "moss clumps" in rep and 0 < clumps < carpet, "%d faces vs %d | %.2fs | %s" % (clumps, carpet, dt, rep))
+    window.grab().save(os.path.join(OUT, "12_panel_moss_clumps.png"))
+    look(*roof)
+    snap("12_moss_clumps.png")
+    look((0, 1, -6), (10, 9, 6))
+    snap("12_moss_clumps_sill.png")
+    quiet(lambda: cmds.delete(root))
+
+    root, dt = grow([glass], "Specks", "Moss and dirt specks")
+    rep = panel.status.text()
+    check("Specks on a window pane from the panel", "specks" in rep and
+          sorted(k.split("/")[1] for k in ns["sc_parts"](root)) == ["dirt", "specks"], "%.2fs | %s" % (dt, rep))
+    window.grab().save(os.path.join(OUT, "13_panel_specks.png"))
+    look((0, 9, -11.7), (8, 14, 4))
+    snap("13_specks_glass.png")
+    look((1, 8, -11.7), (2.2, 8.8, -8.6))
+    snap("13_specks_close.png")
 
 
 def drawing(ns, panel, window):

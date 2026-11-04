@@ -29162,7 +29162,8 @@ MOSS_DEFAULTS = {
     "coverage": 0.55, "clump_size": 0.06, "size_var": 0.5, "thickness": 0.025, "mess": 0.6,
     "slope": 50.0, "crevices": 0.7, "edges": 0.6, "patchiness": 0.6, "patch_size": 0.8, "creases": 0.4,
     "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
-    "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles"}
+    "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles",
+    "style": "Carpet"}
 IVY_DEFAULTS = {
     "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
     "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
@@ -29173,6 +29174,7 @@ DEBRIS_DEFAULTS = {
     "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
+    "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS, "Debris": DEBRIS_DEFAULTS}
 MI_PRESET_SKIP = ("seed", "udim")
@@ -30943,8 +30945,195 @@ class _MossDetail(object):
             uvi.extend((top_i, a2 + j, a2 + j1))
 
 
+MOSS_STYLES = ("Carpet", "Clumps")
+MOSS_CLUMP_GRID = {"Proxy": (2, 6), "Normal": (3, 8), "High": (5, 12), "Hero": (7, 16)}  # rings, segments
+
+
+class _MossClumps(object):
+    """The Clumps style (the user, 2026-11-04: the carpet "can become a bit
+    heavy ... it doesn't always have to be one object ... a scattered thing
+    instead of this growth"): separate moss cushions where the field says
+    moss grows (the carpet's candidates and margins), the best spots first;
+    deeper inside a patch = bigger and taller, where it's sheltered =
+    taller. Each is one to three domes run together (lumpy tops, steep
+    sides, the rim tucked under), every point laid onto the surface. It
+    looks like _MossBed to _MossDetail (pts, dirs, hf, core, faces_out, R),
+    so shoots, hanging strands and capsules grow on the cushions. UVs: each
+    dome a planar patch at Tile size scale, at a random place in the tile
+    (the carpet's tiling texture fits)."""
+
+    def __init__(self, surf, s, cands, rows, faces=None):
+        m = scene_m_per_unit()
+        self.m = m
+        self.surf = surf
+        self.R = max(1e-4, float(s["clump_size"]) / m)
+        self.H = max(1e-6, float(s["thickness"]) / m)
+        detail = s["detail"] if s["detail"] in MOSS_CLUMP_GRID else "Normal"
+        self.rings, self.segs = MOSS_CLUMP_GRID[detail]
+        self.proxy = detail == "Proxy"
+        self.lump = 0.0 if self.proxy else clamp(float(s.get("lumps", 0.6)), 0.0, 1.0)
+        self.var = clamp(float(s["size_var"]), 0.0, 1.0)
+        self.mess = clamp(float(s["mess"]), 0.0, 2.0)
+        self.seed = int(s["seed"])
+        self.tile = max(1e-4, float(s["uv_tile"]) / m)
+        self.cands, self.rows = cands, rows
+        self.capped = False
+        self.count = 0
+        self.pts, self.dirs, self.hf, self.core = [], [], [], []
+        self.faces_out = []  # (vertex ids, uv ids, stable key): one UV per point here
+        self.us, self.vs = [], []
+
+    def build(self):
+        R, cands, rows = self.R, self.cands, self.rows
+        cover = 0.05 / self.m
+        order = [i for i, row in enumerate(rows) if row is not None and row[0] > 0.0]
+        order.sort(key=lambda i: (-rows[i][0], i))
+        cell = 4.0 * R
+        room = {}
+        per = (1 + self.rings * self.segs) * (1 if self.proxy else 3)
+        for i in order:
+            c, row = cands[i], rows[i]
+            pr = math.sqrt(clamp(row[0] / 0.3, 0.0, 1.0))
+            r = _rand12(self.seed, i, 5, 91)
+            rad = R * (0.45 + 0.75 * pr) * (1.0 + self.var * (r[0] - 0.5))
+            p, n = c[0], c[1]
+            key = (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
+            near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                    for q in room.get((key[0] + dx, key[1] + dy, key[2] + dz), ())]
+            if any(_rl_len(_rl_sub(p, q)) < rad + qr for q, qr in near):
+                continue  # scattered: cushions don't overlap (a clump's own domes run together)
+            o = _moss_obstacle(self.surf, p, n, c[5], R)
+            if o is not None and o < cover:
+                continue
+            if len(self.pts) + per > MI_MAX_VERTS:
+                self.capped = True
+                break
+            h = self.H * (0.55 + 0.45 * pr) * (0.8 + 0.5 * row[1]) * (0.8 + 0.4 * r[1])
+            if o is not None:
+                h = min(h, 0.6 * o)
+            if self._clump(i, p, n, rad, h, pr, r):
+                room.setdefault(key, []).append((p, rad))
+        return self
+
+    def _covered(self, p, n):
+        """A laid point pressed against something, or inside another solid
+        (the floor runs on under a wall standing on it)."""
+        eps = 1e-3 * self.R
+        hit = self.surf.ray((p[0] + n[0] * eps, p[1] + n[1] * eps, p[2] + n[2] * eps), n, self.surf.size)
+        return bool(hit and (hit[0] < 0.01 / self.m or _rl_dot(hit[2], n) > 0.0))
+
+    def _fit(self, c, n, rad, r):
+        """The dome's radius, shrunk until its rim is clear of what stands on
+        the surface (a wall's foot: no moss under the wall), or None."""
+        t1, t2 = _mi_frame(n, r[7] * 6.2832)
+        for f in (1.0, 0.65, 0.4):
+            ok = True
+            for j in range(0, self.segs, 2):
+                a = 6.2832 * j / float(self.segs)
+                x, y = 1.1 * f * rad * math.cos(a), 1.1 * f * rad * math.sin(a)
+                hit = self.surf.closest((c[0] + t1[0] * x + t2[0] * y, c[1] + t1[1] * x + t2[1] * y,
+                                         c[2] + t1[2] * x + t2[2] * y))
+                if hit is not None and self._covered(hit[1], hit[2]):
+                    ok = False
+                    break
+            if ok:
+                return f * rad
+        return None
+
+    def _clump(self, i, c, n, rad, h, pr, r):
+        """One cushion: the main dome, plus up to two smaller ones run into its side."""
+        fit = self._fit(c, n, rad, r)
+        if fit is None:
+            return False
+        h *= 0.5 + 0.5 * fit / rad
+        rad = fit
+        self.count += 1
+        k = 1 if self.proxy else 1 + int(r[2] * (1.0 + 1.999 * min(1.0, self.mess)))
+        t1, t2 = _mi_frame(n, r[3] * 6.2832)
+        for d in range(min(3, k)):
+            rr = _rand12(self.seed, i * 4 + d, 6, 93) if d else r
+            if not d:
+                q, dr, dh = c, rad, h
+            else:
+                a, dist = rr[0] * 6.2832, rad * (0.55 + 0.25 * rr[1])
+                hit = self.surf.closest(_rl_add(c, _rl_add(_rl_mul(t1, dist * math.cos(a)),
+                                                           _rl_mul(t2, dist * math.sin(a)))))
+                if hit is None or _rl_dot(hit[2], n) < 0.4:
+                    continue
+                q, dr, dh = hit[1], rad * (0.45 + 0.25 * rr[2]), h * (0.55 + 0.3 * rr[3])
+                fit = self._fit(q, n, dr, rr)
+                if fit is None:
+                    continue
+                dh *= 0.5 + 0.5 * fit / dr
+                dr = fit
+            self._dome(i * 4 + d, q, n, dr, dh, pr, rr)
+        return True
+
+    def _dome(self, key, c, n, rad, h, pr, r):
+        rings, segs = self.rings, self.segs
+        t1, t2 = _mi_frame(n, r[7] * 6.2832)
+        b = len(self.pts)
+        sx, sy = r[10] * 50.0, r[11] * 50.0
+        u0 = 0.15 + 0.7 * r[8]
+        v0 = 0.15 + 0.7 * r[9]
+        lump = self.lump
+        P, D, HF, CORE = self.pts, self.dirs, self.hf, self.core
+        top = h * (1.0 + 0.15 * lump * _th_noise(sx, sy, self.seed + 43))
+        P.append(_rl_add(c, _rl_mul(n, top)))
+        D.append(n)
+        HF.append(1.0)
+        CORE.append(pr)
+        self.us.append(u0)
+        self.vs.append(v0)
+        for ri in range(1, rings + 1):
+            f = ri / float(rings)
+            for j in range(segs):
+                a = 6.2832 * j / float(segs)
+                ca, sa = math.cos(a), math.sin(a)
+                rj = 1.0 + (0.12 + 0.1 * self.mess) * _th_noise(sx + ca * 1.7, sy + sa * 1.7, self.seed + 45)
+                x, y = f * rad * rj * ca, f * rad * rj * sa
+                if ri < rings:
+                    z = h * math.sqrt(max(0.0, 1.0 - f ** 2.4))
+                    z *= 1.0 + 0.35 * lump * _th_noise(sx + x / rad * 2.5, sy + y / rad * 2.5, self.seed + 47)
+                else:
+                    z = -0.08 * h  # the rim tucks under
+                q = (c[0] + t1[0] * x + t2[0] * y, c[1] + t1[1] * x + t2[1] * y, c[2] + t1[2] * x + t2[2] * y)
+                hit = self.surf.closest(q)
+                if hit is not None:
+                    up = _rl_norm(_rl_add(hit[2], n), n)
+                    q = hit[1]
+                else:
+                    up = n
+                P.append(_rl_add(q, _rl_mul(up, z)))
+                D.append(up)
+                HF.append(max(0.0, z) / max(1e-9, self.H))
+                CORE.append(pr * (1.0 - f))
+                self.us.append(u0 + x / self.tile)
+                self.vs.append(v0 + y / self.tile)
+        fkey = key * 1024
+        for j in range(segs):  # top fan
+            j2 = (j + 1) % segs
+            tri = [b, b + 1 + j, b + 1 + j2]
+            self.faces_out.append((tri, tri, fkey + j))
+        for ri in range(1, rings):
+            r0, r1 = b + 1 + (ri - 1) * segs, b + 1 + ri * segs
+            for j in range(segs):
+                j2 = (j + 1) % segs
+                quad = [r0 + j, r1 + j, r1 + j2, r0 + j2]
+                self.faces_out.append((quad, quad, fkey + ri * segs + j))
+
+    def mesh(self):
+        """The cushions as (points, counts, connects, us, vs, uv ids)."""
+        counts, conn = [], []
+        for vids, _, _ in self.faces_out:
+            counts.append(len(vids))
+            conn.extend(vids)
+        return list(self.pts), counts, conn, list(self.us), list(self.vs), list(conn)
+
+
 def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
-    """Grow a moss patch on meshes: {"moss": the bed, "strands": shoots and
+    """Grow a moss patch on meshes: {"moss": the bed (Style Carpet: one
+    continuous shell; Clumps: separate cushions), "strands": shoots and
     hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
     space). Detail sets how fine the bed is and what stands out of it."""
     s = mi_settings_only("Moss", s)
@@ -30958,10 +31147,11 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     if not sampler.total:
         return empty
     spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces, draw)
-    bed = _MossBed(surf, s, cands, rows, faces).build()
+    clumps = s.get("style") == MOSS_STYLES[1]
+    bed = (_MossClumps if clumps else _MossBed)(surf, s, cands, rows, faces).build()
     det = _MossDetail(bed, s).build()
     return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C),
-            "clumps": sum(1 for row in rows if row is not None and row[0] > 0.0),
+            "clumps": bed.count if clumps else sum(1 for row in rows if row is not None and row[0] > 0.0),
             "capped": bed.capped or det.capped}
 
 
@@ -31439,7 +31629,7 @@ DEBRIS_DETAIL = {"Proxy": (6, 3.0, 2, (3, 2), (2, 6)),
 DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first row)
 DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
 DEBRIS_PILE_LEAVES = 400  # most leaves in one round pile (a drift along a crease: twice that)
-DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0}  # how much grass, leaves, piles, tufts, big leaves
+DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0, 6: 0.6}  # grass, leaves, piles, tufts, big leaves, specks
 # crowd into creases
 # Big jungle leaves (the user, 2026-11-04: "instead of piles of small leaves ... large jungle leaves, like one or
 # two or three of them at a time ... the size of a whole small leaf pile"). Detail: blade rows, columns, frond
@@ -31478,9 +31668,16 @@ class _DebrisBuild(object):
         self.lift = 0.001 / m  # what rests on the surface sits this far off it
         self.G, self.L, self.T = _mi_mesh(), _mi_mesh(), _mi_mesh()
         self.J, self.JD = _mi_mesh(), _mi_mesh()  # big leaves: green, dry
+        self.DT = _mi_mesh()  # specks: dirt flakes (the moss specks are self.md.S)
+        ms = dict(MOSS_DEFAULTS)
+        ms.update({"detail": detail, "mess": self.mess, "seed": self.seed, "stacks": self.stacks,
+                   "stack_layout": s["stack_layout"], "strand_length": float(s["speck_size"])})
+        self.md = _MossDetail(None, ms)  # a moss shoot's star (Proxy / Normal) or shoot (High / Hero)
+        if not self.md.kind:
+            self.md.kind = "tuft"
         self.jungle_grid = JUNGLE_DETAIL[detail]
         self.jungle_at = {}  # cell -> [(centre, radius)] of the big leaf clusters so far
-        self.counts = {"bunches": 0, "leaves": 0, "piles": 0, "tufts": 0, "jungle": 0}
+        self.counts = {"bunches": 0, "leaves": 0, "piles": 0, "tufts": 0, "jungle": 0, "specks": 0}
         self.capped = False
         fs = _debris_field(s)
         self.R = DEBRIS_FIELD_R / m
@@ -31505,7 +31702,7 @@ class _DebrisBuild(object):
         dens = density * self.m * self.m  # per square scene unit
         step = math.sqrt(self.per)
         lim = float(self.s["slope"])
-        cut = math.cos(math.radians(min(90.0, lim + 15.0)))  # past Slope limit + 15 degrees: never
+        cut = math.cos(math.radians(min(90.0, lim + 15.0))) - 1e-6  # past Slope limit + 15 degrees: never
         for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
             if row is None or cand[1][1] < cut:
                 continue
@@ -31584,7 +31781,79 @@ class _DebrisBuild(object):
             self._jungle(p, n, r, ci)
         for p, n, r, margin, ci in self._spots(float(s["tufts"]), 4):
             self._tuft(p, n, r)
+        for p, n, r, margin, ci in self._spots(float(s["specks"]), 6):
+            self._specks(p, n, r)
+        self.capped = self.capped or self.md.capped
         return self
+
+    # -------------------------------------------------------------- specks
+    def _specks(self, c, n, r):
+        """A few specks that landed together (the user, 2026-11-04: "really
+        tiny bits of moss ... separate to the big moss green coverage, sort
+        of like set dressing ... bits of dirt or tiny bits of moss that have
+        fallen down and stuck to a window"): 1 to Per cluster within Cluster
+        spread, each a tiny moss star (a shoot at High / Hero) or, Dirt of
+        them, a flat dirt flake. Stuck to anything up to Slope limit, glass
+        and walls too."""
+        s = self.s
+        most = max(1, int(s["speck_cluster"]))
+        k = 1 + min(most - 1, int(r[8] * most))
+        spread = max(0.0, float(s["speck_spread"])) / self.m
+        dirt = clamp(float(s["speck_dirt"]), 0.0, 1.0)
+        t1, t2 = _mi_frame(n, r[7] * 6.2832)
+        for i in range(k):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + i, 9, 89)
+            if i:
+                a, d = rr[0] * 6.2832, spread * math.sqrt(rr[1])
+                hit = self.surf.closest(_rl_add(c, _rl_add(_rl_mul(t1, d * math.cos(a)), _rl_mul(t2, d * math.sin(a)))))
+                if hit is None or _rl_dot(hit[2], n) < 0.5:
+                    continue
+                p, nn = hit[1], hit[2]
+            else:
+                p, nn = c, n
+            size = self._size("speck_size", rr[2]) * (1.0 if not i else 0.55 + 0.5 * rr[6])
+            if rr[3] < dirt:
+                self._dirt(p, nn, size, rr)
+            else:
+                md = self.md
+                md.L = size
+                lift = 0.0 if md.kind == "tuft" else 0.3 * size  # a shoot stands on the surface, not in it
+                n0 = len(md.S[0])
+                md._shoot(_rl_add(p, _rl_mul(nn, lift)), nn, 1.0, rr)
+                if len(md.S[0]) == n0:
+                    continue
+            self.counts["specks"] += 1
+
+    def _dirt(self, p, n, size, r):
+        """A dirt flake: a flat, jagged, slightly domed crumb lying on the surface (a disc in the UVs)."""
+        sides = 5 if self.proxy else 6 + int(r[4] * 3.999)
+        if self._full(self.DT, sides + 1):
+            return
+        t1, t2 = _mi_frame(n, r[5] * 6.2832)
+        rad = 0.5 * size
+        aspect = 1.0 + 0.8 * r[6]
+        lift = 0.0002 / self.m + 0.002 * rad
+        stack = min(self.stacks - 1, int(r[9] * self.stacks))
+        pts, counts, conn, us, vs, uvi = self.DT
+        b = len(pts)
+        pts.append(_rl_add(p, _rl_mul(n, lift + 0.15 * rad * r[7])))
+        u, v = self._uv(0.5, 0.5, stack)
+        us.append(u)
+        vs.append(v)
+        for j in range(sides):
+            a = 6.2832 * (j + 0.35 * (_rand12(self.seed, int(r[10] * 1e6) + j, 3, 97)[0] - 0.5)) / sides
+            jag = 0.6 + 0.4 * _rand12(self.seed, int(r[11] * 1e6) + j, 4, 97)[0]
+            x, y = math.cos(a) * rad * jag * aspect, math.sin(a) * rad * jag
+            pts.append((p[0] + t1[0] * x + t2[0] * y + n[0] * lift, p[1] + t1[1] * x + t2[1] * y + n[1] * lift,
+                        p[2] + t1[2] * x + t2[2] * y + n[2] * lift))
+            u, v = self._uv(0.5 + 0.45 * x / (rad * aspect), 0.5 + 0.45 * y / rad, stack)
+            us.append(u)
+            vs.append(v)
+        for j in range(sides):
+            tri = (b, b + 1 + j, b + 1 + (j + 1) % sides)
+            counts.append(3)
+            conn.extend(tri)
+            uvi.extend(tri)
 
     # --------------------------------------------------------------- grass
     def _bunch(self, c, n, r, ci=-1):
@@ -32277,13 +32546,14 @@ class _DebrisBuild(object):
 def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
     leaves (scattered and in piles), "tufts": tiny moss cushions, "jungle" /
-    "jungle_dry": big leaves, green / dried, "bunches", "leaves_n", "piles",
-    "tufts_n", "jungle_n", "capped"} (world space)."""
+    "jungle_dry": big leaves, green / dried, "specks" / "dirt": tiny moss
+    stars and dirt flakes, "bunches", "leaves_n", "piles", "tufts_n",
+    "jungle_n", "specks_n", "capped"} (world space)."""
     s = mi_settings_only("Debris", s)
     surf = surf or _MiSurface(nodes)
     empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "jungle": _mi_mesh(),
-             "jungle_dry": _mi_mesh(), "bunches": 0, "leaves_n": 0, "piles": 0, "tufts_n": 0, "jungle_n": 0,
-             "capped": False}
+             "jungle_dry": _mi_mesh(), "specks": _mi_mesh(), "dirt": _mi_mesh(), "bunches": 0, "leaves_n": 0,
+             "piles": 0, "tufts_n": 0, "jungle_n": 0, "specks_n": 0, "capped": False}
     if not surf.items or float(s["coverage"]) <= 0.0:
         return empty
     if draw is not None:
@@ -32293,9 +32563,9 @@ def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
         return empty
     b = _DebrisBuild(surf, sampler, s, seeds, faces, draw).build()
     return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "jungle": tuple(b.J),
-            "jungle_dry": tuple(b.JD), "bunches": b.counts["bunches"], "leaves_n": b.counts["leaves"],
-            "piles": b.counts["piles"], "tufts_n": b.counts["tufts"], "jungle_n": b.counts["jungle"],
-            "capped": b.capped}
+            "jungle_dry": tuple(b.JD), "specks": tuple(b.md.S), "dirt": tuple(b.DT), "bunches": b.counts["bunches"],
+            "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
+            "jungle_n": b.counts["jungle"], "specks_n": b.counts["specks"], "capped": b.capped}
 
 
 def mi_build(kind, nodes, s, seeds=None, faces=None):
@@ -32804,13 +33074,18 @@ SC_TYPES = collections.OrderedDict([
                        "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
                     "over": {"slope": 60.0, "tufts": 6.0}}),
+    ("Specks", {"parts": (("specks", "mossSpeck"), ("dirt", "dirtSpeck")),
+                "keys": SC_DEBRIS_COMMON + ("specks", "speck_size", "speck_dirt", "speck_cluster", "speck_spread"),
+                "over": {"slope": 90.0, "specks": 40.0, "coverage": 0.8, "crevices": 0.3, "edges": 0.0,
+                         "patchiness": 0.5, "creases": 0.5}}),
     ("Ivy", {"parts": (("stems", "ivyStem"), ("leaves", "ivyLeaf")),
              "keys": tuple(k for k in IVY_DEFAULTS if k != "udim"), "over": {}})])
 SC_DEBRIS_ITEMS = {"Grass": "grass", "Leaves": "leaves", "Leaf piles": "piles", "Moss tufts": "tufts",
-                   "Jungle leaves": "jungle"}
+                   "Jungle leaves": "jungle", "Specks": "specks"}
 SC_DEBRIS_OUT = {"Grass": (("grass", "grass"),), "Leaves": (("litter", "litter"),),
                  "Leaf piles": (("litter", "piles"),), "Moss tufts": (("tufts", "tufts"),),
-                 "Jungle leaves": (("jungle", "green"), ("jungle_dry", "dry"))}  # debris_build's mesh -> part
+                 "Jungle leaves": (("jungle", "green"), ("jungle_dry", "dry")),
+                 "Specks": (("specks", "specks"), ("dirt", "dirt"))}  # debris_build's mesh -> part
 SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
@@ -32984,7 +33259,7 @@ def _sc_build_layer(layer, surf):
         out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw)
         parts = {part: out.get(src) for src, part in SC_DEBRIS_OUT[typ]}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
-                  "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0)}
+                  "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0), "specks": out.get("specks_n", 0)}
     counts["capped"] = bool(out.get("capped"))
     return {p: _mi_drop_repeats(m) for p, m in parts.items()}, counts
 
@@ -32996,7 +33271,7 @@ def sc_build(root, data, surf=None, only=None):
     order. Returns ({"<id>/<part>": mesh}, {"udims", counts...}, meshes)."""
     meshes = sc_surfaces(data)
     report = {"faces": 0, "capped": False, "clumps": 0, "vines": 0, "leaves": 0, "bunches": 0, "piles": 0,
-              "tufts": 0, "jungle": 0, "udims": {}, "surfaces": len(meshes)}
+              "tufts": 0, "jungle": 0, "specks": 0, "udims": {}, "surfaces": len(meshes)}
     combined, order = {}, []
     if not meshes:
         return combined, report, meshes
@@ -33019,7 +33294,7 @@ def sc_build(root, data, surf=None, only=None):
         for part, mesh in parts.items():
             if mesh and mesh[1]:
                 combined[lid + "/" + part] = mesh
-        for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts", "jungle"):
+        for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts", "jungle", "specks"):
             report[k] += counts.get(k, 0)
         report["capped"] = report["capped"] or counts.get("capped", False)
     placed = _roof_udims(dict(combined), int(data.get("udim") or 1001), order=order)
@@ -33217,7 +33492,7 @@ def _sc_make_part(root, layer, part, material):
     cmds.setAttr(shape + "." + SC_PART, layer["id"] + "/" + part, type="string")
     cmds.addAttr(shape, longName=MI_VERTS, attributeType="long", defaultValue=0)
     cmds.addAttr(shape, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
-    if part in MI_STACKED_PARTS or part in ("piles", "green", "dry"):
+    if part in MI_STACKED_PARTS or part in ("piles", "green", "dry", "specks", "dirt"):
         cmds.addAttr(shape, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=True)
     return node
 
@@ -33561,6 +33836,12 @@ SC_PRESETS = {
         ("Dry and torn", {"jungle_green": 0.1, "curl": 1.2, "jungle_tear": 0.8}),
         ("Single big leaves", {"jungle_cluster": 1, "jungle_size": 0.6, "jungle": 0.4}),
         ("Palm fronds", {"jungle_shape": "Frond", "jungle_size": 1.2, "jungle_cluster": 2, "jungle": 0.25})]),
+    "Specks": collections.OrderedDict([
+        ("Moss and dirt specks", {}),
+        ("Dirty glass", {"speck_dirt": 0.85, "specks": 80.0, "speck_size": 0.0025, "speck_cluster": 3}),
+        ("Fallen moss bits", {"speck_dirt": 0.1, "speck_size": 0.006, "speck_cluster": 6, "speck_spread": 0.02,
+                              "specks": 25.0}),
+        ("A few specks", {"specks": 8.0, "speck_cluster": 2})]),
     "Moss tufts": collections.OrderedDict([
         ("Moss tufts", {}),
         ("Crevice tufts", {"tufts": 25.0, "tuft_size": 0.03, "crevices": 1.0, "patchiness": 0.8})])}
@@ -33645,6 +33926,9 @@ SC_FIELDS = {
     "detail": ("Detail", lambda: SegmentField(MI_DETAILS),
                "Proxy: layout. Normal: mid shots. High: close-ups. Hero: extreme close-ups (keep it small)."),
     # moss
+    "style": ("Style", lambda: SegmentField(MOSS_STYLES),
+              "Carpet: one continuous bed of moss over the surface. Clumps: separate moss cushions scattered where "
+              "it grows (lighter; bigger and taller deeper in a patch). Shoots, strands and capsules grow on both."),
     "clump_size": ("Clump size", _scf(0.005, 3.0, 0.02, 0.4, 3, 0.01),
                    "Size of the moss's cushions and how fine its patches' edges are, in metres."),
     "thickness": ("Thickness", _scf(0.0, 0.5, 0.0, 0.12, 3, 0.005),
@@ -33679,6 +33963,15 @@ SC_FIELDS = {
              "How dried the leaves are: edges curled up, ends lifted, folded, crumpled."),
     "tufts": ("Tufts", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Tiny moss cushions per square metre."),
     "tuft_size": ("Tuft size", _scf(0.005, 0.5, 0.01, 0.1, 3, 0.005), "How wide a moss tuft is, in metres."),
+    # specks
+    "specks": ("Specks", _scf(0.0, 2000.0, 0.0, 200.0, 1, 1.0),
+               "Little clusters of specks per square metre: tiny moss bits and dirt stuck to the surface."),
+    "speck_size": ("Speck size", _scf(0.0005, 0.1, 0.001, 0.02, 4, 0.0005), "How big a speck is, in metres."),
+    "speck_dirt": ("Dirt", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                   "How many are bits of dirt (flat flakes, their own part); the rest are tiny moss stars."),
+    "speck_cluster": ("Per cluster", lambda: IntField(1, 12, 1, 12), "Most specks that landed together."),
+    "speck_spread": ("Cluster spread", _scf(0.0, 0.5, 0.0, 0.05, 3, 0.001),
+                     "How far a cluster's specks spread, in metres."),
     # jungle leaves
     "jungle": ("Clusters", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
                "Clusters of big leaves per square metre where they gather."),
@@ -33720,7 +34013,8 @@ SC_FIELDS = {
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
-    "Moss": [("", True, ["coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands", "capsules"]),
+    "Moss": [("", True, ["style", "coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands",
+                         "capsules"]),
              ("Where it grows", True, _SC_WHERE),
              ("More", False, ["size_var", "strand_length", "droop", "detail"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
@@ -33745,6 +34039,10 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
                    ("More", False, ["size_var", "detail"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
+    "Specks": [("", True, ["coverage", "spread", "specks", "speck_size", "speck_dirt", "speck_cluster"]),
+               ("Where it gathers", True, _SC_WHERE + ["mess"]),
+               ("More", False, ["speck_spread", "size_var", "detail"]),
+               ("UVs", False, ["stacks", "stack_layout"])],
     "Ivy": [("", True, ["vines", "length", "climb", "wander", "branching", "leaf_size", "leaf_density"]),
             ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
@@ -34334,7 +34632,8 @@ class ScatterPanel(QtWidgets.QWidget):
     def _counts(self, rep):
         bits = []
         for key, word in (("clumps", "moss clumps"), ("bunches", "grass bunches"), ("leaves", "leaves"),
-                          ("piles", "piles"), ("tufts", "tufts"), ("jungle", "big leaves"), ("vines", "vines")):
+                          ("piles", "piles"), ("tufts", "tufts"), ("jungle", "big leaves"), ("specks", "specks"),
+                          ("vines", "vines")):
             if rep.get(key):
                 bits.append("%s %s" % (format(rep[key], ","), word))
         bits.append("%s faces" % format(rep.get("faces", 0), ","))
