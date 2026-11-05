@@ -755,10 +755,16 @@ def drawing(ns, panel, window):
     snap("07_drawing_cleared.png")
     check("Clear removes the strokes and their lines", not panel.drawer.strokes and
           not cmds.ls("scatterDrawing*", type="transform"))
+    pump()  # anything a timer has left to do happens before the Ctrl+Z, not after
+    undo_state = "undo %s, queue %s, length %s, top %r" % (
+        "on" if cmds.undoInfo(q=True, state=True) else "OFF",
+        "EMPTY" if cmds.undoInfo(q=True, undoQueueEmpty=True) else "not empty",
+        "infinite" if cmds.undoInfo(q=True, infinity=True) else cmds.undoInfo(q=True, length=True),
+        cmds.undoInfo(q=True, undoName=True))  # in the detail: what a failure here undid (it fails now and then)
     cmds.undo()
     panel._after_undo()
     check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1,
-          "%d layers, %s" % (len(ns["sc_data"](root)["layers"]), panel.status.text()))
+          "%d layers (%s), %s" % (len(ns["sc_data"](root)["layers"]), undo_state, panel.status.text()))
 
 
 def jungle_leaves(ns, panel, window):
@@ -815,6 +821,14 @@ def jungle_leaves(ns, panel, window):
         shade_part(node, key.split("/")[1])
     check("Shape Frond is live", ns["sc_settings"](ns["sc_layer"](ns["sc_data"](root), panel._lid))["jungle_shape"] ==
           "Frond", panel.status.text())
+    has = all("drape" in panel.f[t] for t in ("Leaves", "Leaf piles", "Jungle leaves"))
+    panel.f["Jungle leaves"]["drape"].setValue(1.0)
+    panel._queue("Jungle leaves", "drape")
+    panel._apply_pending()
+    for key, node in ns["sc_parts"](root).items():
+        shade_part(node, key.split("/")[1])
+    check("Drape (under More) on Leaves, Leaf piles and Jungle leaves, live", has and ns["sc_settings"](
+        ns["sc_layer"](ns["sc_data"](root), panel._lid))["drape"] == 1.0, panel.status.text())
     look((0, 8, -2), (30, 34, 62))
     snap("10_fronds_overview.png")
     close_ups(root, "10_close")

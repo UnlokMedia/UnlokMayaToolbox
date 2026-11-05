@@ -29224,7 +29224,7 @@ DEBRIS_DEFAULTS = {
     "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
-    "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012,
+    "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
@@ -33141,6 +33141,7 @@ DEBRIS_DETAIL = {"Proxy": (6, 3.0, 2, (3, 2), (2, 6)),
                  "Hero": (90, 1.0, 10, (14, 8), (6, 20))}
 DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first row)
 DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
+LEAF_DROP_SAMPLES = tuple((x, f) for f in (-0.4, -0.07, 0.27, 0.6) for x in (-0.3, 0.0, 0.3))  # leaf lengths, to its edges
 DEBRIS_PILE_LEAVES = 400  # most leaves in one round pile (a drift along a crease: twice that)
 DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0, 6: 0.6}  # grass, leaves, piles, tufts, big leaves, specks
 # crowd into creases
@@ -33162,6 +33163,338 @@ def _debris_field(s):
     fs["clump_size"] = DEBRIS_FIELD_R
     fs["_up_only"] = True  # crevices and creases don't pull leaves up a wall
     return fs
+
+
+# Dropped leaves: where something dropped from above comes to rest (the user: leaves on corrugated sheets and
+# glass roofs "clipping through the window frames", "stick vertically upright ... like towers"; "as if ... dropped
+# on top and then maybe droop a little bit over all the surfaces ... more procedural", no simulation).
+_MI_DROP_FIELDS = collections.OrderedDict()  # (meshes, cell) -> a _MiDropField's nodes
+MI_DROP_VOID = -1e30     # nothing under a node (past an edge)
+MI_DROP_INSIDE = 1e30    # a node's ray starts inside something (a wall's footprint)
+MI_DROP_TILT = 40.0      # degrees a dropped leaf lies at most (more only on a roof steeper than that)
+
+
+class _MiDropField(object):
+    """The top surface under any point, seen from above: rays straight down
+    at grid nodes `cell` apart, cast when first needed and kept (per set of
+    meshes and cell, across builds). A node's ray starts a band or two above
+    the height asked about, so a roof far overhead doesn't count; one that
+    starts inside a solid reads MI_DROP_INSIDE, nothing under it
+    MI_DROP_VOID."""
+
+    def __init__(self, surf, cell, band=None):
+        self.surf = surf
+        self.c = cell
+        self.band = band or 8.0 * cell
+        key = (tuple(_mi_mesh_key(x) for x in surf.nodes), round(cell, 9), round(self.band, 9))
+        nodes = _mi_cache_get(_MI_DROP_FIELDS, key)
+        if nodes is None:
+            nodes = _MI_DROP_FIELDS[key] = {}
+            while len(_MI_DROP_FIELDS) > 4:
+                _MI_DROP_FIELDS.popitem(last=False)
+        self.nodes = nodes
+        self.stack = None  # a _MiDropStack: the leaves laid so far count as surface too
+
+    def _node(self, i, k, b):
+        key = (i, k, b)
+        v = self.nodes.get(key)
+        if v is None:
+            top = (b + 2) * self.band
+            c = self.c
+            for x, z in (((i + 0.31) * c, (k + 0.43) * c), ((i + 0.48) * c, (k + 0.54) * c)):
+                hit = self.surf.ray((x, top, z), (0.0, -1.0, 0.0), 4.0 * self.band)
+                if hit is None:
+                    v = MI_DROP_VOID
+                elif hit[2][1] < -0.5:  # an underside: the ray started inside something
+                    v = MI_DROP_INSIDE
+                else:
+                    v = hit[1][1]
+                    if hit[2][1] < 0.05:  # grazing a side face: look again a little over
+                        continue
+                break
+            self.nodes[key] = v
+        return v
+
+    def top(self, x, z, y):
+        """The highest of the four nodes round (x, z), asked from height y
+        (MI_DROP_VOID: nothing under any; MI_DROP_INSIDE: one is in a solid)."""
+        c = self.c
+        i, k = int(math.floor(x / c - 0.31)), int(math.floor(z / c - 0.43))  # nodes sit off round numbers
+        b = int(math.floor(y / self.band))
+        node = self._node
+        v = max(node(i, k, b), node(i + 1, k, b), node(i, k + 1, b), node(i + 1, k + 1, b))
+        if self.stack is not None and v < MI_DROP_INSIDE:
+            s = self.stack.top(x, z, y + 2.0 * self.band)
+            if s > v:
+                v = s
+        return v
+
+    def top_wide(self, x, z, y):
+        """The highest of the nine nodes round (x, z) (and the leaves laid
+        there), leaving out nodes inside a solid: what a point must stay
+        above, so the edge of a frame or a step between nodes can't slip
+        over it."""
+        c = self.c
+        i, k = int(round(x / c - 0.31)), int(round(z / c - 0.43))
+        b = int(math.floor(y / self.band))
+        node = self._node
+        v = MI_DROP_VOID
+        for di in (-1, 0, 1):
+            for dk in (-1, 0, 1):
+                h = node(i + di, k + dk, b)
+                if v < h < MI_DROP_INSIDE:
+                    v = h
+        if self.stack is not None:
+            s = self.stack.top(x, z, y + 2.0 * self.band)
+            if s > v:
+                v = s
+        return v
+
+
+class _MiDropStack(object):
+    """The leaves a build has laid so far, seen from above: the highest leaf
+    point in each cell (cell apart). Read through _MiDropField.top, so the
+    next leaf dropped lands on them instead of through them: a layer's
+    leaves pile up on each other in the order they are made."""
+
+    def __init__(self, cell):
+        self.c = cell
+        self.cells = {}
+
+    def lay(self, pts, conn, k0):
+        """Adds a leaf just made: its quads conn[k0:] (4 point indices each),
+        sampled finer than a cell."""
+        c, cells = self.c, self.cells
+        floor = math.floor
+        for k in range(k0, len(conn) - 3, 4):
+            p0, p1, p2, p3 = pts[conn[k]], pts[conn[k + 1]], pts[conn[k + 2]], pts[conn[k + 3]]
+            span = max(math.hypot(p2[0] - p0[0], p2[2] - p0[2]), math.hypot(p3[0] - p1[0], p3[2] - p1[2]))
+            m = int(span / c) + 1
+            for i in range(m + 1):
+                u = i / float(m)
+                ax, ay, az = p0[0] + (p1[0] - p0[0]) * u, p0[1] + (p1[1] - p0[1]) * u, p0[2] + (p1[2] - p0[2]) * u
+                bx, by, bz = p3[0] + (p2[0] - p3[0]) * u, p3[1] + (p2[1] - p3[1]) * u, p3[2] + (p2[2] - p3[2]) * u
+                for j in range(m + 1):
+                    v = j / float(m)
+                    y = ay + (by - ay) * v
+                    key = (int(floor((ax + (bx - ax) * v) / c)), int(floor((az + (bz - az) * v) / c)))
+                    if cells.get(key, MI_DROP_VOID) < y:
+                        cells[key] = y
+
+    def top(self, x, z, ylim):
+        """The highest leaf laid round (x, z) no higher than ylim (one far
+        overhead doesn't count); MI_DROP_VOID: none."""
+        c, get = self.c, self.cells.get
+        i, k = int(math.floor(x / c - 0.5)), int(math.floor(z / c - 0.5))
+        v = MI_DROP_VOID
+        for key in ((i, k), (i + 1, k), (i, k + 1), (i + 1, k + 1)):
+            y = get(key, MI_DROP_VOID)
+            if v < y <= ylim:
+                v = y
+        return v
+
+
+def _mi_drop_slope(field, base, ax, s, d):
+    """The slope along horizontal ax a dropped piece goes by: the surface
+    normal's (s) or that of the tops d either side of base, whichever is
+    gentler (level when they disagree) - so a corrugation flank under base
+    reads as the roof's pitch, a step beside a floor as level."""
+    hp = field.top(base[0] + ax[0] * d, base[2] + ax[2] * d, base[1] + s * d)
+    hm = field.top(base[0] - ax[0] * d, base[2] - ax[2] * d, base[1] - s * d)
+    if not (MI_DROP_VOID < hp < MI_DROP_INSIDE and MI_DROP_VOID < hm < MI_DROP_INSIDE):
+        return s
+    e = (hp - hm) / (2.0 * d)
+    if e * s <= 0.0:
+        return 0.0
+    return e if abs(e) < abs(s) else s
+
+
+def _mi_drop_fill(samples, step, most=24):
+    """samples (x, f) filled in to about step apart when they're a grid
+    (each axis refined, at most most a side), so nothing as thin as a rim
+    or a mullion falls between them; other sets as they are."""
+    xs, fs = sorted(set(s[0] for s in samples)), sorted(set(s[1] for s in samples))
+    if len(xs) * len(fs) != len(samples) or step <= 0.0:
+        return samples
+
+    def fill(v):
+        out = [v[0]]
+        for a, b in zip(v, v[1:]):
+            k = min(most, max(1, int(math.ceil((b - a) / step - 1e-9))))
+            out.extend(a + (b - a) * i / float(k) for i in range(1, k + 1))
+        while len(out) > most:  # long and fine: every other one, keeping both ends
+            out = out[::2] + ([out[-1]] if len(out) % 2 == 0 else [])
+        return out
+    return [(x, f) for f in fill(fs) for x in fill(xs)]
+
+
+def _mi_drop_rest(pts, gx, gf, most, c):
+    """Where a rigid piece comes to rest on the heights pts (x, f, h): from
+    slope (gx, gf) it sits on the highest point, then tips its middle c
+    down - about that point, then about the line to the next it meets -
+    till it lies on three with c between them (or on two with c on the
+    line). The slope it rests at (the lowest plane over every point, at c)
+    and whether it rests: False when it would only stop tilted most, its
+    middle past what holds it (it slides off)."""
+    def top(gx, gf):
+        return max(range(len(pts)), key=lambda i: pts[i][2] - gx * pts[i][0] - gf * pts[i][1])
+
+    def tip(S, dx, df, gx, gf):  # tip about the points S the way (dx, df) (unit): how far, and onto which
+        p1 = pts[S[0]]
+        t, hit = None, None
+        b = gx * dx + gf * df
+        disc = b * b - (gx * gx + gf * gf - most * most)
+        if disc > 0.0:
+            t = -b + math.sqrt(disc)  # no steeper than most
+        for i, q in enumerate(pts):
+            if i in S:
+                continue
+            rate = dx * (q[0] - p1[0]) + df * (q[1] - p1[1])
+            if rate < -1e-12:
+                slack = gx * (q[0] - p1[0]) + gf * (q[1] - p1[1]) + p1[2] - q[2]
+                ti = max(0.0, slack) / -rate
+                if t is None or ti < t:
+                    t, hit = ti, i
+        return t, hit
+
+    S = [top(gx, gf)]
+    steady = True
+    for _ in range(12):
+        p1 = pts[S[0]]
+        if len(S) == 1:
+            dx, df = c[0] - p1[0], c[1] - p1[1]
+        elif len(S) == 2:
+            p2 = pts[S[1]]
+            ex, ef = p2[0] - p1[0], p2[1] - p1[1]
+            el = math.hypot(ex, ef)
+            if el < 1e-9:
+                S = S[:1]
+                continue
+            dx, df = -ef / el, ex / el
+            side = dx * (c[0] - p1[0]) + df * (c[1] - p1[1])
+            if abs(side) < 1e-6 * (1.0 + el):
+                break  # its middle on the line: at rest
+            if side < 0.0:
+                dx, df = -dx, -df
+        else:
+            (ax, af, _), (bx, bf, _), (qx, qf, _) = (pts[i] for i in S)
+            det = (bx - ax) * (qf - af) - (qx - ax) * (bf - af)
+            if abs(det) < 1e-12:
+                S = S[:2]
+                continue
+            w1 = ((c[0] - ax) * (qf - af) - (qx - ax) * (c[1] - af)) / det
+            w2 = ((bx - ax) * (c[1] - af) - (c[0] - ax) * (bf - af)) / det
+            w = (1.0 - w1 - w2, w1, w2)
+            k = min(range(3), key=lambda j: w[j])
+            if w[k] >= -1e-9:
+                break  # its middle between three: at rest
+            S = [S[j] for j in range(3) if j != k]  # lifts off the one opposite: tips about the other two
+            continue
+        dl = math.hypot(dx, df)
+        if dl < 1e-9:
+            break  # its middle over the point / on the line: at rest
+        dx, df = -dx / dl, -df / dl  # the slope grows down towards c: c goes down
+        t, hit = tip(S, dx, df, gx, gf)
+        if t is None:
+            steady = False
+            break
+        gx, gf = gx + t * dx, gf + t * df
+        if hit is None:
+            steady = False
+            break  # as steep as it may lie and still tipping
+        S.append(hit)
+    return gx, gf, steady
+
+
+def _mi_drop_pose(field, base, n, X, F, samples, climb, lift, reach=0.0):
+    """A dropped piece's rest: rigid, on the highest things under it.
+    samples: (x, f) offsets along X (across) and F (along) from base; climb:
+    how much higher than base something may be before it's a wall to keep
+    off (lower steps and rails are rested on). (origin, X, F, N, contacts)
+    on the fitted plane, and the height it asked the field from (yq: the
+    settle asks from it too, so both see the same tops) - tilted no more
+    than MI_DROP_TILT (or the surface's
+    own slope, seen at least reach either side, so a small leaf on a
+    corrugation's flank goes by the roof's pitch) - or None (against a
+    wall, or nothing under it)."""
+    up = (0.0, 1.0, 0.0)
+    Fh = _rl_norm((F[0], 0.0, F[2]), None) or _rl_norm(_rl_cross(X, up), (0.0, 0.0, 1.0))
+    Xh = _rl_cross(Fh, up)
+    if _rl_dot(Xh, X) < 0.0:
+        Xh = _rl_mul(Xh, -1.0)
+    ny = max(0.2, n[1])
+    sx, sf = -_rl_dot(n, Xh) / ny, -_rl_dot(n, Fh) / ny  # the surface's own slope at base
+    d = max(reach, 0.5 * max(math.hypot(x, f) for x, f in samples))
+    if d > 0.0:
+        sx, sf = _mi_drop_slope(field, base, Xh, sx, d), _mi_drop_slope(field, base, Fh, sf, d)
+    yq = base[1] + max(0.0, max(sx * x + sf * f for x, f in samples))  # the whole piece asks from one height
+    pts = []
+    dense = _mi_drop_fill(samples, 2.0 * field.c)
+    mid = (sum(s[0] for s in dense) / float(len(dense)), sum(s[1] for s in dense) / float(len(dense)))
+    for x, f in dense:
+        px, pz = base[0] + Xh[0] * x + Fh[0] * f, base[2] + Xh[2] * x + Fh[2] * f
+        ref = base[1] + sx * x + sf * f  # where the surface would be if it went on flat
+        h = field.top(px, pz, yq)
+        if h < MI_DROP_INSIDE:
+            h = max(h, field.top_wide(px, pz, yq))  # what the settle keeps it above there
+        if h >= MI_DROP_INSIDE or h > ref + climb:
+            return None  # a wall or something taller than the piece: it can't lie here
+        if h <= ref - climb:
+            continue  # past an edge: nothing under this part
+        pts.append((x, f, h))
+    if len(pts) < 3:
+        return None
+    k = float(len(pts))
+    mx = sum(p[0] for p in pts) / k
+    mf = sum(p[1] for p in pts) / k
+    mh = sum(p[2] for p in pts) / k
+    sxx = sum((p[0] - mx) ** 2 for p in pts)
+    sff = sum((p[1] - mf) ** 2 for p in pts)
+    sxf = sum((p[0] - mx) * (p[1] - mf) for p in pts)
+    sxh = sum((p[0] - mx) * (p[2] - mh) for p in pts)
+    sfh = sum((p[1] - mf) * (p[2] - mh) for p in pts)
+    det = sxx * sff - sxf * sxf
+    if det > 1e-18:
+        gx, gf = (sxh * sff - sfh * sxf) / det, (sfh * sxx - sxh * sxf) / det
+    else:  # all in a line: the surface's own slope
+        gx, gf = sx, sf
+    most = math.tan(math.radians(max(MI_DROP_TILT, math.degrees(math.atan(math.hypot(sx, sf))) + 8.0)))
+    g = math.hypot(gx, gf)
+    if g > most:  # leaning on a lip or a rail: no steeper than a leaf could lie
+        gx, gf = gx * most / g, gf * most / g
+    gx, gf, steady = _mi_drop_rest(pts, gx, gf, most, mid)  # its weight in the middle of all of it
+    if not steady:
+        return None  # it would slide off
+    a = max(p[2] - gx * p[0] - gf * p[1] for p in pts)  # down onto the highest contacts
+    contacts = [(base[0] + Xh[0] * p[0] + Fh[0] * p[1], base[2] + Xh[2] * p[0] + Fh[2] * p[1])
+                for p in pts if p[2] - gx * p[0] - gf * p[1] > a - 0.15 * climb]
+    N = _rl_norm((-gx * Xh[0] - gf * Fh[0], 1.0, -gx * Xh[2] - gf * Fh[2]))
+    F2 = _rl_norm((Fh[0], gf, Fh[2]))
+    X2 = _rl_cross(F2, N)
+    return (base[0], a + lift, base[2]), X2, F2, N, contacts, yq
+
+
+def _mi_drop_settle(field, pts, start, yq, contacts, L, droop, lift):
+    """Settle a dropped piece's points (from start on): out from where it
+    rests each bends down along an arc, the further out the more (Drape: a
+    cantilever's curve, pulled in so the piece keeps its length) - an
+    overhang curls down past an edge, a span bows a little - and nothing
+    ends up under the surface or a leaf laid before it (top_wide + lift)."""
+    bend = 1.1 * droop / L if contacts and droop > 0.0 else 0.0
+    for j in range(start, len(pts)):
+        x, y, z = pts[j]
+        if bend:
+            cx, cz = min(contacts, key=lambda q: (x - q[0]) ** 2 + (z - q[1]) ** 2)
+            d = math.hypot(x - cx, z - cz)
+            th = bend * min(d, L)
+            if th > 1e-4:
+                s = math.sin(th) / th
+                x, z = cx + (x - cx) * s, cz + (z - cz) * s
+                y -= d * (1.0 - math.cos(th)) / th
+        h = field.top_wide(x, z, min(yq, y + field.band))  # drooped well below it: from its own height
+        if MI_DROP_VOID < h < MI_DROP_INSIDE and y < h + lift:
+            y = h + lift
+        pts[j] = (x, y, z)
 
 
 class _DebrisBuild(object):
@@ -33201,6 +33534,9 @@ class _DebrisBuild(object):
         self.gat, self.ggrid, self.gcell = _mi_gather(surf, sampler, fs, self.R, self.cands) if self.creases else \
             (None, {}, 1.0)
         self.piles_at = {}  # cell -> [(centre, radius)] of the piles so far
+        self.drape = clamp(float(s.get("drape", 0.5)), 0.0, 1.0)
+        self.fields = {}
+        self.stack = None  # the leaves laid so far (_MiDropStack, made with the first field)
         tried = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * self.R * self.R) * 4.5)))
         self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
         self.cover = 0.05 / m
@@ -33279,6 +33615,55 @@ class _DebrisBuild(object):
 
     def _uv(self, u, v, stack):
         return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
+
+    def _field(self, L):
+        """The dropped-leaf field for pieces about L long (nodes L / 5 apart,
+        5 mm .. 1 cm; rays from at least 1.5 L above, so whatever a piece
+        could rest on or lean on is seen from above; both in steps of two
+        so few fields are made)."""
+        want = clamp(L / 5.0, 0.005 / self.m, 0.01 / self.m)
+        cell = 0.005 / self.m * 2.0 ** int(math.floor(math.log(want / (0.005 / self.m), 2.0) + 1e-9))
+        band = cell * 2.0 ** int(math.ceil(math.log(max(8.0, 1.5 * L / cell), 2.0) - 1e-9))
+        f = self.fields.get((cell, band))
+        if f is None:
+            f = self.fields[(cell, band)] = _MiDropField(self.surf, cell, band)
+            if self.stack is None:
+                self.stack = _MiDropStack(0.01 / self.m)
+            f.stack = self.stack
+        return f
+
+    def _drop(self, base, n, X, F, L, samples):
+        """A loose piece's rest (_mi_drop_pose); landing against a wall it
+        turns (glancing off it: into a gutter it fits along), slides a
+        little sideways (off a gutter's side), else moves half a length
+        away; None: no room."""
+        field = self._field(L)
+        climb = max(min(L, 0.08 / self.m), 0.3 * L)  # lower than that it rests on (a lip, a rail, a gutter's rims)
+        for ang in (0.0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05):
+            got = _mi_drop_pose(field, base, n, _mi_rotate(X, n, ang) if ang else X,
+                                _mi_rotate(F, n, ang) if ang else F, samples, climb, self.lift, 0.15 / self.m)
+            if got is not None:
+                return field, got
+        Xh = _rl_norm((X[0], 0.0, X[2]), None)
+        for off in (0.15, -0.15, 0.3, -0.3) if Xh is not None else ():  # slid a little off a wall
+            q = (base[0] + Xh[0] * off * L, base[1], base[2] + Xh[2] * off * L)
+            h = field.top(q[0], q[2], base[1])
+            if not (MI_DROP_VOID < h < MI_DROP_INSIDE and abs(h - base[1]) < 0.25 * L):
+                continue
+            for ang in (0.0, 0.35, -0.35):
+                got = _mi_drop_pose(field, (q[0], h, q[2]), n, _mi_rotate(X, n, ang) if ang else X,
+                                    _mi_rotate(F, n, ang) if ang else F, samples, climb, self.lift, 0.15 / self.m)
+                if got is not None:
+                    return field, got
+        for ang in (0.0, 3.1416, 1.5708, -1.5708):  # half a length away, the way it points, then the others
+            d = _mi_rotate(F, n, ang)
+            q = (base[0] + d[0] * 0.5 * L, base[1], base[2] + d[2] * 0.5 * L)
+            h = field.top(q[0], q[2], base[1])
+            if MI_DROP_VOID < h < MI_DROP_INSIDE and abs(h - base[1]) < 0.25 * L:
+                got = _mi_drop_pose(field, (q[0], h, q[2]), n, X, F, samples, climb, self.lift, 0.15 / self.m)
+                if got is not None:
+                    return field, got
+        return field, None
 
     def build(self):
         s = self.s
@@ -33520,26 +33905,38 @@ class _DebrisBuild(object):
                 grid.append((x, f, z))
         zs = [g[2] for g in grid]
         lo, hi = min(zs), max(zs)
+        if lift > 0.0:  # in a pile: on the pile's slope at its depth
+            field, contacts, origin, X, F, N = self._field(L), [], _rl_add(base, _rl_mul(n, lift)), t1, t2, n
+            yq = origin[1]
+        else:  # dropped: resting on the highest things under it (a crest, a rail, a lip's edge), tilted at most so
+            field, got = self._drop(base, n, t1, t2, L, [(x * L, f * L) for x, f in LEAF_DROP_SAMPLES])
+            if got is None:
+                self.counts["leaves"] -= 1
+                return
+            origin, X, F, N, contacts, yq = got
         pts, counts, conn, us, vs, uvi = self.L
         b = len(pts)
         stack = min(self.stacks - 1, int(r[4] * self.stacks))
-        surf = None if self.proxy else self.surf
         for x, f, z in grid:
             z = (hi - z) if flip else (z - lo)  # resting on its lowest point(s)
-            h = z * L + lift + self.lift
-            p = (base[0] + (t1[0] * x + t2[0] * (f - 0.4)) * L + n[0] * h,
-                 base[1] + (t1[1] * x + t2[1] * (f - 0.4)) * L + n[1] * h,
-                 base[2] + (t1[2] * x + t2[2] * (f - 0.4)) * L + n[2] * h)
-            if surf is not None:  # never into the surface where it isn't flat
-                c = surf.closest(p)
-                if c is not None:
-                    dh = _rl_dot(_rl_sub(p, c[1]), c[2])
-                    if dh < self.lift:
-                        p = _rl_add(p, _rl_mul(c[2], self.lift - dh))
-            pts.append(p)
+            h = z * L + self.lift
+            pts.append((origin[0] + (X[0] * x + F[0] * (f - 0.4)) * L + N[0] * h,
+                        origin[1] + (X[1] * x + F[1] * (f - 0.4)) * L + N[1] * h,
+                        origin[2] + (X[2] * x + F[2] * (f - 0.4)) * L + N[2] * h))
             u, v = self._uv(0.5 + x / 0.8, f, stack)
             us.append(u)
             vs.append(v)
+        if lift > 0.0:  # in a pile: kept out of the surface where it isn't flat (not dropped)
+            surf = None if self.proxy else self.surf
+            for j in range(b, len(pts)) if surf is not None else ():
+                c = surf.closest(pts[j])
+                if c is not None:
+                    dh = _rl_dot(_rl_sub(pts[j], c[1]), c[2])
+                    if dh < self.lift:
+                        pts[j] = _rl_add(pts[j], _rl_mul(c[2], self.lift - dh))
+        else:
+            _mi_drop_settle(field, pts, b, yq, contacts, L, 0.5 * self.drape, self.lift)
+        k0 = len(conn)
         for k in range(rows):
             for j in range(cols):
                 a = b + k * (cols + 1) + j
@@ -33547,6 +33944,7 @@ class _DebrisBuild(object):
                 counts.append(4)
                 conn.extend(quad)
                 uvi.extend(quad)
+        self.stack.lay(pts, conn, k0)  # the next leaves land on it
 
     def _pile(self, c, n, r, ci=-1):
         """A small pile of leaves where it fell: in a crease (a gutter, the
@@ -33766,88 +34164,42 @@ class _DebrisBuild(object):
     def _big_leaf(self, base, n, d, L, r, shape, green, lift):
         """One big leaf from its stalk at base, heading d: its outline (leaf
         space: x across and f along, in leaf lengths; z up off the ground)
-        laid along a spine walked over the surface (_leaf_spine), the sides
-        pushed out of the surface (they ride up a gutter's sides) or hanging
-        past an edge."""
+        dropped: resting rigid on the highest things under it (_mi_drop_pose:
+        across a rail, a lip, the crests of a corrugated sheet; kept off
+        walls), then drooping by Drape (green ones more) towards what's under
+        it and down past an edge, never into it (_mi_drop_settle)."""
         pts_l, quads, uvs = (self._frond_local if shape == JUNGLE_SHAPES[3] else self._blade_local)(r, shape, green)
         mesh = self.J if green else self.JD
         if not pts_l or self._full(mesh, len(pts_l)):
             return
+        d = _rl_norm(_rl_sub(d, _rl_mul(n, _rl_dot(d, n))), _mi_frame(n)[0])
+        X0 = _rl_cross(d, n)
+        wide = max(abs(p[0]) for p in pts_l)
+        samples = [(x * wide * L, f * L) for f in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) for x in (-1.0, 0.0, 1.0)]
+        field, got = self._drop(base, n, X0, d, L, samples)
+        if got is None:
+            return
         self.counts["jungle"] += 1
-        steps = self.jungle_grid[0]
-        spine = self._leaf_spine(base, n, d, L, steps, 0.12 if green else 0.06)
+        origin, X, F, N, contacts, yq = got
         stack = min(self.stacks - 1, int(r[4] * self.stacks))
-        sag = 0.9 if green else 0.4
         lifted = self.lift + lift
         pts, counts, conn, us, vs, uvi = mesh
         b = len(pts)
-        surf = None if self.proxy else self.surf
         for (x, f, z), (u, v) in zip(pts_l, uvs):
-            fk = clamp(f, 0.0, 1.0) * steps
-            i = min(steps - 1, int(fk))
-            t = fk - i
-            (pa, da, na), (pb, db, nb) = spine[i], spine[i + 1]
-            S = _rl_add(pa, _rl_mul(_rl_sub(pb, pa), t))
-            D = _rl_norm(_rl_add(_rl_mul(da, 1.0 - t), _rl_mul(db, t)), da)
-            N = _rl_norm(_rl_add(_rl_mul(na, 1.0 - t), _rl_mul(nb, t)), na)
-            X = _rl_norm(_rl_cross(D, N), _rl_any_perp(N))
-            over = (f - clamp(f, 0.0, 1.0)) * L  # past the tip / behind the stalk: straight on
-            p = _rl_add(_rl_add(S, _rl_mul(D, over)), _rl_add(_rl_mul(X, x * L), _rl_mul(N, z * L + lifted)))
-            if surf is not None and abs(x) * L > 4.0 * self.lift:
-                hit = surf.closest(p)
-                if hit is not None:
-                    off = _rl_sub(p, hit[1])
-                    h = _rl_dot(off, hit[2])
-                    lat = _rl_len(_rl_sub(off, _rl_mul(hit[2], h)))
-                    if lat < 0.2 * abs(x) * L + self.lift:
-                        if h < self.lift:  # into the surface (a gutter's side): onto it
-                            p = _rl_add(p, _rl_mul(hit[2], self.lift - h))
-                    else:  # out past an edge: it hangs
-                        p = (p[0], p[1] - min(lat, sag * lat * lat / (0.25 * L)), p[2])
-            pts.append(p)
+            h = z * L + lifted
+            pts.append((origin[0] + (X[0] * x + F[0] * f) * L + N[0] * h,
+                        origin[1] + (X[1] * x + F[1] * f) * L + N[1] * h,
+                        origin[2] + (X[2] * x + F[2] * f) * L + N[2] * h))
             u, v = self._uv(u, v, stack)
             us.append(u)
             vs.append(v)
+        _mi_drop_settle(field, pts, b, yq, contacts, L, self.drape * (0.9 if green else 0.5), lifted)
+        k0 = len(conn)
         for q in quads:
             counts.append(4)
             conn.extend(b + j for j in q)
             uvi.extend(b + j for j in q)
-
-    def _leaf_spine(self, base, n, d, L, steps, stiff):
-        """steps + 1 (point, along, normal) a leaf's midrib takes from base:
-        over the surface, level past an edge then bending down (stiff: how
-        fast), and turning up a wall it runs into."""
-        surf = self.surf
-        d = _rl_norm(_rl_sub(d, _rl_mul(n, _rl_dot(d, n))), _mi_frame(n)[0])
-        step = L / float(steps)
-        p, nrm = base, n
-        out = [(p, d, nrm)]
-        free = 0
-        for k in range(steps):
-            if not free:
-                q = _rl_add(p, _rl_mul(d, step))
-                hit = surf.closest(q)
-                if hit is not None:
-                    off = _rl_sub(q, hit[1])
-                    h = _rl_dot(off, hit[2])
-                    if _rl_len(_rl_sub(off, _rl_mul(hit[2], h))) < 0.35 * step and _rl_dot(hit[2], nrm) > 0.2:
-                        nd = _rl_sub(hit[1], p)
-                        d = _rl_norm(_rl_sub(nd, _rl_mul(hit[2], _rl_dot(nd, hit[2]))), d)
-                        p, nrm = hit[1], hit[2]
-                        out.append((p, d, nrm))
-                        continue
-            free += 1
-            side = _rl_cross(d, nrm)
-            if free > 1:
-                d = _rl_norm((d[0], d[1] - stiff, d[2]), (0.0, -1.0, 0.0))
-            hit = surf.ray(_rl_add(p, _rl_mul(nrm, 2.0 * self.lift)), d, step)
-            if hit is not None:  # against a wall: it rides up / along it
-                dn = _rl_sub(d, _rl_mul(hit[2], _rl_dot(d, hit[2])))
-                d = _rl_norm(_rl_add(dn, (0.0, 0.5, 0.0)) if _rl_len(dn) < 0.3 else dn, (0.0, 1.0, 0.0))
-            p = _rl_add(p, _rl_mul(d, step))
-            nrm = _rl_norm(_rl_cross(side, d), nrm)
-            out.append((p, d, nrm))
-        return out
+        self.stack.lay(pts, conn, k0)  # the next leaves land on it
 
     def _blade_local(self, r, shape, green):
         """A whole leaf's points (x, f, z), quads and UVs (0..1 over the
@@ -34586,14 +34938,15 @@ SC_TYPES = collections.OrderedDict([
                "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
                                            "blade_width"),
                "over": {"slope": 40.0, "grass": 1.5}}),
-    ("Leaves", {"parts": (("litter", "leafDry"),), "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl"),
+    ("Leaves", {"parts": (("litter", "leafDry"),),
+                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape"),
                 "over": {"slope": 35.0, "leaves": 8.0}}),
     ("Leaf piles", {"parts": (("piles", "leafPile"),),
-                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl"),
+                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape"),
                     "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}}),
     ("Jungle leaves", {"parts": (("green", "leafJungle"), ("dry", "leafJungleDry")),
                        "keys": SC_DEBRIS_COMMON + ("jungle", "jungle_size", "jungle_cluster", "jungle_shape",
-                                                   "jungle_green", "jungle_tear", "curl"),
+                                                   "jungle_green", "jungle_tear", "curl", "drape"),
                        "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
                     "over": {"slope": 60.0, "tufts": 6.0}}),
@@ -35912,6 +36265,10 @@ SC_FIELDS.update({
                   "0 = full right up to the fade height, then a hard line; 1 = thinning out all the way from the "
                   "foot."),
 })
+SC_FIELDS["drape"] = ("Drape", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                      "Leaves land on the highest things under them (corrugation crests, frames, a lip) as if "
+                      "dropped there; Drape is how much they then sag over gaps and bend down past edges (0 = stiff "
+                      "and flat, 1 = soft). They never go into the surface or stand up against a wall.")
 _SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
@@ -35930,16 +36287,16 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
               ("UVs", False, ["stacks", "stack_layout"])],
     "Leaves": [("", True, ["coverage", "spread", "leaves", "leaf_size", "curl"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("More", False, ["size_var", "detail"]),
+               ("More", False, ["drape", "size_var", "detail"]),
                ("UVs", False, ["stacks", "stack_layout"])],
     "Leaf piles": [("", True, ["coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                   ("More", False, ["size_var", "detail"]),
+                   ("More", False, ["drape", "size_var", "detail"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
     "Jungle leaves": [("", True, ["coverage", "spread", "jungle", "jungle_size", "jungle_cluster", "jungle_shape",
                                   "jungle_green"]),
                       ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                      ("More", False, ["curl", "jungle_tear", "size_var", "detail"]),
+                      ("More", False, ["curl", "jungle_tear", "drape", "size_var", "detail"]),
                       ("UVs", False, ["stacks", "stack_layout"])],
     "Moss tufts": [("", True, ["coverage", "spread", "tufts", "tuft_size"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),

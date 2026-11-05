@@ -997,11 +997,68 @@
     veins: f += |x| x slant, Broad's lobes reach back by a notch term; dry =
     rolled round a circle keeping the width, tears duplicate a row's outer
     vertices for the strip above, shifted a little) or `_frond_local`
-    (rachis strip u 0..0.08, leaflets u 0.1..1 all on the same UVs), mapped
-    along `_leaf_spine` (walked over the surface, level then bending down
-    past an edge, sliding up a wall a ray hits); points off the midrib are
-    pushed out of the surface when it's under them, else hang (sag ~ lat^2).
-    Detail `JUNGLE_DETAIL` (rows, columns, leaflet rows).
+    (rachis strip u 0..0.08, leaflets u 0.1..1 all on the same UVs), placed
+    by the drop (below). Detail `JUNGLE_DETAIL` (rows, columns, leaflet
+    rows).
+  - **Dropped leaves** (the user, 2026-11-05: leaves "conform to the
+    surface instead of sitting on top", "clipping through the window
+    frames", big leaves sticking up "like towers" against a small step,
+    "almost like it's been simulated that the leaves have just been dropped
+    on top and then maybe droop a little"; then "stop leaves clipping into
+    the surface or clipping into each other"): `_leaf` (lift 0) and
+    `_big_leaf` go through `_DebrisBuild._drop` -> `_mi_drop_pose`, then
+    `_mi_drop_settle`, then `stack.lay`. The heightfield is its own pieces,
+    so it can serve other growth later:
+    - `_MiDropField(surf, cell, band)`: rays straight down at nodes (i + 0.31,
+      k + 0.43) * cell (off round numbers: a node on a sheet's end grazes
+      its side), cast lazily, cached in `_MI_DROP_FIELDS` (4, by mesh keys,
+      cell and band) across builds. A ray starts (band + 2) bands above the
+      height asked, so a roof far overhead doesn't count;
+      a grazing side hit is cast again a little over; an underside
+      (normal y < -0.5) is `MI_DROP_INSIDE`, nothing `MI_DROP_VOID`.
+      `top` = max of the 4 nodes round a point; `top_wide` = max of the 9
+      round the nearest, leaving out inside ones (the settle's clamp, so a
+      frame's edge between nodes can't slip over a point). Both add
+      `stack.top` (laid leaves up to 2 bands above). `_DebrisBuild._field`
+      picks cell L/5 in 5 mm .. 1 cm and band at least 8 cells and 1.5 L
+      (powers of two: a gutter's sides under a big leaf are seen from
+      above, not started inside).
+    - `_MiDropStack(1 cm)`: per build, highest laid-leaf point per cell;
+      `lay` samples every quad finer than a cell, so later leaves land on
+      earlier ones (a layer's leaves only; layers don't see each other).
+    - `_mi_drop_slope`: the slope a piece goes by along a horizontal axis:
+      the normal's or that of the tops at least 15 cm either side
+      (`reach`), whichever is gentler, level when they disagree (a
+      corrugation flank reads as the pitch, a floor by a step as level).
+    - `_mi_drop_pose(field, base, n, X, F, samples, climb, lift, reach)`:
+      samples (x across, f along, `LEAF_DROP_SAMPLES` / a 3 x 6 grid over a
+      big leaf) all asked from one height yq (the piece's highest expected
+      point; the settle asks from it too, so both see the same tops);
+      filled in to 2 cells apart (`_mi_drop_fill`, at most 24 a side, so
+      a rim or a mullion can't fall between; each reads top_wide too, what
+      the settle keeps points above, so nothing is lifted into a spike by
+      a lip); against ref = base + slope:
+      higher than climb (max(min(L, 8 cm), 0.3 L)) or inside = a wall,
+      None; lower than climb = past an edge, skipped; < 3 left, None.
+      Least-squares slope clamped to MI_DROP_TILT 40 degrees (or the slope
+      + 8), then `_mi_drop_rest`: a rigid body's rest - on the highest
+      sample, tipping its middle (of all samples, overhang too) down about
+      it, then about the line to the next it meets, till it lies on three
+      round its middle (the lowest plane over every sample there; a leaf
+      across a gutter lies on both rims, one mostly past a rim tips over
+      it), no steeper than the clamp; contacts within 0.15 climb. `_drop`
+      turns it 20 / 40 / 60 degrees either way first (glancing off a wall:
+      into a gutter it fits along), slides 0.15 / 0.3 of a length sideways
+      (off a gutter's side), then tries half a length away in four
+      directions.
+    - `_mi_drop_settle`: Drape as a cantilever's arc out from the nearest
+      contact (angle 1.1 droop d / L, pulled in to keep the length; droop =
+      Drape x 0.5 small, 0.9 green, 0.5 dry), then clamped to top_wide +
+      lift (asked from yq, or from the point's own height once it has
+      drooped a band below, so a gutter under an eave counts).
+    `drape` (0.5) in `DEBRIS_DEFAULTS` and on Leaves / Leaf piles / Jungle
+    leaves (More). Pile leaves (lift > 0) keep their pile placement but are
+    laid in the stack. `_leaf_spine` is gone.
   - **Moss Style** (the user, 2026-11-04: the carpet "can become a bit
     heavy ... it doesn't always have to be one object ... a scattered thing
     instead of this growth. Or maybe there's a setting to toggle"): `style`

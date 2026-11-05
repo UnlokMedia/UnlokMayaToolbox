@@ -21,6 +21,10 @@ once and is one Ctrl+Z. An old scatter opened again: one setting grows
 only its layer; a live edit too big to grow quickly pauses. Draft moss:
 a quick rough look while editing, Full detail grows it properly. Height
 fade: moss and ivy up columns from the foot, thinning out going up.
+Dropped leaves: Leaves and Jungle leaves rest on corrugated roofs, a
+glass roof's mullions, rails, a window lip, a step and each other without
+sinking in or standing up, kept off a tall wall; Drape bends them over an
+edge.
 """
 
 import json
@@ -543,24 +547,40 @@ def jungle():
                                                         counts[(s, "Hero")] for s in ("Paddle", "Broad", "Frond")),
           ", ".join("%s %s %d" % (s, d, counts[(s, d)]) for s, d in sorted(counts)))
 
-    # --- along the gutter
-    cmds.file(new=True, force=True)
-    grp, nodes = yard()
-    gutter = [n for n in nodes if "gutter" in n]
-    rep = tb["create_scatter_group"](gutter, "Jungle leaves", {"jungle": 4.0, "jungle_cluster": 2, "coverage": 0.9,
-                                                               "jungle_shape": "Paddle", "creases": 1.5,
-                                                               "jungle_size": 0.45, "jungle_green": 1.0})
-    root = rep["root"]
-    lid = tb["sc_data"](root)["layers"][0]["id"]
-    shells = leaf_shells(tb, tb["sc_parts"](root)[lid + "/green"])
+    # --- along the gutter (inside 7.3 .. 8.7 wide, bottom 0.6, rims 1.7; sides 7.1 .. 7.3 and 8.7 .. 8.9):
+    # leaves that fit in it lie along it (dropped across, they'd meet its sides); bigger ones rest on its rims
+    def gutter_leaves(size, density, seed=0):
+        cmds.file(new=True, force=True)
+        grp, nodes = yard()
+        gutter = [n for n in nodes if "gutter" in n]
+        rep = tb["create_scatter_group"](gutter, "Jungle leaves", {"jungle": density, "jungle_cluster": 2,
+                                                                   "coverage": 0.9, "jungle_shape": "Paddle",
+                                                                   "creases": 1.5, "jungle_size": size,
+                                                                   "jungle_green": 1.0, "seed": seed})
+        root = rep["root"]
+        lid = tb["sc_data"](root)["layers"][0]["id"]
+        node = tb["sc_parts"](root).get(lid + "/green")
+        return leaf_shells(tb, node) if node else []
+
+    def in_sides(sh):
+        return sum(1 for p in sh if (7.12 < p[2] < 7.28 or 8.72 < p[2] < 8.88) and 0.3 < p[1] < 1.68)
+
+    shells = [sh for seed in (0, 2, 3, 4) for sh in gutter_leaves(0.2, 10.0, seed)]  # few fit: four seeds
     along = 0
     for sh in shells:
         xs, zs = [p[0] for p in sh], [p[2] for p in sh]
         along += (max(xs) - min(xs)) > 1.5 * (max(zs) - min(zs))
-    check("in a gutter they lie along it", shells and along >= 0.7 * len(shells),
+    check("in a gutter they lie along it", len(shells) >= 2 and along >= 0.7 * len(shells),
           "%d of %d along" % (along, len(shells)))
     ys = [p[1] for sh in shells for p in sh if 7.3 < p[2] < 8.7]
-    check("riding up its sides, not through them", ys and min(ys) > 0.55, "lowest %.2f" % (min(ys) if ys else 0))
+    check("riding up its sides, not through them", ys and min(ys) > 0.55 and not sum(in_sides(sh) for sh in shells),
+          "lowest %.2f, %d points in its sides" % (min(ys) if ys else 0, sum(in_sides(sh) for sh in shells)))
+    big = gutter_leaves(0.45, 10.0)
+    check("bigger than it, they rest on its rims", big and not sum(in_sides(sh) for sh in big) and
+          all(min(p[1] for p in sh if 7.1 < p[2] < 8.9) > 1.6 for sh in big if any(7.1 < p[2] < 8.9 for p in sh)),
+          "%d leaves, %d points in its sides, lowest over it %s" % (
+              len(big), sum(in_sides(sh) for sh in big),
+              ", ".join("%.2f" % min([p[1] for p in sh if 7.1 < p[2] < 8.9] or [9]) for sh in big)))
 
 
 def moss_and_specks():
@@ -1134,6 +1154,255 @@ def height_fade():
                                                                         band(ly, 7.0, 14.0), band(ly, 14.0, 21.0)))
 
 
+def drop_pitch(pts):
+    """Degrees a piece's best-fit plane leans from level."""
+    n = float(len(pts))
+    cx, cy, cz = (sum(p[i] for p in pts) / n for i in range(3))
+    xx = xz = zz = xy = zy = 0.0
+    for x, y, z in pts:
+        x, y, z = x - cx, y - cy, z - cz
+        xx += x * x
+        xz += x * z
+        zz += z * z
+        xy += x * y
+        zy += z * y
+    det = xx * zz - xz * xz
+    if abs(det) < 1e-12:
+        return 90.0
+    a = (xy * zz - zy * xz) / det
+    b = (zy * xx - xy * xz) / det
+    return math.degrees(math.atan(math.sqrt(a * a + b * b)))
+
+
+def leaf_pieces(tb, node):
+    """A part's separate pieces in the order they were made: [(points, triangles of point indices)]."""
+    fn = om.MFnMesh(tb["get_dag_path"](tb["_log_shape"](node)))
+    pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    counts, ids = fn.getVertices()
+    up = list(range(len(pts)))
+
+    def find(a):
+        while up[a] != a:
+            up[a] = up[up[a]]
+            a = up[a]
+        return a
+
+    faces, k = [], 0
+    for c in counts:
+        f = list(ids[k:k + c])
+        faces.append(f)
+        r0 = find(f[0])
+        for i in f[1:]:
+            ri = find(i)
+            if ri != r0:
+                up[ri] = r0
+        k += c
+    order, local = {}, {}
+    for i in range(len(pts)):
+        r = find(i)
+        if r not in order:
+            order[r] = ([], [])
+        local[i] = len(order[r][0])
+        order[r][0].append(pts[i])
+    for f in faces:
+        g = order[find(f[0])]
+        for j in range(1, len(f) - 1):
+            g[1].append((local[f[0]], local[f[j]], local[f[j + 1]]))
+    return list(order.values())
+
+
+def leaves_through_leaves(pieces, cell=0.25, found=None):
+    """(How many pieces cross another - some of their points above its face
+    and some under it (by more than 1 mm, seen from above, within 3 cm):
+    one pushed through the other instead of lying on it, the deepest in
+    decimetres)."""
+    grid = {}
+    for n, (pts, tris) in enumerate(pieces):
+        for t in tris:
+            a, b, c = pts[t[0]], pts[t[1]], pts[t[2]]
+            for i in range(int(math.floor(min(a[0], b[0], c[0]) / cell)), int(math.floor(max(a[0], b[0], c[0]) / cell)) + 1):
+                for k in range(int(math.floor(min(a[2], b[2], c[2]) / cell)),
+                               int(math.floor(max(a[2], b[2], c[2]) / cell)) + 1):
+                    grid.setdefault((i, k), []).append((n, (a, b, c)))
+    bad, deep = 0, 0.0
+    for n, (pts, tris) in enumerate(pieces):
+        side = {}  # other piece -> [above, under, deepest under]
+        for x, y, z in pts:
+            for m, (a, b, c) in grid.get((int(math.floor(x / cell)), int(math.floor(z / cell))), ()):
+                if m == n:
+                    continue
+                d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2])
+                if abs(d) < 1e-12:
+                    continue
+                w1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d
+                w2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d
+                w3 = 1.0 - w1 - w2
+                if min(w1, w2, w3) < 0.0:
+                    continue
+                h = w1 * a[1] + w2 * b[1] + w3 * c[1]
+                e = side.setdefault(m, [False, False, 0.0])
+                if y > h + 0.01:
+                    e[0] = True
+                elif h - 0.3 < y < h - 0.01:
+                    e[1] = True
+                    e[2] = max(e[2], h - y)
+        cross = [e[2] for e in side.values() if e[0] and e[1]]
+        if found is not None:
+            found.extend((n, m) for m, e in side.items() if e[0] and e[1])
+        if cross:
+            bad += 1
+            deep = max(deep, max(cross))
+    return bad, deep
+
+
+def drop_scenes(tb):
+    """{name: ([surface nodes], roof)}: a yard (floor 6 x 4 m, a tall wall at
+    the back, a window lip 4 cm high, a stair step 15 cm, a grating of rails
+    4 cm high 12 cm apart), corrugated roofs from the Roof tool (Clean,
+    Makeshift), a glass roof (panes between mullions 4 cm proud, tilted 12
+    degrees) and a ball."""
+    out = {}
+    yard_g = cmds.group(empty=True, name="dropYard_GRP")
+    box("dropFloor", (60, 1, 40), (0, -0.5, 0), yard_g)
+    box("tallWall", (60, 15, 1), (0, 7.5, -19.5), yard_g, div=3.0)
+    box("windowLip", (24, 0.4, 0.5), (15, 0.2, -3), yard_g, div=1.0)
+    box("stairStep", (24, 1.5, 4), (15, 0.75, 5), yard_g, div=1.0)
+    for k in range(11):
+        box("rail%d" % k, (20, 0.4, 0.4), (-15, 0.2, -6 + 1.2 * k), yard_g, div=1.0)
+    out["yard"] = ([cmds.ls(yard_g, long=True)[0]], False)
+    for i, mode in enumerate(("Clean", "Makeshift")):
+        house = box("dropHouse%s" % mode, (24, 10, 16), (100.0 + 50.0 * i, 5.0, 0.0), div=8.0)
+        rep = tb["make_thatch_roof"](house, {"covering": "Corrugated", "m_mode": mode, "overhang": 0.03,
+                                             "shape": "Lean-to", "end_a": "Gable", "end_b": "Gable"})
+        out["corrugated " + mode] = ([rep["root"]], True)
+    g = cmds.group(empty=True, name="dropGlass_GRP")
+    for ix in range(4):
+        for iz in range(3):
+            box("pane_%d_%d" % (ix, iz), (5.6, 0.06, 5.6), (-9.0 + ix * 6.0, 0.0, -6.0 + iz * 6.0), g, div=6.0)
+    for ix in range(5):
+        box("mullionX_%d" % ix, (0.4, 0.4, 18.4), (-12.0 + ix * 6.0, 0.17, 0.0), g, div=2.0)
+    for iz in range(4):
+        box("mullionZ_%d" % iz, (24.4, 0.4, 0.4), (0.0, 0.17, -9.0 + iz * 6.0), g, div=2.0)
+    cmds.rotate(12, 0, 0, g)
+    cmds.move(200.0, 20.0, 0.0, g)
+    out["glass roof"] = ([cmds.ls(g, long=True)[0]], True)
+    ball = cmds.polySphere(name="dropBall", r=6, sx=40, sy=30, constructionHistory=False)[0]
+    cmds.move(260.0, 6.0, 0.0, ball)
+    out["ball"] = ([cmds.ls(ball, long=True)[0]], None)
+    return out
+
+
+def dropped_leaves():
+    """Dropped leaves (the user: leaves "conform to the surface instead of
+    sitting on top", "clipping through the window frames", big leaves
+    standing up "like towers" against a small step; "stop leaves clipping
+    into the surface or clipping into each other"): Leaves and Jungle
+    leaves rest on the highest things under them - the surface and the
+    leaves laid before them - never into either, bridging corrugation
+    troughs and rails, lying no steeper than about 45 degrees against a
+    lip, kept off a tall wall; Drape bends them down over an edge."""
+    tb = load_toolbox()
+    cmds.file(new=True, force=True)
+    scenes = drop_scenes(tb)
+    small = {"leaves": 30.0, "coverage": 0.85, "slope": 45.0}
+    big = {"jungle": 3.0, "coverage": 0.85, "slope": 45.0}
+
+    def under(surf, pts):
+        for p in pts:
+            hit = surf.ray(p, (0.0, 1.0, 0.0), 0.6)
+            if hit is not None and hit[2][1] > 0.2:
+                return p
+        return None
+
+    def held(surf, pts):  # every point has the surface close under it (not drooping over an edge)
+        return all(surf.ray(p, (0.0, -1.0, 0.0), 1.0) is not None for p in pts[::3])
+
+    def tall(pts):
+        ext = math.hypot(max(p[0] for p in pts) - min(p[0] for p in pts), max(p[2] for p in pts) - min(p[2] for p in pts))
+        return max(p[1] for p in pts) - min(p[1] for p in pts) > 1.2 * ext  # past 50 degrees
+
+    def at(pts):
+        n = float(len(pts))
+        return "(%.1f, %.1f, %.1f)" % tuple(sum(p[i] for p in pts) / n for i in range(3))
+
+    for name, (nodes, roof) in scenes.items():
+        trs = (cmds.listRelatives(nodes, allDescendents=True, type="transform", fullPath=True) or []) + list(nodes)
+        surf = tb["_MiSurface"]([t for t in trs if tb["_log_shape"](t)])
+        root, times, parts = None, [], {}
+        for typ, s in (("Leaves", small), ("Jungle leaves", big)):
+            t0 = time.time()
+            if root is None:
+                root = tb["create_scatter_group"](nodes, typ, dict(s))["root"]
+                lid = tb["sc_data"](root)["layers"][0]["id"]
+            else:
+                _, lid = tb["sc_add_layer"](root, typ, dict(s))
+            times.append(time.time() - t0)
+            for key, node in tb["sc_parts"](root).items():
+                part = key.split("/")[1]
+                if key.startswith(lid + "/") and part in ("litter", "green", "dry") and cmds.getAttr(node + ".visibility"):
+                    parts[part] = leaf_pieces(tb, node)
+        sm = [p[0] for p in parts.get("litter", [])]
+        bg = [p[0] for p in parts.get("green", []) + parts.get("dry", [])]
+        us = [u for u in (under(surf, p) for p in sm) if u]
+        ub = [u for u in (under(surf, p) for p in bg) if u]
+        check("Dropped leaves (%s): none into the surface" % name,
+              len(sm) > 5 and len(us) <= max(1, len(sm) // 200) and not ub,
+              "%d leaves (%d under), %d big pieces (%d under%s); %.1f s + %.1f s" % (
+                  len(sm), len(us), len(bg), len(ub), (" at %.1f, %.1f, %.1f" % ub[0]) if ub else "", times[0], times[1]))
+        thr = [leaves_through_leaves(parts.get("litter", []))]
+        for shape in ("Paddle", "Broad"):  # one piece a leaf (a Frond's own leaflets overlap, as they grow)
+            tb["sc_update"](root, lid, {"jungle_shape": shape})
+            blades = []
+            for key, node in tb["sc_parts"](root).items():
+                if key.startswith(lid + "/") and key.split("/")[1] in ("green", "dry") and cmds.getAttr(node + ".visibility"):
+                    blades += leaf_pieces(tb, node)
+            thr.append(leaves_through_leaves(blades))
+        through = sum(x[0] for x in thr)
+        check("... none through another leaf (%s)" % name, through == 0,
+              "%d leaves crossing another (%d small, %d Paddle, %d Broad; deepest %.1f mm)" % (
+                  through, thr[0][0], thr[1][0], thr[2][0], 100.0 * max(x[1] for x in thr)))
+        if roof is not None:  # (a ball's own slope is steeper than that)
+            most = 52.0 if roof else 48.0
+            ps = sorted((drop_pitch(p), at(p)) for p in sm if len(p) > 3 and held(surf, p))
+            pb = sorted((drop_pitch(p), at(p)) for p in bg if len(p) > 3 and held(surf, p))
+            ts, tb_ = sum(1 for p in sm if tall(p) and held(surf, p)), sum(1 for p in bg if tall(p) and held(surf, p))
+            check("... lying no steeper than about 45 degrees, no towers (%s)" % name,
+                  (ps[-1][0] if ps else 0) <= most and (pb[-1][0] if pb else 0) <= 45.0
+                  and ts <= max(1, len(sm) // 100) and tb_ == 0,
+                  "steepest leaf %.0f %s, big %.0f %s; standing up %d / %d" % (
+                      ps[-1][0] if ps else 0, ps[-1][1] if ps else "", pb[-1][0] if pb else 0,
+                      pb[-1][1] if pb else "", ts, tb_))
+        if name == "yard":
+            pts = [q for p in sm + bg for q in p]
+            wall = [q for q in pts if q[2] < -18.4 and 1.0 < q[1] < 14.0]
+            check("... nothing up the tall wall", not wall, "%d points up it" % len(wall))
+            on = [p for p in bg if all(-25.0 < q[0] < -5.0 and -6.0 < q[2] < 6.0 for q in p)]
+            low = min(min(q[1] for q in p) for p in on) if on else -1.0
+            check("... big leaves across the rails rest on them (not down between)",
+                  len(on) >= 2 and low > 0.25, "%d on the grating, lowest point %.2f (rail tops 0.4)" % (len(on), low))
+
+    table = box("dropTable", (10, 1.5, 10), (320.0, 0.75, 0.0), div=1.0)
+    root = tb["create_scatter_group"]([table], "Jungle leaves", {"jungle": 12.0, "coverage": 1.0, "jungle_green": 1.0,
+                                                                 "drape": 0.0})["root"]
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+
+    def over_edge():
+        out = []
+        for key, node in tb["sc_parts"](root).items():
+            if key.startswith(lid + "/") and key.split("/")[1] in ("green", "dry") and cmds.getAttr(node + ".visibility"):
+                out.extend(q[1] for q in points(tb, node) if not (315.0 < q[0] < 325.0 and -5.0 < q[2] < 5.0))
+        return out
+
+    stiff = over_edge()
+    tb["sc_update"](root, lid, {"drape": 1.0})
+    soft = over_edge()
+    ms = sum(stiff) / len(stiff) if stiff else 0.0
+    mf = sum(soft) / len(soft) if soft else 0.0
+    check("Drape: leaves on a table bend down over its edge (Drape 0 stick out level)",
+          len(stiff) > 10 and len(soft) > 10 and min(stiff) > 1.45 and mf < ms - 0.1,
+          "overhanging points %d; mean height %.2f at Drape 0 (lowest %.2f), %.2f at Drape 1 (table top 1.5)" % (
+              len(soft), ms, min(stiff) if stiff else 0, mf))
+
 try:
     run()
     drawing()
@@ -1143,6 +1412,7 @@ try:
     old_scatter()
     draft()
     height_fade()
+    dropped_leaves()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

@@ -918,15 +918,29 @@ gathers* weights, a picked area), per square metre where they gather:
   (some rounder, some narrower) cut in the geometry, dried (*Leaf curl*:
   edges curled up, ends lifted, folded on the midrib, crumpled), one in
   four upside down.
+
+  Leaves and Jungle leaves are *dropped*: each one comes to rest as a
+  stiff leaf would, on the highest things under it (the crests of a
+  corrugated sheet, the bars of a glass roof's frame, a window lip's
+  edge), bridging the gaps between rather than sinking into them, never
+  into the surface; it tips like a stiff leaf too, so one hanging mostly
+  past an edge tips over it. One that lands against a wall turns off it
+  (into a gutter it fits along; a bigger one lies across its rims). It
+  lies no steeper than about 40 degrees (a lip or a
+  step shorter than the leaf is leant on; a wall taller than it is kept
+  off), and on the leaves laid before it, never through one. *Drape*
+  (under More; on Leaf piles, their strays) bends it after that: the part past
+  where it rests curves down (over an edge, a little across a gap), green
+  leaves more than dry; 0 keeps every leaf stiff and flat.
 - *Leaf piles*: in a crease a drift along it, in a corner pushed into it,
   in the open a round mound; each leaf lying along the pile at its own
   depth, a few strays round it.
 - *Jungle leaves*: big fallen leaves, each about the size of a small leaf
   pile (*Leaf length*), one to *Per cluster* that came down together:
   fanned out from where they landed, or in a gutter / along a wall's foot
-  one after another along it, pushed up to the wall. Each one drapes over
-  the surface: its sides ride up a gutter's sides, it hangs past an edge
-  and turns up a wall it runs into. *Shape*: Paddle (long and blunt, torn
+  one after another along it, pushed up to the wall. Each is dropped (see
+  Leaves above): resting on the highest things under it, curving down past
+  an edge by *Drape*. *Shape*: Paddle (long and blunt, torn
   along its veins), Broad (wide, a heart-shaped base), Frond (a fallen
   palm frond), Mixed (one kind per cluster). *Green*: how many are fresh
   (a little cupped, folded on the midrib); the rest are dried, rolled in
@@ -1963,7 +1977,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   each, green and dry in their own parts, lying on the yard (never in it,
   never floating, none up the wall), Per cluster 3 giving clusters of 1-3,
   Green 1 leaving no dry part, every shape at every Detail, and in a gutter
-  lying along it and riding up its sides; then moss Style Clumps (separate
+  lying along it (those that fit) and never in its sides, bigger ones
+  resting on its rims; then moss Style Clumps (separate
   cushions about Clump size, fewer faces than the carpet, shoots on them,
   on the surface, not in it; Grouping gathering them into groups with bare
   cells between, at next to no cost; Packing and Group size; Height
@@ -1986,7 +2001,14 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   thinning out going up; two columns in one mesh each on its own; a base,
   shaft and capital as one column; by metres; from the top; the floor as
   it was; leaves off the column tops; ivy vines stopping in the fade at
-  their own heights, leaves thinning out).
+  their own heights, leaves thinning out); then dropped leaves on a yard
+  (a tall wall, a window lip, a step, a grating of rails), corrugated
+  roofs from the Roof tool (Clean, Makeshift), a glass roof with raised
+  mullions and a ball: Leaves and Jungle leaves never into the surface,
+  none through another (Paddle and Broad too), no steeper than about 45
+  degrees where they're held, none standing up, nothing up the wall, big
+  leaves across the rails resting on them, and Drape bending leaves on a
+  table down over its edge (Drape 0 sticking out level).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
@@ -1994,7 +2016,8 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   layer, the box picks the group, Delete, Duplicate; then Draw on Surfaces
   over a fresh porch with Ctrl+Z on a stroke, Scatter on Drawing and a
   second layer on the same drawing; then leaf piles and jungle leaves on
-  the same porch, before / after, fronds live, then the floor left out of
+  the same porch, before / after, fronds live, Drape (on Leaves, Leaf
+  piles and Jungle leaves) live, then the floor left out of
   the group from the panel and put back from the list; then the moss
   preset as a carpet and as Clumps (evenly spaced, grouped, and with varied
   heights and mounds) on a
