@@ -18,6 +18,12 @@ parts, lying on the surface, along a gutter. Removing a mesh inside the
 Maya group leaves just it out (nothing grows on it), adding it puts it back.
 Moss Style Clumps: separate cushions, lighter than the carpet. Specks:
 tiny moss stars and dirt flakes stuck on a standing pane of glass.
+Drawn strokes one by one: listed with their meshes, Delete Stroke takes
+just the picked ones out and only that layer grows again, Add Strokes
+adds new ones, one Ctrl+Z each, saved while paused. Draw on: Surfaces
+skips scatter, live or baked (even moved out of its group), Selected
+draws only on the picked meshes, Everything on any; a surface group
+never scatters onto baked parts moved into it (unless added by hand).
 Pause: edits are saved and nothing grows; Play grows each changed layer
 once and is one Ctrl+Z. An old scatter opened again: one setting grows
 only its layer; a live edit too big to grow quickly pauses. Draft moss:
@@ -481,6 +487,55 @@ def drawing():
     tb["sc_set_layer"](root, cp, area=([], {}), drawing=[])
     pts = leaf_points(root, cp)
     check("Clear Area lets it grow everywhere again", pts and max(abs(p[2]) for p in pts) > 50.0)
+
+    # --- strokes one by one (the user: "one of the ones I painted I don't want anymore ... how can I just
+    # remove that?"): Delete Stroke, Add Strokes
+    def lay():
+        return tb["sc_layer"](tb["sc_data"](root), lid)
+
+    third = [((x, 0.0, -60.0), gshape) for x in range(-40, 41, 2)]
+    tb["sc_set_layer"](root, lid, drawing=[other, line, third])
+    info = tb["sc_stroke_info"](lay())
+    check("each stroke is listed with the meshes it's on", info == [(41, ["ground"]), (101, ["ground"]),
+                                                                   (41, ["ground"])], str(info))
+    wall_leaves = leaf_points(root, wl)
+    tb["sc_delete_strokes"](root, lid, [1])
+    rows = tb["_sc_drawing_rows"](lay())
+    pts = leaf_points(root, lid)
+    check("Delete Stroke takes just that one out, the others stay",
+          len(rows) == 2 and abs(rows[0][0][2] - 60.0) < 0.01 and abs(rows[1][0][2] + 60.0) < 0.01 and
+          not any(abs(p[2]) < 6.0 for p in pts) and any(p[2] > 54.0 for p in pts) and any(p[2] < -54.0 for p in pts),
+          "%d strokes, %d leaves" % (len(rows), len(pts)))
+    check("... and only that layer grows again", leaf_points(root, wl) == wall_leaves)
+    check("it's one Ctrl+Z", cmds.undoInfo(q=True, undoName=True) == "Delete scatter strokes",
+          cmds.undoInfo(q=True, undoName=True))
+    cmds.undo()
+    tb["sc_sync"]()
+    check("one Ctrl+Z puts the stroke back", tb["sc_area"](lay())[2] == 3 and
+          any(abs(p[2]) < 6.0 for p in leaf_points(root, lid)))
+    tb["sc_set_layer"](root, lid, add_drawing=[up])
+    d = lay()["draw"]
+    check("Add Strokes adds to the drawing (the wall's stroke after the others)",
+          tb["sc_area"](lay())[2] == 4 and len(d["t"]) == 2 and tb["sc_stroke_info"](lay())[3][1] == ["bigWall"],
+          str(tb["sc_stroke_info"](lay())))
+    tb["sc_delete_strokes"](root, lid, [0, 1, 2])
+    d = lay()["draw"]
+    check("deleting the ground's strokes leaves just the wall's (and forgets the ground)",
+          len(d["k"]) == 1 and len(d["t"]) == 1 and tb["sc_stroke_info"](lay()) == [(len(up), ["bigWall"])],
+          str(d.get("t")))
+    cmds.undo()
+    cmds.undo()
+    tb["sc_sync"]()
+    check("Ctrl+Z steps back through them", tb["sc_area"](lay())[2] == 3)
+    tb["sc_pause"]()
+    before = leaf_points(root, lid)
+    tb["sc_delete_strokes"](root, lid, [0])
+    check("paused, Delete Stroke saves it and grows nothing", tb["sc_area"](lay())[2] == 2 and
+          leaf_points(root, lid) == before)
+    cmds.undo()
+    tb["sc_play"]()
+    tb["sc_sync"]()
+    check("... Ctrl+Z puts it back", tb["sc_area"](lay())[2] == 3)
 
     # --- ivy: vines start along the drawing
     cmds.select(clear=True)
@@ -1457,9 +1512,55 @@ def dropped_leaves():
           "overhanging points %d; mean height %.2f at Drape 0 (lowest %.2f), %.2f at Drape 1 (table top 1.5)" % (
               len(soft), ms, min(stiff) if stiff else 0, mf))
 
+def draw_on():
+    """Draw on: Surfaces skips scatter (live or baked, even moved out of its
+    group), Selected draws only on the picked meshes, Everything on any; a
+    surface group never scatters onto baked parts moved into it."""
+    tb = load_toolbox()
+    sn = tb["short_name"]
+    cmds.file(new=True, force=True)
+    grp = cmds.group(empty=True, name="yard_GRP")
+    floor = box("floor", (40, 1, 30), (0, -0.5, 0), grp)
+    crate = box("crate", (6, 6, 6), (8, 3, 4), grp)
+    root = tb["create_scatter_group"]([grp], "Leaf piles", {"coverage": 0.8})["root"]
+    tb["bake_scatter"]([root])
+    baked = [n for n in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []]
+    moved = cmds.ls(cmds.parent(baked[0], grp)[0], long=True)[0]
+    live = tb["create_scatter_group"]([grp], "Moss tufts")["root"]
+    check("a surface group never scatters onto baked scatter moved into it",
+          sorted(sn(n) for n in tb["sc_surfaces"](tb["sc_data"](live))) == ["crate", "floor"],
+          str([sn(n) for n in tb["sc_surfaces"](tb["sc_data"](live))]))
+    tb["sc_set_surfaces"](live, add=[moved])
+    check("... unless it's added by hand", moved in tb["sc_surfaces"](tb["sc_data"](live)))
+    cmds.undo()
+    drawer = tb["ScatterDrawer"]()
+
+    def hits(mode, only=None):
+        drawer.mode, drawer.only = mode, list(only or [])
+        out = set()
+        for dag in drawer._candidate_meshes():
+            path = dag.fullPathName()
+            out.add(sn(cmds.listRelatives(path, parent=True, fullPath=True)[0]))
+        return sorted(out)
+
+    got = hits("Surfaces")
+    check("Draw on Surfaces: not on scatter, live or baked (even moved out of its group)", got == ["crate", "floor"],
+          str(got))
+    got = hits("Everything")
+    check("Draw on Everything: baked scatter too (not a live group's)",
+          "crate" in got and sn(moved) in got and len(got) == 2 + len(baked) and
+          not any(sn(n) in got for n in tb["sc_parts"](live).values()), str(got))
+    got = hits("Selected", tb["sc_draw_targets"]([crate]))
+    check("Draw on Selected: only the meshes picked", got == ["crate"], str(got))
+    check("... a group picked means every mesh in it", sorted(sn(cmds.listRelatives(s, parent=True)[0]) for s in
+                                                            tb["sc_draw_targets"]([grp])) ==
+          sorted(["crate", "floor", sn(moved)]))
+
+
 try:
     run()
     drawing()
+    draw_on()
     jungle()
     moss_and_specks()
     pause()

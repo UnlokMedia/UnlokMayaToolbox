@@ -783,6 +783,10 @@ you tune them.
    surfaces); with a group open it adds a layer on the drawing instead
    (**Add Layer on Drawing**), so moss and leaves can follow one drawing.
    **Clear** forgets the drawing (layers keep what was drawn for them).
+   **Draw on** says what strokes land on: *Surfaces* (default: any mesh
+   but scatter, so baked scatter isn't drawn on), *Selected* (only the
+   meshes or groups selected when you start drawing) or *Everything*
+   (baked scatter too).
 2. **Layers:** **Add Layer** of any type (Moss, Grass, Leaves, Leaf piles,
    Jungle leaves, Moss tufts, Specks, Ivy); two of a type are fine (a moss that keeps to flat
    rooftops and a second, sparse one that grows anywhere). Tick a layer to
@@ -792,6 +796,12 @@ you tune them.
    those faces; **vertices or edges** = a clump round each picked point,
    out to *Spread* (ivy: vines start there); **Use Drawing** = along the
    strokes drawn now. **Clear Area** frees it again.
+   A drawn layer's strokes are listed under **Drawn strokes**, with the
+   meshes each is on. **Show Strokes** draws them in the viewport; click
+   one's line (or pick it in the list) and press **Delete Stroke** to take
+   just that stroke out (only that layer grows again). **Add Strokes** adds
+   the strokes drawn now to the layer's drawing (**Use Drawing** replaces
+   it). One Ctrl+Z each.
    Clicking a layer's mesh in the viewport edits that layer.
 3. **Layer settings** (live, out of the undo queue like the other tools'
    sliders): every layer has its own *Coverage*, *Slope limit*, *Crevices*,

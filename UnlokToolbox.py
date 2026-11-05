@@ -34988,6 +34988,7 @@ SC_DEBRIS_OUT = {"Grass": (("grass", "grass"),), "Leaves": (("litter", "litter")
                  "Specks": (("specks", "specks"), ("dirt", "dirt"))}  # debris_build's mesh -> part
 SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
+SC_DRAW_ON = ("Surfaces", "Selected", "Everything")  # what Draw on Surfaces draws on
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
 _SC_LAST = {}   # group -> (JSON, stamp) it was last built from
 _SC_SURF = {}   # group -> its surfaces' mesh keys at that build (JSON-like lists)
@@ -35080,7 +35081,13 @@ def sc_store_drawing(strokes):
 
 def sc_drawing(layer):
     """A layer's strokes in world space now ([[point, ...], ...])."""
-    draw = layer.get("draw") or {}
+    return [st for st in _sc_drawing_rows(layer) if st]
+
+
+def _sc_drawing_rows(layer):
+    """Every stored stroke of a layer in world space now, in order (a stroke
+    whose meshes are all gone: [])."""
+    draw = (layer or {}).get("draw") or {}
     mats = []
     for uid in draw.get("t") or []:
         found = cmds.ls(uid, long=True) or []
@@ -35092,9 +35099,104 @@ def sc_drawing(layer):
             if 0 <= ti < len(mats) and mats[ti] is not None:
                 w = om.MPoint(x, y, z) * mats[ti]
                 st.append((w.x, w.y, w.z))
-        if st:
-            out.append(st)
+        out.append(st)
     return out
+
+
+def sc_stroke_info(layer):
+    """[(points, [short names of the meshes it's on])] per stored stroke."""
+    draw = (layer or {}).get("draw") or {}
+    names = []
+    for uid in draw.get("t") or []:
+        found = cmds.ls(uid, long=True) or []
+        names.append(short_name(found[0]) if found else None)
+    out = []
+    for row in draw.get("k") or []:
+        on = []
+        for q in row:
+            n = names[q[0]] if 0 <= q[0] < len(names) else None
+            if n and n not in on:
+                on.append(n)
+        out.append((len(row), on))
+    return out
+
+
+def _sc_draw_keep(draw, keep):
+    """A stored drawing with only the strokes keep (indices) in it."""
+    rows, uids = draw.get("k") or [], draw.get("t") or []
+    index, out_t, out_k = {}, [], []
+    for i in keep:
+        if not 0 <= i < len(rows):
+            continue
+        row = []
+        for ti, x, y, z in rows[i]:
+            if not 0 <= ti < len(uids):
+                continue
+            if ti not in index:
+                index[ti] = len(out_t)
+                out_t.append(uids[ti])
+            row.append([index[ti], x, y, z])
+        if row:
+            out_k.append(row)
+    return {"t": out_t, "k": out_k} if out_k else {}
+
+
+def _sc_draw_join(a, b):
+    """Two stored drawings as one (b's strokes after a's), thinned evenly
+    past SC_DRAW_MAX_POINTS."""
+    uids = list(a.get("t") or [])
+    index = dict((u, i) for i, u in enumerate(uids))
+    rows = [list(r) for r in a.get("k") or []]
+    bt = b.get("t") or []
+    for row in b.get("k") or []:
+        new = []
+        for ti, x, y, z in row:
+            if not 0 <= ti < len(bt):
+                continue
+            if bt[ti] not in index:
+                index[bt[ti]] = len(uids)
+                uids.append(bt[ti])
+            new.append([index[bt[ti]], x, y, z])
+        if new:
+            rows.append(new)
+    every = max(1, int(math.ceil(sum(len(r) for r in rows) / float(SC_DRAW_MAX_POINTS))))
+    if every > 1:
+        rows = [r[::every] + ([r[-1]] if (len(r) - 1) % every else []) for r in rows]
+    return _sc_draw_keep({"t": uids, "k": rows}, range(len(rows))) if rows else {}
+
+
+def sc_draw_targets(nodes):
+    """The visible mesh shapes of nodes (meshes, or groups: every mesh under
+    them): what Draw on Selected draws on."""
+    out = []
+    for node in nodes or ():
+        if not cmds.objExists(node):
+            continue
+        if cmds.objectType(node, isAType="mesh"):
+            shapes = [long_name(node)]
+        else:
+            shapes = cmds.listRelatives(node, allDescendents=True, type="mesh", fullPath=True,
+                                        noIntermediate=True) or []
+        for sh in cmds.ls(shapes, visible=True, long=True) or []:
+            if sh not in out:
+                out.append(sh)
+    return out
+
+
+_SC_PART_NAME = re.compile(r"_C_%s\d{4}_GEP$" % SC_STEM)
+
+
+def _sc_scatter_mesh(dag):
+    """A scatter part's mesh, live or baked, wherever it's been moved to
+    (Bake keeps its unlokScatterPart tag; an older one by its name)."""
+    try:
+        if om.MFnDependencyNode(dag.node()).hasAttribute(SC_PART):
+            return True
+        parent = om.MDagPath(dag)
+        parent.pop()
+        return bool(_SC_PART_NAME.search(om.MFnDependencyNode(parent.node()).name()))
+    except RuntimeError:
+        return False
 
 
 def sc_drawing_meshes(strokes):
@@ -35823,6 +35925,8 @@ def sc_surfaces(data):
                                         noIntermediate=True) or []
             cand = []
             for sh in cmds.ls(shapes, visible=True, long=True) or []:
+                if cmds.attributeQuery(SC_PART, node=sh, exists=True):  # baked scatter moved in: added only by hand
+                    continue
                 t = cmds.listRelatives(sh, parent=True, fullPath=True)[0]
                 if t not in cand and not _sc_inside(t, left_out):
                     cand.append(t)
@@ -35856,13 +35960,16 @@ def _sc_covering(data, node):
 
 def _sc_include(data, node):
     """node is scattered onto: back in its surface group when it was left
-    out of it, else (not in one, or inside something left out) a surface
-    of its own."""
+    out of it, else (not in one, or inside something left out, or a
+    scatter part, which a surface group never uses by itself) a surface of
+    its own."""
     uid = cmds.ls(node, uuid=True)[0]
     ex = data.setdefault("exclude", [])
     if uid in ex:
         ex.remove(uid)
-    if _sc_covering(data, node) and not _sc_inside(node, _sc_left_out(data)):
+    shape = _log_shape(node)
+    part = bool(shape) and cmds.attributeQuery(SC_PART, node=shape, exists=True)
+    if not part and _sc_covering(data, node) and not _sc_inside(node, _sc_left_out(data)):
         return
     if uid not in data["surfaces"]:
         data["surfaces"].append(uid)
@@ -36322,9 +36429,10 @@ def _sc_add_drawn_surfaces(data, drawing):
             _sc_include(data, node)
 
 
-def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None):
+def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None, add_drawing=None):
     """Turn a layer on / off, rename it, set its area (points, faces) or its
-    drawing (strokes; [] clears it) (one Ctrl+Z)."""
+    drawing (strokes; [] clears it), or add strokes to its drawing
+    (add_drawing) (one Ctrl+Z)."""
     def edit(data):
         layer = sc_layer(data, lid)
         if layer is None:
@@ -36342,7 +36450,26 @@ def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None):
             if drawing:
                 _sc_add_drawn_surfaces(data, drawing)
             layer["draw"] = sc_store_drawing(drawing)
+        if add_drawing:
+            _sc_add_drawn_surfaces(data, add_drawing)
+            layer["draw"] = _sc_draw_join(layer.get("draw") or {}, sc_store_drawing(add_drawing))
     return _sc_change(root, "Scatter layer", edit)
+
+
+def sc_delete_strokes(root, lid, indices):
+    """Take strokes (indices into the layer's drawing) out of it, then only
+    that layer grows again (one Ctrl+Z; while paused: at Play). The user,
+    2026-11-05: "I've realized one of the ones I painted I don't want
+    anymore. I've already scattered, so how can I just remove that?"."""
+    drop = set(int(i) for i in indices or ())
+
+    def edit(data):
+        layer = sc_layer(data, lid)
+        if layer is None or not drop:
+            return
+        rows = (layer.get("draw") or {}).get("k") or []
+        layer["draw"] = _sc_draw_keep(layer.get("draw") or {}, [i for i in range(len(rows)) if i not in drop])
+    return _sc_change(root, "Delete scatter strokes", edit)
 
 
 def sc_set_paint(root, lid, paint, label="Scatter paint"):
@@ -36792,9 +36919,34 @@ class ScatterDrawer(SurfacePathDrawer):
         self.curves = []    # the line showing each stroke
         self.undone = []    # (stroke, ) taken back, newest last: what Ctrl+Y puts back
         self._filter = None
+        self.mode = SC_DRAW_ON[0]  # Draw on
+        self.only = []             # Draw on Selected: those mesh shapes
+
+    def _candidate_meshes(self, use_forced=True):
+        """Meshes a stroke can land on, by Draw on (the user, 2026-11-05: "if
+        I bake a bunch of scattered stuff and then want to draw another
+        one, it suddenly starts drawing on top of the scattered stuff ...
+        I want to be able to sometimes just draw on the underlying
+        surface"): Surfaces, any visible mesh but scatter, live or baked;
+        Selected, the meshes picked when drawing started; Everything, any
+        visible mesh but a live scatter group's."""
+        if self.mode == SC_DRAW_ON[1]:
+            out = []
+            for node in self.only:
+                dag = get_dag_path(node) if cmds.objExists(node) else None
+                if dag is not None and dag.isVisible():
+                    out.append(dag)
+            return out
+        out = super(ScatterDrawer, self)._candidate_meshes(use_forced=False)
+        if self.mode == SC_DRAW_ON[2]:
+            return out
+        baked = tuple(r + "|" for r in sc_groups(baked=True))
+        return [d for d in out if not (baked and d.fullPathName().startswith(baked)) and not _sc_scatter_mesh(d)]
 
     # ---------------------------------------------------------- tool
-    def activate(self, surfaces=None):
+    def activate(self, surfaces=None, mode=None, only=None):
+        self.mode = mode or SC_DRAW_ON[0]
+        self.only = list(only or [])
         if cmds.draggerContext(SC_DRAW_CTX, exists=True):
             cmds.deleteUI(SC_DRAW_CTX)
         cmds.draggerContext(SC_DRAW_CTX, pressCommand=self._press, dragCommand=self._drag,
@@ -36952,6 +37104,68 @@ class ScatterDrawer(SurfacePathDrawer):
 
     def meshes(self):
         return sc_drawing_meshes(self.strokes)
+
+
+class ScatterStrokeView(object):
+    """A layer's stored strokes as lines in the viewport (Show Strokes):
+    orange, the picked ones yellow and thicker; outside the undo queue,
+    never saved. Clicking a line picks its stroke."""
+    RGB = (1.0, 0.6, 0.15)
+    PICKED_RGB = (1.0, 0.95, 0.2)
+
+    def __init__(self):
+        self.curves = []  # per stroke: its line's transform (None: nothing left of it)
+        self.key = None
+
+    def show(self, root, lid, layer, picked=()):
+        key = (root, lid, json.dumps((layer or {}).get("draw") or {}, sort_keys=True))
+        if key != self.key or not all(c is None or cmds.objExists(c) for c in self.curves):
+            self.hide()
+            with NoUndo(), PreserveSelection():
+                self.curves = [self._make(pts) if pts else None for pts in _sc_drawing_rows(layer)]
+            self.key = key
+        picked = set(picked or ())
+        with NoUndo():
+            for i, curve in enumerate(self.curves):
+                if curve and cmds.objExists(curve):
+                    shape = cmds.listRelatives(curve, shapes=True, fullPath=True)[0]
+                    cmds.setAttr(shape + ".overrideColorRGB", *(self.PICKED_RGB if i in picked else self.RGB))
+                    cmds.setAttr(shape + ".lineWidth", 5.0 if i in picked else 2.5)
+
+    @staticmethod
+    def _make(pts):
+        if len(pts) == 1:  # a single spot: a short tick up from it
+            pts = [pts[0], (pts[0][0], pts[0][1] + 0.02 / scene_m_per_unit(), pts[0][2])]
+        curve = long_name(cmds.curve(degree=1, point=pts, name="scatterStroke1"))
+        shape = cmds.listRelatives(curve, shapes=True, fullPath=True)[0]
+        for node in (curve, shape):
+            om.MFnDependencyNode(get_dag_path(node).node()).setDoNotWrite(True)  # never saved
+        cmds.setAttr(curve + ".hiddenInOutliner", 1)
+        cmds.setAttr(shape + ".overrideEnabled", 1)
+        cmds.setAttr(shape + ".overrideRGBColors", 1)
+        if cmds.attributeQuery("alwaysDrawOnTop", node=shape, exists=True):
+            cmds.setAttr(shape + ".alwaysDrawOnTop", 1)
+        return curve
+
+    def hide(self):
+        with NoUndo():
+            for curve in self.curves:
+                if curve and cmds.objExists(curve):
+                    cmds.delete(curve)
+        self.curves, self.key = [], None
+
+    def picked_in(self, nodes):
+        """Indices of the strokes whose lines are among nodes (None: none are)."""
+        found = set()
+        for node in nodes or ():
+            if not cmds.objExists(node):
+                continue
+            node = long_name(node)
+            if cmds.objectType(node, isAType="shape"):
+                node = (cmds.listRelatives(node, parent=True, fullPath=True) or [node])[0]
+            if node in self.curves:
+                found.add(self.curves.index(node))
+        return sorted(found) if found else None
 
 
 SC_PAINT_CTX = "unlokScatterPaintCtx"
@@ -37303,6 +37517,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._undo_timer.setInterval(50)
         self._undo_timer.timeout.connect(_guarded(self._undo_timer, self._after_undo))
         self.drawer = ScatterDrawer(on_change=lambda: self._drawing_changed())
+        self.stroke_view = ScatterStrokeView()
         self.painter = ScatterPainter(on_change=lambda: self._drawing_changed(),
                                       on_stroke=lambda paint: self._paint_stroke(paint), get_brush=lambda: self._brush())
         self.draw_sec = {}
@@ -37407,6 +37622,13 @@ class ScatterPanel(QtWidgets.QWidget):
         clear_d = secondary_button("Clear", "Clear the drawing (layers keep what was drawn for them).")
         clear_d.clicked.connect(lambda *_: self.clear_drawing())
         card.add(button_row(self.draw_btn, self.scatter_draw_btn, clear_d))
+        don = Section("", header=False)
+        self.draw_on = SegmentField(SC_DRAW_ON)
+        don.add_row("Draw on", self.draw_on, "Surfaces: any mesh but scatter (live or baked). Selected: only the "
+                                             "meshes (or groups) selected when you start drawing. Everything: any "
+                                             "mesh, baked scatter too.")
+        self.draw_on.changed.connect(lambda: self._draw_on_changed())
+        card.add(don)
         self.draw_label = hint_label("")
         card.add(self.draw_label)
         self.group_label = hint_label("")
@@ -37475,6 +37697,26 @@ class ScatterPanel(QtWidgets.QWidget):
                                                "drawing).")
         clear.clicked.connect(lambda *_: self.set_area(clear=True))
         card.add(button_row(pick, use_d, clear))
+        ssec = self.stroke_sec = Section("Drawn strokes", expanded=True)
+        self.stroke_list = QtWidgets.QListWidget()
+        self.stroke_list.setMaximumHeight(90)
+        self.stroke_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.stroke_list.setToolTip("The layer's strokes. Pick some here (or click their lines in the viewport "
+                                    "with Show Strokes on), then Delete Stroke.")
+        self.stroke_list.itemSelectionChanged.connect(lambda: self._show_strokes())
+        ssec.add_full(self.stroke_list)
+        self.stroke_show = secondary_button("Show Strokes", "Show the layer's strokes as lines in the viewport (the "
+                                                            "picked ones bright yellow); click a line to pick it.")
+        self.stroke_show.setCheckable(True)
+        self.stroke_show.clicked.connect(lambda *_: self._show_strokes())
+        s_del = secondary_button("Delete Stroke", "Take the picked strokes out of the layer's drawing: only this "
+                                                  "layer grows again (one Ctrl+Z).")
+        s_del.clicked.connect(lambda *_: self.delete_strokes())
+        s_add = secondary_button("Add Strokes", "Add the strokes drawn now (Draw on Surfaces) to the layer's "
+                                                "drawing; Use Drawing replaces it (one Ctrl+Z).")
+        s_add.clicked.connect(lambda *_: self.add_strokes())
+        ssec.add_full(button_row(self.stroke_show, s_del, s_add))
+        card.add(ssec)
         psec = self.paint_sec = Section("Influence paint", expanded=True)
         self.paint_mode = SegmentField(SC_PAINT_MODES)
         psec.add_row("Brush", self.paint_mode, "Add paints the layer in (more of it, even where it wouldn't grow by "
@@ -37660,6 +37902,94 @@ class ScatterPanel(QtWidgets.QWidget):
             self.step_look.title.setText("Settings for the first layer (%s)" % typ)
         self._style_rows(typ)
         self._fill_presets()
+        self._fill_strokes(layer)
+
+    # ------------------------------------------------------ drawn strokes
+    def _fill_strokes(self, layer):
+        """The layer's strokes in the list (picks kept), their lines when
+        Show Strokes is on; the section shows with strokes to edit or add."""
+        n = sc_area(layer)[2] if layer is not None else 0
+        self.stroke_sec.setVisible(layer is not None and bool(n or self.drawer.strokes))
+        picked = set(self._picked_strokes())
+        self.stroke_list.blockSignals(True)
+        try:
+            self.stroke_list.clear()
+            for i, (count, names) in enumerate(sc_stroke_info(layer) if n else []):
+                item = QtWidgets.QListWidgetItem("Stroke %d: %s" % (i + 1, ", ".join(names) if names else
+                                                                    "(its meshes are gone)"))
+                item.setData(QtCore.Qt.UserRole, i)
+                self.stroke_list.addItem(item)
+                item.setSelected(i in picked)
+        finally:
+            self.stroke_list.blockSignals(False)
+        self._show_strokes()
+
+    def _picked_strokes(self):
+        return sorted(item.data(QtCore.Qt.UserRole) for item in self.stroke_list.selectedItems())
+
+    def _show_strokes(self):
+        try:
+            layer = self._layer() if self._alive() else None
+            if layer is not None and sc_area(layer)[2] and self.stroke_show.isChecked():
+                self.stroke_view.show(self._root, self._lid, layer, self._picked_strokes())
+            else:
+                self.stroke_view.hide()
+                if layer is None or not sc_area(layer)[2]:
+                    self.stroke_show.setChecked(False)
+        except Exception:
+            traceback.print_exc()
+
+    def _pick_stroke_lines(self):
+        """Lines of shown strokes selected in the viewport pick their rows.
+        Returns whether they did."""
+        if not self.stroke_view.curves:
+            return False
+        found = self.stroke_view.picked_in(cmds.ls(selection=True, long=True) or [])
+        if found is None:
+            return False
+        self.stroke_list.blockSignals(True)
+        try:
+            for i in range(self.stroke_list.count()):
+                item = self.stroke_list.item(i)
+                item.setSelected(item.data(QtCore.Qt.UserRole) in found)
+        finally:
+            self.stroke_list.blockSignals(False)
+        self._show_strokes()
+        return True
+
+    @ui_safe
+    def delete_strokes(self):
+        if not (self._alive() and self._lid):
+            self.set_status("Pick a layer of a scatter group first.", level="warn")
+            return
+        picked = self._picked_strokes()
+        if not picked:
+            self.set_status("Pick the strokes to delete in the list (or click their lines with Show Strokes on).",
+                            level="warn")
+            return
+        self.stroke_list.blockSignals(True)
+        self.stroke_list.clearSelection()
+        self.stroke_list.blockSignals(False)
+        self._structural("Deleted %d stroke%s from" % (len(picked), "" if len(picked) == 1 else "s"),
+                         lambda: sc_delete_strokes(self._root, self._lid, picked))
+
+    @ui_safe
+    def add_strokes(self):
+        if not (self._alive() and self._lid):
+            self.set_status("Pick a layer of a scatter group first.", level="warn")
+            return
+        strokes = list(self.drawer.strokes)
+        if not strokes:
+            self.set_status("Draw the new strokes first (Draw on Surfaces), then Add Strokes.", level="warn")
+            return
+        self.drawer.deactivate()
+        self._structural("Added %d stroke%s to" % (len(strokes), "" if len(strokes) == 1 else "s"),
+                         lambda: sc_set_layer(self._root, self._lid, add_drawing=strokes))
+
+    def _draw_on_changed(self):
+        if self.drawer.is_active():  # drawing now: on what was picked again
+            self.drawer.deactivate()
+            self.toggle_drawing()
 
     def _style_rows(self, typ):
         """The Clumps section only shows for moss grown as Clumps; Height
@@ -37870,6 +38200,8 @@ class ScatterPanel(QtWidgets.QWidget):
         if not self.isVisible():
             return
         try:
+            if self._pick_stroke_lines():
+                return
             sel = sc_selection()
             if sel["root"]:
                 if sel["root"] != self._root:
@@ -38132,9 +38464,19 @@ class ScatterPanel(QtWidgets.QWidget):
     def toggle_drawing(self):
         if self.drawer.is_active():
             self.drawer.deactivate()
-        else:
-            self.drawer.activate()
-            self.set_status("Draw over the surfaces; Ctrl+Z takes the last stroke back, Enter or Esc stops.")
+            return
+        mode = self.draw_on.value()
+        only = None
+        if mode == SC_DRAW_ON[1]:
+            only = sc_draw_targets(cmds.ls(selection=True, objectsOnly=True, long=True) or [])
+            if not only:
+                self.draw_btn.setChecked(False)
+                self.set_status("Draw on Selected: select the meshes (or groups) to draw on first.", level="warn")
+                return
+        self.drawer.activate(mode=mode, only=only)
+        self.set_status("Draw over %s; Ctrl+Z takes the last stroke back, Enter or Esc stops." % (
+            "the %d selected mesh%s only" % (len(only), "" if len(only) == 1 else "es") if only else
+            "any mesh, baked scatter too" if mode == SC_DRAW_ON[2] else "the surfaces (not scatter)"))
 
     @ui_safe
     def clear_drawing(self):
@@ -38412,6 +38754,10 @@ class ScatterPanel(QtWidgets.QWidget):
             timer.stop()
         try:
             self.drawer.shutdown()
+        except Exception:
+            traceback.print_exc()
+        try:
+            self.stroke_view.hide()
         except Exception:
             traceback.print_exc()
         try:

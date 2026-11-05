@@ -777,6 +777,68 @@ def drawing(ns, panel, window):
     check("Clear leaves what the layers were drawn on", len(ns["sc_data"](root)["layers"]) == 2 and
           ns["sc_area"](ns["sc_layer"](ns["sc_data"](root), leaves))[2] == 3)
 
+    # --- the leaves layer's strokes one by one: listed, Show Strokes, click a line, Delete Stroke, Ctrl+Z
+    def button(text):
+        found = [w for w in panel.findChildren(QtWidgets.QPushButton) if w.text() == text]
+        return found[0] if found else None
+
+    def strokes_now():
+        return ns["sc_area"](ns["sc_layer"](ns["sc_data"](root), leaves))[2]
+
+    panel._lid = leaves
+    panel._refresh()
+    pump()
+    rows = [panel.stroke_list.item(i).text() for i in range(panel.stroke_list.count())]
+    check("Drawn strokes lists the layer's strokes and the meshes they're on",
+          panel.stroke_sec.isVisible() and len(rows) == 3 and "floor" in " ".join(rows) and
+          "shackWall" in " ".join(rows), str(rows))
+    panel.stroke_show.click()
+    pump()
+    lines = list(panel.stroke_view.curves)
+    check("Show Strokes draws them in the viewport", len(lines) == 3 and all(c and cmds.objExists(c) for c in lines),
+          str(lines))
+    wall_row = [i for i, r in enumerate(rows) if r.endswith(": shackWall")][0]
+    kept = [r.split(": ", 1)[1] for i, r in enumerate(rows) if i != wall_row]
+    cmds.select(lines[wall_row])
+    panel._sync_from_selection()
+    pump()
+    check("clicking a stroke's line picks it in the list (the group and layer stay open)",
+          panel._picked_strokes() == [wall_row] and panel._root == root and panel._lid == leaves,
+          "%s | %s" % (panel._picked_strokes(), panel.status.text()))
+    window.grab().save(os.path.join(OUT, "08_panel_strokes.png"))
+    look((0, 10, -4), (26, 36, 58))
+    snap("08_stroke_picked.png")
+    button("Delete Stroke").click()
+    pump()
+    rows = [panel.stroke_list.item(i).text() for i in range(panel.stroke_list.count())]
+    check("Delete Stroke takes just that stroke out of the layer",
+          strokes_now() == 2 and [r.split(": ", 1)[1] for r in rows] == kept and
+          len(panel.stroke_view.curves) == 2, "%s | %s" % (rows, panel.status.text()))
+    snap("08_stroke_deleted.png")
+    cmds.undo()
+    panel._after_undo()
+    pump()
+    check("one Ctrl+Z puts it back", strokes_now() == 3 and panel.stroke_list.count() == 3 and
+          len(panel.stroke_view.curves) == 3, panel.status.text())
+    panel.stroke_show.click()
+    pump()
+    check("Show Strokes off takes the lines away", not cmds.ls("scatterStroke*", type="transform"))
+
+    # --- Draw on Selected: only the wall takes strokes (one across the floor lands nowhere)
+    panel.draw_on.setValue("Selected")
+    cmds.select(nodes["wall"])
+    panel.draw_btn.click()
+    pump()
+    stroke([(x, 0.2, 10.0) for x in range(-10, 10, 2)])                    # across the floor: not selected
+    stroke([(8 + 3 * math.sin(y * 0.5), y, -11.9) for y in range(2, 20)])  # up the wall
+    on = sorted(ns["short_name"](m) for m in panel.drawer.meshes())
+    check("Draw on Selected: strokes land only on the selected meshes", len(panel.drawer.strokes) == 1 and
+          on == ["shackWall"], "%d strokes on %s" % (len(panel.drawer.strokes), on))
+    panel.draw_btn.click()
+    panel.clear_drawing()
+    panel.draw_on.setValue("Surfaces")
+    pump()
+
 
 def jungle_leaves(ns, panel, window):
     """Before / after on a fresh porch: Leaf piles (Gutters and wall bases),

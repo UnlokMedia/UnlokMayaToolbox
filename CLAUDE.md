@@ -1034,6 +1034,34 @@
     the strokes (`spread`). Settings `SC_DRAW_DEFAULTS` (draw_width metres,
     draw_falloff, draw_follow) on every type; the panel's Drawing section
     shows for a drawn layer.
+  - **Strokes one by one** (the user, 2026-11-05: "I've realized one of
+    the ones I painted I don't want anymore. I've already scattered, so
+    how can I just remove that?"): `sc_stroke_info` (points, meshes per
+    stored stroke), `_sc_drawing_rows` (every stroke in world space, in
+    order, [] for one whose meshes are gone; `sc_drawing` drops those),
+    `sc_delete_strokes(root, lid, indices)` (`_sc_draw_keep`: the kept
+    rows, "t" pruned and re-indexed) and `sc_set_layer(add_drawing=)`
+    (`_sc_draw_join`, thinned past `SC_DRAW_MAX_POINTS`), both through
+    `_sc_change` (one Ctrl+Z, saved while paused, only that layer's cache
+    misses). Panel: a Drawn strokes section in step 2 (list, Show Strokes,
+    Delete Stroke, Add Strokes); `ScatterStrokeView` draws the stored
+    strokes as curves `scatterStroke*` (NoUndo, doNotWrite, picked ones
+    yellow and thicker), rebuilt when the layer's draw JSON changes;
+    `_sync_from_selection` first checks `_pick_stroke_lines` (a selected
+    line picks its row and keeps the group / layer open).
+  - **Draw on** (the user, 2026-11-05: "if I bake a bunch of scattered
+    stuff and then want to draw another one, it suddenly starts drawing on
+    top of the scattered stuff ... I want to be able to sometimes just
+    draw on the underlying surface"): `SC_DRAW_ON` Surfaces / Selected /
+    Everything; `ScatterDrawer._candidate_meshes` by its `mode`: Surfaces
+    skips meshes under any scatter group, live or baked, and any
+    `_sc_scatter_mesh` (shape tagged `unlokScatterPart`, which Bake keeps,
+    or a transform named `*_C_scatteredObjects####_GEP`) wherever it was
+    moved; Selected = `sc_draw_targets` of the selection at activate;
+    Everything = the old behaviour (all but live groups). `sc_surfaces`
+    skips tagged parts found under a surface group (a baked part moved
+    into it) unless one is stored itself, so moss / leaves / paint never
+    use baked scatter as ground by accident.
   - **Jungle leaves** (the user, 2026-11-04: "instead of piles of small
     leaves ... large jungle leaves, like one or two or three of them at a
     time ... the size of a whole small leaf pile"): layer type "Jungle
