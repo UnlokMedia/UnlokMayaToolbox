@@ -1779,7 +1779,10 @@
   narrow column. Shares `UR_MATERIALS` / `UR_COLORS` / `UR_SUFFIXES` and the
   split helpers with Smart UDIM. `tests/test_renamer.py` compares the maths
   with the standalone `unlok_renamer.py` (loaded from the UnlokRenamer repo
-  when it's there); keep them in step if either changes. Smart UDIM's
+  when it's there). **Both stay maintained** (the user, 2026-11-05: "Keep
+  both maintained"): a naming-rule change goes into both this panel and
+  UnlokRenamer's `unlok_renamer.py`, and the parity test must still pass.
+  Smart UDIM's
   **Open Renamer** selects the listed meshes and calls
   `open_toolbox_tool("Renamer")` (the old "is unlok_renamer loaded" lookup is
   gone).
