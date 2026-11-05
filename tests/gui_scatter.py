@@ -444,7 +444,13 @@ def draft_mode(ns, panel, window):
 
     def verts(part):
         node = ns["sc_parts"](root).get(moss + "/" + part)
-        return cmds.polyEvaluate(node, vertex=True) if node and cmds.getAttr(node + ".visibility") else 0
+        n = cmds.polyEvaluate(node, vertex=True) if node and cmds.getAttr(node + ".visibility") else 0
+        if part == "strands":  # instanced shoots count as strands
+            sh = ns["sc_shoots"](root).get(moss + "/shoots")
+            if sh and cmds.getAttr(sh + ".visibility"):
+                ps = ns["_sc_shoot_nodes"](sh)[0]
+                n += cmds.particle(ps, q=True, count=True) if ps else 0
+        return n
 
     def row():
         return [panel.layer_list.item(k).text() for k in range(panel.layer_list.count())
@@ -502,21 +508,24 @@ def draft_mode(ns, panel, window):
         layer = [lay for lay in ns["sc_data"](root)["layers"] if lay["id"] == moss][0]
         return ns["sc_settings"](layer)["coverage"]
 
-    # a slow layer (the speed pass: a drag at High queued a rebuild per tick): held slider, one update on release
+    # a slow layer (the speed pass: a drag at High queued a rebuild per tick): while its slider is held a moss
+    # edit grows the quick draft look; let go, the layer grows in full
     field = panel.f["Moss"]["coverage"]
     panel._slow = True
     field.slider.setSliderDown(True)
     field.setValue(0.47)
     panel._pending.add("coverage")
     panel._apply_pending()
-    held = "coverage" in panel._pending and panel._edit_timer.isActive() and abs(saved() - 0.47) > 1e-6
+    pump()
+    held = (abs(saved() - 0.47) < 1e-6, moss in ns["sc_drafted"](root), verts("strands") == 0,
+            panel._edit_timer.isActive())
     field.slider.setSliderDown(False)
     panel._edit_timer.stop()
     panel._apply_pending()
     pump()
-    check("a slow layer waits while its slider is held, then updates once on release",
-          held and not panel._pending and abs(saved() - 0.47) < 1e-6, "held %s, coverage %s" % (held, saved()))
-
+    let_go = (moss not in ns["sc_drafted"](root), verts("strands") > 0, "(draft)" not in row())
+    check("a slow moss layer: a held slider grows the draft look, let go it grows in full",
+          all(held) and all(let_go), "held %s, let go %s | %s" % (held, let_go, panel.status.text()))
 
 def colonnade():
     """Columns 3 m high (decimetres) on a floor: A a cylinder; B1 and B2

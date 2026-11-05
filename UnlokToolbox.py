@@ -31221,8 +31221,11 @@ def moss_clumps(surf, sampler, s, seeds=None, faces=None):
 # lumps on, shoots per (shoot length)^2, the shoot kind, capsule sides, hanging strand segments.
 MOSS_DETAIL = {"Proxy": (1.0, False, 0.0, None, 0, 0),
                "Normal": (0.3, True, 0.08, "tuft", 3, 4),
-               "High": (0.14, True, 1.6, "shoot", 4, 6),
-               "Hero": (0.09, True, 5.0, "leafy", 6, 9)}
+               "High": (0.2, True, 1.6, "shoot", 4, 6),
+               "Hero": (0.13, True, 5.0, "leafy", 6, 9)}
+# the bed's cells are coarser than the look needs (High 0.2 R, was 0.14): it's named _GES so the render
+# subdivides it (and Arnold's own subdivision is set when MtoA is loaded); Proxy stays as built (_GEP)
+MOSS_BED_SMOOTH = ("Normal", "High", "Hero")
 MOSS_SMOOTH = math.cos(math.radians(35.0))  # facets closer than this blend (a stone); sharper edges roll
 MOSS_MAX_CELLS = 2500000  # bed cells looked at; past it the cell grows (reported as capped)
 MOSS_WARN_CELLS = 800000  # a live edit that would look at more stops before it (about a minute): Play grows it
@@ -32158,6 +32161,10 @@ class _MossDetail(object):
         self.S, self.C = _mi_mesh(), _mi_mesh()
         self.capped = False
         self._tpl = {}  # each ribbon / star shape's UVs and corners, the same for every one of them
+        # shoots as instances (Scatter: s["_instances"]): a few shoot shapes at unit length, each shoot their
+        # place, turn and length (an instancer); hanging strands and capsules stay meshes
+        self.inst = bool(s.get("_instances")) and self.kind in MOSS_INST_KINDS
+        self.I = ([], [], [], [])  # root points, (x, y, z) axes, lengths, shape index
 
     def _uv(self, u, v, stack):
         return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
@@ -32175,9 +32182,9 @@ class _MossDetail(object):
         cverts = 8 + 2 + 3 * self.csides
         # every exposed bed triangle (fanned faces): area, normal; then one pass to size the cap
         tris = []
-        est_s = est_c = 0.0
+        est_s = est_c = est_i = 0.0
         P, HF, D, CORE = bed.pts, bed.hf, bed.dirs, bed.core
-        per_s, per_h = dens * per, hang * hverts
+        per_s, per_h = (0.0 if self.inst else dens * per), hang * hverts
         sqrt = math.sqrt
         for vids, _, fkey in bed.faces_out:
             a = vids[0]
@@ -32201,15 +32208,17 @@ class _MossDetail(object):
                 tris.append((a, b, c, ar, fn, fkey * 8 + f))
                 est_s += ar * (per_s + (per_h if side else 0.0))
                 est_c += ar * caps * cverts * 0.5
+                est_i += ar * dens
         keep_s = min(1.0, MI_MAX_VERTS / max(1.0, est_s))
         keep_c = min(1.0, MI_MAX_VERTS / max(1.0, est_c))
-        if keep_s < 1.0 or keep_c < 1.0:
+        keep_i = min(1.0, MOSS_MAX_INSTANCES / max(1.0, est_i)) if self.inst else keep_s
+        if keep_s < 1.0 or keep_c < 1.0 or keep_i < 1.0:
             self.capped = True
         seed = self.seed
         for a, b, c, ar, fn, key in tris:
             _poll()  # a long build: the Working window, Esc / Cancel
             side = fn[1] < 0.35
-            lam_s = ar * dens * keep_s
+            lam_s = ar * dens * keep_i
             lam_h = 2.0 * ar * hang * keep_s if side else 0.0  # about half are gated out (curtains)
             lam_c = ar * caps * keep_c
             r0 = _rand4(seed, key, 0, 43)
@@ -32346,6 +32355,9 @@ class _MossDetail(object):
         mesh = self.S
         d = self._lean(nrm, r, 0.18 + 0.12 * self.mess)
         rot = r[5] * 6.2832
+        if self.inst:
+            self._instance(pos, nrm, d, rot, L, stack, r)
+            return
         if self.kind == "tuft":
             if not self._full(mesh, 11):
                 self._star(mesh, _rl_add(pos, _rl_mul(nrm, 0.12 * L)), d, 5, 0.45 * L, 0.45, rot, stack)
@@ -32381,6 +32393,58 @@ class _MossDetail(object):
             self._star(mesh, tip, top, 6, 0.42 * L, 0.7, rot, stack)
         else:
             self._star(mesh, tip, top, 4, 0.42 * L, 0.6, rot, stack)
+
+    def _instance(self, pos, nrm, d, rot, L, stack, r):
+        """One shoot as an instance: where its stem starts, its axes (x: the
+        stem ribbon's side, y: up the stem, z), its length and which shape
+        (the bend's turn from the side, in MOSS_INST_TURNS steps, and the UV stack)."""
+        perp = _rl_any_perp(d)
+        x = _mi_rotate(perp, d, rot) if rot else perp
+        z = _rl_cross(x, d)
+        if self.kind == "tuft":  # a leaf star a little up the normal (a tuft has no stem)
+            k, shape = 0.12 * L, 0
+        else:
+            k = -0.35 * L
+            turn = (r[6] * 6.2832 - rot) % 6.2832
+            shape = min(MOSS_INST_TURNS - 1, int(turn / 6.2832 * MOSS_INST_TURNS))
+        pts, axes, lens, idx = self.I
+        pts.append((pos[0] + nrm[0] * k, pos[1] + nrm[1] * k, pos[2] + nrm[2] * k))
+        axes.append((x, d, z))
+        lens.append(L)
+        idx.append(stack * self._turns() + shape)
+
+    def _turns(self):
+        return 1 if self.kind == "tuft" else MOSS_INST_TURNS
+
+    def shapes(self):
+        """The instanced shoots' shapes, one mesh: every shape at unit length
+        in its own frame (x the stem's side, y up it), stacks after each other.
+        Returns (mesh, [(points, faces, corners) of each shape])."""
+        mesh, split = _mi_mesh(), []
+        X, Y = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+        for stack in range(self.stacks):
+            for shape in range(self._turns()):
+                at = (len(mesh[0]), len(mesh[1]), len(mesh[2]))
+                if self.kind == "tuft":
+                    self._star(mesh, (0.0, 0.0, 0.0), Y, 5, 0.45, 0.45, 0.0, stack)
+                else:
+                    phi = (shape + 0.5) * 6.2832 / MOSS_INST_TURNS  # the bend, turned from the side about the stem
+                    bx, bz = 0.08 * math.cos(phi), -0.08 * math.sin(phi)
+                    segs = 3 if self.kind == "leafy" else 2
+                    spine = []
+                    for k in range(segs + 1):
+                        f = k / float(segs)
+                        spine.append((bx * f * f, f, bz * f * f))
+                    top = _rl_norm(_rl_sub(spine[-1], spine[-2]), Y)
+                    self._ribbon(mesh, spine, [0.05 * (1.0 - 0.5 * k / float(segs)) for k in range(segs + 1)], X,
+                                 0.0, 0.1, stack)
+                    if self.kind == "leafy":
+                        self._star(mesh, spine[2] if segs == 3 else spine[1], Y, 5, 0.32, 0.35, 0.6, stack)
+                        self._star(mesh, spine[-1], top, 6, 0.42, 0.7, 0.0, stack)
+                    else:
+                        self._star(mesh, spine[-1], top, 4, 0.42, 0.6, 0.0, stack)
+                split.append((len(mesh[0]) - at[0], len(mesh[1]) - at[1], len(mesh[2]) - at[2]))
+        return mesh, split
 
     def _hang(self, pos, nrm, core, r, clump=1.0):
         """A pendant strand: out of the moss, then down under its own weight,
@@ -32469,7 +32533,72 @@ class _MossDetail(object):
             uvi.extend((top_i, a2 + j, a2 + j1))
 
 
+def _mi_euler_xyz(x, y, z):
+    """Rotation (degrees, order XYZ, as an instancer reads it) that turns
+    the unit axes onto x, y, z (orthonormal, right-handed)."""
+    s = -x[2]
+    s = -1.0 if s < -1.0 else (1.0 if s > 1.0 else s)
+    b = math.asin(s)
+    if abs(s) < 0.999999:
+        a = math.atan2(y[2], z[2])
+        c = math.atan2(x[1], x[0])
+    else:  # gimbal: the x turn takes it all
+        a = math.atan2(-z[1], y[1])
+        c = 0.0
+    return math.degrees(a), math.degrees(b), math.degrees(c)
+
+
+def _mi_axes_xyz(a, b, c):
+    """The axes (x, y, z) an XYZ rotation (degrees) turns the unit axes onto: _mi_euler_xyz's inverse."""
+    a, b, c = math.radians(a), math.radians(b), math.radians(c)
+    ca, sa, cb, sb, cc, sc = math.cos(a), math.sin(a), math.cos(b), math.sin(b), math.cos(c), math.sin(c)
+    return ((cb * cc, cb * sc, -sb), (sa * sb * cc - ca * sc, sa * sb * sc + ca * cc, sa * cb),
+            (ca * sb * cc + sa * sc, ca * sb * sc - sa * cc, ca * cb))
+
+
+def moss_shoot_instances(det):
+    """A _MossDetail's instanced shoots as a mesh tuple with two more
+    items: (shape points..., uv ids, split, data): split [(points, faces,
+    corners) per shape], data {"pos", "rot" (degrees XYZ), "scale",
+    "index", "axes"}. None when it has none."""
+    if not det.inst or not det.I[0]:
+        return None
+    mesh, split = det.shapes()
+    pts, axes, lens, idx = det.I
+    return tuple(mesh) + (split, {"pos": pts, "rot": [_mi_euler_xyz(*a) for a in axes], "scale": lens,
+                                  "index": idx, "axes": axes})
+
+
+def moss_instances_mesh(shoots):
+    """Instanced shoots as one real mesh (Bake, and anything that wants
+    geometry): each shape's points through each shoot's axes and length."""
+    pts, counts, conn, us, vs, uvi, split, data = shoots
+    starts, a = [], [0, 0, 0]
+    for n, f, k in split:
+        starts.append(tuple(a))
+        a = [a[0] + n, a[1] + f, a[2] + k]
+    out = _mi_mesh()
+    P, C, K, U, V, I = out
+    for p, (x, y, z), L, i in zip(data["pos"], data["axes"], data["scale"], data["index"]):
+        n0, f0, k0 = starts[i]
+        n, f, k = split[i]
+        b = len(P)
+        px, py, pz = p
+        for q in pts[n0:n0 + n]:
+            u, v, w = q[0] * L, q[1] * L, q[2] * L
+            P.append((px + x[0] * u + y[0] * v + z[0] * w, py + x[1] * u + y[1] * v + z[1] * w,
+                      pz + x[2] * u + y[2] * v + z[2] * w))
+        C.extend(counts[f0:f0 + f])
+        ids = [b + c - n0 for c in conn[k0:k0 + k]]
+        K.extend(ids)
+        I.extend(ids)
+        U.extend(us[n0:n0 + n])
+        V.extend(vs[n0:n0 + n])
+    return out
+
+
 MOSS_STYLES = ("Carpet", "Clumps")
+MOSS_SHOOT_MODES = ("Instances", "Mesh")  # Scatter: shoots as instances of a few shapes, or one mesh
 MOSS_CLUMP_GRID = {"Proxy": (2, 6), "Normal": (3, 8), "High": (5, 12), "Hero": (7, 16)}  # rings, segments
 
 
@@ -32757,18 +32886,24 @@ class _MossClumps(object):
         return list(self.pts), counts, conn, list(self.us), list(self.vs), list(conn)
 
 
-MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "stack_layout", "udim")
+MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "stack_layout", "udim",
+                    "shoot_instances")
+MOSS_INST_KINDS = ("tuft", "shoot", "leafy")  # what can grow as instances (Scatter's Shoots: Instances)
+MOSS_INST_TURNS = 8  # instanced shoot shapes per stack: the bend turned round the stem in eighths
+MOSS_MAX_INSTANCES = 1500000  # instanced shoots per layer (meshes stop at MI_MAX_VERTS)
 _MI_MOSS_BUILT = collections.OrderedDict()  # (meshes, settings but those, seeds, faces) -> (finished bed, clumps)
 
 
-def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=False, paint=None):
+def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=False, paint=None, instances=False):
     """Grow a moss patch on meshes: {"moss": the bed (Style Carpet: one
     continuous shell; Clumps: separate cushions), "strands": shoots and
     hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
     space). Detail sets how fine the bed is and what stands out of it.
     draft: a quick look while editing (a carpet bed in Proxy's coarse cells,
     nothing standing out of it), from the same field: the same patches in
-    the same places. paint: influence paint (_MiPaint)."""
+    the same places. paint: influence paint (_MiPaint). instances: shoots
+    (tufts, leafy shoots) as instances, "shoots" (moss_shoot_instances),
+    not in "strands" (Scatter)."""
     s = mi_settings_only("Moss", s)
     surf = _mi_rest_surface(surf or _MiSurface(nodes), s)  # the surface the render will show (Surface)
     if paint is not None:
@@ -32799,11 +32934,11 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=Fal
             while len(_MI_MOSS_BUILT) > 2:
                 _MI_MOSS_BUILT.popitem(last=False)
     bed, count = got
-    det = _MossDetail(bed, s)
+    det = _MossDetail(bed, dict(s, _instances=bool(instances)))
     if not draft:
         det.build()
     return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C), "clumps": count,
-            "capped": bed.capped or det.capped}
+            "shoots": moss_shoot_instances(det), "capped": bed.capped or det.capped}
 
 
 # -------------------------------------------------------------------- ivy
@@ -35155,6 +35290,8 @@ SC_GROWN = "unlokScatterGrown"     # string on the group: the JSON its parts wer
 SC_COUNTS = "unlokScatterCounts"   # string on the group: each layer's counts at that build
 SC_SURF = "unlokScatterSurfaces"   # string on the group: its surfaces' mesh keys at that build
 SC_PART = "unlokScatterPart"       # string on a part's shape: "<layer id>/<part>"
+SC_SHOOTS = "unlokScatterShoots"   # string on a Moss layer's instanced shoots transform: "<layer id>/shoots"
+SC_SHOOT_SHAPE = "unlokShootShape"  # int on each instanced shoot shape: its instancer index
 SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
 SC_BOX_OF = "unlokScatterBoxOf"    # string on the box: its group's uuid
 SC_BOX_ID = "unlokScatterBoxId"    # string on the group: its box's uuid
@@ -35165,7 +35302,7 @@ SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patc
 SC_DEBRIS_COMMON = SC_PLACE + ("size_var", "detail", "seed", "stacks", "stack_layout") + tuple(MI_FADE_DEFAULTS)
 SC_TYPES = collections.OrderedDict([
     ("Moss", {"parts": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
-              "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {}}),
+              "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {"shoots": "Instances"}}),
     ("Grass", {"parts": (("grass", "grassDry"),),
                "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
                                            "blade_width"),
@@ -35851,9 +35988,13 @@ def _sc_build_layer(layer, surf, draft=False):
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
         ms.update(s)
-        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw, draft=draft, paint=paint)
+        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw, draft=draft, paint=paint,
+                         instances=s.get("shoots", "Instances") == "Instances")
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["clumps"] = out.get("clumps", 0)
+        if out.get("shoots"):
+            parts["shoots"] = out["shoots"]
+            counts["shoots"] = len(out["shoots"][7]["pos"])
         if draft:
             counts["draft"] = True
     elif typ == "Ivy":
@@ -35873,7 +36014,7 @@ def _sc_build_layer(layer, surf, draft=False):
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
                   "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0), "specks": out.get("specks_n", 0)}
     counts["capped"] = bool(out.get("capped"))
-    return {p: _mi_drop_repeats(m) for p, m in parts.items()}, counts
+    return {p: (m if p == "shoots" else _mi_drop_repeats(m)) for p, m in parts.items()}, counts
 
 
 def _sc_note(root):
@@ -35968,6 +36109,13 @@ def _sc_read_layer(root, layer, counts):
             return None
         out[part] = mesh
         wrote[(root, key)] = (id(mesh[0]), mesh[3][0], mesh[4][0], len(mesh[1]))
+    node = sc_shoots(root).get(layer["id"] + "/shoots")
+    if node is not None and cmds.getAttr(node + ".visibility"):
+        got = _sc_read_shoots(node)
+        if got is None:
+            return None
+        out["shoots"] = got
+        wrote[(root, layer["id"] + "/shoots")] = _sc_shoots_sig(got)
     _SC_WROTE.update(wrote)
     c = dict(counts or {})
     c["read"] = True
@@ -36027,8 +36175,28 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
         for k in ("clumps", "vines", "leaves", "bunches", "piles", "tufts", "jungle", "specks"):
             report[k] += counts.get(k, 0)
         report["capped"] = report["capped"] or counts.get("capped", False)
+    # instanced shoots share their strands' tiles (one mossStrand texture): moved as the strands part moves,
+    # or in its place when the layer has no strands part
+    lone = {}
+    for key in [k for k in combined if k.endswith("/shoots")]:
+        strands = key[:-len("shoots")] + "strands"
+        if strands not in combined:
+            lone[strands] = key
+            combined[strands] = combined.pop(key)
+    before = dict((k, (min(m[3]), min(m[4]))) for k, m in combined.items() if k.endswith("/strands") and m[3])
     placed = _roof_udims(dict(combined), int(data.get("udim") or 1001), order=order)
     report["udims"] = placed.pop("udims")
+    for strands, key in lone.items():
+        placed[key] = placed.pop(strands)
+        report["udims"][key] = report["udims"].pop(strands, [])
+    for key in [k for k in placed if k.endswith("/shoots") and k[:-len("shoots")] + "strands" not in lone]:
+        strands = key[:-len("shoots")] + "strands"
+        if strands in before and strands in placed:
+            du = int(math.floor(min(placed[strands][3]) + 1e-6)) - int(math.floor(before[strands][0] + 1e-6))
+            dv = int(math.floor(min(placed[strands][4]) + 1e-6)) - int(math.floor(before[strands][1] + 1e-6))
+            if du or dv:
+                m = placed[key]
+                placed[key] = tuple(m[:3]) + ([u + du for u in m[3]], [v + dv for v in m[4]]) + tuple(m[5:])
     return placed, report, meshes
 
 
@@ -36090,6 +36258,158 @@ def sc_parts(root):
         if shape and cmds.attributeQuery(SC_PART, node=shape, exists=True):
             parts[cmds.getAttr(shape + "." + SC_PART)] = child
     return parts
+
+
+def sc_shoots(root):
+    """{"<layer id>/shoots": transform} under a scatter group: a Moss
+    layer's instanced shoots (particles, the instancer, its shoot shapes)."""
+    out = {}
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        if cmds.attributeQuery(SC_SHOOTS, node=child, exists=True):
+            out[cmds.getAttr(child + "." + SC_SHOOTS)] = child
+    return out
+
+
+def _sc_shoot_nodes(node):
+    """(particle shape, instancer, [shape meshes in index order]) under a shoots transform."""
+    ps = (cmds.listRelatives(node, shapes=True, type="particle", fullPath=True) or [None])[0]
+    inst = (cmds.listRelatives(node, children=True, type="instancer", fullPath=True) or [None])[0]
+    shapes = []
+    for grp in cmds.listRelatives(node, children=True, type="transform", fullPath=True) or []:
+        for child in cmds.listRelatives(grp, children=True, type="transform", fullPath=True) or []:
+            sh = _log_shape(child)
+            if sh and cmds.attributeQuery(SC_SHOOT_SHAPE, node=sh, exists=True):
+                shapes.append((cmds.getAttr(sh + "." + SC_SHOOT_SHAPE), child))
+    return ps, inst, [c for _, c in sorted(shapes)]
+
+
+def _sc_shoots_sig(mesh):
+    return (id(mesh[0]), id(mesh[7]["pos"]), mesh[3][0] if mesh[3] else 0.0, len(mesh[7]["pos"]), len(mesh[6]))
+
+
+def _sc_sg(node):
+    shape = _log_shape(node) if node and cmds.objExists(node) else None
+    sgs = cmds.listConnections(shape, type="shadingEngine") or [] if shape else []
+    return sgs[0] if sgs else None
+
+
+def _sc_make_shoots(root, layer, material):
+    """A Moss layer's instanced shoots node (outside the undo queue):
+    <material><tag>Shoots_C_scatteredObjects####_GRP, tagged."""
+    num = short_name(root)[len(SC_STEM):len(SC_STEM) + 4]
+    node = cmds.createNode("transform", name="%s%sShoots_C_%s%s_GRP" % (material, layer.get("tag", ""), SC_STEM, num),
+                           parent=root, skipSelect=True)
+    node = long_name(node)
+    cmds.addAttr(node, longName=SC_SHOOTS, dataType="string")
+    cmds.setAttr(node + "." + SC_SHOOTS, layer["id"] + "/shoots", type="string")
+    return node
+
+
+def _sc_fill_shoots(node, mesh, sg=None):
+    """(Re)make what's under a shoots node from moss_shoot_instances'
+    mesh: the shoot shapes (hidden, UV ready / stacked, the strands' shading
+    or what they had), a particle shape holding each shoot's place, turn and
+    length (saved with the scene as its initial state, not dynamic) and an
+    instancer of the shapes. Returns the faces the instances make."""
+    import maya.OpenMayaFX as omfx1
+    pts, counts, conn, us, vs, uvi, split, data = mesh
+    old = _sc_shoot_nodes(node)
+    sg = sg or (_sc_sg(old[2][0]) if old[2] else None)
+    kids = cmds.listRelatives(node, children=True, fullPath=True) or []
+    if kids:
+        cmds.delete(kids)
+    short = short_name(node)
+    stem = short[:-4] if short.endswith("_GRP") else short
+    grp = long_name(cmds.createNode("transform", name=stem + "Shapes_GRP", parent=node, skipSelect=True))
+    cmds.setAttr(grp + ".visibility", False)
+    shapes = []
+    n0 = f0 = k0 = 0
+    for i, (n, f, k) in enumerate(split):
+        sub = (pts[n0:n0 + n], counts[f0:f0 + f], [c - n0 for c in conn[k0:k0 + k]], us[n0:n0 + n], vs[n0:n0 + n],
+               [c - n0 for c in uvi[k0:k0 + k]])
+        n0, f0, k0 = n0 + n, f0 + f, k0 + k
+        xf = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
+                                      constructionHistory=False, name="%sShape%02d_GEP" % (stem, i + 1))[0])
+        xf = long_name(cmds.parent(xf, grp)[0])
+        sh = _log_shape(xf)
+        cmds.addAttr(sh, longName=SC_SHOOT_SHAPE, attributeType="long", defaultValue=i)
+        cmds.addAttr(sh, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
+        cmds.addAttr(sh, longName=UV_STACKED_ATTR, attributeType="bool", defaultValue=True)
+        _rope_fill(sh, sub)
+        if sg and cmds.objExists(sg):
+            cmds.sets(sh, edit=True, forceElement=sg)
+        shapes.append(xf)
+    ps = cmds.createNode("particle", name=stem + "ParticleShape", parent=node, skipSelect=True)
+    for ln, typ in (("rotationPP", "vectorArray"), ("scalePP", "vectorArray"), ("indexPP", "doubleArray")):
+        cmds.addAttr(ps, longName=ln, dataType=typ)
+        cmds.addAttr(ps, longName=ln + "0", dataType=typ)
+    sel = om1.MSelectionList()
+    sel.add(ps)
+    obj = om1.MObject()
+    sel.getDependNode(0, obj)
+    fn = omfx1.MFnParticleSystem(obj)
+    arr = om1.MPointArray()
+    for p in data["pos"]:
+        arr.append(om1.MPoint(p[0], p[1], p[2]))
+    fn.emit(arr)
+    rot, sca, idx = om1.MVectorArray(), om1.MVectorArray(), om1.MDoubleArray()
+    for r in data["rot"]:
+        rot.append(om1.MVector(r[0], r[1], r[2]))
+    for L in data["scale"]:
+        sca.append(om1.MVector(L, L, L))
+    for i in data["index"]:
+        idx.append(float(i))
+    fn.setPerParticleAttribute("rotationPP", rot)
+    fn.setPerParticleAttribute("scalePP", sca)
+    fn.setPerParticleAttribute("indexPP", idx)
+    fn.saveInitialState()
+    cmds.setAttr(ps + ".isDynamic", False)
+    cmds.setAttr(ps + ".visibility", False)  # the points themselves: only the instances show
+    inst = cmds.particleInstancer(ps, addObject=True, object=shapes, cycle="None", rotation="rotationPP",
+                                  scale="scalePP", objectIndex="indexPP", rotationUnits="Degrees")
+    inst = cmds.parent(inst, node)[0]
+    cmds.rename(node + "|" + inst, stem + "_INS")
+    per = [f for _, f, _ in split]
+    return sum(per[i] for i in data["index"])
+
+
+def _sc_read_shoots(node):
+    """A shoots node read back as moss_shoot_instances' mesh, or None."""
+    import maya.OpenMayaFX as omfx1
+    ps, inst, shapes = _sc_shoot_nodes(node)
+    if not ps or not inst or not shapes:
+        return None
+    mesh, split = _mi_mesh(), []
+    for xf in shapes:
+        sub = _sc_read_part(xf)
+        if sub is None:
+            return None
+        b = len(mesh[0])
+        mesh[0].extend(sub[0])
+        mesh[1].extend(sub[1])
+        mesh[2].extend(c + b for c in sub[2])
+        mesh[3].extend(sub[3])
+        mesh[4].extend(sub[4])
+        mesh[5].extend(c + b for c in sub[5])
+        split.append((len(sub[0]), len(sub[1]), len(sub[2])))
+    sel = om1.MSelectionList()
+    sel.add(ps)
+    obj = om1.MObject()
+    sel.getDependNode(0, obj)
+    fn = omfx1.MFnParticleSystem(obj)
+    pos, rot, sca, idx = om1.MVectorArray(), om1.MVectorArray(), om1.MVectorArray(), om1.MDoubleArray()
+    fn.position(pos)
+    fn.getPerParticleAttribute("rotationPP", rot)
+    fn.getPerParticleAttribute("scalePP", sca)
+    fn.getPerParticleAttribute("indexPP", idx)
+    n = pos.length()
+    if rot.length() != n or sca.length() != n or idx.length() != n:
+        return None
+    data = {"pos": [(pos[i].x, pos[i].y, pos[i].z) for i in range(n)],
+            "rot": [(rot[i].x, rot[i].y, rot[i].z) for i in range(n)],
+            "scale": [sca[i].x for i in range(n)], "index": [int(round(idx[i])) for i in range(n)]}
+    data["axes"] = [_mi_axes_xyz(*r) for r in data["rot"]]
+    return tuple(mesh) + (split, data)
 
 
 def sc_box(root):
@@ -36240,6 +36560,17 @@ def sc_owner(node):
     if _sc_box_of(node):  # a box beside its group
         found = cmds.ls(_sc_box_of(node), long=True)
         return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
+    up = node
+    for _ in range(3):  # instanced shoots: the instancer, the shapes' group, a shape under their node
+        if cmds.attributeQuery(SC_SHOOTS, node=up, exists=True):
+            parent = cmds.listRelatives(up, parent=True, fullPath=True)
+            if parent and _sc_attr(parent[0]):
+                return parent[0], cmds.getAttr(up + "." + SC_SHOOTS).split("/")[0]
+            break
+        nxt = cmds.listRelatives(up, parent=True, fullPath=True)
+        if not nxt:
+            break
+        up = nxt[0]
     parent = cmds.listRelatives(node, parent=True, fullPath=True)
     if not parent or not _sc_attr(parent[0]):
         return None, None
@@ -36385,8 +36716,9 @@ def _sc_write(root, data, placed, meshes):
     makes a part the first time it has something, hides one that's empty
     now, rewrites only what changed. Returns the face count."""
     parts = sc_parts(root)
+    shoots = sc_shoots(root)
     faces = 0
-    sel = None
+    sel = cmds.ls(selection=True, long=True) or []  # making parts / instancers selects them: put it back after
     for layer in data.get("layers", []):
         for part, material in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
             key = layer["id"] + "/" + part
@@ -36397,9 +36729,9 @@ def _sc_write(root, data, placed, meshes):
                     cmds.setAttr(node + ".visibility", False)
                 continue
             if node is None:
-                if sel is None:
-                    sel = cmds.ls(selection=True, long=True) or []
                 node = _sc_make_part(root, layer, part, material)
+            if part == "moss" and sc_type(layer.get("type")) == "Moss":
+                node = parts[key] = _sc_bed_suffix(node, sc_settings(layer).get("detail") in MOSS_BED_SMOOTH)
             sig = (id(mesh[0]), mesh[3][0] if mesh[3] else 0.0, mesh[4][0] if mesh[4] else 0.0, len(mesh[1]))
             shape = _log_shape(node)
             if _SC_WROTE.get((root, key)) != sig or cmds.getAttr(shape + "." + MI_VERTS) != len(mesh[0]):
@@ -36408,18 +36740,61 @@ def _sc_write(root, data, placed, meshes):
             if not cmds.getAttr(node + ".visibility"):
                 cmds.setAttr(node + ".visibility", True)
             faces += len(mesh[1])
+        if sc_type(layer.get("type")) == "Moss":
+            faces += _sc_write_layer_shoots(root, layer, placed, shoots, parts)
     known = set(l["id"] for l in data.get("layers", []))
-    for key, node in parts.items():  # a layer that's gone (its parts are deleted with it; this is a safety net)
+    for key, node in list(parts.items()) + list(shoots.items()):  # a layer that's gone (a safety net)
         if key.split("/")[0] not in known and cmds.getAttr(node + ".visibility"):
             cmds.setAttr(node + ".visibility", False)
     _sc_fit_box(root, sc_box(root), meshes)
-    if sel is not None:  # polyPlane / parent select the new part: keep what was selected
+    now = cmds.ls(selection=True, long=True) or []
+    if now != sel:  # polyPlane / parent / particleInstancer select what they make: keep what was selected
         sel = [n for n in sel if cmds.objExists(n)]
         if sel:
             cmds.select(sel, replace=True)
         else:
             cmds.select(clear=True)
     return faces
+
+
+def _sc_bed_suffix(node, smooth):
+    """A moss bed named for how it renders: _GES (subdivided at render
+    time: its cells are coarse) or _GEP; with MtoA loaded, Arnold's
+    subdivision (Catmull-Clark, 1 step) set to match. Returns the node."""
+    name = short_name(node)
+    want = "GES" if smooth else "GEP"
+    stem, _, suf = name.rpartition("_")
+    if stem and suf in ("GEP", "GES") and suf != want:
+        node = long_name(cmds.rename(node, stem + "_" + want))
+    shape = _log_shape(node)
+    if shape and cmds.attributeQuery("aiSubdivType", node=shape, exists=True):
+        if cmds.getAttr(shape + ".aiSubdivType") != (1 if smooth else 0):
+            cmds.setAttr(shape + ".aiSubdivType", 1 if smooth else 0)
+            cmds.setAttr(shape + ".aiSubdivIterations", 1 if smooth else 0)
+    return node
+
+
+def _sc_write_layer_shoots(root, layer, placed, shoots, parts):
+    """A Moss layer's instanced shoots into its shoots node (made the first
+    time, hidden when there are none, refilled only when they changed).
+    Returns the faces the instances make."""
+    key = layer["id"] + "/shoots"
+    mesh = placed.get(key)
+    node = shoots.get(key)
+    if not mesh:
+        if node and cmds.getAttr(node + ".visibility"):
+            cmds.setAttr(node + ".visibility", False)
+        return 0
+    if node is None:
+        node = shoots[key] = _sc_make_shoots(root, layer, "mossStrand")
+    sig = _sc_shoots_sig(mesh)
+    if _SC_WROTE.get((root, key)) != sig or not _sc_shoot_nodes(node)[1]:
+        _sc_fill_shoots(node, mesh, sg=_sc_sg(parts.get(layer["id"] + "/strands")))
+        _SC_WROTE[(root, key)] = sig
+    if not cmds.getAttr(node + ".visibility"):
+        cmds.setAttr(node + ".visibility", True)
+    per = [f for _, f, _ in mesh[6]]
+    return sum(per[i] for i in mesh[7]["index"])
 
 
 def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
@@ -36755,7 +37130,7 @@ def sc_remove_layer(root, lid):
     """Remove a layer and its parts (one Ctrl+Z)."""
     def edit(data):
         data["layers"] = [l for l in data["layers"] if l.get("id") != lid]
-        return [n for k, n in sc_parts(root).items() if k.split("/")[0] == lid]
+        return [n for k, n in list(sc_parts(root).items()) + list(sc_shoots(root).items()) if k.split("/")[0] == lid]
     return _sc_change(root, "Remove scatter layer", edit)
 
 
@@ -36861,11 +37236,11 @@ def sc_set_surfaces(root, add=(), remove=()):
     return _sc_change(root, "Scatter surfaces", edit)
 
 
-def sc_update(root, lid=None, change=None, group_change=None):
+def sc_update(root, lid=None, change=None, group_change=None, draft=None):
     """Live edit (out of the undo queue, like the other tools' sliders): a
     layer's settings (change) or the group's (group_change: udim), then the
-    regrow of that layer (while paused: saved, grown at Play). Returns the
-    report."""
+    regrow of that layer (while paused: saved, grown at Play; draft: as
+    sc_regrow's). Returns the report."""
     _sc_note(root)
     before = cmds.getAttr(root + "." + SC_ATTR) if _SC_HOLD["on"] else None
     data = sc_data(root)
@@ -36879,7 +37254,7 @@ def sc_update(root, lid=None, change=None, group_change=None):
         _sc_set(root, data)
     if _SC_HOLD["on"]:
         return _sc_held(root, before)
-    return sc_regrow(root)
+    return sc_regrow(root, draft=draft)
 
 
 def sc_surface_names(data):
@@ -36917,6 +37292,10 @@ def bake_scatter(roots):
         for root in roots:
             if not is_scatter(root) or root in stopped:
                 continue
+            for key, node in sc_shoots(root).items():  # instanced shoots become real geometry
+                if cmds.getAttr(node + ".visibility"):
+                    _sc_bake_shoots(root, key.split("/")[0], node)
+                cmds.delete(node)
             for node in sc_parts(root).values():
                 if not cmds.getAttr(node + ".visibility"):
                     cmds.delete(node)
@@ -36928,6 +37307,36 @@ def bake_scatter(roots):
             cmds.renameAttr(root + "." + SC_ATTR, SC_BAKED)
             done.append(root)
     return done
+
+
+def _sc_bake_shoots(root, lid, node):
+    """Bake: a layer's instanced shoots as real geometry, in its strands
+    mesh (a new mesh with the strands and the shoots, in the strands part's
+    place and name, its shading; undoable: the old nodes are deleted, the new
+    one made with commands)."""
+    shoots = _sc_read_shoots(node)
+    if shoots is None:
+        return None
+    mesh = moss_instances_mesh(shoots)
+    old = sc_parts(root).get(lid + "/strands")
+    sg = _sc_sg(old) or _sc_sg((_sc_shoot_nodes(node)[2] or [None])[0])
+    if old is not None and cmds.getAttr(old + ".visibility"):
+        got = _sc_read_part(old)
+        if got is not None:
+            b = len(got[0])
+            mesh = (got[0] + mesh[0], got[1] + mesh[1], got[2] + [c + b for c in mesh[2]], got[3] + mesh[3],
+                    got[4] + mesh[4], got[5] + [c + b for c in mesh[5]])
+    layer = sc_layer(sc_data(root), lid) or {"id": lid, "tag": ""}
+    new = _sc_make_part(root, layer, "strands", "mossStrand")
+    shape = _log_shape(new)
+    cmds.setAttr(shape + "." + MI_VERTS, _rope_fill(shape, mesh))
+    if sg:
+        cmds.sets(shape, edit=True, forceElement=sg)
+    if old is not None:
+        name = short_name(old)
+        cmds.delete(old)
+        new = long_name(cmds.rename(new, name))
+    return new
 
 
 def sc_selection():
@@ -37064,6 +37473,10 @@ SC_FIELDS = {
     "detail": ("Detail", lambda: SegmentField(MI_DETAILS),
                "Proxy: layout. Normal: mid shots. High: close-ups. Hero: extreme close-ups (keep it small)."),
     # moss
+    "shoots": ("Shoots", lambda: SegmentField(MOSS_SHOOT_MODES),
+               "Instances: each shoot an instance of a few shoot shapes (light scenes and renders, Hero doesn't "
+               "hit the cap). Mesh: every shoot real geometry in the strands mesh. Bake always makes real "
+               "geometry."),
     "style": ("Style", lambda: SegmentField(MOSS_STYLES),
               "Carpet: one continuous bed of moss over the surface. Clumps: separate moss cushions scattered where "
               "it grows (lighter; bigger and taller deeper in a patch). Shoots, strands and capsules grow on both."),
@@ -37211,7 +37624,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                                "clump_ghvar"]),
              ("Where it grows", True, _SC_WHERE),
              ("Surface", False, ["surface", "surface_detail"]),
-             ("More", False, ["size_var", "strand_length", "droop", "detail"]),
+             ("More", False, ["size_var", "strand_length", "droop", "detail", "shoots"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
     "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),
@@ -37864,6 +38277,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._edit_timer.setInterval(60)
         self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
         self._slow = False  # the last update took a while: a slider drag updates once, on release
+        self._drag_draft = False  # moss grown as a draft while a slider was held: in full once it's let go
         self._undo_timer = QtCore.QTimer(self)
         self._undo_timer.setSingleShot(True)
         self._undo_timer.setInterval(50)
@@ -38639,11 +39053,31 @@ class ScatterPanel(QtWidgets.QWidget):
 
     @ui_safe
     def _apply_pending(self):
-        if self._pending and self._slow and self._dragging():
-            self._edit_timer.start()  # a slow layer (moss at High: seconds a build): grow once the slider's let go
+        if self._slow and (self._pending or self._drag_draft) and self._dragging():
+            # a slow layer (moss at High: seconds a build) while its slider is held: moss shows its quick
+            # draft look as it moves (a light viewport), anything else waits; in full once it's let go
+            if self._pending and self._type() == "Moss" and not sc_drafting() and self._alive() and self._layer():
+                keys, self._pending = self._pending, set()
+                values = self._settings()
+                t0 = time.time()
+                rep = sc_update(self._root, self._lid, {k: values[k] for k in keys}, draft=True)
+                self._drag_draft = True
+                self._report("Draft (let go for full detail)", rep, t0)
+            self._edit_timer.start()
             return
         keys, self._pending = self._pending, set()
-        if not keys or not self._alive() or not self._layer():
+        if not self._alive() or not self._layer():
+            return
+        if not keys:
+            if self._drag_draft and not sc_drafting():  # let go after a draft drag: the layer in full
+                self._drag_draft = False
+                t0 = time.time()
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+                try:
+                    rep = sc_regrow(self._root, only={self._lid}, draft=False)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                self._report("Updated", rep, t0)
             return
         values = self._settings()
         t0 = time.time()
@@ -38652,6 +39086,7 @@ class ScatterPanel(QtWidgets.QWidget):
             rep = sc_update(self._root, self._lid, {k: values[k] for k in keys})
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
+        self._drag_draft = False
         self._slow = time.time() - t0 > 0.3
         self._report("Updated", rep, t0)
 

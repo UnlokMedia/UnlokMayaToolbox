@@ -1429,10 +1429,54 @@
       `--hash`): old and new in one process, topology and UVs must match
       exactly; points match to ~1e-9 (the engine isn't bit for bit the
       same from one run to the next, ~2e-10, even old vs old).
+    - **Speed pass 2 (instanced shoots, coarser bed, drag draft):**
+      - **Shoots as instances** (setting `shoots`, `MOSS_SHOOT_MODES`
+        Instances / Mesh; the Moss type's "over" sets Instances, an old
+        layer without the key grows instances too). `_MossDetail(inst=)`
+        for `MOSS_INST_KINDS` (tuft / shoot / leafy) records each shoot
+        (root, axes x = the turned perpendicular, y = up the shoot, z,
+        length, index = stack x `MOSS_INST_TURNS` + turn bucket) in
+        `self.I` instead of meshing it; `shapes()` builds the unit-length
+        protos (8 turns of the bend per stack). Scene: a
+        `...Shoots_C_<group>_GRP` transform (`SC_SHOOTS`, key
+        "<layer>/shoots", `sc_shoots`, `_sc_shoot_nodes`) holding a hidden
+        `...Shapes_GRP` of `...Shape##_GEP` protos (`SC_SHOOT_SHAPE`
+        order, strands UVs: they share the strands part's tiles, or take
+        its key when there's no strands part), a hidden particle shape
+        (API1 `MFnParticleSystem.emit`, rotationPP / scalePP / indexPP and
+        their "0" copies, `saveInitialState`, not dynamic: the data is
+        saved with the scene and survives frame changes) and a
+        `particleInstancer` renamed `..._INS`. Rotation: XYZ Euler from
+        the axes (`_mi_euler_xyz` / `_mi_axes_xyz`, row-vector: matrix
+        rows = axes). Read back by `_sc_read_shoots` (the freeze fix's
+        readback, `_sc_shoots_sig` in `_SC_WROTE`). `sc_owner` walks up
+        to the shoots node; `sc_remove_layer` deletes it; Bake
+        (`_sc_bake_shoots`) makes a new strands mesh with the shoots as
+        real geometry (`moss_instances_mesh`) in the old part's name and
+        shading, in the undo queue (one Ctrl+Z brings the instancer back).
+        `MOSS_MAX_INSTANCES` thins like `MI_MAX_VERTS`.
+      - **Coarser bed:** High 0.2 R (was 0.14), Hero 0.13 R (0.09); at
+        `MOSS_BED_SMOOTH` (Normal / High / Hero) the bed part is named
+        `_GES` (`_sc_bed_suffix`; Arnold's Catmull-Clark 1 step set when
+        MtoA's attrs exist), Proxy stays `_GEP`. Tests must fetch the
+        bed part's name from `sc_parts`.
+      - **Drag draft:** on a slow layer (`_slow`) a held slider grows the
+        moss layer as a draft (`sc_update(..., draft=True)`, "Draft (let
+        go for full detail)") and `_drag_draft` makes the release regrow
+        it in full (`sc_regrow(only={lid}, draft=False)`); other types
+        still wait for the release. Skipped while global Draft is on.
+      - Numbers (`tests/bench_moss_scene.py --detail High`, the bench
+        boulder): first grow 17.9 s -> 13.0 s, Coverage 4.2 -> 2.7 s,
+        Patch size 5.2 -> 3.1 s, Strands 2.6 -> 1.5 s; bed 87.8k -> 58.1k
+        faces; strands 467k faces -> 11.6k hanging-strand faces + 45k
+        instances; .mb 47.8 -> 14.4 MB, .ma 95.6 -> 23.1 MB.
+        `tests/test_moss_instances.py` checks the convention, every
+        instance's matrix, tiles, Mesh mode, file size, reopen, Bake and
+        undo, old layers and removal.
   - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
     sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,
-    tufts (5-point leaf stars on the bed); High 0.14 R, shoots (2-segment
-    stem + 4-leaf star); Hero 0.09 R, leafy shoots (3 segments, two
+    tufts (5-point leaf stars on the bed); High 0.2 R, shoots (2-segment
+    stem + 4-leaf star); Hero 0.13 R, leafy shoots (3 segments, two
     whorls). `_MossDetail` samples the bed's exposed faces area-weighted,
     keyed by (plane, cell, triangle) so a tier's shoots keep their place
     through edits. Hanging strands (ribbons bent down by gravity) where the

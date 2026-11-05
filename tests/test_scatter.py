@@ -162,11 +162,11 @@ def run():
     before = cmds.undoInfo(q=True, undoName=True)
     rep, moss = tb["sc_add_layer"](root, "Moss", {"strands": 0.0, "capsules": 0.0, "coverage": 0.6})
     names = sorted(sn(n) for k, n in tb["sc_parts"](root).items() if k.startswith(moss + "/"))
-    check("a moss layer makes only parts that hold something", names == ["mossGreen_C_scatteredObjects0001_GEP"],
+    check("a moss layer makes only parts that hold something", names == ["mossGreen_C_scatteredObjects0001_GES"],
           str(names))
     rep, moss2 = tb["sc_add_layer"](root, "Moss", {"strands": 1.0, "capsules": 0.5, "coverage": 0.3, "slope": 20.0})
     names2 = sorted(sn(n) for k, n in tb["sc_parts"](root).items() if k.startswith(moss2 + "/"))
-    check("a second moss layer gets its own parts", names2 and all("2_C_scatteredObjects0001_GEP" in n
+    check("a second moss layer gets its own parts", names2 and all("2_C_scatteredObjects0001_GE" in n
                                                                    for n in names2), str(names2))
     allp = tb["sc_parts"](root)
     seen, clash = {}, []
