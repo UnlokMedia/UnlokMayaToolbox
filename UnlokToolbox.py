@@ -37386,7 +37386,7 @@ def sc_selection():
     out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}}
     # Groups are found once; a node is only asked about if it's under one (a
     # 200-mesh pick asked every mesh, on every click, with the toolbox open).
-    sc_roots = _tagged_roots((SC_ATTR, SC_BAKED))
+    sc_roots = _tagged_roots((SC_ATTR, SC_BAKED, SC_BOX_ATTR))  # boxes sit beside their groups
     mi_roots = _tagged_roots((MI_SETTINGS, MI_BAKED))
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
         if _under_any(node, sc_roots):

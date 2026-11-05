@@ -168,6 +168,11 @@ def steps():
     for w in timed("Scatter tab, a scatter group", window, groups[:1]):
         yield w
     check("Scatter edits the picked group", sc._root == groups[0], sc._root)
+    box = ns["sc_box"](groups[1])
+    cmds.select(box, replace=True)
+    for w in settle(window):
+        yield w
+    check("picking a group's box edits that group", box and sc._root == groups[1], (box, sc._root))
 
     window.show_tool("Quad Fill")
     yield 0.5
