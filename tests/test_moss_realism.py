@@ -224,6 +224,18 @@ def run():
           "furthest %.1f dm" % far(b))
     c = tb["moss_build"]([gnd], dict(sp, spill=0.4))["moss"]
     check("Floor spill with only a floor: the floor still mosses", far(c) > 20.0, "%.1f dm" % far(c))
+    # a rock on a huge floor, a ring of the floor picked: the rock keeps its fine bed (only picked faces count)
+    big = cmds.ls(cmds.polyPlane(w=2400.0, h=2400.0, sx=240, sy=240, ch=False, name="groundSoil_C_test0002_GEP")[0], long=True)[0]
+    near = [f for f in range(240 * 240)  # (a 240 x 240 grid of 10 dm faces: the ones within 12 dm of the middle)
+            if math.hypot(-1195.0 + 10.0 * (f % 240), -1195.0 + 10.0 * (f // 240)) < 12.0]
+    nf = cmds.polyEvaluate(stone, face=True)
+    r1 = tb["moss_build"]([stone], sp)
+    r2 = tb["moss_build"]([stone, big], dict(sp, spill=0.4), faces={stone: list(range(nf)), big: near})
+    on_rock = lambda m: sum(1 for p in m[0] if p[1] > 0.3)
+    check("a rock on a huge floor (a ring picked) keeps its fine bed", not r2["capped"] and
+          on_rock(r2["moss"]) > 0.8 * on_rock(r1["moss"]), "%d vs %d bed points on the rock, capped %s" % (
+              on_rock(r2["moss"]), on_rock(r1["moss"]), r2["capped"]))
+    cmds.delete(big)
 
     # Rest on moss: leaves on a mossed floor land on top of the moss
     stone2 = rock("rockGrey_C_test0002_GEP")

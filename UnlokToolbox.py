@@ -31658,13 +31658,15 @@ class _MossBed(object):
         mgs = self.mg
         self.hot = set(key for key, v in buckets.items() if any(mgs[i] > lo for i in v))
         # the bed's own cells: one Tile size tile = k cells (grown if the patch would be too big)
-        area = sum(_mi_triangles(n)[0][-1] for n in surf.nodes if _mi_triangles(n)[0])
+        # (only the faces it may grow on count: a rock on a big floor with a ring of the floor picked kept
+        # the rock's cells, 2026-11-05)
+        area = _moss_area(surf.nodes, faces)
         if area / ((tile / k) ** 2) > MOSS_MAX_CELLS:
             k = max(1, int(tile / math.sqrt(area / MOSS_MAX_CELLS)))
             self.capped = True
         # cells it will look at: the faces it may grow on (a drawing / picked faces: just those), the
         # blocks that can show moss as a share of them
-        self.est = _moss_area(surf.nodes, faces) / ((tile / k) ** 2) * len(self.hot) / float(max(1, len(buckets)))
+        self.est = area / ((tile / k) ** 2) * len(self.hot) / float(max(1, len(buckets)))
         if _MI_BUDGET["on"] and self.est > MOSS_WARN_CELLS:
             raise ScatterTooBig("about %s moss bed cells" % format(int(self.est), ","))
         self.k = k
