@@ -303,6 +303,7 @@ def main():
     moss_and_specks(ns, panel, window)
     pause_play(ns, panel, window)
     draft_mode(ns, panel, window)
+    height_fade(ns, panel, window)
 
 
 def pause_play(ns, panel, window):
@@ -463,6 +464,128 @@ def draft_mode(ns, panel, window):
     pump()
     check("Draft off grows the drafts in full", not ns["sc_drafting"]() and not panel.draft_btn.isChecked() and
           verts("strands") > 0 and "(draft)" not in row(), panel.status.text())
+
+
+def colonnade():
+    """Columns 3 m high (decimetres) on a floor: A a cylinder; B1 and B2
+    one mesh; C a base, shaft and capital (three meshes)."""
+    grp = cmds.group(empty=True, name="colonnade_GRP")
+    floor = box("floor", (70, 1, 34), (0, -0.5, 0), parent=grp)
+
+    def cyl(name, x, z, h=30.0, y0=0.0):
+        c = cmds.polyCylinder(name=name, r=2.5, h=h, sx=24, sy=max(1, int(h / 2.5)), sc=1,
+                              constructionHistory=False)[0]
+        cmds.move(x, y0 + 0.5 * h, z, c)
+        return c
+
+    a = cyl("colA", -22, 0)
+    b = cmds.polyUnite(cyl("colB1", -8, 3), cyl("colB2", 6, 3), constructionHistory=False, name="colB")[0]
+    base = box("colC_base", (8, 3, 8), (20, 1.5, -2), div=1.0)
+    shaft = cyl("colC_shaft", 20, -2, h=24.0, y0=3.0)
+    cap = box("colC_cap", (8, 3, 8), (20, 28.5, -2), div=1.0)
+    cols = [cmds.ls(cmds.parent(n, grp)[0], long=True)[0] for n in (a, b, base, shaft, cap)]
+    return cmds.ls(grp, long=True)[0], floor, cols
+
+
+def height_fade(ns, panel, window):
+    """Height fade (the user: "moss and ivy growing up columns from the
+    bottom fading out towards the top"): before, moss stays on the floor
+    and ivy climbs to the top; Height fade From base (its rows showing as
+    it is turned on, the height by part or metres) and the moss climbs
+    each column's foot, ivy (Column base) stops part way up."""
+    cmds.file(new=True, force=True)
+    _SG.clear()
+    grp, floor, cols = quiet(colonnade)
+    shade([floor] + cols, "testStone", (0.62, 0.60, 0.55))
+
+    def make(sel, typ, preset, extra):
+        cmds.select(sel)
+        panel._sync_from_selection()
+        panel._root, panel._lid = None, None  # a new group, not a preset on the layer being edited
+        panel.start_type.setCurrentIndex(panel.start_type.findText(typ))
+        panel._show_layer()
+        panel.preset_combo.setCurrentIndex(panel.preset_combo.findText(preset))
+        panel.load_preset()
+        for key, value in extra.items():
+            panel.f[typ][key].setValue(value)
+        panel.new_btn.click()
+        pump()
+        root = panel._root
+        for key, node in ns["sc_parts"](root).items():
+            shade_part(node, key.split("/")[1])
+        return root
+
+    def on_columns(root, part):
+        node = [n for k, n in ns["sc_parts"](root).items() if k.endswith("/" + part)]
+        if not node or not cmds.getAttr(node[0] + ".visibility"):
+            return []
+        import maya.api.OpenMaya as om
+        fn = om.MFnMesh(ns["get_dag_path"](ns["_log_shape"](node[0])))
+        return [p.y for p in fn.getPoints(om.MSpace.kWorld) if p.y > 0.6 and abs(p.z) < 10.0 and
+                min(abs(p.x - x) for x in (-22, -8, 6, 20)) < 5.0]
+
+    def pictures(tag):
+        cmds.select(clear=True)
+        look((0, 12, 0), (14, 34, 80))
+        snap("16_%s_overview.png" % tag)
+        look((-22, 12, 0), (-8, 18, 34))
+        snap("16_%s_column.png" % tag)
+        look((20, 12, -2), (34, 16, 30))
+        snap("16_%s_stack.png" % tag)
+
+    moss_root = make([grp], "Moss", "Jungle roof", {"coverage": 0.6})
+    ivy_root = make(cols, "Ivy", "Column base", {"fade": "Off"})
+    m0, i0 = on_columns(moss_root, "moss"), on_columns(ivy_root, "stems")
+    pictures("before")
+
+    # ivy: turn the fade on
+    cmds.select(ivy_root)
+    panel._sync_from_selection()
+    panel.f["Ivy"]["fade"].setValue("From base")
+    panel._pending.add("fade")
+    panel._apply_pending()
+    pump()
+    for key, node in ns["sc_parts"](ivy_root).items():
+        shade_part(node, key.split("/")[1])
+    i1 = on_columns(ivy_root, "stems")
+
+    # moss: the rows follow Height fade and Fade by
+    cmds.select(moss_root)
+    panel._sync_from_selection()
+    pump()
+    f = panel.f["Moss"]
+    panel.fade_sec["Moss"].header.setChecked(True)
+
+    def shown():
+        return [k for k in ("fade_by", "fade_part", "fade_height", "fade_soft") if not f[k].isHidden()]
+
+    off_rows = shown()
+    f["fade"].buttons["From base"].click()
+    pump()
+    on_rows = shown()
+    f["fade_by"].buttons["Metres"].click()
+    pump()
+    metre_rows = shown()
+    f["fade_by"].buttons["Object height"].click()
+    check("Height fade: its rows show when it is on, the height as a part or in metres",
+          off_rows == [] and on_rows == ["fade_by", "fade_part", "fade_soft"] and
+          metre_rows == ["fade_by", "fade_height", "fade_soft"], "%s / %s / %s" % (off_rows, on_rows, metre_rows))
+    f["fade_part"].setValue(0.5)
+    f["fade_soft"].setValue(0.6)
+    panel._pending.update(("fade", "fade_by", "fade_part", "fade_soft"))
+    panel._apply_pending()
+    pump()
+    for key, node in ns["sc_parts"](moss_root).items():
+        shade_part(node, key.split("/")[1])
+    m1 = on_columns(moss_root, "moss")
+    window.grab().save(os.path.join(OUT, "16_panel_fade.png"))
+    check("moss climbs the columns from their feet, no higher than half way",
+          sum(1 for y in m1 if 4.0 < y < 26.0) > 4 * max(50, sum(1 for y in m0 if 4.0 < y < 26.0)) and max(m1) < 16.0,
+          "%d -> %d points up the columns (4..26), top %.1f" %
+          (sum(1 for y in m0 if 4.0 < y < 26.0), sum(1 for y in m1 if 4.0 < y < 26.0), max(m1 or [0])))
+    check("ivy (Column base) stops part way up", i0 and i1 and max(i1) < 22.0 < max(i0),
+          "stems top %.1f -> %.1f" % (max(i0 or [0]), max(i1 or [0])))
+    pictures("fade")
 
 
 def moss_and_specks(ns, panel, window):

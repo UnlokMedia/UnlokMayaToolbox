@@ -834,6 +834,21 @@ past their *Slope limit* (nothing up a wall with a low limit); moss still
 creeps up sheltered walls
 (Crevices).
 
+**Height fade** (every layer type, its own section): growth thins out with
+height on each object, *From base* (densest at the foot, fading going up:
+moss and ivy up columns) or *From top* (hanging from the top). *Fade by*
+*Object height* (*Fade height* a part of each object's own height, so tall
+and short columns alike) or *Metres* (the same height on every object);
+*Softness* 0 = full up to the fade height then a hard line, 1 = thinning
+out all the way from the foot. An object is whatever stands on itself:
+pieces of a mesh are separate objects (one mesh of six columns is six),
+and a base, shaft and capital (separate meshes or not) are one column.
+Flat things (a floor, a wide plinth) stay full. With the fade on, moss
+climbs the object's sides as far as the fade goes (the Slope limit still
+rules the rest); each ivy vine stops at its own height inside the fade,
+branching and leaves thinning out up it. Moss and Ivy have a **Column
+base** preset.
+
 **Moss** scatters spots over the meshes and scores each one: up-facing
 (*Slope limit*, faded out over the next 15 degrees), sheltered (short rays
 round it that hit: inside corners, and gaps between boards count as cracks:
@@ -863,7 +878,7 @@ fruiting clusters) and, where the moss faces sideways or down (over an
 eave, down a wall), hanging strands (*Hanging*). All real geometry, no
 alpha cards.
 Presets: Jungle roof, Crevices only, Thick carpet, Fruiting cushions,
-Shaggy hanging.
+Shaggy hanging, Column base.
 
 **Ivy** vines start from the picked points (*Vines* shared between them) or
 from automatic seeds at the bottom of the meshes. Each vine walks the
@@ -877,7 +892,7 @@ variation*), bigger on old growth, smaller at the tips: a stalk from the
 stem to a leaf-shaped blade (heart-shaped base, pointed tip, cut in the
 geometry above Proxy) lying over the surface like shingles, cupped, its
 tip curled.
-Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines.
+Presets: Climbing ivy, Young shoots, Overgrown, Hanging vines, Column base.
 
 **Grass**, **Leaves**, **Leaf piles**, **Jungle leaves** and **Moss tufts** gather where
 litter would, by the same field as moss (*Coverage*, the *Where it
@@ -1954,7 +1969,12 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   moss edit in Draft grows a coarse bed with no strands, much faster, in
   the same place, the other layers as they were; still marked after the
   scene is opened again; Full detail grows it as a fresh full build does;
-  Bake grows a draft properly first).
+  Bake grows a draft properly first); then Height fade on a colonnade
+  (moss up every column from its foot, no higher than the fade and
+  thinning out going up; two columns in one mesh each on its own; a base,
+  shaft and capital as one column; by metres; from the top; the floor as
+  it was; leaves off the column tops; ivy vines stopping in the fade at
+  their own heights, leaves thinning out).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
@@ -1972,7 +1992,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   back, a moss edit too big to grow quickly pausing with a warning; then
   Draft on a fresh porch: a moss edit quick and rough with its row
   marked (draft), Full detail growing it properly, Draft off growing what's
-  left) and saves pictures to
+  left; then Height fade on a colonnade: moss and Column base ivy before,
+  the fade's rows following Height fade / Fade by, moss climbing each
+  column's foot and ivy stopping part way up after) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular

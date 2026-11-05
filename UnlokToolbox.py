@@ -29148,6 +29148,15 @@ DEBRIS_DEFAULTS = {
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
+# Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
+# kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
+# a part of the object's height or metres; Softness 0 = a hard line, 1 = thinning out all the way.
+MI_FADES = ("Off", "From base", "From top")
+MI_FADE_BY = ("Object height", "Metres")
+MI_FADE_DEFAULTS = {"fade": "Off", "fade_by": "Object height", "fade_height": 1.0, "fade_part": 0.5,
+                    "fade_soft": 0.6}
+for _d in (MOSS_DEFAULTS, IVY_DEFAULTS, DEBRIS_DEFAULTS):
+    _d.update(MI_FADE_DEFAULTS)
 MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS, "Debris": DEBRIS_DEFAULTS}
 MI_PRESET_SKIP = ("seed", "udim")
 _MI_UP = (0.0, 1.0, 0.0)
@@ -29394,6 +29403,187 @@ def _mi_triangles(node):
     while len(_MI_TRIS) > 24:
         _MI_TRIS.popitem(last=False)
     return acc, tris
+
+
+_MI_PIECES = collections.OrderedDict()  # mesh state -> its connected pieces' world boxes
+_MI_FADE_GROUPS = collections.OrderedDict()  # meshes -> the objects heights are measured on
+MI_FADE_JOIN = 0.3   # pieces whose footprints overlap by this much of the smaller one stand on each other...
+MI_FADE_RATIO = 6.0  # ...unless one's footprint is this many times the other's (the floor under a column)
+
+
+def _mi_pieces(node):
+    """A mesh's connected pieces as world boxes [(x0, y0, z0, x1, y1, z1)]
+    (cached while the mesh is unchanged): one mesh of six columns is six."""
+    key = _mi_mesh_key(node)
+    hit = _mi_cache_get(_MI_PIECES, key)
+    if hit is not None:
+        return hit
+    fn = om.MFnMesh(get_dag_path(key[0]))
+    P = fn.getPoints(om.MSpace.kWorld)
+    counts, ids = fn.getVertices()
+    parent = list(range(len(P)))
+
+    def find(a):
+        root = a
+        while parent[root] != root:
+            root = parent[root]
+        while parent[a] != root:
+            parent[a], a = root, parent[a]
+        return root
+
+    k = 0
+    for c in counts:
+        r0 = find(ids[k])
+        for j in range(k + 1, k + c):
+            r = find(ids[j])
+            if r != r0:
+                parent[r] = r0
+        k += c
+    boxes = {}
+    for v in set(ids):
+        p = P[v]
+        x, y, z = p.x, p.y, p.z
+        b = boxes.get(find(v))
+        if b is None:
+            boxes[find(v)] = [x, y, z, x, y, z]
+            continue
+        if x < b[0]:
+            b[0] = x
+        elif x > b[3]:
+            b[3] = x
+        if y < b[1]:
+            b[1] = y
+        elif y > b[4]:
+            b[4] = y
+        if z < b[2]:
+            b[2] = z
+        elif z > b[5]:
+            b[5] = z
+    out = [tuple(b) for b in boxes.values()]
+    _MI_PIECES[key] = out
+    while len(_MI_PIECES) > 24:
+        _MI_PIECES.popitem(last=False)
+    return out
+
+
+def _mi_fade_groups(nodes):
+    """The objects heights are measured on: pieces (of any of the meshes)
+    standing on each other (footprints overlapping) are one, so a column of
+    base, shaft and capital fades as one and a floor under it stays apart.
+    ([(x0, y0, z0, x1, y1, z1, footprint area)], grid cell, {cell: [group]},
+    groups always looked at)."""
+    key = tuple(_mi_mesh_key(n) for n in nodes)
+    hit = _mi_cache_get(_MI_FADE_GROUPS, key)
+    if hit is not None:
+        return hit
+    boxes = [b for n in nodes for b in _mi_pieces(n)]
+    parent = list(range(len(boxes)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    area = [max(1e-12, (b[3] - b[0]) * (b[5] - b[2])) for b in boxes]
+    active = []
+    for i in sorted(range(len(boxes)), key=lambda i: boxes[i][0]):  # sweep along x
+        bi = boxes[i]
+        active = [j for j in active if boxes[j][3] >= bi[0]]
+        for j in active:
+            bj = boxes[j]
+            ox = min(bi[3], bj[3]) - max(bi[0], bj[0])
+            oz = min(bi[5], bj[5]) - max(bi[2], bj[2])
+            if ox <= 0.0 or oz <= 0.0:
+                continue
+            small, big = min(area[i], area[j]), max(area[i], area[j])
+            if big <= MI_FADE_RATIO * small and ox * oz >= MI_FADE_JOIN * small:
+                a, b = find(i), find(j)
+                if a != b:
+                    parent[a] = b
+        active.append(i)
+    merged = {}
+    for i, b in enumerate(boxes):
+        g = merged.setdefault(find(i), list(b))
+        for k in range(3):
+            g[k] = min(g[k], b[k])
+            g[k + 3] = max(g[k + 3], b[k + 3])
+    groups = [tuple(g) + (max(1e-12, (g[3] - g[0]) * (g[5] - g[2])),) for g in merged.values()]
+    sizes = sorted(max(g[3] - g[0], g[5] - g[2]) for g in groups) or [1.0]
+    cell = max(sizes[len(sizes) // 2], 1e-6 * max(sizes[-1], 1e-9), 1e-9)
+    grid, big = {}, []
+    for g in groups:
+        i0, i1 = int(math.floor(g[0] / cell)), int(math.floor(g[3] / cell))
+        k0, k1 = int(math.floor(g[2] / cell)), int(math.floor(g[5] / cell))
+        if (i1 - i0 + 1) * (k1 - k0 + 1) > 256:
+            big.append(g)
+            continue
+        for i in range(i0, i1 + 1):
+            for k in range(k0, k1 + 1):
+                grid.setdefault((i, k), []).append(g)
+    out = (groups, cell, grid, big)
+    _MI_FADE_GROUPS[key] = out
+    while len(_MI_FADE_GROUPS) > 8:
+        _MI_FADE_GROUPS.popitem(last=False)
+    return out
+
+
+class _MiFade(object):
+    """Height fade: at(p) = 1 (full) .. 0 (none) by p's height on the object
+    it is on (the smallest one whose box holds it): full up to Fade height x
+    (1 - Softness), none past Fade height, smoothly between. From top
+    measures down from the object's top. A flat object (lower than half its
+    narrower side: a floor slab, a wide plinth) is full: the fade is for
+    what stands up."""
+
+    def __init__(self, nodes, s):
+        m = scene_m_per_unit()
+        self.groups, self.cell, self.grid, self.big = _mi_fade_groups(nodes)
+        self.top = s.get("fade") == MI_FADES[2]
+        self.H = max(0.0, float(s.get("fade_height", 1.0))) / m if s.get("fade_by") == MI_FADE_BY[1] else None
+        self.part = clamp(float(s.get("fade_part", 0.5)), 0.0, 1.0)
+        self.soft = clamp(float(s.get("fade_soft", 0.6)), 0.0, 1.0)
+        self.pad = 0.01 / m  # a point on an object's side is on its box: this much leeway
+        self.least = 0.01 / m  # a fade never shorter than this
+
+    def group(self, p):
+        x, y, z = p
+        c, pad = self.cell, self.pad
+        best = None
+        for gs in (self.grid.get((int(math.floor(x / c)), int(math.floor(z / c))), ()), self.big):
+            for g in gs:
+                if (g[0] - pad <= x <= g[3] + pad and g[2] - pad <= z <= g[5] + pad and
+                        g[1] - pad <= y <= g[4] + pad and (best is None or g[6] < best[6])):
+                    best = g
+        if best is None:  # (off every box: the nearest)
+            best = min(self.groups, key=lambda g: (max(0.0, g[0] - x, x - g[3]) ** 2 + max(0.0, g[1] - y, y - g[4]) ** 2 +
+                                                   max(0.0, g[2] - z, z - g[5]) ** 2))
+        return best
+
+    def at(self, p):
+        if not self.groups:
+            return 1.0
+        g = self.group(p)
+        lo, hi = g[1], g[4]
+        if hi - lo < 0.5 * min(g[3] - g[0], g[5] - g[2]):
+            return 1.0
+        h = hi - p[1] if self.top else p[1] - lo
+        H = self.H if self.H is not None else self.part * (hi - lo)
+        H = max(H, self.least)
+        a = H * (1.0 - self.soft)
+        if h <= a:
+            return 1.0
+        if h >= H:
+            return 0.0
+        t = (h - a) / (H - a)
+        return 1.0 - t * t * (3.0 - 2.0 * t)
+
+
+def _mi_fade(nodes, s):
+    """The layer's height fade, or None when it is off."""
+    if s.get("fade") not in MI_FADES[1:] or not nodes:
+        return None
+    return _MiFade(nodes, s)
 
 
 class _MiSampler(object):
@@ -29984,7 +30174,11 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     thr = 1.0 - clamp(float(s["coverage"]), 0.0, 1.0)
     rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
     spots, cands = _moss_field(surf, sampler, s, R)
-    scores = [moss_score(sp, s) for sp in spots]
+    fade = _mi_fade(surf.nodes, s)
+    if fade is not None and not s.get("_up_only"):  # moss up a column's sides (the fade decides how high)
+        scores = [moss_score(sp, dict(s, slope=max(float(s["slope"]), 90.0))) for sp in spots]
+    else:
+        scores = [moss_score(sp, s) for sp in spots]
     creases = clamp(float(s.get("creases", 0.0)), 0.0, 2.0)
     gat = _mi_gather(surf, sampler, s, R, cands)[0] if creases > 0.0 else None
     spread = max(1e-4, float(s["spread"]) / m)
@@ -30015,6 +30209,11 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
         if gat is not None and gat[idx][0] > 0.0:
             upf = clamp((n[1] - 0.3) / 0.4, 0.0, 1.0)
             margin += creases * 0.5 * gat[idx][0] * upf  # where it faces up (moss climbs walls by Crevices)
+        if fade is not None:  # Height fade: less coverage higher up, none past it
+            f = fade.at(p)
+            if f < 1.0:
+                g = 1.0 - f  # coverage x f, and the best spots too near the top: patches thinning out
+                margin = margin - g * (1.0 - thr) - 0.6 * g * g * g if f > 0.0 else -1.0
         rows.append((margin, occ / tw, edge / tw))
     return spots, cands, rows
 
@@ -31377,6 +31576,7 @@ def ivy_walk(surf, seeds, s):
     crowd = 1.4 * leaf
     cell = crowd
     grid = {}
+    fade = _mi_fade(surf.nodes, s)  # Height fade: a vine stops where it fades below its own cut
 
     def cell_of(p):
         return (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
@@ -31403,6 +31603,8 @@ def ivy_walk(surf, seeds, s):
         p, n, d, vlen, rad0, gen, vkey, a0 = queue[qi]
         qi += 1
         pts, nrm, free = [p], [n], [False]
+        fl = None if fade is None else [fade.at(p)]
+        cut = 0.0 if fade is None else 0.05 + 0.9 * _rand12(seed, vkey, 0, 55)[0]
         arc = 0.0
         next_branch = leaf * (2.0 + 2.0 * _rand12(seed, vkey, 0, 52)[0])
         stuck = 0
@@ -31427,6 +31629,8 @@ def ivy_walk(surf, seeds, s):
                 pts.append(p)
                 nrm.append(n)
                 free.append(hanging)
+                if fl is not None:
+                    fl.append(fade.at(p))
                 arc += step
                 hang_left -= step
                 total += 1
@@ -31496,11 +31700,16 @@ def ivy_walk(surf, seeds, s):
             own.append(p)
             arc += max(moved, 0.5 * step)
             total += 1
+            if fl is not None:
+                fl.append(fade.at(p))
+                if fl[-1] < cut:
+                    break
             # branches: thinner, shorter, at an angle
             if gen < 2 and branching > 0.0 and arc > next_branch:
                 rb = _rand12(seed, vkey, i, 54)
                 next_branch = arc + leaf * (3.0 + 3.0 * rb[0]) / branching
-                if rb[1] < min(1.0, 0.5 + 0.4 * branching) and vlen - arc > 3.0 * leaf:
+                if rb[1] < min(1.0, 0.5 + 0.4 * branching) * (1.0 if fl is None else fl[-1]) and \
+                        vlen - arc > 3.0 * leaf:
                     sgn = 1.0 if rb[2] < 0.5 else -1.0
                     bd = _mi_rotate(d, n, sgn * (0.55 + 0.5 * rb[3]))
                     blen = (vlen - arc) * (0.35 + 0.45 * rb[4])
@@ -31509,7 +31718,7 @@ def ivy_walk(surf, seeds, s):
         for q in own:
             grid.setdefault(cell_of(q), []).append((q, vkey))
         if len(pts) >= 3:
-            vines.append({"pts": pts, "nrm": nrm, "free": free, "r0": rad0, "gen": gen})
+            vines.append({"pts": pts, "nrm": nrm, "free": free, "r0": rad0, "gen": gen, "fade": fl})
     for v in vines:  # radius: thick at the base, thin at the tip
         n_ = len(v["pts"])
         v["rad"] = [v["r0"] * (1.0 - 0.65 * i / float(n_ - 1)) for i in range(n_)]
@@ -31696,6 +31905,11 @@ def ivy_leaf_mesh(surf, vines, X_list, s, rows):
                 break
             r = _rand12(seed, vi * 4096 + li, 7, 61)
             i = min(len(X) - 1, bisect.bisect_left(acc, a))
+            fd = vine.get("fade")
+            if fd is not None and fd[i] < 1.0 and _rand12(seed, vi * 4096 + li, 7, 62)[0] >= fd[i]:
+                li += 1  # Height fade: fewer leaves higher up
+                a += spacing * (0.7 + 0.6 * r[7])
+                continue
             x, n, t = X[i], vine["nrm"][i], T[i]
             if vine["free"][i]:
                 n = _rl_norm(_rl_cross(t, _rl_any_perp(t)))
@@ -31810,6 +32024,8 @@ def _debris_field(s):
     for key in ("coverage", "spread", "slope", "crevices", "edges", "patchiness", "patch_size", "mess", "seed",
                 "detail", "creases"):
         fs[key] = s[key]
+    for key in MI_FADE_DEFAULTS:
+        fs[key] = s.get(key, MI_FADE_DEFAULTS[key])
     fs["clump_size"] = DEBRIS_FIELD_R
     fs["_up_only"] = True  # crevices and creases don't pull leaves up a wall
     return fs
@@ -33162,14 +33378,18 @@ MI_PRESETS = {
         ("Fruiting cushions", {"coverage": 0.5, "clump_size": 0.045, "thickness": 0.03, "lumps": 0.9,
                                "patchiness": 0.7, "capsules": 0.9}),
         ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.3, "strand_length": 0.02, "droop": 1.4,
-                            "edges": 0.2, "capsules": 0.1})]),
+                            "edges": 0.2, "capsules": 0.1}),
+        ("Column base", {"coverage": 0.8, "crevices": 0.8, "patchiness": 0.45, "fade": "From base",
+                         "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7})]),
     "Ivy": collections.OrderedDict([
         ("Climbing ivy", {}),
         ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
                           "stem_width": 0.006}),
         ("Overgrown", {"vines": 10, "length": 4.0, "branching": 1.0, "leaf_density": 1.1, "wander": 0.6,
                        "gravity": 0.6}),
-        ("Hanging vines", {"climb": 0.4, "gravity": 1.0, "wander": 0.25, "branching": 0.3})]),
+        ("Hanging vines", {"climb": 0.4, "gravity": 1.0, "wander": 0.25, "branching": 0.3}),
+        ("Column base", {"vines": 8, "length": 3.0, "climb": 1.0, "wander": 0.35, "branching": 0.7, "gravity": 0.15,
+                         "fade": "From base", "fade_by": "Object height", "fade_part": 0.7, "fade_soft": 0.6})]),
     "Debris": collections.OrderedDict([
         ("Roof litter", {}),
         ("Dry grass mat", {"coverage": 0.9, "grass": 6.0, "bunch_size": 0.5, "grass_length": 0.35,
@@ -33225,7 +33445,7 @@ SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
 SC_STEM = "scatteredObjects"
 SC_VERSION = 1
 SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patchiness", "patch_size", "mess")
-SC_DEBRIS_COMMON = SC_PLACE + ("size_var", "detail", "seed", "stacks", "stack_layout")
+SC_DEBRIS_COMMON = SC_PLACE + ("size_var", "detail", "seed", "stacks", "stack_layout") + tuple(MI_FADE_DEFAULTS)
 SC_TYPES = collections.OrderedDict([
     ("Moss", {"parts": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
               "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {}}),
@@ -34534,6 +34754,23 @@ SC_FIELDS = {
                     "evenly along the strokes, 1 = only where it would grow anyway. Grass and leaves never go "
                     "past their Slope limit."),
 }
+SC_FIELDS.update({
+    "fade": ("Height fade", lambda: SegmentField(MI_FADES),
+             "Thins it out with height on each object (a column, a post, a wall): From base = densest at its foot, "
+             "fading out going up; From top = hanging from its top. Moss then climbs the object's sides too, up "
+             "to the fade (the Slope limit still rules the rest)."),
+    "fade_by": ("Fade by", lambda: SegmentField(MI_FADE_BY),
+                "Object height: the fade's height is a part of each object's own height (tall and short columns "
+                "alike). Metres: the same height on every object."),
+    "fade_part": ("Fade height", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                  "How far up each object it reaches, as a part of its height (0.5 = halfway)."),
+    "fade_height": ("Fade height", _scf(0.0, 100.0, 0.05, 5.0, 2, 0.05),
+                    "How far up each object it reaches, in metres from its foot (or down from its top)."),
+    "fade_soft": ("Softness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                  "0 = full right up to the fade height, then a hard line; 1 = thinning out all the way from the "
+                  "foot."),
+})
+_SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
@@ -34573,6 +34810,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
             ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
 for _t in SC_LAYOUT:
+    SC_LAYOUT[_t].insert(len(SC_LAYOUT[_t]) - 2, _SC_FADE)  # before More and UVs
     SC_LAYOUT[_t].insert(1, _SC_DRAWING)  # shown when the layer has a drawing
 
 
@@ -34787,6 +35025,8 @@ class ScatterPanel(QtWidgets.QWidget):
         self.drawer = ScatterDrawer(on_change=lambda: self._drawing_changed())
         self.draw_sec = {}
         self.clump_sec = {}
+        self.fade_sec = {}
+        self.row_lbl = {}
         self._build()
         self._install_jobs()
 
@@ -34977,8 +35217,9 @@ class ScatterPanel(QtWidgets.QWidget):
             for key, widget in self.f[typ].items():
                 widget.setValue(sc_defaults(typ)[key])
                 widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
-            if "style" in self.f[typ]:
-                self.f[typ]["style"].changed.connect(lambda t=typ: self._style_rows(t))
+            for key in ("style", "fade", "fade_by"):
+                if key in self.f[typ]:
+                    self.f[typ][key].changed.connect(lambda t=typ: self._style_rows(t))
         col.addWidget(card)
 
         # ---- 4. finish
@@ -35019,11 +35260,13 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.draw_sec[typ] = sec
             if title == "Clumps":
                 self.clump_sec[typ] = sec
+            if title == _SC_FADE[0]:
+                self.fade_sec[typ] = sec
             for key in keys:
                 label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
                 widget = make()
                 self.f[typ][key] = widget
-                sec.add_row(label, widget, tip)
+                self.row_lbl[(typ, key)] = sec.add_row(label, widget, tip)
             lay.addWidget(sec)
         w = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(w)
@@ -35093,16 +35336,27 @@ class ScatterPanel(QtWidgets.QWidget):
         if layer is not None:
             self._show(typ, sc_settings(layer))
             self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
+            if sc_settings(layer).get("fade", "Off") != "Off" and typ in self.fade_sec:
+                self.fade_sec[typ].header.setChecked(True)  # a faded layer shows its fade
         else:
             self.step_look.title.setText("Settings for the first layer (%s)" % typ)
         self._style_rows(typ)
         self._fill_presets()
 
     def _style_rows(self, typ):
-        """The Clumps section only shows for moss grown as Clumps."""
+        """The Clumps section only shows for moss grown as Clumps; Height
+        fade shows its other rows when it is on, the height as a part or in
+        metres by Fade by."""
         sec = self.clump_sec.get(typ)
         if sec is not None:
             sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[1])
+        if "fade" in self.f[typ]:
+            on = self.f[typ]["fade"].value() != MI_FADES[0]
+            metres = self.f[typ]["fade_by"].value() == MI_FADE_BY[1]
+            for key, show in (("fade_by", on), ("fade_part", on and not metres), ("fade_height", on and metres),
+                              ("fade_soft", on)):
+                self.f[typ][key].setVisible(show)
+                self.row_lbl[(typ, key)].setVisible(show)
 
     def _refresh(self):
         """Lists, settings and banner from the scene."""

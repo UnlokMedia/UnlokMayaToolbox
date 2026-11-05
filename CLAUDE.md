@@ -877,6 +877,25 @@
     whose growing was cancelled. Panel: `draft_btn` / `full_btn` /
     `draft_label` under Pause, `(draft)` rows (`DRAFT_RGB`), Draft off with
     drafts left = Full detail.
+  - **Height fade** (the user: "moss and ivy growing up columns from the
+    bottom fading out towards the top"): `MI_FADE_DEFAULTS` (fade, fade_by,
+    fade_height, fade_part, fade_soft) in all three defaults and
+    `SC_DEBRIS_COMMON`; `_debris_field` copies them. Objects =
+    `_mi_fade_groups(nodes)`: each mesh's connected pieces
+    (`_mi_pieces`, union-find on face vertices, cached by mesh key) joined
+    when their XZ footprints overlap by `MI_FADE_JOIN` of the smaller one
+    and neither is `MI_FADE_RATIO`x the other (so a floor stays apart).
+    `_MiFade.at(p)`: the smallest object box holding p (1 cm leeway; else
+    the nearest), flat ones (lower than half their narrower side) 1, else
+    smoothstep from 1 at H(1 - soft) to 0 at H. `_moss_margins`: margin -=
+    (1 - f) coverage + 0.6 (1 - f)^3 (patches thinning out over the whole fade), -1 at f = 0; moss (not `_up_only`) scores with
+    slope >= 90 while a fade is on. `ivy_walk`: a per-vine cut (rand 55),
+    the vine stops on a clinging step whose f < cut; branch chance x f;
+    `vine["fade"]` per point; `ivy_leaf_mesh` skips a leaf when rand 62 >=
+    f. Off = no fade object: same randoms, same meshes. Panel: section
+    `_SC_FADE` before More (`fade_sec`, opened for a faded layer),
+    `_style_rows` shows by/part/height/soft by Height fade and Fade by
+    (`row_lbl`).
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass

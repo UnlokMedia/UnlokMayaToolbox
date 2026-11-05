@@ -19,7 +19,8 @@ tiny moss stars and dirt flakes stuck on a standing pane of glass.
 Pause: edits are saved and nothing grows; Play grows each changed layer
 once and is one Ctrl+Z. An old scatter opened again: one setting grows
 only its layer; a live edit too big to grow quickly pauses. Draft moss:
-a quick rough look while editing, Full detail grows it properly.
+a quick rough look while editing, Full detail grows it properly. Height
+fade: moss and ivy up columns from the foot, thinning out going up.
 """
 
 import json
@@ -1009,6 +1010,130 @@ def draft():
     tb["sc_set_draft"](False)
 
 
+COLS = {"A": (-20.0, 0.0), "B1": (-7.0, 4.0), "B2": (4.0, 4.0), "C": (18.0, -4.0)}
+
+
+def colonnade():
+    """A floor 6 x 3 m (top y = 0) and columns 3 m high (r 25 cm): A a
+    cylinder; B1 and B2 one mesh (two pieces); C a base, shaft and capital,
+    three meshes (base and capital 80 cm square, 30 cm high)."""
+    grp = cmds.group(empty=True, name="colonnade_GRP")
+    floor = box("floor", (60, 1, 30), (0, -0.5, 0), grp)
+
+    def cyl(name, x, z, h=30.0, y0=0.0):
+        c = cmds.polyCylinder(name=name, r=2.5, h=h, sx=24, sy=max(1, int(h / 2.5)), sc=1,
+                              constructionHistory=False)[0]
+        cmds.move(x, y0 + 0.5 * h, z, c)
+        return c
+
+    a = cyl("colA", *COLS["A"])
+    b = cmds.polyUnite(cyl("colB1", *COLS["B1"]), cyl("colB2", *COLS["B2"]), constructionHistory=False,
+                       name="colB")[0]
+    x, z = COLS["C"]
+    base = box("colC_base", (8, 3, 8), (x, 1.5, z), div=1.0)
+    shaft = cyl("colC_shaft", x, z, h=24.0, y0=3.0)
+    cap = box("colC_cap", (8, 3, 8), (x, 28.5, z), div=1.0)
+    nodes = [floor] + [cmds.ls(cmds.parent(n, grp)[0], long=True)[0] for n in (a, b, base, shaft, cap)]
+    return cmds.ls(grp, long=True)[0], nodes
+
+
+def column_of(p):
+    """Which column a point is on (None: the floor)."""
+    if p[1] < 0.6:
+        return None
+    for k, (x, z) in COLS.items():
+        dx, dz = p[0] - x, p[2] - z
+        if (max(abs(dx), abs(dz)) <= 5.0) if k == "C" else (dx * dx + dz * dz <= 3.6 * 3.6):
+            return k
+    return None
+
+
+def height_fade():
+    """Height fade (the user: "moss and ivy growing up columns from the
+    bottom fading out towards the top"): moss climbs every column from its
+    foot and thins out up it, each piece of one mesh on its own, a base,
+    shaft and capital (three meshes) as one column; by metres; from the
+    top; leaves leave the column tops; ivy stops in the fade (each vine at
+    its own height), leaves thinning out going up."""
+    tb = load_toolbox()
+    cmds.file(new=True, force=True)
+    grp, nodes = colonnade()
+    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.6})["root"]
+    moss = tb["sc_data"](root)["layers"][0]["id"]
+
+    def spread(part):
+        node = tb["sc_parts"](root).get(part)
+        out = {k: [] for k in list(COLS) + [None]}
+        if node and cmds.getAttr(node + ".visibility"):
+            for p in points(tb, node):
+                out[column_of(p)].append(p[1])
+        return out
+
+    def band(ys, lo, hi):
+        return sum(1 for y in ys if lo <= y < hi)
+
+    def short(sp):
+        return " ".join("%s %d..%.1f" % (k, len(v), max(v) if v else 0.0) for k, v in sp.items() if k)
+
+    off = spread(moss + "/moss")
+    t0 = time.time()
+    tb["sc_update"](root, moss, {"fade": "From base", "fade_part": 0.5, "fade_soft": 0.5})
+    dt = time.time() - t0
+    on = spread(moss + "/moss")
+    check("From base: moss climbs every column from its foot (the Slope limit alone keeps it off)",
+          all(band(on[k], 4.0, 15.0) >= max(40, 3 * band(off[k], 4.0, 15.0)) for k in COLS),
+          "4..15: %s | off %s | on: %s (%.1fs)" % (" ".join("%s %d->%d" % (k, band(off[k], 4.0, 15.0), band(on[k], 4.0, 15.0)) for k in COLS), short(off), short(on), dt))
+    check("... no higher than the fade (half way up)", all(on[k] and max(on[k]) < 16.0 for k in COLS), short(on))
+    check("... thinning out going up", all(band(on[k], 0.6, 7.5) > band(on[k], 7.5, 15.0) > 0 for k in COLS),
+          " ".join("%s %d/%d" % (k, band(on[k], 0.6, 7.5), band(on[k], 7.5, 15.0)) for k in COLS))
+    x, z = COLS["C"]
+    base_side = sum(1 for y in on["C"] if 1.8 <= y < 2.8)
+    check("a base, shaft and capital (three meshes) fade as one column: the base is covered to its top",
+          base_side >= 10, "%d moss points high on the base's sides" % base_side)
+    check("the floor as it was", abs(len(on[None]) - len(off[None])) <= 0.1 * len(off[None]),
+          "%d vs %d" % (len(on[None]), len(off[None])))
+
+    tb["sc_update"](root, moss, {"fade_by": "Metres", "fade_height": 1.0, "fade_soft": 0.3})
+    me = spread(moss + "/moss")
+    check("Metres: the same 1 m on every column", all(me[k] and max(me[k]) < 11.0 for k in COLS), short(me))
+    tb["sc_update"](root, moss, {"fade": "From top", "fade_by": "Object height", "fade_part": 0.3})
+    top = spread(moss + "/moss")
+    check("From top: moss on the top 30% of each column only",
+          all(len(top[k]) >= 20 and min(top[k]) > 19.5 for k in COLS),
+          " ".join("%s %d %.1f..%.1f" % (k, len(top[k]), min(top[k] or [0]), max(top[k] or [0])) for k in COLS))
+
+    tb["sc_update"](root, moss, {"fade": "Off"})
+    check("Off: as it was", spread(moss + "/moss") == off)
+    _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 20.0, "coverage": 0.8})
+    lo = spread(leaves + "/litter")
+    tb["sc_update"](root, leaves, {"fade": "From base", "fade_part": 0.5})
+    lf = spread(leaves + "/litter")
+    up_off = sum(1 for k in COLS for y in lo[k] if y > 16.0)
+    up_on = sum(1 for k in COLS for y in lf[k] if y > 16.0)
+    check("Leaves: none on the column tops past the fade, the floor as it was",
+          up_on == 0 and abs(len(lf[None]) - len(lo[None])) <= 0.1 * len(lo[None]),
+          "on tops %d -> %d, floor %d -> %d" % (up_off, up_on, len(lo[None]), len(lf[None])))
+
+    cols = nodes[1:]
+    surf = tb["_MiSurface"](cols)
+    seeds = [(COLS["A"][0] + 2.6, 0.3, COLS["A"][1]), (COLS["B1"][0] + 2.6, 0.3, COLS["B1"][1]),
+             (COLS["B2"][0] - 2.6, 0.3, COLS["B2"][1]), (COLS["C"][0] + 4.1, 0.3, COLS["C"][1])]
+    s = tb["sc_preset"]("Ivy", "Column base")
+    s = tb["mi_settings_only"]("Ivy", dict(s, length=4.0))
+    vf = tb["ivy_walk"](surf, seeds, s)
+    vo = tb["ivy_walk"](surf, seeds, dict(s, fade="Off"))
+    tops_f = [max(p[1] for p in v["pts"]) for v in vf]
+    tops_o = [max(p[1] for p in v["pts"]) for v in vo]
+    check("Ivy (Column base): vines stop in the fade, each at its own height",
+          max(tops_f) < 22.0 and max(tops_o) > 25.0 and max(tops_f) - min(tops_f) > 3.0,
+          "tops %s (no fade: up to %.1f)" % (sorted(round(t, 1) for t in tops_f), max(tops_o)))
+    built = tb["ivy_build"](cols, s, seeds=seeds)
+    ly = [p[1] for p in built["leaves"][0]]
+    check("... leaves thinning out going up", built["leaves_n"] > 50 and band(ly, 0.0, 7.0) > band(ly, 7.0, 14.0) >
+          band(ly, 14.0, 21.0), "%d leaves; leaf points %d / %d / %d" % (built["leaves_n"], band(ly, 0.0, 7.0),
+                                                                        band(ly, 7.0, 14.0), band(ly, 14.0, 21.0)))
+
+
 try:
     run()
     drawing()
@@ -1017,6 +1142,7 @@ try:
     pause()
     old_scatter()
     draft()
+    height_fade()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))
