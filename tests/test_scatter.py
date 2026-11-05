@@ -18,7 +18,8 @@ Moss Style Clumps: separate cushions, lighter than the carpet. Specks:
 tiny moss stars and dirt flakes stuck on a standing pane of glass.
 Pause: edits are saved and nothing grows; Play grows each changed layer
 once and is one Ctrl+Z. An old scatter opened again: one setting grows
-only its layer; a live edit too big to grow quickly pauses.
+only its layer; a live edit too big to grow quickly pauses. Draft moss:
+a quick rough look while editing, Full detail grows it properly.
 """
 
 import json
@@ -741,9 +742,9 @@ def pause():
     built = []
     real = tb["_sc_build_layer"]
 
-    def counting(layer, surf):
+    def counting(layer, surf, *rest):
         built.append(layer["id"])
-        return real(layer, surf)
+        return real(layer, surf, *rest)
 
     tb["_sc_build_layer"] = counting
 
@@ -856,9 +857,9 @@ def old_scatter():
     built = []
     real = tb["_sc_build_layer"]
 
-    def counting(layer, surf):
+    def counting(layer, surf, *rest):
         built.append(layer["id"])
-        return real(layer, surf)
+        return real(layer, surf, *rest)
 
     tb["_sc_build_layer"] = counting
     parts = [(moss, "moss"), (leaves, "litter"), (grass, "grass")]
@@ -915,6 +916,99 @@ def old_scatter():
     tb["_sc_build_layer"] = real
 
 
+def draft():
+    """Moss speed (the user: "scattering moss is slowwwwwww, it takes ages
+    to update"). A Strands / Droop / Capsules edit keeps the bed. Draft on:
+    a moss edit grows a quick rough look (coarse bed, no strands) from the
+    same patches, much faster, other layers as they were; it stays marked
+    when the scene opens again; Full detail grows it just as a fresh full
+    build does; Bake grows drafts properly first."""
+    tb = load_toolbox()
+    cmds.undoInfo(state=True, infinity=True)
+    cmds.file(new=True, force=True)
+    grp, nodes = yard()
+    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.5})["root"]
+    moss = tb["sc_data"](root)["layers"][0]["id"]
+    _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0})
+    keys = [moss + "/moss", moss + "/strands", leaves + "/litter"]
+
+    def verts():
+        parts = tb["sc_parts"](root)
+        return [cmds.polyEvaluate(parts[k], vertex=True) if k in parts and cmds.getAttr(parts[k] + ".visibility")
+                else 0 for k in keys]
+
+    def bed_box():
+        return cmds.exactWorldBoundingBox(tb["sc_parts"](root)[moss + "/moss"])
+
+    beds = []
+    Bed = tb["_MossBed"]
+    real_build = Bed.build
+
+    def counting(self):
+        beds.append(1)
+        return real_build(self)
+
+    Bed.build = counting
+    v0 = verts()
+    tb["sc_update"](root, moss, {"strands": 1.6})
+    v1 = verts()
+    check("a Strands edit keeps the moss bed (only the strands grow again)",
+          not beds and v1[0] == v0[0] and v1[1] != v0[1], "%s -> %s, bed built %d time(s)" % (v0, v1, len(beds)))
+    t0 = time.time()
+    tb["sc_update"](root, moss, {"strands": 1.0, "coverage": 0.45})
+    t_full = time.time() - t0
+    full = verts()
+    box_full = bed_box()
+    tb["sc_update"](root, moss, {"coverage": 0.5})
+
+    tb["sc_set_draft"](True)
+    tb["sc_update"](root, moss, {"coverage": 0.43})  # the first draft lays its coarse grid out
+    t0 = time.time()
+    tb["sc_update"](root, moss, {"coverage": 0.44})  # (0.45 grew in full just now: that comes from the cache)
+    t_draft = time.time() - t0
+    vd = verts()
+    check("Draft: a moss edit grows a rough bed, much faster, no strands",
+          tb["sc_drafted"](root) == [moss] and 0 < vd[0] < full[0] / 3 and vd[1] == 0 and t_draft < 0.6 * t_full,
+          "%.2fs (full %.2fs), verts %s (full %s)" % (t_draft, t_full, vd, full))
+    bd = bed_box()
+    size = max(box_full[3] - box_full[0], box_full[5] - box_full[2])
+    check("... the same patches in the same places, the leaves as they were",
+          vd[2] == full[2] and max(abs(a - b) for a, b in zip(bd, box_full)) < 0.1 * size,
+          "box %s vs %s" % ([round(v, 1) for v in bd], [round(v, 1) for v in box_full]))
+    tb["sc_update"](root, leaves, {"coverage": 0.4})
+    check("... another layer's edit leaves the draft a draft", tb["sc_drafted"](root) == [moss] and
+          verts()[0] == vd[0], str(verts()))
+
+    path = os.path.join(tempfile.mkdtemp(), "draft_scatter.ma")
+    cmds.file(rename=path)
+    cmds.file(save=True, type="mayaAscii", force=True)
+    cmds.file(new=True, force=True)
+    cmds.file(path, open=True, force=True)
+    tb = load_toolbox()  # a new session: Draft off, nothing cached
+    check("a draft stays marked when the scene opens again", tb["sc_drafted"](root) == [moss] and
+          not tb["sc_drafting"]() and verts()[0] == vd[0], str(tb["sc_drafted"](root)))
+    vr = verts()
+    reps = tb["sc_full_detail"]([root])
+    vf = verts()
+    check("Full detail grows it properly (strands too), the leaves as they were", len(reps) == 1 and
+          not tb["sc_drafted"](root) and vf[0] > vr[0] and vf[1] > 0 and vf[2] == vr[2], "%s -> %s" % (vr, vf))
+    tb["_SC_BUILT"].clear()
+    tb["sc_regrow"](root, readback=False)
+    check("... just as a fresh full build does", verts() == vf, "%s vs %s" % (vf, verts()))
+
+    tb["sc_set_draft"](True)
+    tb["sc_update"](root, moss, {"coverage": 0.5})
+    vd2 = verts()
+    tb["bake_scatter"]([root])
+    parts = dict((cmds.getAttr(tb["_log_shape"](n) + "." + tb["SC_PART"]), n)
+                 for n in cmds.listRelatives(root, children=True, fullPath=True) or []
+                 if tb["_log_shape"](n) and cmds.attributeQuery(tb["SC_PART"], node=tb["_log_shape"](n), exists=True))
+    vb = [cmds.polyEvaluate(parts[k], vertex=True) if k in parts else 0 for k in keys]
+    check("Bake grows a draft properly first", vd2[1] == 0 and vb[0] > vd2[0] and vb[1] > 0,
+          "%s -> %s" % (vd2, vb))
+    tb["sc_set_draft"](False)
+
+
 try:
     run()
     drawing()
@@ -922,6 +1016,7 @@ try:
     moss_and_specks()
     pause()
     old_scatter()
+    draft()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

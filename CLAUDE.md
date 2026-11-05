@@ -861,6 +861,22 @@
     that can show moss); Cancelled / ScatterTooBig -> `_sc_stopped`:
     pause, box fitted, a held report with "stopped". Play, Bake and
     Regrow pass budget=False.
+  - **Draft** (the user: "scattering moss is slowwwwwww, it takes ages to
+    update"; pure-Python tuning only bought 10-20%): `_SC_DRAFT` {on,
+    later}, a session toggle (`sc_set_draft`, `sc_drafting`). `sc_build`
+    passes draft to `_sc_build_layer` for layers that grow (new / changed /
+    `only`); a moss layer then calls `moss_build(draft=True)`: `_MossBed`
+    with Proxy's cell and no lumps, no `_MossDetail.build()`, from the same
+    field caches (same patches). Its counts get "draft": True, saved in
+    `unlokScatterCounts`, so `sc_drafted(root)` (on layers with it) holds
+    across undo, cache and a scene opened again; layers that don't grow
+    keep what they are (a cached full build of the same JSON comes back
+    full). `sc_full_detail(roots)` = `sc_regrow(only=drafted,
+    draft=False)` (paused: at Play, via later). `bake_scatter` grows
+    pending and drafted layers with draft=False first and skips a group
+    whose growing was cancelled. Panel: `draft_btn` / `full_btn` /
+    `draft_label` under Pause, `(draft)` rows (`DRAFT_RGB`), Draft off with
+    drafts left = Full detail.
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass
@@ -1076,8 +1092,18 @@
     - **Speed:** blocks of ~0.6 rk cells are skipped unless a candidate in
       reach can show moss (exact bound on the margin), and the layout
       (points, lift directions, kernel weights, noise; block polygons) is
-      cached in `_MI_MOSS_BEDS` (3 layouts), so Coverage, Thickness, Lumps
-      and the weights redo the sums only. `MOSS_MAX_CELLS` grows the cell
+      cached in `_MI_MOSS_BEDS` (4 layouts, with each mesh's covered faces
+      `_coverage` and each block's buckets `bks`), so Coverage, Thickness,
+      Lumps and the weights redo the sums only. A new block's candidates
+      are the buckets within reach of its points (`_local`, box test per
+      bucket) as flat tuples (`flat`). The finished bed is kept too
+      (`_MI_MOSS_BUILT`, 2, keyed on every setting but `MOSS_DETAIL_ONLY`),
+      so Strands, Strand length, Droop and Capsules only redo `_MossDetail`
+      (~3x faster). `_MI_MOSS_CACHE` (spots, field, creases) keeps the last
+      `MOSS_CACHE_KEEP` entries, refreshed on use (`_mi_cache_get`): before,
+      a hit didn't count as a use and each kind trimmed to its own size, so
+      a few moss layers edited in turn pushed each other out. All of it
+      gives exactly the same meshes (checked old vs new, bit for bit). `MOSS_MAX_CELLS` grows the cell
       on huge areas (`capped`).
   - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
     sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,

@@ -29298,23 +29298,26 @@ class _MiSurface(object):
         items = self._near((min(p[0], e[0]), min(p[1], e[1]), min(p[2], e[2])),
                            (max(p[0], e[0]), max(p[1], e[1]), max(p[2], e[2])))
         cands = []
+        axes = [(k, p[k], 1.0 / d[k]) for k in range(3) if abs(d[k]) >= 1e-12]
+        flat = [(k, p[k]) for k in range(3) if abs(d[k]) < 1e-12]
         for item in self.items if items is None else items:  # slab test of the segment against the mesh's box
             b = item[3]
             t0, t1 = 0.0, far
-            for k in range(3):
-                if abs(d[k]) < 1e-12:
-                    if p[k] < b[k] or p[k] > b[k + 3]:
-                        t0 = 1.0
-                        t1 = 0.0
-                        break
-                    continue
-                inv = 1.0 / d[k]
-                ta, tb = (b[k] - p[k]) * inv, (b[k + 3] - p[k]) * inv
-                if ta > tb:
-                    ta, tb = tb, ta
-                t0, t1 = max(t0, ta), min(t1, tb)
-                if t0 > t1:
+            for k, pk in flat:
+                if pk < b[k] or pk > b[k + 3]:
+                    t0, t1 = 1.0, 0.0
                     break
+            else:
+                for k, pk, inv in axes:
+                    ta, tb = (b[k] - pk) * inv, (b[k + 3] - pk) * inv
+                    if ta > tb:
+                        ta, tb = tb, ta
+                    if ta > t0:
+                        t0 = ta
+                    if tb < t1:
+                        t1 = tb
+                    if t0 > t1:
+                        break
             if t0 <= t1:
                 cands.append((t0, item))
         if not cands:
@@ -29347,6 +29350,14 @@ class _MiSurface(object):
 
 
 _MI_TRIS = collections.OrderedDict()  # mesh state -> (running areas, triangles): reused while a mesh is unchanged
+
+
+def _mi_cache_get(cache, key):
+    """A cached value (None: not there), kept as the most recently used."""
+    hit = cache.get(key)
+    if hit is not None:
+        cache.move_to_end(key)
+    return hit
 
 
 def _mi_mesh_key(node):
@@ -29622,7 +29633,8 @@ def _mi_mesh():
 MOSS_RAYS = {"Proxy": 5, "Normal": 7, "High": 9, "Hero": 12}
 MOSS_MAX_CANDIDATES = 9000
 MOSS_MAX_CUSHIONS = 120000  # cushion candidates
-_MI_MOSS_CACHE = collections.OrderedDict()  # (meshes, seed, sizes, detail) -> analysed spots
+_MI_MOSS_CACHE = collections.OrderedDict()  # (meshes, seed, sizes, detail) -> analysed spots, field, creases
+MOSS_CACHE_KEEP = 12  # spots + field + creases of the last 4 layouts: a few moss layers edited in turn stay warm
 
 
 def _moss_spots(surf, sampler, s, R):
@@ -29635,7 +29647,7 @@ def _moss_spots(surf, sampler, s, R):
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
     key = (tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9), round(float(s["patch_size"]), 6), detail,
            sampler.key)
-    hit = _MI_MOSS_CACHE.get(key)
+    hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return hit
     m = scene_m_per_unit()
@@ -29691,7 +29703,7 @@ def _moss_spots(surf, sampler, s, R):
         occ = min(1.0, occ + 0.8 * crack)
         spots.append((p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r))
     _MI_MOSS_CACHE[key] = spots
-    while len(_MI_MOSS_CACHE) > 6:
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
         _MI_MOSS_CACHE.popitem(last=False)
     return spots
 
@@ -29728,7 +29740,7 @@ def _moss_field(surf, sampler, s, R):
     spots = _moss_spots(surf, sampler, s, RA)
     key = ("field", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
            round(float(s["patch_size"]), 6), detail, sampler.key)
-    hit = _MI_MOSS_CACHE.get(key)
+    hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return spots, hit
     patch = max(1e-3, float(s["patch_size"]) / scene_m_per_unit())
@@ -29765,7 +29777,7 @@ def _moss_field(surf, sampler, s, R):
         fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
         cands.append((p, tn, r, near, fine, {}, node, face))  # memo: is it covered (worked out when first kept)
     _MI_MOSS_CACHE[key] = cands
-    while len(_MI_MOSS_CACHE) > 8:
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
         _MI_MOSS_CACHE.popitem(last=False)
     return spots, cands
 
@@ -29840,7 +29852,7 @@ def _mi_gather(surf, sampler, s, R, cands):
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
     key = ("gather", tuple(_mi_mesh_key(x) for x in surf.nodes), seed, round(R, 9),
            round(float(s["patch_size"]), 6), detail, sampler.key)
-    hit = _MI_MOSS_CACHE.get(key)
+    hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return hit
     none = (0.0, None, 0.0, 0.0)
@@ -29937,7 +29949,7 @@ def _mi_gather(surf, sampler, s, R, cands):
         table.append(table[j] if j >= 0 else none)
     hit = (table, grid, rad)
     _MI_MOSS_CACHE[key] = hit
-    while len(_MI_MOSS_CACHE) > 10:
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
         _MI_MOSS_CACHE.popitem(last=False)
     return hit
 
@@ -30159,6 +30171,7 @@ def _moss_clip(poly, lines, eps):
 
 
 _MI_MOSS_BEDS = collections.OrderedDict()  # bed layout key -> (grid point records, block polygons)
+_MI_MOSS_COVER = collections.OrderedDict()  # (meshes, clump size, faces) -> each mesh's covered faces
 
 
 def _moss_area(nodes, faces=None):
@@ -30199,13 +30212,13 @@ class _MossBed(object):
     the where-it-grows weights only redo the sums (a roof: seconds down to
     about one)."""
 
-    def __init__(self, surf, s, cands, rows, faces=None):
+    def __init__(self, surf, s, cands, rows, faces=None, draft=False):
         m = scene_m_per_unit()
         self.surf = surf
         self.R = R = max(1e-4, float(s["clump_size"]) / m)
         self.H = H = max(1e-6, float(s["thickness"]) / m)
         detail = s["detail"] if s["detail"] in MOSS_DETAIL else "Normal"
-        cell_f, lumps_on = MOSS_DETAIL[detail][:2]
+        cell_f, lumps_on = MOSS_DETAIL["Proxy" if draft else detail][:2]  # a draft: Proxy's cells, no lumps
         self.tile = tile = max(1e-4, float(s["uv_tile"]) / m)
         k = max(1, int(math.ceil(tile / (cell_f * R))))
         self.seed = int(s["seed"])
@@ -30216,6 +30229,7 @@ class _MossBed(object):
         self.delta = 0.6 * R  # how far the moss rolls over an edge (not Thickness: layouts stay cached)
         self.tuck = 0.08 * H + 0.0005 / m
         self.faces = faces
+        self.draft = draft
         self.capped = False
         cover = 0.05 / m
         self.cq, self.cn, self.mg, self.oc, self.ob = [], [], [], [], []
@@ -30243,6 +30257,7 @@ class _MossBed(object):
             buckets.setdefault((int(math.floor(p[0] / rk)), int(math.floor(p[1] / rk)),
                                 int(math.floor(p[2] / rk))), []).append(i)
         self.buckets = buckets
+        self.flat = None  # each bucket's candidates as (index, point, normal), made when a block first needs them
         # a grid point's margin is a weighted mean of the candidates round it plus the ragged-edge noise, so a
         # block with no candidate above this can't show any moss: skipped without looking at its points
         lo = -0.04 - 0.12 * self.mess
@@ -30266,23 +30281,38 @@ class _MossBed(object):
                None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
         cache = _MI_MOSS_BEDS.get(key)
         if cache is None:
-            cache = _MI_MOSS_BEDS[key] = ({}, {})
-            while len(_MI_MOSS_BEDS) > 3:
+            cover = (key[1], key[3], key[-1])  # covered faces don't depend on the cells: a draft and full share them
+            if cover not in _MI_MOSS_COVER:
+                _MI_MOSS_COVER[cover] = {}
+                while len(_MI_MOSS_COVER) > 4:
+                    _MI_MOSS_COVER.popitem(last=False)
+            cache = _MI_MOSS_BEDS[key] = ({}, {}, _MI_MOSS_COVER[cover], {})
+            while len(_MI_MOSS_BEDS) > 4:
                 _MI_MOSS_BEDS.popitem(last=False)
         else:
             _MI_MOSS_BEDS.move_to_end(key)
-        self.recs, self.blocks = cache
+        self.recs, self.blocks, self.cov, self.bks = cache
         self.pts, self.dirs, self.hf, self.core = [], [], [], []
         self.vid = {}
         self.faces_out = []  # (vertex ids, uv ids, stable key)
         self.us, self.vs, self.uvid = [], [], {}
 
     # ---------------------------------------------------------------- field
-    def _local(self, c, rad, need):
+    def _local(self, c, rad, need, bkey=None):
         """(hot, candidate indices) within reach of a ball: hot when one of them
-        can show moss; the indices only when need (a block seen for the first time)."""
+        can show moss; the indices only when need (a block seen for the first
+        time: just those that can reach one of its points). A block's buckets
+        are kept (bkey), so later rebuilds only look those up."""
         rk = self.rk
         reach = rad + rk
+        if not need and bkey is not None:
+            got = self.bks.get(bkey)
+            if got is not None:
+                hs = self.hot
+                for key in got:
+                    if key in hs:
+                        return True, []
+                return False, []
         a = [int(math.floor((c[i] - reach) / rk)) for i in range(3)]
         b = [int(math.floor((c[i] + reach) / rk)) for i in range(3)]
         found, hot = [], False
@@ -30292,14 +30322,31 @@ class _MossBed(object):
         else:
             keys = [(i, j, k) for i in range(a[0], b[0] + 1) for j in range(a[1], b[1] + 1)
                     for k in range(a[2], b[2] + 1)]
+        mine = []
         for key in keys:
-            got = buckets.get(key)
-            if got:
-                hot = hot or key in hs
-                if need:
-                    found.extend(got)
-                elif hot:
-                    break
+            if key in buckets:
+                mine.append(key)
+                if not hot and key in hs:
+                    hot = True
+                    if not need and bkey is None:
+                        break
+        if bkey is not None:
+            self.bks[bkey] = tuple(mine)
+        if need and hot:  # a grid point reads candidates within rk and lies within rad of c: the buckets in reach
+            r2 = reach * reach * 1.0001
+            cx, cy, cz = c
+            flat = self.flat
+            if flat is None:
+                cq, cnn = self.cq, self.cn
+                flat = self.flat = dict((key, [(i, cq[i][0], cq[i][1], cq[i][2], cnn[i][0], cnn[i][1], cnn[i][2])
+                                               for i in v]) for key, v in buckets.items())
+            for key in mine:
+                lx, ly, lz = key[0] * rk, key[1] * rk, key[2] * rk
+                ex = lx - cx if cx < lx else (cx - lx - rk if cx > lx + rk else 0.0)
+                ey = ly - cy if cy < ly else (cy - ly - rk if cy > ly + rk else 0.0)
+                ez = lz - cz if cz < lz else (cz - lz - rk if cz > lz + rk else 0.0)
+                if ex * ex + ey * ey + ez * ez < r2:
+                    found.extend(flat[key])
         return hot, found
 
     def _record(self, u, v, ctx, local):
@@ -30340,23 +30387,20 @@ class _MossBed(object):
         dx, dy, dz = dx / ln, dy / ln, dz / ln
         rk2 = self.rk * self.rk
         lvmax = 0.5 * self.rk
-        cq, cnn = self.cq, self.cn
         pairs = []
-        for i in local:
-            q = cq[i]
-            ex, ey, ez = q[0] - x, q[1] - y, q[2] - z
+        for i, qx, qy, qz, nx, ny, nz in local:
+            ex, ey, ez = qx - x, qy - y, qz - z
             d2 = ex * ex + ey * ey + ez * ez
             if d2 >= rk2:
                 continue
-            qn = cnn[i]
-            dn = qn[0] * dx + qn[1] * dy + qn[2] * dz
+            dn = nx * dx + ny * dy + nz * dz
             if dn < -0.15:
                 continue
             lv = abs(ex * dx + ey * dy + ez * dz)
             if lv >= lvmax:
                 continue  # a rail's top doesn't read the board under it
             w = 1.0 - d2 / rk2
-            pairs.append((i, w * w * (0.25 + 0.75 * max(0.0, dn)) * (1.0 - lv / lvmax)))
+            pairs.append((i, w * w * (0.25 + 0.75 * (dn if dn > 0.0 else 0.0)) * (1.0 - lv / lvmax)))
         room = None
         if check:  # under the rail or the wall: no room at all; next to it: up to what's there
             eps = 1e-3 * self.R
@@ -30420,26 +30464,12 @@ class _MossBed(object):
 
     def _mesh(self, node, mask, planes):
         P, tris, corners, nbrs = _moss_topology(node)
-        ok = [tri[3][1] >= -0.35 and (mask is None or tri[4] in mask) for tri in tris]
-        # a face pressed against other geometry (a board's back against the wall) gets no moss, and moss
-        # doesn't roll over onto it: just in front of it is inside the other solid, or right up against it.
-        # A face only partly covered (half under the wall, a rail across a board) checks each of its points
-        buried = [False] * len(tris)
-        partial = [False] * len(tris)
-        for t, tri in enumerate(tris):
-            if ok[t]:
-                n = tri[3]
-                a, b, c = P[tri[0]], P[tri[1]], P[tri[2]]
-                m = [(a[i] + b[i] + c[i]) / 3.0 for i in range(3)]
-                got = [self._covered(m, n)]
-                for p, q in ((a, b), (b, c), (c, a)):  # near each corner and each edge's middle
-                    got.append(self._covered([0.88 * p[i] + 0.12 * m[i] for i in range(3)], n))
-                    got.append(self._covered([0.44 * (p[i] + q[i]) + 0.12 * m[i] for i in range(3)], n))
-                if all(got):
-                    buried[t] = True
-                    ok[t] = False
-                elif any(got):
-                    partial[t] = True
+        shape = _mi_mesh_key(node)[0]
+        known = self.cov.get(shape)
+        if known is None:
+            known = self.cov[shape] = self._coverage(P, tris, nbrs, mask)
+        ok, buried, partial, edges = known
+        ok = list(ok)
         keys = []
         for tri in tris:
             n = tri[3]
@@ -30460,7 +30490,7 @@ class _MossBed(object):
             t1, t2, _, _, specs = planes[keys[t]]
             for j, (x, y) in enumerate(((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0]))):
                 o = nbrs[t][j]
-                if o >= 0 and (buried[o] or (partial[o] and self._edge_covered(P[x], P[y], tris[o], P))):
+                if o >= 0 and (buried[o] or (t, j) in edges):
                     continue  # runs straight on into the corner it makes with what covers that face
                 if o >= 0 and ok[o]:
                     no = tris[o][3]
@@ -30480,11 +30510,43 @@ class _MossBed(object):
                 for i in range(int(math.floor(min(ax, bx) / D)), int(math.floor(max(ax, bx) / D)) + 1):
                     for k in range(int(math.floor(min(ay, by) / D)), int(math.floor(max(ay, by) / D)) + 1):
                         specs.setdefault((i, k), []).append(item)
-        shape = _mi_mesh_key(node)[0]
         for t, tri in enumerate(tris):
             if ok[t]:
                 check = partial[t] or any(o >= 0 and (buried[o] or partial[o]) for o in nbrs[t])
                 self._triangle((shape, t), tri, P, corners[t], planes[keys[t]], keys[t], D, check)
+
+    def _coverage(self, P, tris, nbrs, mask):
+        """(ok, buried, partial, covered edges) of a mesh's triangles, by rays:
+        kept with the layout, as they don't change with the look."""
+        ok = [tri[3][1] >= -0.35 and (mask is None or tri[4] in mask) for tri in tris]
+        # a face pressed against other geometry (a board's back against the wall) gets no moss, and moss
+        # doesn't roll over onto it: just in front of it is inside the other solid, or right up against it.
+        # A face only partly covered (half under the wall, a rail across a board) checks each of its points
+        buried = [False] * len(tris)
+        partial = [False] * len(tris)
+        for t, tri in enumerate(tris):
+            if ok[t]:
+                n = tri[3]
+                a, b, c = P[tri[0]], P[tri[1]], P[tri[2]]
+                m = [(a[i] + b[i] + c[i]) / 3.0 for i in range(3)]
+                got = [self._covered(m, n)]
+                for p, q in ((a, b), (b, c), (c, a)):  # near each corner and each edge's middle
+                    got.append(self._covered([0.88 * p[i] + 0.12 * m[i] for i in range(3)], n))
+                    got.append(self._covered([0.44 * (p[i] + q[i]) + 0.12 * m[i] for i in range(3)], n))
+                if all(got):
+                    buried[t] = True
+                    ok[t] = False
+                elif any(got):
+                    partial[t] = True
+        edges = set()  # (triangle, side) whose neighbour is partly covered along the shared edge
+        for t, tri in enumerate(tris):
+            if not ok[t]:
+                continue
+            for j, (x, y) in enumerate(((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0]))):
+                o = nbrs[t][j]
+                if o >= 0 and not buried[o] and partial[o] and self._edge_covered(P[x], P[y], tris[o], P):
+                    edges.add((t, j))
+        return tuple(ok), buried, partial, edges
 
     def _covered(self, p, n):
         """Is a surface point pressed against something (other geometry right
@@ -30529,6 +30591,8 @@ class _MossBed(object):
         j0, j1 = int(math.floor(lo_v / e)), int(math.floor(hi_v / e))
         eps = 1e-6 * e
         B = max(1, int(round(0.6 * self.rk / e)))
+        if self.draft:  # its cells are about rk: a block of one cell costs more than its points
+            B = max(2, int(round(1.5 * self.rk / e)))
         ctx = None
         inside = {}
         blocks = self.blocks
@@ -30548,7 +30612,7 @@ class _MossBed(object):
                 cu, cv = 0.5 * (bu0 + bu1), 0.5 * (bv0 + bv1)
                 cen = (cu * t1[0] + cv * t2[0] + dp * n[0], cu * t1[1] + cv * t2[1] + dp * n[1],
                        cu * t1[2] + cv * t2[2] + dp * n[2])
-                hot, local = self._local(cen, 0.5 * math.hypot(bu1 - bu0, bv1 - bv0), polys is None)
+                hot, local = self._local(cen, 0.5 * math.hypot(bu1 - bu0, bv1 - bv0), polys is None, bkey)
                 if not hot:
                     continue  # no moss can reach here this time
                 if polys is None:
@@ -30579,18 +30643,21 @@ class _MossBed(object):
         e, k, tile = self.e, self.k, self.tile
         cs = ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))
         vals = []
-        for ci, cj in cs:
-            got = inside.get((ci, cj))
+        (l0x, l0y, n0x, n0y), (l1x, l1y, n1x, n1y), (l2x, l2y, n2x, n2y) = lines
+        for cc in cs:
+            got = inside.get(cc)
             if got is None:
-                u, v = ci * e, cj * e
-                got = tuple((u - lx) * nx + (v - ly) * ny for lx, ly, nx, ny in lines)
-                inside[(ci, cj)] = got
+                u, v = cc[0] * e, cc[1] * e
+                got = inside[cc] = ((u - l0x) * n0x + (v - l0y) * n0y, (u - l1x) * n1x + (v - l1y) * n1y,
+                                    (u - l2x) * n2x + (v - l2y) * n2y)
             vals.append(got)
+        v0, v1, v2, v3 = vals
+        meps = -eps
         for m in range(3):
-            if vals[0][m] < -eps and vals[1][m] < -eps and vals[2][m] < -eps and vals[3][m] < -eps:
+            if v0[m] < meps and v1[m] < meps and v2[m] < meps and v3[m] < meps:
                 return None
         poly = [(ci * e, cj * e, (ci, cj)) for ci, cj in cs]
-        if not all(min(vv) >= -eps for vv in vals):
+        if not (min(v0) >= meps and min(v1) >= meps and min(v2) >= meps and min(v3) >= meps):
             poly = _moss_clip(poly, lines, eps)
             if len(poly) < 3:
                 return None
@@ -30631,29 +30698,31 @@ class _MossBed(object):
 
     def _emit(self, polys):
         recs, vid, uvid = self.recs, self.vid, self.uvid
-        hf = self.hf
+        hf, pts, dirs, core, us, vs = self.hf, self.pts, self.dirs, self.core, self.us, self.vs
+        value, out = self._value, self.faces_out
         for keys, uvs, fkey in polys:
             vids, uids, exposed = [], [], False
             for key, (uu, vv, ti, tj) in zip(keys, uvs):
                 vi = vid.get(key)
                 if vi is None:
-                    pos, d, h, c = self._value(recs[key])
-                    vi = vid[key] = len(self.pts)
-                    self.pts.append(pos)
-                    self.dirs.append(d)
+                    pos, d, h, c = value(recs[key])
+                    vi = vid[key] = len(pts)
+                    pts.append(pos)
+                    dirs.append(d)
                     hf.append(h)
-                    self.core.append(c)
-                exposed = exposed or hf[vi] > 0.0
+                    core.append(c)
+                if not exposed and hf[vi] > 0.0:
+                    exposed = True
                 vids.append(vi)
                 ukey = (vi, ti, tj)
                 ui = uvid.get(ukey)
                 if ui is None:
-                    ui = uvid[ukey] = len(self.us)
-                    self.us.append(uu)
-                    self.vs.append(vv)
+                    ui = uvid[ukey] = len(us)
+                    us.append(uu)
+                    vs.append(vv)
                 uids.append(ui)
             if exposed:
-                self.faces_out.append((vids, uids, fkey))
+                out.append((vids, uids, fkey))
 
     def mesh(self):
         """The bed as (points, counts, connects, us, vs, uv ids), unused points dropped."""
@@ -30674,6 +30743,19 @@ class _MossBed(object):
                     vs.append(self.vs[ui])
                 uvi.append(r)
         return pts, counts, conn, us, vs, uvi
+
+
+def _rand4(seed, a, b, c):
+    """_rand12(seed, a, b, c)[:4]: the same numbers from one splitmix64 step
+    instead of three (a per-triangle draw that only needs a few)."""
+    x = (seed * 0x9E3779B97F4A7C15 ^ a * 0xBF58476D1CE4E5B9 ^ b * 0x94D049BB133111EB
+         ^ c * 0xD6E8FEB86659FD93) & _MASK64
+    x = (x + 0x9E3779B97F4A7C15) & _MASK64
+    z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    z ^= z >> 31
+    k = 1.0 / 65536.0
+    return ((z >> 48) & 0xFFFF) * k, ((z >> 32) & 0xFFFF) * k, ((z >> 16) & 0xFFFF) * k, (z & 0xFFFF) * k
 
 
 class _MossDetail(object):
@@ -30722,20 +30804,29 @@ class _MossDetail(object):
         tris = []
         est_s = est_c = 0.0
         P, HF, D, CORE = bed.pts, bed.hf, bed.dirs, bed.core
+        per_s, per_h = dens * per, hang * hverts
+        sqrt = math.sqrt
         for vids, _, fkey in bed.faces_out:
             a = vids[0]
+            if HF[a] <= 0.0:
+                continue
+            pa = P[a]
             for f in range(1, len(vids) - 1):
                 b, c = vids[f], vids[f + 1]
-                if HF[a] <= 0.0 or HF[b] <= 0.0 or HF[c] <= 0.0:
+                if HF[b] <= 0.0 or HF[c] <= 0.0:
                     continue
-                cr = _rl_cross(_rl_sub(P[b], P[a]), _rl_sub(P[c], P[a]))
-                ar = 0.5 * _rl_len(cr)
+                pb, pc = P[b], P[c]
+                ux, uy, uz = pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]
+                vx, vy, vz = pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]
+                cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+                ar = 0.5 * sqrt(cx * cx + cy * cy + cz * cz)
                 if ar <= 1e-14:
                     continue
-                fn = _rl_mul(cr, 0.5 / ar)
+                k = 0.5 / ar
+                fn = (cx * k, cy * k, cz * k)
                 side = fn[1] < 0.35
                 tris.append((a, b, c, ar, fn, fkey * 8 + f))
-                est_s += ar * (dens * per + (hang * hverts if side else 0.0))
+                est_s += ar * (per_s + (per_h if side else 0.0))
                 est_c += ar * caps * cverts * 0.5
         keep_s = min(1.0, MI_MAX_VERTS / max(1.0, est_s))
         keep_c = min(1.0, MI_MAX_VERTS / max(1.0, est_c))
@@ -30748,7 +30839,7 @@ class _MossDetail(object):
             lam_s = ar * dens * keep_s
             lam_h = 2.0 * ar * hang * keep_s if side else 0.0  # about half are gated out (curtains)
             lam_c = ar * caps * keep_c
-            r0 = _rand12(seed, key, 0, 43)
+            r0 = _rand4(seed, key, 0, 43)
             ns, nh = int(lam_s + r0[0]), int(lam_h + r0[1])
             nc = int(lam_c + r0[2]) if lam_c > 0.0 else 0
             if not (ns or nh or nc):
@@ -31181,11 +31272,18 @@ class _MossClumps(object):
         return list(self.pts), counts, conn, list(self.us), list(self.vs), list(conn)
 
 
-def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
+MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "stack_layout", "udim")
+_MI_MOSS_BUILT = collections.OrderedDict()  # (meshes, settings but those, seeds, faces) -> (finished bed, clumps)
+
+
+def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=False):
     """Grow a moss patch on meshes: {"moss": the bed (Style Carpet: one
     continuous shell; Clumps: separate cushions), "strands": shoots and
     hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
-    space). Detail sets how fine the bed is and what stands out of it."""
+    space). Detail sets how fine the bed is and what stands out of it.
+    draft: a quick look while editing (a carpet bed in Proxy's coarse cells,
+    nothing standing out of it), from the same field: the same patches in
+    the same places."""
     s = mi_settings_only("Moss", s)
     surf = surf or _MiSurface(nodes)
     empty = {"moss": _mi_mesh(), "strands": _mi_mesh(), "capsules": _mi_mesh(), "clumps": 0, "capped": False}
@@ -31196,12 +31294,28 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
     sampler = _MiSampler(surf.nodes, faces)
     if not sampler.total:
         return empty
-    spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces, draw)
     clumps = s.get("style") == MOSS_STYLES[1]
-    bed = (_MossClumps if clumps else _MossBed)(surf, s, cands, rows, faces).build()
-    det = _MossDetail(bed, s).build()
-    return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C),
-            "clumps": bed.count if clumps else sum(1 for row in rows if row is not None and row[0] > 0.0),
+    key = None
+    if draw is None:  # (a drawing's strokes have no cheap key: built each time)
+        key = (tuple(_mi_mesh_key(x) for x in surf.nodes),
+               tuple(sorted((k, repr(v)) for k, v in s.items() if k not in MOSS_DETAIL_ONLY)), repr(seeds),
+               None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())),
+               bool(draft))
+    got = None if key is None else _mi_cache_get(_MI_MOSS_BUILT, key)
+    if got is None:
+        spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces, draw)
+        bed = (_MossClumps(surf, s, cands, rows, faces) if clumps else
+               _MossBed(surf, s, cands, rows, faces, draft=draft)).build()
+        got = (bed, bed.count if clumps else sum(1 for row in rows if row is not None and row[0] > 0.0))
+        if key is not None:
+            _MI_MOSS_BUILT[key] = got
+            while len(_MI_MOSS_BUILT) > 2:
+                _MI_MOSS_BUILT.popitem(last=False)
+    bed, count = got
+    det = _MossDetail(bed, s)
+    if not draft:
+        det.build()
+    return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C), "clumps": count,
             "capped": bed.capped or det.capped}
 
 
@@ -33154,6 +33268,13 @@ _SC_WROTE = {}  # (group, layer id / part) -> what was last written (mesh identi
 # undoable state); seen: group -> the JSON this tool last wrote; force:
 # groups Regrow was pressed for.
 _SC_HOLD = {"on": False, "base": {}, "seen": {}, "force": set()}
+# Draft (the user: "scattering moss is slowwwwwww, it takes ages to update"):
+# while on, a moss layer that grows (a live edit, a new layer, an undo) grows
+# a coarse bed with nothing standing out of it, noted "draft" in its counts
+# (saved on the group, so a draft stays marked when the scene opens again);
+# Full detail grows the drafts properly. later: groups Full detail was
+# pressed for while paused (grown at Play).
+_SC_DRAFT = {"on": False, "later": set()}
 
 
 def sc_type(name):
@@ -33291,8 +33412,9 @@ def _mi_drop_repeats(mesh):
     return (pts, nc, ncon, us, vs, nuv)
 
 
-def _sc_build_layer(layer, surf):
-    """A layer's parts {part: mesh} and counts, built on the surfaces."""
+def _sc_build_layer(layer, surf, draft=False):
+    """A layer's parts {part: mesh} and counts, built on the surfaces (draft:
+    a moss layer grows its quick look, "draft" in its counts)."""
     typ = sc_type(layer.get("type"))
     s = sc_settings(layer)
     seeds = mi_seed_points(layer) or None
@@ -33304,9 +33426,11 @@ def _sc_build_layer(layer, surf):
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
         ms.update(s)
-        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw)
+        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw, draft=draft)
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["clumps"] = out.get("clumps", 0)
+        if draft:
+            counts["draft"] = True
     elif typ == "Ivy":
         ivs = dict(IVY_DEFAULTS)
         ivs.update(s)
@@ -33425,14 +33549,18 @@ def _sc_read_layer(root, layer, counts):
     return out, c
 
 
-def sc_build(root, data, surf=None, only=None, readback=True):
+def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     """Every on layer's parts for a group, from the cache where a layer and
     its surfaces are unchanged (only: layer ids to rebuild regardless),
     else, when the parts in the scene show it as it is (a scene just
     opened), read back from them (readback=False: Regrow, grow them all),
     each part in its own UDIM tiles from the group's Start UDIM, in layer
-    order. Returns ({"<id>/<part>": mesh}, {"udims", counts..., "layers":
-    {id: counts}}, meshes)."""
+    order. A layer that grows is a draft when Draft is on (draft: True /
+    False overrides it); one that doesn't keeps what it is. Returns
+    ({"<id>/<part>": mesh}, {"udims", counts..., "layers": {id: counts}},
+    meshes)."""
+    if draft is None:
+        draft = _SC_DRAFT["on"]
     meshes = sc_surfaces(data)
     report = {"faces": 0, "capped": False, "clumps": 0, "vines": 0, "leaves": 0, "bunches": 0, "piles": 0,
               "tufts": 0, "jungle": 0, "specks": 0, "udims": {}, "surfaces": len(meshes), "layers": {}, "read": 0}
@@ -33460,7 +33588,7 @@ def sc_build(root, data, surf=None, only=None, readback=True):
         if hit is None and grown.get(lid) == layer and not (only and lid in only):
             hit = _sc_read_layer(root, layer, saved.get(lid))
         if hit is None:
-            hit = _sc_build_layer(layer, surf) if surf.items else ({}, {})
+            hit = _sc_build_layer(layer, surf, draft) if surf.items else ({}, {})
         if hit is not _SC_BUILT.get(key):
             _SC_BUILT[key] = hit
             while len(_SC_BUILT) > 32:
@@ -33731,7 +33859,7 @@ def _sc_write(root, data, placed, meshes):
     return faces
 
 
-def sc_regrow(root, only=None, readback=True, budget=True):
+def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
     """Grow a group again from its JSON (outside the undo queue), in the
     Working window (Esc / Cancel stops it). budget: a build that would take
     a minute or more isn't started (live edits: the user changed one
@@ -33745,7 +33873,7 @@ def sc_regrow(root, only=None, readback=True, budget=True):
         with Progress("Scatter: growing %s" % short_name(root), [("grow", 1)]) as pr:
             pr.stage("grow", 1, "Growing")
             with NoUndo():
-                placed, report, meshes = sc_build(root, data, only=only, readback=readback)
+                placed, report, meshes = sc_build(root, data, only=only, readback=readback, draft=draft)
     except (Cancelled, ScatterTooBig) as exc:
         return _sc_stopped(root, data, exc)
     finally:
@@ -33844,6 +33972,47 @@ def _sc_commit(roots, label):
                 cmds.setAttr(root + "." + SC_ATTR, now, type="string")
 
 
+def sc_drafting():
+    return _SC_DRAFT["on"]
+
+
+def sc_set_draft(on):
+    """Draft on / off: moss layers that grow from now on grow their quick
+    look (off: in full). What's grown stays as it is (sc_full_detail)."""
+    _SC_DRAFT["on"] = bool(on)
+
+
+def sc_drafted(root):
+    """Ids of a group's on layers whose parts show a draft (as last grown)."""
+    if not is_scatter(root) or not cmds.attributeQuery(SC_COUNTS, node=root, exists=True):
+        return []
+    try:
+        counts = json.loads(cmds.getAttr(root + "." + SC_COUNTS) or "{}")
+    except ValueError:
+        return []
+    return [l["id"] for l in sc_data(root).get("layers", [])
+            if l.get("on", True) and (counts.get(l["id"]) or {}).get("draft")]
+
+
+def sc_full_detail(roots):
+    """Grow the groups' draft layers properly (outside the undo queue, like
+    any regrow; while paused: at Play). Returns the reports of the groups
+    grown (the last one "stopped" when cancelled)."""
+    if _SC_HOLD["on"]:
+        _SC_DRAFT["later"].update(r for r in roots if sc_drafted(r))
+        return []
+    reps = []
+    for root in roots:
+        ids = sc_drafted(root)
+        if not ids:
+            continue
+        rep = sc_regrow(root, only=set(ids), budget=False, draft=False)
+        reps.append(rep)
+        if rep.get("stopped"):
+            break
+    return reps
+
+
 def sc_regrow_later(roots):
     """Regrow pressed while paused: the groups grow at Play."""
     _SC_HOLD["force"].update(roots)
@@ -33896,6 +34065,9 @@ def sc_play():
             if rep.get("stopped"):  # cancelled: paused again, the rest wait too
                 _SC_HOLD["force"].update(r for r in roots[k + 1:] if r in hold["force"])
                 break
+    else:
+        later, _SC_DRAFT["later"] = _SC_DRAFT["later"], set()
+        reps.extend(sc_full_detail([r for r in roots if r in later]))
     return reps
 
 
@@ -34099,15 +34271,23 @@ def sc_surface_names(data):
 def bake_scatter(roots):
     """Plain meshes (one Ctrl+Z): empty parts and the box go, the settings
     move to a hidden attribute. Edits saved while paused grow first (it
-    bakes them). Returns the groups baked."""
+    bakes them), and draft moss grows properly first (a draft is never
+    baked). A group whose growing was cancelled isn't baked. Returns the
+    groups baked."""
+    stopped = set()
     for root in roots:
         if _SC_HOLD["on"] and sc_pending(root):
-            sc_regrow(root, budget=False)
+            if sc_regrow(root, budget=False, draft=False).get("stopped"):
+                stopped.add(root)
+                continue
             _SC_HOLD["force"].discard(root)
+        ids = sc_drafted(root)
+        if ids and sc_regrow(root, only=set(ids), budget=False, draft=False).get("stopped"):
+            stopped.add(root)
     done = []
     with UndoChunk("Scatter bake"):
         for root in roots:
-            if not is_scatter(root):
+            if not is_scatter(root) or root in stopped:
                 continue
             for node in sc_parts(root).values():
                 if not cmds.getAttr(node + ".visibility"):
@@ -34644,6 +34824,26 @@ class ScatterPanel(QtWidgets.QWidget):
         prow.addWidget(self.pause_btn)
         prow.addWidget(self.pause_label, 1)
         tl.addLayout(prow)
+        drow = QtWidgets.QHBoxLayout()
+        drow.setSpacing(8)
+        self.draft_btn = secondary_button("Draft", "Draft moss: while on, moss edits grow a quick rough look (big "
+                                                   "cells, no strands or capsules) from the same patches, so "
+                                                   "editing stays fast. Full detail (or Draft off) grows it "
+                                                   "properly. Other layers grow as normal; Bake grows drafts "
+                                                   "properly first.")
+        self.draft_btn.setCheckable(True)
+        self.draft_btn.setMinimumWidth(90)
+        self.draft_btn.clicked.connect(lambda *_: self.toggle_draft())
+        self.full_btn = secondary_button("Full detail", "Grow every draft moss layer properly (in every scatter "
+                                                        "group). While paused: at Play.")
+        self.full_btn.clicked.connect(lambda *_: self.full_detail())
+        self.draft_label = QtWidgets.QLabel()
+        self.draft_label.setWordWrap(True)
+        self.draft_label.setProperty("unlokHint", True)
+        drow.addWidget(self.draft_btn)
+        drow.addWidget(self.full_btn)
+        drow.addWidget(self.draft_label, 1)
+        tl.addLayout(drow)
         outer.addWidget(top)
         scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
@@ -34926,10 +35126,14 @@ class ScatterPanel(QtWidgets.QWidget):
                     item.setData(QtCore.Qt.UserRole + 1, kind)
                     self.surf_list.addItem(item)
                 changed = (sc_pending(self._root) or (set(),))[0] if sc_paused() else ()
+                drafts = set(sc_drafted(self._root))
                 for layer in data["layers"]:
-                    item = QtWidgets.QListWidgetItem(self._layer_text(layer, layer["id"] in changed))
+                    item = QtWidgets.QListWidgetItem(self._layer_text(layer, layer["id"] in changed,
+                                                                      layer["id"] in drafts))
                     if layer["id"] in changed:
                         item.setForeground(QtGui.QColor(240, 200, 112))
+                    elif layer["id"] in drafts:
+                        item.setForeground(QtGui.QColor(*self.DRAFT_RGB))
                     item.setData(QtCore.Qt.UserRole, layer["id"])
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEditable)
                     item.setCheckState(QtCore.Qt.Checked if layer.get("on", True) else QtCore.Qt.Unchecked)
@@ -34944,13 +35148,22 @@ class ScatterPanel(QtWidgets.QWidget):
             self._filling = False
         self._update_states()
 
+    DRAFT_RGB = (140, 180, 235)
+
     @staticmethod
-    def _layer_text(layer, changed=False):
+    def _layer_text(layer, changed=False, draft=False):
         pts, fcs, strokes = sc_area(layer)
         extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
         if strokes:
             extra += "  (drawn, %d stroke%s)" % (strokes, "" if strokes == 1 else "s")
-        return layer.get("name", layer["type"]) + extra + ("  (changed)" if changed else "")
+        return layer.get("name", layer["type"]) + extra + ("  (changed)" if changed else
+                                                           ("  (draft)" if draft else ""))
+
+    @staticmethod
+    def _draft_count():
+        """Draft layers over every group, and the groups they're in."""
+        roots = [r for r in sc_groups() if sc_drafted(r)]
+        return sum(len(sc_drafted(r)) for r in roots), roots
 
     def _paused_counts(self):
         """(layers changed, groups changed otherwise) over every group, while paused."""
@@ -34972,11 +35185,13 @@ class ScatterPanel(QtWidgets.QWidget):
         return ", ".join(bits) if bits else "nothing changed yet"
 
     def _mark_paused(self):
-        """While paused: the changed layers' rows, the Play button and the banner."""
-        if not sc_paused() or not self._alive():
+        """The layers' rows (changed while paused, drafts), the Play / Draft
+        buttons and the banner."""
+        if not self._alive():
             self._update_states()
             return
-        changed = (sc_pending(self._root) or (set(),))[0]
+        changed = (sc_pending(self._root) or (set(),))[0] if sc_paused() else set()
+        drafts = set(sc_drafted(self._root))
         data = self._data()
         self._filling = True
         try:
@@ -34986,10 +35201,12 @@ class ScatterPanel(QtWidgets.QWidget):
                 if layer is None:
                     continue
                 on = layer["id"] in changed
-                text = self._layer_text(layer, on)
+                draft = layer["id"] in drafts
+                text = self._layer_text(layer, on, draft)
                 if item.text() != text:
                     item.setText(text)
-                    item.setForeground(QtGui.QColor(240, 200, 112) if on else self.layer_list.palette().text())
+                    item.setForeground(QtGui.QColor(240, 200, 112) if on else (
+                        QtGui.QColor(*self.DRAFT_RGB) if draft else self.layer_list.palette().text()))
         finally:
             self._filling = False
         self._update_states()
@@ -35005,6 +35222,22 @@ class ScatterPanel(QtWidgets.QWidget):
         self.pause_label.setText(("<b>Paused</b> - %s. Play grows %s." % (
             self._paused_text(counts), "them" if any(counts) else "any you make")) if paused else
             "Live: edits grow straight away. Pause to make a bunch first.")
+        drafting = sc_drafting()
+        nd = self._draft_count()[0]
+        self.draft_btn.setChecked(drafting)
+        if bool(self.draft_btn.property("unlokPrimary")) != drafting:
+            self.draft_btn.setProperty("unlokPrimary", drafting)
+            repolish(self.draft_btn)
+        self.full_btn.setEnabled(bool(nd))
+        rough = "%d moss layer%s rough" % (nd, "" if nd == 1 else "s")
+        if drafting:
+            self.draft_label.setText("<b>Draft</b> - moss edits grow a quick rough look. %s" % (
+                ("%s: Full detail grows %s properly." % (rough, "it" if nd == 1 else "them")) if nd else
+                "Full detail (or Draft off) grows them properly."))
+        else:
+            self.draft_label.setText(("%s (drafts): Full detail grows %s properly." % (
+                rough, "it" if nd == 1 else "them")) if nd else
+                "Draft: edit moss fast with a rough look, then grow it in full.")
         try:
             sel = sc_selection()
         except Exception:
@@ -35092,6 +35325,8 @@ class ScatterPanel(QtWidgets.QWidget):
             return
         msg = "%s %s in %.2fs: %s." % (verb, short_name(rep.get("root", self._root or "")), time.time() - t0,
                                       self._counts(rep))
+        if sc_drafting() and rep.get("root") and sc_drafted(rep["root"]):
+            msg += " Draft moss: press <b>Full detail</b> when it looks right."
         level = "info"
         if not rep.get("surfaces"):
             msg = "%s: it has nothing to grow on (add meshes or groups in step 1)." % verb
@@ -35100,6 +35335,7 @@ class ScatterPanel(QtWidgets.QWidget):
             msg += " Capped at %s vertices per part: lower the amount or the Detail." % format(MI_MAX_VERTS, ",")
             level = "warn"
         self.set_status(msg, level)
+        self._mark_paused()
 
     def _queue(self, typ, key):
         if self._filling or typ != self._type():
@@ -35363,6 +35599,52 @@ class ScatterPanel(QtWidgets.QWidget):
                                        format(faces, ",")), level="fixed")
         else:
             self.set_status("Playing: nothing had changed while paused.")
+        self._refresh()
+
+    @ui_safe
+    def toggle_draft(self):
+        if not sc_drafting():
+            sc_set_draft(True)
+            self.set_status("Draft on: moss edits grow a quick rough look (no strands). Full detail (or Draft off) "
+                            "grows them properly.", level="warn")
+            self._mark_paused()
+            return
+        sc_set_draft(False)
+        if self._draft_count()[0]:
+            self.full_detail()
+        else:
+            self.set_status("Draft off: moss grows in full.")
+            self._mark_paused()
+
+    @ui_safe
+    def full_detail(self):
+        if self._edit_timer.isActive():  # an edit still waiting: it grows first
+            self._edit_timer.stop()
+            self._apply_pending()
+        n, roots = self._draft_count()
+        if not roots:
+            self.set_status("No draft moss to grow.")
+            self._mark_paused()
+            return
+        if sc_paused():
+            sc_full_detail(roots)
+            self.set_status("Paused: the %d draft layer%s grow in full when you press Play." % (
+                n, "" if n == 1 else "s"), level="warn")
+            self._mark_paused()
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            reps = sc_full_detail(roots)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if reps and reps[-1].get("stopped"):
+            self.set_status("Cancelled: paused, the drafts stay rough. Full detail (at Play) grows them.",
+                            level="warn")
+        else:
+            self.set_status("Full detail: grew %d draft layer%s properly in %.2fs (%d group(s), %s faces)." % (
+                n, "" if n == 1 else "s", time.time() - t0, len(reps),
+                format(sum(r.get("faces", 0) for r in reps), ",")), level="fixed")
         self._refresh()
 
     @ui_safe

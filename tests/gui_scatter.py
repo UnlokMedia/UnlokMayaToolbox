@@ -302,6 +302,7 @@ def main():
     jungle_leaves(ns, panel, window)
     moss_and_specks(ns, panel, window)
     pause_play(ns, panel, window)
+    draft_mode(ns, panel, window)
 
 
 def pause_play(ns, panel, window):
@@ -376,7 +377,7 @@ def pause_play(ns, panel, window):
     keep = ns["MOSS_WARN_CELLS"]
     ns["MOSS_WARN_CELLS"] = 1000
     v2 = verts(moss, "moss")
-    panel.f["Moss"]["coverage"].setValue(0.42)
+    panel.f["Moss"]["coverage"].setValue(0.37)  # (a value no other section grows: a cached bed is quick, so never too big)
     panel._pending.add("coverage")
     panel._apply_pending()
     pump()
@@ -388,6 +389,80 @@ def pause_play(ns, panel, window):
     pump()
     check("... Play grows it anyway", not ns["sc_paused"]() and verts(moss, "moss") != v2, panel.status.text())
     ns["MOSS_WARN_CELLS"] = keep
+
+
+def draft_mode(ns, panel, window):
+    """Draft (the user: "scattering moss is slowwwwwww"): on, a moss edit
+    grows a quick rough look (the row marked, no strands), Full detail
+    grows it properly, Draft off with no drafts left just says so."""
+    cmds.file(new=True, force=True)
+    _SG.clear()
+    grp, nodes = quiet(porch)
+    shade(list(nodes.values()), "testWood", (0.42, 0.34, 0.25))
+    cmds.select([nodes["roof"], nodes["sill"], nodes["floor"]])
+    panel._sync_from_selection()
+    panel.start_type.setCurrentIndex(panel.start_type.findText("Moss"))
+    panel._show_layer()
+    panel.new_btn.click()
+    pump()
+    root, moss = panel._root, panel._lid
+    shade_part(ns["sc_parts"](root)[moss + "/moss"], "moss")
+
+    def verts(part):
+        node = ns["sc_parts"](root).get(moss + "/" + part)
+        return cmds.polyEvaluate(node, vertex=True) if node and cmds.getAttr(node + ".visibility") else 0
+
+    def row():
+        return [panel.layer_list.item(k).text() for k in range(panel.layer_list.count())
+                if panel.layer_list.item(k).data(QtCore.Qt.UserRole) == moss][0]
+
+    def edit(value):
+        panel.f["Moss"]["coverage"].setValue(value)
+        panel._pending.add("coverage")
+        t0 = time.time()
+        panel._apply_pending()
+        pump()
+        return time.time() - t0
+
+    t_full = edit(0.6)
+    full = (verts("moss"), verts("strands"))
+    check("Draft and Full detail show under Pause, Draft off, nothing to grow in full",
+          panel.draft_btn.isVisible() and not panel.draft_btn.isChecked() and not panel.full_btn.isEnabled(),
+          panel.draft_label.text())
+    panel.draft_btn.click()
+    pump()
+    check("Draft on: the button lights, the line says what it does", panel.draft_btn.isChecked() and
+          ns["sc_drafting"]() and "quick rough look" in panel.draft_label.text(), panel.draft_label.text())
+    edit(0.52)  # the first draft lays its coarse grid out
+    t_draft = edit(0.53)  # (not 0.55: the group grew in full at that when made, so that comes from the cache)
+    d = (verts("moss"), verts("strands"))
+    check("a moss edit in Draft: quick, rough, the layer marked (draft)", d[1] == 0 and 0 < d[0] < full[0] and
+          "(draft)" in row() and panel.full_btn.isEnabled() and "Full detail" in panel.status.text() and
+          t_draft < t_full, "%.2fs (full %.2fs), %s vs %s | %s | %s" % (t_draft, t_full, d, full, row(),
+                                                                        panel.status.text()))
+    window.grab().save(os.path.join(OUT, "15_panel_draft.png"))
+    cmds.select(clear=True)
+    look(*VIEWS[0][1:])
+    snap("15_draft_overview.png")
+    look(*VIEWS[2][1:])
+    snap("15_draft_gutter.png")
+    panel.full_btn.click()
+    pump()
+    f = (verts("moss"), verts("strands"))
+    check("Full detail grows it properly, the mark goes", f[0] > d[0] and f[1] > 0 and "(draft)" not in row() and
+          not panel.full_btn.isEnabled() and "grew 1 draft layer" in panel.status.text(),
+          "%s -> %s | %s" % (d, f, panel.status.text()))
+    window.grab().save(os.path.join(OUT, "15_panel_full_detail.png"))
+    cmds.select(clear=True)
+    look(*VIEWS[0][1:])
+    snap("15_full_overview.png")
+    look(*VIEWS[2][1:])
+    snap("15_full_gutter.png")
+    edit(0.5)
+    panel.draft_btn.click()  # Draft off with a draft: grows it in full
+    pump()
+    check("Draft off grows the drafts in full", not ns["sc_drafting"]() and not panel.draft_btn.isChecked() and
+          verts("strands") > 0 and "(draft)" not in row(), panel.status.text())
 
 
 def moss_and_specks(ns, panel, window):

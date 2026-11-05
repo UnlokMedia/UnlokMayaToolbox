@@ -808,6 +808,17 @@ live edit whose moss would take a minute or more isn't started: it
 pauses with a warning; lower Coverage or Detail, or press Play to grow
 it anyway.
 
+**Draft** (under Pause): moss is the slow layer to tune. With Draft on, a
+moss edit grows a quick rough look instead: big cells, no strands or
+capsules, from the same field, so the patches sit where the full moss
+will (on a small yard an edit drops from about 2 s to well under one).
+The layer says *(draft)*. When it looks right press **Full detail** (or
+turn Draft off): every draft layer grows properly, once. A draft stays
+marked when the scene is saved and opened again, Bake grows drafts
+properly first, and other layer types grow as normal. Strands, Strand
+length, Droop and Capsules edits are quick anyway (the moss bed is kept;
+only what stands out of it grows again).
+
 A layer's meshes exist only while they hold something: a moss layer with
 no capsules has no capsule mesh. One that empties while you tune it hides
 (keeping any material you gave it) until Bake.
@@ -1939,7 +1950,11 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   in a new session (one setting grows only its layer, the others read
   back just as growing them gives, meshes and UDIM tiles; a mesh added to
   its surface group grows them all; a live edit too big to grow quickly
-  pauses, Play grows it).
+  pauses, Play grows it); then Draft (a Strands edit keeps the bed; a
+  moss edit in Draft grows a coarse bed with no strands, much faster, in
+  the same place, the other layers as they were; still marked after the
+  scene is opened again; Full detail grows it as a fresh full build does;
+  Bake grows a draft properly first).
 - `tests/gui_scatter.py`: drives the Scatter panel in a real Maya session
   on a shack porch (a group from the Maya group with a leaf piles layer,
   then flat moss, leaves, grass and a sparse moss added through the panel,
@@ -1954,8 +1969,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   fresh porch, and Specks on a window
   pane; then Pause, a layer unticked and moss edited with nothing
   growing, the layers marked (changed), Play growing them and one Ctrl+Z
-  back, a moss edit too big to grow quickly pausing with a warning) and
-  saves pictures to
+  back, a moss edit too big to grow quickly pausing with a warning; then
+  Draft on a fresh porch: a moss edit quick and rough with its row
+  marked (draft), Full detail growing it properly, Draft off growing what's
+  left) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular
