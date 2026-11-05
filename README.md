@@ -760,7 +760,13 @@ you tune them.
    first layer is (*Start with*, and a preset), then **New Scatter Group
    from Selected** (one Ctrl+Z). It's `scatteredObjects0001_GRP`, with a
    wireframe box round it (`scatteredObjects0001_CTL`, never renders):
-   click the box in the viewport to edit the group. **Add Selected** /
+   click the box in the viewport to edit the group. The box sits beside
+   the group, not in it, so you can drag the group straight into a publish
+   group in the Outliner (even one that's been moved: the scatter stays
+   where it is). Groups made before move their box out the first time the
+   toolbox touches them. A Ctrl+D copy gets a box of its own; a group
+   whose box you deleted still grows, and **Make Box** brings one back.
+   **Add Selected** /
    **Remove** change what it grows on. To keep one mesh of a group bare,
    select it (viewport or Outliner) and press **Remove**: just that mesh
    (or a group inside it) is left out, listed greyed under the group as
@@ -1026,8 +1032,8 @@ stalk at the bottom 20%). *Stacks* gives each shoot / strand / leaf one of
 N stacks (UDIM tiles or atlas columns). Stems are laid out in neat
 columns at one density over *Stem tiles* tiles.
 
-**Names:** `scatteredObjects0001_GRP` holds the box
-`scatteredObjects0001_CTL` and each layer's meshes, named after their
+**Names:** `scatteredObjects0001_GRP` holds each layer's meshes (its box
+`scatteredObjects0001_CTL` sits beside it), named after their
 material: `mossGreen_C_scatteredObjects0001_GEP` (the bed),
 `mossStrand_..._GEP` (shoots and hanging strands), `mossSpore_..._GEP`
 (capsules), `grassDry_..._GEP` (blades: u across, v along),
@@ -2041,7 +2047,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   thinning out going up; two columns in one mesh each on its own; a base,
   shaft and capital as one column; by metres; from the top; the floor as
   it was; leaves off the column tops; ivy vines stopping in the fade at
-  their own heights, leaves thinning out); then ivy over a row of eight
+  their own heights, leaves thinning out); then the box beside its group
+  (dragged into a moved publish group the scatter stays and regrows in
+  place, an old group's box moving out, Ctrl+D copies, Make Box, Draw on
+  never on a box); then ivy over a row of eight
   columns, two sunk into the floor (In all: starts over most columns, low,
   above the floor; Per mesh: every column; Spacing 1 further apart than 0;
   Climb variation: vines reach different heights); then dropped leaves on a yard
@@ -2072,7 +2081,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   marked (draft), Full detail growing it properly, Draft off growing what's
   left; then Height fade on a colonnade: moss and Column base ivy before,
   the fade's rows following Height fade / Fade by, moss climbing each
-  column's foot and ivy stopping part way up after; the Ivy panel's Vines
+  column's foot and ivy stopping part way up after; clicking the box
+  picking its group, the group dragged into a publish group staying in the
+  panel, Make Box after the box is deleted; the Ivy panel's Vines
   are / Spacing / Climb variation rows, Per mesh putting ivy on every
   column) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with

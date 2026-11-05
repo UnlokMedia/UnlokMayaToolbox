@@ -35135,7 +35135,8 @@ def mi_preset(kind, name):
 # The user, 2026-11-03: "a 'build a scatter group' ... it showed a bounding box like the roof does ... in that
 # group there's like a list of stuff in it, you can add / remove / undo and click things to control them". One
 # scatteredObjects####_GRP holds what it scatters onto (meshes and whole groups, read fresh at every regrow),
-# a wireframe box round it to click (scatteredObjects####_CTL) and layers: each its own type (Moss, Grass,
+# a wireframe box round it to click (scatteredObjects####_CTL, beside the group, linked both ways by uuid: the user
+# drags groups into a publish group without it) and layers: each its own type (Moss, Grass,
 # Leaves, Leaf piles, Moss tufts, Ivy), settings, area (picked faces / points), seed, on or off. Two layers of
 # a type each get their own parts (mossGreen_C_..., mossGreen2_C_...). A part mesh exists only while it holds
 # something (the user: empty parts showing as planes at the origin); one that empties while you edit hides
@@ -35155,6 +35156,9 @@ SC_COUNTS = "unlokScatterCounts"   # string on the group: each layer's counts at
 SC_SURF = "unlokScatterSurfaces"   # string on the group: its surfaces' mesh keys at that build
 SC_PART = "unlokScatterPart"       # string on a part's shape: "<layer id>/<part>"
 SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
+SC_BOX_OF = "unlokScatterBoxOf"    # string on the box: its group's uuid
+SC_BOX_ID = "unlokScatterBoxId"    # string on the group: its box's uuid
+SC_BOX_AUTO = "unlokScatterBoxAuto"  # bool on a box made outside the undo queue (a Ctrl+D copy's)
 SC_STEM = "scatteredObjects"
 SC_VERSION = 1
 SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patchiness", "patch_size", "mess")
@@ -35392,13 +35396,25 @@ _SC_PART_NAME = re.compile(r"_C_%s\d{4}_GEP$" % SC_STEM)
 
 def _sc_scatter_mesh(dag):
     """A scatter part's mesh, live or baked, wherever it's been moved to
-    (Bake keeps its unlokScatterPart tag; an older one by its name)."""
+    (Bake keeps its unlokScatterPart tag; an older one by its name), or a
+    group's box."""
     try:
         if om.MFnDependencyNode(dag.node()).hasAttribute(SC_PART):
             return True
         parent = om.MDagPath(dag)
         parent.pop()
-        return bool(_SC_PART_NAME.search(om.MFnDependencyNode(parent.node()).name()))
+        fn = om.MFnDependencyNode(parent.node())
+        return fn.hasAttribute(SC_BOX_ATTR) or bool(_SC_PART_NAME.search(fn.name()))
+    except RuntimeError:
+        return False
+
+
+def _sc_box_mesh(dag):
+    """A scatter group's box (its shape's dag)."""
+    try:
+        parent = om.MDagPath(dag)
+        parent.pop()
+        return om.MFnDependencyNode(parent.node()).hasAttribute(SC_BOX_ATTR)
     except RuntimeError:
         return False
 
@@ -36077,10 +36093,138 @@ def sc_parts(root):
 
 
 def sc_box(root):
+    """A group's box: beside it, linked both ways by uuid (an old one still
+    inside it). None when it's been deleted, or it's a Ctrl+D copy's link
+    to the original's box (sc_fix_box gives a copy its own)."""
+    if cmds.attributeQuery(SC_BOX_ID, node=root, exists=True):
+        uid = cmds.getAttr(root + "." + SC_BOX_ID)
+        found = cmds.ls(uid, long=True) if uid else None
+        if found and _sc_box_of(found[0]) == cmds.ls(root, uuid=True)[0]:
+            return found[0]
     for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
         if cmds.attributeQuery(SC_BOX_ATTR, node=child, exists=True):
             return child
     return None
+
+
+def _sc_box_of(box):
+    """The uuid of the group a box belongs to ("" for an old box: its parent)."""
+    if cmds.attributeQuery(SC_BOX_OF, node=box, exists=True):
+        return cmds.getAttr(box + "." + SC_BOX_OF) or ""
+    return ""
+
+
+def _sc_link_box(root, box):
+    """Link a group and its box both ways by uuid."""
+    for node, attr, other in ((root, SC_BOX_ID, box), (box, SC_BOX_OF, root)):
+        if not cmds.attributeQuery(attr, node=node, exists=True):
+            cmds.addAttr(node, longName=attr, dataType="string")
+        cmds.setAttr(node + "." + attr, cmds.ls(other, uuid=True)[0], type="string")
+
+
+def _sc_make_box(root, auto=False):
+    """A wireframe box for a group, at world level, linked to it (fit it
+    after). auto: made outside the undo queue (sc_sync deletes it when its
+    group is gone, say the Ctrl+D it was made for is undone)."""
+    m = re.match(SC_STEM + r"(\d{4})", short_name(root))
+    num = int(m.group(1)) if m else _th_free_number(SC_STEM + "%04d_CTL")
+    box = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
+                                  name="%s%04d_CTL" % (SC_STEM, num))[0])
+    shape = _log_shape(box)
+    cmds.addAttr(box, longName=SC_BOX_ATTR, attributeType="bool", defaultValue=True)
+    if auto:
+        cmds.addAttr(box, longName=SC_BOX_AUTO, attributeType="bool", defaultValue=True)
+    for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                 "visibleInRefractions"):
+        if cmds.attributeQuery(attr, node=shape, exists=True):
+            cmds.setAttr(shape + "." + attr, False)
+    cmds.setAttr(box + ".overrideEnabled", True)
+    cmds.setAttr(box + ".overrideShading", False)  # wireframe: click its edges to pick the group
+    _sc_link_box(root, box)
+    return box
+
+
+def sc_fix_box(root):
+    """Bring a group up to date, outside the undo queue (the first time
+    the toolbox touches it: the panel picks it, it regrows): its move /
+    rotate / scale unlocked (locked, Maya can't keep it in place when it's
+    dragged under a moved group), an old box inside it moved out beside it
+    (where it is), a Ctrl+D copy (its link is the original's box) given a
+    box of its own (a copy of the box made with it, else a new one round
+    it). Returns its box, or None (deleted: Make Box)."""
+    if not is_scatter(root):
+        return None
+    with NoUndo():
+        for attr in ("translate", "rotate", "scale"):
+            for ax in "XYZ":
+                if cmds.getAttr(root + "." + attr + ax, lock=True):
+                    cmds.setAttr(root + "." + attr + ax, lock=False)
+        box = sc_box(root)
+        if box and not _sc_box_of(box):  # an old box inside the group: out beside it
+            sel = cmds.ls(selection=True, long=True) or []
+            box = long_name(cmds.parent(box, world=True)[0])
+            _sc_link_box(root, box)
+            _sc_reselect(sel, box)
+        elif not box and cmds.attributeQuery(SC_BOX_ID, node=root, exists=True):
+            uid = cmds.getAttr(root + "." + SC_BOX_ID)
+            found = cmds.ls(uid, long=True) if uid else None
+            other = _sc_box_of(found[0]) if found else ""
+            if other and cmds.ls(other) and other != cmds.ls(root, uuid=True)[0]:  # a copy
+                sel = cmds.ls(selection=True, long=True) or []
+                spare = [b for b in _sc_boxes() if b != found[0] and _sc_box_of(b) == other]
+                if spare:  # the group and its box were copied together: that copy is its box
+                    box = spare[0]
+                    _sc_link_box(root, box)
+                else:
+                    box = _sc_make_box(root, auto=True)
+                    _sc_fit_box(root, box, sc_surfaces(sc_data(root)))
+                _sc_reselect(sel, box)
+    return box
+
+
+def _sc_reselect(sel, box):
+    """Put back the selection a box's parent / polyCube changed (the moved
+    box under its new name)."""
+    sel = [box if s.endswith("_CTL") and not cmds.objExists(s) else s for s in sel]
+    sel = [s for s in sel if cmds.objExists(s)]
+    if sel:
+        cmds.select(sel, replace=True)
+    else:
+        cmds.select(clear=True)
+
+
+def _sc_boxes():
+    """Every scatter box in the scene."""
+    return [n for n in cmds.ls(["*." + SC_BOX_ATTR, "*:*." + SC_BOX_ATTR], objectsOnly=True, long=True) or []
+            if cmds.objectType(n, isAType="transform")]
+
+
+def _sc_drop_orphan_boxes():
+    """Delete boxes made outside the undo queue whose group is gone (the
+    Ctrl+D copy they were made for was undone). Returns how many."""
+    gone = [b for b in _sc_boxes() if cmds.attributeQuery(SC_BOX_AUTO, node=b, exists=True) and
+            not cmds.ls(_sc_box_of(b) or "-")]
+    if gone:
+        with NoUndo():
+            cmds.delete(gone)
+    return len(gone)
+
+
+def sc_remake_boxes(roots):
+    """Give groups whose box is gone (deleted, say, to keep it out of a
+    publish) a box again, round what they grew. One Ctrl+Z; the new boxes
+    are selected. Returns [(root, box)] (groups with a box are left alone)."""
+    roots = [r for r in roots if is_scatter(r) and not sc_fix_box(r)]
+    made = []
+    if not roots:
+        return made
+    with UndoChunk("Scatter box"):
+        for root in roots:
+            box = _sc_make_box(root)
+            _sc_fit_box(root, box, sc_surfaces(sc_data(root)))
+            made.append((root, box))
+        cmds.select([b for _, b in made], replace=True)
+    return made
 
 
 def sc_owner(node):
@@ -36093,6 +36237,9 @@ def sc_owner(node):
         node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
     if _sc_attr(node):
         return node, None
+    if _sc_box_of(node):  # a box beside its group
+        found = cmds.ls(_sc_box_of(node), long=True)
+        return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
     parent = cmds.listRelatives(node, parent=True, fullPath=True)
     if not parent or not _sc_attr(parent[0]):
         return None, None
@@ -36127,6 +36274,8 @@ def sc_surfaces(data):
                 if cmds.attributeQuery(SC_PART, node=sh, exists=True):  # baked scatter moved in: added only by hand
                     continue
                 t = cmds.listRelatives(sh, parent=True, fullPath=True)[0]
+                if cmds.attributeQuery(SC_BOX_ATTR, node=t, exists=True):  # a group's box moved in
+                    continue
                 if t not in cand and not _sc_inside(t, left_out):
                     cand.append(t)
         for t in cand:
@@ -36280,6 +36429,7 @@ def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
     setting on a big scatter and Maya seemed frozen). Stopped, nothing
     changes and it pauses (the edits are kept: Play grows them). Returns
     its report ("held" and "stopped" when stopped)."""
+    sc_fix_box(root)
     _sc_note(root)
     data = sc_data(root)
     _MI_BUDGET["on"] = bool(budget)
@@ -36328,6 +36478,7 @@ def sc_sync():
     While paused nothing grows (Play grows it). Returns the groups regrown."""
     done = []
     hold = _SC_HOLD
+    _sc_drop_orphan_boxes()
     for root in sc_groups():
         now = (cmds.getAttr(root + "." + SC_ATTR), cmds.getAttr(root + "." + SC_STAMP) or "")
         last = _SC_LAST.get(root)
@@ -36514,27 +36665,16 @@ def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None
 
 
 def _sc_new_root(data, select=True):
-    """A scatteredObjects####_GRP holding data, with its box (inside the
-    caller's Ctrl+Z). Returns the group."""
+    """A scatteredObjects####_GRP holding data, with its box beside it
+    (inside the caller's Ctrl+Z). Returns the group."""
     num = _th_free_number(SC_STEM + "%04d_GRP")
     root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (SC_STEM, num)))
     cmds.addAttr(root, longName=SC_ATTR, dataType="string")
     cmds.addAttr(root, longName=SC_STAMP, dataType="string")
     _sc_set(root, data)
-    for attr in ("translate", "rotate", "scale"):  # parts are built in world space
-        for ax in "XYZ":
-            cmds.setAttr(root + "." + attr + ax, lock=True)
-    box = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
-                                  name="%s%04d_CTL" % (SC_STEM, num))[0])
-    box = long_name(cmds.parent(box, root)[0])
-    shape = _log_shape(box)
-    cmds.addAttr(box, longName=SC_BOX_ATTR, attributeType="bool", defaultValue=True)
-    for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
-                 "visibleInRefractions"):
-        if cmds.attributeQuery(attr, node=shape, exists=True):
-            cmds.setAttr(shape + "." + attr, False)
-    cmds.setAttr(box + ".overrideEnabled", True)
-    cmds.setAttr(box + ".overrideShading", False)  # wireframe: click its edges to pick the group
+    # move / rotate / scale stay free: dragged under a moved group, Maya keeps it in place (parts are written
+    # through the group's matrix, so they sit on the surfaces wherever it is)
+    _sc_make_box(root)  # beside the group, so it can go into a publish group without its box
     if select:
         cmds.select(root, replace=True)
     return root
@@ -37149,7 +37289,7 @@ class ScatterDrawer(SurfacePathDrawer):
             return out
         out = super(ScatterDrawer, self)._candidate_meshes(use_forced=False)
         if self.mode == SC_DRAW_ON[2]:
-            return out
+            return [d for d in out if not _sc_box_mesh(d)]  # never a group's box (beside its group now)
         baked = tuple(r + "|" for r in sc_groups(baked=True))
         return [d for d in out if not (baked and d.fullPathName().startswith(baked)) and not _sc_scatter_mesh(d)]
 
@@ -37712,6 +37852,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._jobs = []
         self._pending = set()
         self._root = None   # the group being edited (stays while you select meshes to add)
+        self._root_uid = None  # its uuid: followed when it's moved (into a publish group, say)
         self._lid = None    # the layer being edited
         self._filling = False
         self._sel_timer = QtCore.QTimer(self)
@@ -37740,6 +37881,11 @@ class ScatterPanel(QtWidgets.QWidget):
 
     def showEvent(self, event):
         super(ScatterPanel, self).showEvent(event)
+        try:  # groups from before: boxes out beside them, nothing locked
+            for root in sc_groups():
+                sc_fix_box(root)
+        except Exception:
+            traceback.print_exc()
         self._sel_timer.start()
 
     # ============================================================== layout
@@ -37866,6 +38012,12 @@ class ScatterPanel(QtWidgets.QWidget):
                                                     "layer, each with a new seed (one Ctrl+Z).")
         dup_g.clicked.connect(lambda *_: self.new_group_from(layers=True))
         card.add(button_row(from_g, dup_g))
+        self.box_btn = secondary_button("Make Box", "This group has no box (deleted, say, to keep it out of a "
+                                                    "publish): make one round it again, to click (one Ctrl+Z). "
+                                                    "The box sits beside the group, not in it.")
+        self.box_btn.clicked.connect(lambda *_: self.make_box())
+        self.box_btn.setVisible(False)
+        card.add(self.box_btn)
         col.addWidget(card)
 
         # ---- 2. layers
@@ -38061,8 +38213,17 @@ class ScatterPanel(QtWidgets.QWidget):
         self.status.setText('<span style="color:%s">%s</span>' % (color, text))
 
     def _alive(self):
-        if self._root and not is_scatter(self._root):
-            self._root, self._lid = None, None
+        if self._root and not is_scatter(self._root):  # moved (dragged into a publish group, say): follow it
+            found = cmds.ls(self._root_uid, long=True) if self._root_uid else None
+            if found and is_scatter(found[0]):
+                self._root = found[0]
+            else:
+                self._root, self._lid = None, None
+        if self._root:
+            uid = cmds.ls(self._root, uuid=True)[0]
+            if uid != self._root_uid:  # a group the panel hasn't had yet: bring it up to date (its box)
+                self._root_uid = uid
+                sc_fix_box(self._root)
         return self._root
 
     def _data(self):
@@ -38367,6 +38528,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self.draw_label.setText(("Drawing: %d stroke%s." % (n, "" if n == 1 else "s")) +
                                 (" Ctrl+Z takes the last back, Enter stops." if drawing else "") if n or drawing
                                 else "")
+        self.box_btn.setVisible(bool(root) and sc_box(root) is None)
         self.step_group.set_state("done" if root else "current")
         self.step_layers.set_state("current" if root else "todo")
         self.step_look.set_state("current" if root and self._lid else "todo")
@@ -38893,6 +39055,13 @@ class ScatterPanel(QtWidgets.QWidget):
         if found:
             cmds.select(found, replace=True)
         self.set_status("Selected %d scatter group(s)." % len(found) if found else "No scatter groups in the scene.")
+
+    @ui_safe
+    def make_box(self):
+        made = sc_remake_boxes([self._root] if self._alive() else sc_groups())
+        self.set_status("Made a box for %s." % ", ".join(short_name(r) for r, _ in made) if made else
+                        "Every scatter group has its box.", level="fixed" if made else "info")
+        self._refresh()
 
     @ui_safe
     def bake(self):

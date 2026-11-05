@@ -219,6 +219,38 @@ def main():
     piles = data["layers"][0]["id"]
     check("the first layer has the preset", ns["sc_settings"](data["layers"][0])["creases"] == 1.3)
 
+    # --- the box beside the group: click it, drag the group into a publish group, delete the box, Make Box
+    bx = ns["sc_box"](root)
+    cmds.select(clear=True)
+    panel._sync_from_selection()
+    cmds.select(bx)
+    panel._sync_from_selection()
+    pump()
+    check("the box is beside the group, and clicking it picks the group",
+          not cmds.listRelatives(bx, parent=True) and panel._root == root and panel.box_btn.isHidden())
+    pub = cmds.group(empty=True, world=True, name="publish_GRP")
+    cmds.xform(pub, translation=(5, 2, 0), rotation=(0, 20, 0))
+    moved = cmds.ls(cmds.parent(root, pub)[0], long=True)[0]
+    cmds.select(clear=True)
+    panel._refresh()
+    pump()
+    check("dragged into a moved publish group, the panel still edits it", panel._root == moved and
+          panel.layer_list.count() == 1 and ns["sc_box"](moved) == bx, str(panel._root))
+    cmds.delete(bx)
+    panel._refresh()
+    pump()
+    check("its box deleted: Make Box shows", not panel.box_btn.isHidden())
+    panel.box_btn.click()
+    pump()
+    nb = ns["sc_box"](moved)
+    check("Make Box puts one back beside it", nb and not cmds.listRelatives(nb, parent=True) and
+          panel.box_btn.isHidden(), panel.status.text())
+    cmds.parent(moved, world=True)
+    cmds.delete(pub)
+    cmds.select(root)
+    panel._sync_from_selection()
+    pump()
+
     # --- add layers through the panel
     def add(typ, edits):
         panel.add_type.setCurrentIndex(panel.add_type.findText(typ))

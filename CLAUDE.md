@@ -826,13 +826,30 @@
   `sc_set_surfaces`, `sc_update` (live), `sc_regrow`, `sc_sync`,
   `bake_scatter`, `sc_selection`, `sc_owner`, `sc_new_group_from`; panel
   `ScatterPanel`.
-  - **Scene:** `scatteredObjects####_GRP` (transforms locked: parts are
-    world space) with `unlokScatter` JSON {surfaces: [uuid], udim, next,
+  - **Scene:** `scatteredObjects####_GRP` (transforms free: `_rope_fill`
+    writes parts through their inclusive matrix, so they sit on the
+    surfaces under any parent; locked, Maya's parent couldn't compensate
+    and the scatter jumped by a moved parent's offset) with `unlokScatter`
+    JSON {surfaces: [uuid], udim, next,
     layers: [{id "L<n>", type (`SC_TYPES`), tag ("" / "2"...: the number
     after the material in part names), name, on, s (only the type's keys,
     `sc_defaults` under it), seeds, faces}]}; a box
     `scatteredObjects####_CTL` (`unlokScatterBox`, wireframe, no render
-    flags) refit round the visible parts after each build. Parts
+    flags) refit round the visible parts after each build. The box is
+    beside the group at world level (the user, 2026-11-05: "move them into
+    my publish thing without having to move the bounding boxes out of
+    them"), linked both ways by uuid (`unlokScatterBoxId` on the group,
+    `unlokScatterBoxOf` on the box; `sc_box` checks both, `sc_owner` reads
+    the box's). `sc_fix_box` (NoUndo; from `sc_regrow`, the panel's
+    `_alive` on a group it hasn't had, its showEvent over every group):
+    unlocks old groups, parents an old box inside out to world (keeps its
+    place), gives a Ctrl+D copy (link to another group's box) the copied
+    box made with it if there is one, else a new `unlokScatterBoxAuto`
+    box (`sc_sync` deletes those whose group is gone: an undone Ctrl+D).
+    No box: grows fine; `sc_remake_boxes` (panel Make Box, one Ctrl+Z).
+    `_sc_scatter_mesh` / `_sc_box_mesh` keep Draw on off boxes;
+    `sc_surfaces` skips a box moved into a surface group. The panel
+    follows its group by uuid when it's reparented. Parts
     `<material><tag>_C_scatteredObjects####_GEP` tagged `unlokScatterPart`
     "<layer id>/<part>", `unlokMossIvyVerts`, UV ready / stacked.
     Surfaces: a mesh, or every visible mesh under a stored group, read at

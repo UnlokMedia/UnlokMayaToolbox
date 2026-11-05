@@ -28,6 +28,9 @@ Ivy over a row of columns, two sunk into the floor: In all the vine
 starts spread over most columns (low, above the floor), Per mesh every
 column gets its own, Spacing 1 spreads them further than 0; Climb
 variation gives vines different heights.
+The box beside its group: dragged into a moved publish group the
+scatter stays, an old group's box moves out, Ctrl+D copies, Make Box,
+Draw on never on a box.
 Pause: edits are saved and nothing grows; Play grows each changed layer
 once and is one Ctrl+Z. An old scatter opened again: one setting grows
 only its layer; a live edit too big to grow quickly pauses. Draft moss:
@@ -1637,7 +1640,149 @@ def ivy_columns():
                                                                     min(even)))
 
 
+def box_outside():
+    """The box sits beside its group, linked both ways (the user: "move
+    them into my publish thing without having to move the bounding boxes
+    out of them"): the group dragged under a moved, rotated, scaled
+    publish group keeps its scatter where it was, and regrows on its
+    surfaces when everything moves together; an old group (box inside,
+    locked) is brought up to date the first time it regrows; Ctrl+D
+    copies get a box of their own (undoing the copy takes it away); a
+    deleted box: still grows, Make Box brings it back; New Group from This
+    and Duplicate Group have theirs beside them; Draw on never lands on a
+    box, a surface group never scatters onto one."""
+    tb = load_toolbox()
+    sn = tb["short_name"]
+    cmds.file(new=True, force=True)
+    cmds.undoInfo(state=True, infinity=True)
+    grp = cmds.group(empty=True, name="yard_GRP")
+    floor = box("floor", (30, 1, 20), (0, -0.5, 0), grp)
+    box("crate", (6, 6, 6), (6, 3, 2), grp)
+    root = tb["create_scatter_group"]([grp], "Leaf piles", {"coverage": 0.8})["root"]
+    bx = tb["sc_box"](root)
+    locked = [a for a in ("tx", "ry", "sz") if cmds.getAttr(root + "." + a, lock=True)]
+    check("the box is beside the group, not in it, linked both ways",
+          bx and not cmds.listRelatives(bx, parent=True) and
+          bx not in (cmds.listRelatives(root, children=True, fullPath=True) or []) and
+          tb["sc_owner"](bx) == (root, None), "%s | %s" % (bx, tb["sc_owner"](bx)))
+    check("the group's move / rotate / scale aren't locked", not locked, str(locked))
+
+    def world_pts():
+        out = []
+        for node in tb["sc_parts"](root).values():
+            if cmds.getAttr(node + ".visibility"):
+                out.extend(points(tb, node))
+        return out
+
+    def bbox(pts):
+        return [min(q[k] for q in pts) for k in range(3)] + [max(q[k] for q in pts) for k in range(3)]
+
+    def near(a, b, tol=0.05):
+        return max(abs(x - y) for x, y in zip(a, b)) < tol
+
+    before = bbox(world_pts())
+    pub = cmds.group(empty=True, world=True, name="publish_GRP")
+    cmds.xform(pub, translation=(10, 3, -4), rotation=(0, 30, 0), scale=(2, 2, 2))
+    root = cmds.ls(cmds.parent(root, pub)[0], long=True)[0]
+    check("dragged under a moved, rotated, scaled publish group, the scatter stays where it was",
+          near(bbox(world_pts()), before) and tb["sc_box"](root) == bx and tb["sc_owner"](bx) == (root, None),
+          "%s vs %s" % (bbox(world_pts()), before))
+    rep = tb["sc_regrow"](root)
+    check("... and regrows there in the same place", rep.get("faces") and near(bbox(world_pts()), before, 0.2),
+          "%s vs %s" % (bbox(world_pts()), before))
+    grp = cmds.ls(cmds.parent(grp, pub)[0], long=True)[0]
+    cmds.xform(pub, translation=(14, 3, -4))
+    moved = bbox(world_pts())
+    tb["sc_regrow"](root)
+    check("everything moved together: it regrows on the surfaces where they are now",
+          near(bbox(world_pts()), moved, 0.2) and abs(moved[0] - before[0] - 4.0) < 0.2,
+          "%s vs %s" % (bbox(world_pts()), moved))
+    cmds.parent(root, world=True)
+    cmds.parent(grp, world=True)
+    cmds.delete(pub)
+    root = cmds.ls("scatteredObjects0001_GRP", long=True)[0]
+    grp = cmds.ls("yard_GRP", long=True)[0]
+
+    # --- an old group: its box inside it, move / rotate / scale locked
+    old = tb["create_scatter_group"]([grp], "Leaf piles", {"coverage": 0.5})["root"]
+    obox = tb["sc_box"](old)
+    cmds.xform(obox, translation=(1, 2, 3))
+    obox = cmds.ls(cmds.parent(obox, old)[0], long=True)[0]
+    for node, attr in ((old, tb["SC_BOX_ID"]), (obox, tb["SC_BOX_OF"])):
+        cmds.deleteAttr(node + "." + attr)
+    for a in ("translate", "rotate", "scale"):
+        for ax in "XYZ":
+            cmds.setAttr(old + "." + a + ax, lock=True)
+    check("(an old group: its box inside it)", tb["sc_box"](old) == obox and tb["sc_owner"](obox) == (old, None))
+    q0 = cmds.undoInfo(q=True, undoName=True)
+    tb["sc_regrow"](old)
+    nb = tb["sc_box"](old)
+    check("an old group's box moves out beside it the first time it regrows, linked, not on the undo queue",
+          nb and not cmds.listRelatives(nb, parent=True) and sn(nb) == sn(obox) and
+          tb["sc_owner"](nb) == (old, None) and cmds.undoInfo(q=True, undoName=True) == q0,
+          "%s | %s" % (nb, cmds.undoInfo(q=True, undoName=True)))
+    check("... and the group is unlocked", not any(cmds.getAttr(old + "." + a, lock=True) for a in ("tx", "ry", "sz")))
+    cmds.delete(old, nb)
+
+    # --- Ctrl+D copies
+    cmds.select(root)
+    copy = cmds.ls(cmds.duplicate(root)[0], long=True)[0]
+    check("a Ctrl+D copy has no box of its own yet (its link is the original's)",
+          tb["sc_box"](copy) is None and tb["sc_box"](root) == bx)
+    cb = tb["sc_fix_box"](copy)
+    check("... the toolbox gives it one, linked, round its scatter", cb and cb != bx and
+          tb["sc_owner"](cb) == (copy, None) and tb["sc_box"](root) == bx and tb["sc_owner"](bx) == (root, None),
+          "%s %s" % (cb, tb["sc_owner"](cb or bx)))
+    check("... and it grows like any group", tb["sc_regrow"](copy).get("faces"))
+    cmds.undo()  # the Ctrl+D
+    tb["sc_sync"]()
+    check("undoing the Ctrl+D takes the box made for it away too", not cmds.objExists(copy) and
+          not cmds.ls(cb) and tb["sc_box"](root) == bx)
+    two = cmds.duplicate([root, bx], returnRootsOnly=True)
+    copy2, box2 = [cmds.ls(n, long=True)[0] for n in two]
+    got = tb["sc_fix_box"](copy2)
+    check("the group and its box copied together: that copy is its box", got == box2 and
+          tb["sc_owner"](box2) == (copy2, None) and tb["sc_owner"](bx) == (root, None), "%s vs %s" % (got, box2))
+    cmds.delete(copy2, box2)
+
+    # --- a deleted box
+    cmds.delete(bx)
+    rep = tb["sc_regrow"](root)
+    check("a group whose box is deleted still grows", rep.get("faces") and tb["sc_box"](root) is None)
+    made = tb["sc_remake_boxes"]([root])
+    nb = tb["sc_box"](root)
+    check("Make Box: one round it again, beside it, linked, one Ctrl+Z", made and nb and
+          not cmds.listRelatives(nb, parent=True) and tb["sc_owner"](nb) == (root, None) and
+          cmds.undoInfo(q=True, undoName=True) == "Scatter box", cmds.undoInfo(q=True, undoName=True))
+    cmds.undo()
+    check("... Ctrl+Z takes it away", tb["sc_box"](root) is None)
+    cmds.redo()
+    bx = tb["sc_box"](root)
+
+    # --- New Group from This / Duplicate Group
+    for layers in (False, True):
+        new = tb["sc_new_group_from"](root, layers=layers)["root"]
+        b = tb["sc_box"](new)
+        check("%s: its box beside it, linked" % ("Duplicate Group" if layers else "New Group from This"),
+              b and b != bx and not cmds.listRelatives(b, parent=True) and tb["sc_owner"](b) == (new, None))
+
+    # --- never drawn on, never scattered onto
+    drawer = tb["ScatterDrawer"]()
+    for mode in ("Surfaces", "Everything"):
+        drawer.mode, drawer.only = mode, []
+        on = [cmds.listRelatives(d.fullPathName(), parent=True, fullPath=True)[0] for d in drawer._candidate_meshes()]
+        check("Draw on %s: never on a group's box" % mode, not any(n.endswith("_CTL") for n in on),
+              str([sn(n) for n in on]))
+    bx = cmds.ls(cmds.parent(bx, grp)[0], long=True)[0]
+    check("a box moved into a surface group isn't scattered onto",
+          sorted(sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))) == ["crate", "floor"] and
+          tb["sc_box"](root) == bx, str([sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))]))
+    tb["bake_scatter"]([root])
+    check("Bake still drops the box", not cmds.ls(bx))
+
+
 try:
+    box_outside()
     run()
     drawing()
     draw_on()
