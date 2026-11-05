@@ -31057,6 +31057,7 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
     spots, cands = _moss_field(surf, sampler, s, R)
     fade = _mi_fade(surf.nodes, s)
+    paint = s.get("_paint")  # the layer's influence paint (_MiPaint), or None
     if fade is not None and not s.get("_up_only"):  # moss up a column's sides (the fade decides how high)
         scores = [moss_score(sp, dict(s, slope=max(float(s["slope"]), 90.0))) for sp in spots]
     else:
@@ -31096,6 +31097,10 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
             if f < 1.0:
                 g = 1.0 - f  # coverage x f, and the best spots too near the top: patches thinning out
                 margin = margin - g * (1.0 - thr) - 0.6 * g * g * g if f > 0.0 else -1.0
+        if paint is not None:  # influence paint: more coverage where it's painted in, less where out
+            k = paint.at(p)
+            margin = -1.0 if thr >= 1.0 and k <= 0.0 else _sc_paint_margin(margin, k, 1.0 - thr)  # (Coverage 0:
+            # only where it's painted in)
         rows.append((margin, occ / tw, edge / tw))
     return spots, cands, rows
 
@@ -32608,18 +32613,20 @@ MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "
 _MI_MOSS_BUILT = collections.OrderedDict()  # (meshes, settings but those, seeds, faces) -> (finished bed, clumps)
 
 
-def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=False):
+def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=False, paint=None):
     """Grow a moss patch on meshes: {"moss": the bed (Style Carpet: one
     continuous shell; Clumps: separate cushions), "strands": shoots and
     hanging strands, "capsules": sporophytes, "clumps", "capped"} (world
     space). Detail sets how fine the bed is and what stands out of it.
     draft: a quick look while editing (a carpet bed in Proxy's coarse cells,
     nothing standing out of it), from the same field: the same patches in
-    the same places."""
+    the same places. paint: influence paint (_MiPaint)."""
     s = mi_settings_only("Moss", s)
     surf = _mi_rest_surface(surf or _MiSurface(nodes), s)  # the surface the render will show (Surface)
+    if paint is not None:
+        s["_paint"] = paint
     empty = {"moss": _mi_mesh(), "strands": _mi_mesh(), "capsules": _mi_mesh(), "clumps": 0, "capped": False}
-    if not surf.items or float(s["coverage"]) <= 0.0:
+    if not surf.items or (float(s["coverage"]) <= 0.0 and not (paint is not None and paint.top > 0.0)):
         return empty
     if draw is not None:
         faces = _mi_mask_and(faces, draw.faces)
@@ -32661,21 +32668,28 @@ IVY_OUTLINE = ((0.0, 0.5), (0.1, 0.84), (0.25, 0.98), (0.4, 1.0), (0.55, 0.92), 
 IVY_MAX_POINTS = 60000
 
 
-def _ivy_auto_seeds(surf, sampler, count, seed, spacing):
+def _ivy_auto_seeds(surf, sampler, count, seed, spacing, paint=None):
     """count seed points at the bottom of the meshes, spread apart (farthest
-    first among the lowest 12% of random points)."""
+    first among the lowest 12% of random points). paint (influence): fewer
+    start where it's painted out, and where it's painted in comes first."""
     if not sampler.total or count <= 0:
         return []
     pool = []
+    rank = {}
     for i in range(max(60, count * 30)):
         r = _rand12(seed, i, 41, 9)
         p, tn = sampler.point(r[0], r[1], r[2])
         if tn[1] > 0.9 or tn[1] < -0.5:  # tops and undersides: vines start on the sides
             continue
+        if paint is not None:
+            k = paint.at(p)
+            if k < 0.0 and r[3] >= 1.0 + k:
+                continue
+            rank[p] = -k if k > 0.05 else 0.0
         pool.append((p, tn))
     if not pool:
         pool = [sampler.point(*_rand12(seed, i, 43, 9)[:3]) for i in range(count * 10)]
-    pool.sort(key=lambda x: x[0][1])
+    pool.sort(key=lambda x: (rank.get(x[0], 0.0), x[0][1]))
     low = pool[:max(count, int(len(pool) * 0.12))]
     out = [low[0]]
     while len(out) < count and len(out) < len(low):
@@ -32710,6 +32724,8 @@ def ivy_walk(surf, seeds, s):
     cell = crowd
     grid = {}
     fade = _mi_fade(surf.nodes, s)  # Height fade: a vine stops where it fades below its own cut
+    if s.get("_paint") is not None:  # influence paint too: painted out it stops, painted in it goes on
+        fade = _MiInfluence(fade, s["_paint"])
 
     def cell_of(p):
         return (int(math.floor(p[0] / cell)), int(math.floor(p[1] / cell)), int(math.floor(p[2] / cell)))
@@ -33103,11 +33119,14 @@ def ivy_leaf_mesh(surf, vines, X_list, s, rows):
     return tuple(M), leaves, capped
 
 
-def ivy_build(nodes, s, seeds=None, surf=None, draw=None):
+def ivy_build(nodes, s, seeds=None, surf=None, draw=None, paint=None):
     """Grow ivy on meshes from seeds (world points; none: Vines automatic
     seeds at the bottom of the meshes): {"stems": mesh, "leaves": mesh,
-    "vines", "leaves_n", "capped"} (world space)."""
+    "vines", "leaves_n", "capped"} (world space). paint: influence paint
+    (_MiPaint): vines avoid what's painted out."""
     s = mi_settings_only("Ivy", s)
+    if paint is not None:
+        s["_paint"] = paint
     surf = surf or _MiSurface(nodes)
     detail = s["detail"] if s["detail"] in IVY_SIDES else "Normal"
     empty = {"stems": _mi_mesh(), "leaves": _mi_mesh(), "vines": 0, "leaves_n": 0, "capped": False}
@@ -33118,7 +33137,7 @@ def ivy_build(nodes, s, seeds=None, surf=None, draw=None):
     if not seeds:
         sampler = _MiSampler(surf.nodes)
         seeds = _ivy_auto_seeds(surf, sampler, max(1, int(s["vines"])), int(s["seed"]),
-                                math.sqrt(sampler.total / max(1, int(s["vines"]))) if sampler.total else 1.0)
+                                math.sqrt(sampler.total / max(1, int(s["vines"]))) if sampler.total else 1.0, paint)
         s = dict(s, vines=len(seeds))  # one vine per automatic seed
     vines = ivy_walk(surf, seeds, s)
     if not vines:
@@ -33162,6 +33181,8 @@ def _debris_field(s):
         fs[key] = s.get(key, MI_FADE_DEFAULTS[key])
     fs["clump_size"] = DEBRIS_FIELD_R
     fs["_up_only"] = True  # crevices and creases don't pull leaves up a wall
+    if s.get("_paint") is not None:
+        fs["_paint"] = s["_paint"]
     return fs
 
 
@@ -34411,18 +34432,21 @@ class _DebrisBuild(object):
                 uvi.extend(quad)
 
 
-def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None):
+def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, paint=None):
     """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
     leaves (scattered and in piles), "tufts": tiny moss cushions, "jungle" /
     "jungle_dry": big leaves, green / dried, "specks" / "dirt": tiny moss
     stars and dirt flakes, "bunches", "leaves_n", "piles", "tufts_n",
-    "jungle_n", "specks_n", "capped"} (world space)."""
+    "jungle_n", "specks_n", "capped"} (world space). paint: influence
+    paint (_MiPaint)."""
     s = mi_settings_only("Debris", s)
+    if paint is not None:
+        s["_paint"] = paint
     surf = surf or _MiSurface(nodes)
     empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "jungle": _mi_mesh(),
              "jungle_dry": _mi_mesh(), "specks": _mi_mesh(), "dirt": _mi_mesh(), "bunches": 0, "leaves_n": 0,
              "piles": 0, "tufts_n": 0, "jungle_n": 0, "specks_n": 0, "capped": False}
-    if not surf.items or float(s["coverage"]) <= 0.0:
+    if not surf.items or (float(s["coverage"]) <= 0.0 and not (paint is not None and paint.top > 0.0)):
         return empty
     if draw is not None:
         faces = _mi_mask_and(faces, draw.faces)
@@ -35086,6 +35110,383 @@ def sc_drawing_meshes(strokes):
     return out
 
 
+# ------------------------------------------------------- influence paint
+# The user, 2026-11-05: "more control, like a brush to influence paint, to add / remove influence (would be great
+# if this had subtle ability, like not 100% opacity, but like 10% masking mode to do lots of strokes to subtly
+# influence parts)". A layer's "paint" is an influence from -1 (nothing grows) through 0 (as it grows by itself)
+# to +1 (full), on a sparse grid of SC_PAINT_CELL cells local to each mesh (it follows the mesh; guide meshes are
+# often a few big faces, so it can't live on their vertices). Only cells a stroke changed are kept; the rest of
+# the surface has the base (Flood). Stored as {"t": [mesh uuids], "b": base, "m": [[cell size in the mesh's own
+# units, [i, j, k, value, ...]], ...]}, values in 1 / SC_PAINT_Q steps (so a 10% stroke's soft edge still counts).
+SC_PAINT_CELL = 0.1      # metres: one paint cell
+SC_PAINT_Q = 1000        # stored steps per 1
+SC_PAINT_MODES = ("Add", "Remove", "Smooth")
+SC_PAINT_DEFAULTS = {"mode": "Add", "radius": 0.3, "opacity": 0.1}  # radius in metres
+SC_PAINT_TRI_CELL = 0.5  # metres: the grid a dab finds its triangles in
+_SC_PAINT_TRIS = collections.OrderedDict()  # mesh state -> (cell, {cell: triangle ids}, big ids, triangles)
+
+
+def _sc_paint_xform(m16, p):
+    """A point times a 4x4 matrix given as 16 floats (row vectors, like MPoint * MMatrix)."""
+    x, y, z = p
+    return (x * m16[0] + y * m16[4] + z * m16[8] + m16[12], x * m16[1] + y * m16[5] + z * m16[9] + m16[13],
+            x * m16[2] + y * m16[6] + z * m16[10] + m16[14])
+
+
+def _sc_paint_falloff(t):
+    """The brush: 1 at its centre easing to 0 at its rim (t = distance / radius)."""
+    if t >= 1.0:
+        return 0.0
+    u = 1.0 - t * t
+    return u * u
+
+
+def _sc_paint_space(node):
+    """(uuid, world matrix, inverse, scale) of a mesh's transform as 16 floats, or None."""
+    if not node or not cmds.objExists(node):
+        return None
+    if cmds.objectType(node, isAType="shape"):
+        node = cmds.listRelatives(node, parent=True, fullPath=True)[0]
+    dag = get_dag_path(node)
+    if dag is None:
+        return None
+    mat = dag.inclusiveMatrix()
+    m16 = list(mat)
+    scale = (sum(math.sqrt(m16[4 * r] ** 2 + m16[4 * r + 1] ** 2 + m16[4 * r + 2] ** 2) for r in range(3)) / 3.0)
+    return cmds.ls(node, uuid=True)[0], m16, list(mat.inverse()), max(scale, 1e-9)
+
+
+def _sc_paint_tris(node):
+    """A mesh's world triangles in a grid (cached while the mesh is unchanged)."""
+    key = _mi_mesh_key(node)
+    hit = _mi_cache_get(_SC_PAINT_TRIS, key)
+    if hit is not None:
+        return hit
+    tris = _mi_triangles(node)[1]
+    cell = SC_PAINT_TRI_CELL / scene_m_per_unit()
+    grid, big = {}, []
+    for ti, (a, b, c, n, f) in enumerate(tris):
+        lo = [int(math.floor(min(a[k], b[k], c[k]) / cell)) for k in range(3)]
+        hi = [int(math.floor(max(a[k], b[k], c[k]) / cell)) for k in range(3)]
+        if (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1) > 512:
+            big.append(ti)
+            continue
+        for i in range(lo[0], hi[0] + 1):
+            for j in range(lo[1], hi[1] + 1):
+                for k in range(lo[2], hi[2] + 1):
+                    grid.setdefault((i, j, k), []).append(ti)
+    hit = (cell, grid, big, tris)
+    _SC_PAINT_TRIS[key] = hit
+    while len(_SC_PAINT_TRIS) > 24:
+        _SC_PAINT_TRIS.popitem(last=False)
+    return hit
+
+
+def _sc_paint_cells(node, p, r, hl, inv):
+    """The cells (keys in the mesh's local grid of size hl) that its surface
+    passes through within r of world point p: each triangle near p is
+    sampled at half a cell where it cuts the sphere."""
+    cell, grid, big, tris = _sc_paint_tris(node)
+    lo = [int(math.floor((p[k] - r) / cell)) for k in range(3)]
+    hi = [int(math.floor((p[k] + r) / cell)) for k in range(3)]
+    ids = set(big)
+    for i in range(lo[0], hi[0] + 1):
+        for j in range(lo[1], hi[1] + 1):
+            for k in range(lo[2], hi[2] + 1):
+                ids.update(grid.get((i, j, k), ()))
+    scale = math.sqrt(inv[0] ** 2 + inv[1] ** 2 + inv[2] ** 2) or 1.0  # world -> local length
+    step = 0.5 * hl / scale  # world spacing of the samples: half a cell
+    r2 = r * r
+    keys = set()
+    fl = math.floor
+    for ti in ids:
+        a, b, c, n, _ = tris[ti]
+        pa = _rl_sub(p, a)
+        d = _rl_dot(pa, n)
+        if d * d >= r2:
+            continue
+        for q in (a, b, c, ((a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0)):
+            e = _rl_sub(q, p)
+            if _rl_dot(e, e) <= r2:  # small triangles: their corners and middle
+                lq = _sc_paint_xform(inv, q)
+                keys.add((int(fl(lq[0] / hl)), int(fl(lq[1] / hl)), int(fl(lq[2] / hl))))
+        e1 = _rl_sub(b, a)
+        L1 = _rl_len(e1)
+        if L1 < 1e-12:
+            continue
+        u = _rl_mul(e1, 1.0 / L1)
+        v = _rl_cross(n, u)
+        ca = _rl_sub(c, a)
+        cx, cy = _rl_dot(ca, u), _rl_dot(ca, v)
+        if abs(cy) < 1e-12:
+            continue
+        rho2 = r2 - d * d
+        rho = math.sqrt(rho2)
+        qx, qy = _rl_dot(pa, u), _rl_dot(pa, v)  # the sphere's circle on the triangle's plane
+        x0, x1 = max(min(0.0, cx), qx - rho), min(max(L1, cx), qx + rho)
+        y0, y1 = max(min(0.0, cy), qy - rho), min(max(0.0, cy), qy + rho)
+        if x0 > x1 or y0 > y1:
+            continue
+        la = _sc_paint_xform(inv, a)
+        lu = (u[0] * inv[0] + u[1] * inv[4] + u[2] * inv[8], u[0] * inv[1] + u[1] * inv[5] + u[2] * inv[9],
+              u[0] * inv[2] + u[1] * inv[6] + u[2] * inv[10])
+        lv = (v[0] * inv[0] + v[1] * inv[4] + v[2] * inv[8], v[0] * inv[1] + v[1] * inv[5] + v[2] * inv[9],
+              v[0] * inv[2] + v[1] * inv[6] + v[2] * inv[10])
+        tol = 1e-6
+        for iy in range(int(math.ceil(y0 / step)), int(fl(y1 / step)) + 1):
+            y = iy * step
+            t = y / cy
+            if t < -tol or t > 1.0 + tol:
+                continue
+            dy2 = (y - qy) * (y - qy)
+            for ix in range(int(math.ceil(x0 / step)), int(fl(x1 / step)) + 1):
+                x = ix * step
+                if (x - qx) * (x - qx) + dy2 > rho2:
+                    continue
+                s = (x - t * cx) / L1
+                if s < -tol or s + t > 1.0 + tol:
+                    continue
+                keys.add((int(fl((la[0] + lu[0] * x + lv[0] * y) / hl)), int(fl((la[1] + lu[1] * x + lv[1] * y) / hl)),
+                          int(fl((la[2] + lu[2] * x + lv[2] * y) / hl))))
+    return keys
+
+
+_SC_NEAR = tuple((i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1))
+
+
+class ScPaint(object):
+    """A layer's influence paint to edit: base (-1..1) and, per mesh uuid,
+    [cell size in its own units, {(i, j, k): value}]. dab / flood / clear
+    change it; dump() is what the layer stores ({} when nothing's painted)."""
+
+    def __init__(self, paint=None):
+        paint = paint or {}
+        q = float(SC_PAINT_Q)
+        self.base = clamp(paint.get("b", 0) / q, -1.0, 1.0)
+        self.meshes = collections.OrderedDict()
+        for uid, entry in zip(paint.get("t") or [], paint.get("m") or []):
+            flat = entry[1]
+            self.meshes[uid] = [float(entry[0]), dict(((flat[k], flat[k + 1], flat[k + 2]),
+                                                       clamp(flat[k + 3] / q, -1.0, 1.0))
+                                                      for k in range(0, len(flat) - 3, 4))]
+        self._start = None
+
+    def begin_stroke(self):
+        """From here until end_stroke, Add / Remove dabs are one stroke: a
+        cell moves at most opacity (x the falloff) from where the stroke
+        found it, however many dabs overlap it - so ten 10% strokes, not
+        one, paint a place in."""
+        self._start = {}
+
+    def end_stroke(self):
+        self._start = None
+
+    def dump(self):
+        q = SC_PAINT_Q
+        b = int(round(self.base * q))
+        uids, ms = [], []
+        for uid, (hl, cells) in self.meshes.items():
+            flat = []
+            for key in sorted(cells):
+                v = int(round(cells[key] * q))
+                if v != b:
+                    flat.extend((key[0], key[1], key[2], v))
+            if flat:
+                uids.append(uid)
+                ms.append([round(hl, 7), flat])
+        if not ms and not b:
+            return {}
+        return {"t": uids, "b": b, "m": ms}
+
+    def count(self):
+        """Cells painted (different from the base)."""
+        return sum(1 for hl, cells in self.meshes.values() for v in cells.values() if abs(v - self.base) >= 0.0005)
+
+    def dab(self, p, radius, opacity, mode, nodes):
+        """One dab of the brush at world point p (radius in scene units) on
+        the meshes (transforms) given: Add / Remove move the cells under it
+        towards +1 / -1 by opacity x the falloff, Smooth towards the average
+        round them. Returns how many cells changed."""
+        r = max(float(radius), 1e-6)
+        o = clamp(float(opacity), 0.0, 1.0)
+        h = SC_PAINT_CELL / scene_m_per_unit()
+        smooth = mode == SC_PAINT_MODES[2]
+        sign = -1.0 if mode == SC_PAINT_MODES[1] else 1.0
+        changed = 0
+        for node in nodes:
+            info = _sc_paint_space(node)
+            if info is None:
+                continue
+            uid, m16, inv, scale = info
+            entry = self.meshes.get(uid)
+            hl = entry[0] if entry else h / scale
+            keys = _sc_paint_cells(node, p, r, hl, inv)
+            if not keys:
+                continue
+            if entry is None:
+                entry = self.meshes[uid] = [hl, {}]
+            cells = entry[1]
+            before = dict(cells) if smooth else cells
+            base = self.base
+            for key in keys:
+                w = _sc_paint_xform(m16, ((key[0] + 0.5) * hl, (key[1] + 0.5) * hl, (key[2] + 0.5) * hl))
+                f = o * _sc_paint_falloff(_rl_len(_rl_sub(w, p)) / r)
+                if f <= 1e-5:
+                    continue
+                v = before.get(key, base)
+                if smooth:
+                    tot = n = 0.0
+                    for dx, dy, dz in _SC_NEAR:
+                        nk = (key[0] + dx, key[1] + dy, key[2] + dz)
+                        nv = before.get(nk)
+                        if nv is None and nk in keys:  # on the surface, not painted yet: the base
+                            nv = base
+                        if nv is not None:
+                            tot += nv
+                            n += 1.0
+                    new = v + f * (tot / n - v)
+                elif self._start is not None:  # in a stroke: up to opacity past where it started
+                    v0 = self._start.setdefault((uid, key), v)
+                    new = clamp(v0 + sign * f, -1.0, 1.0)
+                    new = max(v, new) if sign > 0 else min(v, new)
+                else:
+                    new = clamp(v + sign * f, -1.0, 1.0)
+                if abs(new - v) > 1e-7:
+                    cells[key] = new
+                    changed += 1
+        return changed
+
+    def flood(self, opacity, mode):
+        """Every cell and the base (the whole surface) at once: Add / Remove
+        by opacity, Smooth blurs what's painted."""
+        o = clamp(float(opacity), 0.0, 1.0)
+        if mode == SC_PAINT_MODES[2]:
+            for hl, cells in self.meshes.values():
+                before = dict(cells)
+                for key, v in before.items():
+                    tot = n = 0.0
+                    for dx, dy, dz in _SC_NEAR:
+                        nv = before.get((key[0] + dx, key[1] + dy, key[2] + dz))
+                        if nv is not None:
+                            tot += nv
+                            n += 1.0
+                    cells[key] = v + o * (tot / n - v)
+            return
+        d = -o if mode == SC_PAINT_MODES[1] else o
+        self.base = clamp(self.base + d, -1.0, 1.0)
+        for hl, cells in self.meshes.values():
+            for key in cells:
+                cells[key] = clamp(cells[key] + d, -1.0, 1.0)
+
+    def clear(self):
+        self.base = 0.0
+        self.meshes.clear()
+
+
+class _MiPaint(object):
+    """A layer's influence paint at build time: at(p) = -1..1 at a world
+    point (the painted cells within 1.5 cells, nearer ones counting more;
+    the base where there are none). top: the most anywhere (a layer at
+    Coverage 0 still grows where it's painted in). Its repr goes in the
+    build caches' keys."""
+
+    W0 = 0.005  # how much the base counts against the cells round a point
+
+    def __init__(self, paint):
+        sp = paint if isinstance(paint, ScPaint) else ScPaint(paint)
+        self.base = sp.base
+        self.top = sp.base
+        self.R = 1.5 * SC_PAINT_CELL / scene_m_per_unit()
+        self.grid = {}
+        c = self.R
+        lo, hi = [1e30] * 3, [-1e30] * 3
+        mats = []
+        for uid, (hl, cells) in sp.meshes.items():
+            found = cmds.ls(uid, long=True) or []
+            dag = get_dag_path(found[0]) if found else None
+            if dag is None or not cells:
+                continue
+            m16 = list(dag.inclusiveMatrix())
+            mats.append((uid, tuple(round(v, 6) for v in m16)))
+            for (i, j, k), v in cells.items():
+                w = _sc_paint_xform(m16, ((i + 0.5) * hl, (j + 0.5) * hl, (k + 0.5) * hl))
+                self.grid.setdefault((int(math.floor(w[0] / c)), int(math.floor(w[1] / c)),
+                                      int(math.floor(w[2] / c))), []).append((w[0], w[1], w[2], v))
+                for a in range(3):
+                    lo[a], hi[a] = min(lo[a], w[a]), max(hi[a], w[a])
+                if v > self.top:
+                    self.top = v
+        self.lo = [x - c for x in lo]
+        self.hi = [x + c for x in hi]
+        self.key = hash((json.dumps(sp.dump(), sort_keys=True), tuple(mats)))
+
+    def __repr__(self):
+        return "<influence paint %x>" % (self.key & 0xffffffffffff)
+
+    def at(self, p):
+        x, y, z = p
+        lo, hi = self.lo, self.hi
+        if not self.grid or x < lo[0] or y < lo[1] or z < lo[2] or x > hi[0] or y > hi[1] or z > hi[2]:
+            return self.base
+        c, R2 = self.R, self.R * self.R
+        fx, fy, fz = x / c, y / c, z / c
+        ix, iy, iz = int(math.floor(fx)), int(math.floor(fy)), int(math.floor(fz))
+        xs = (ix, ix - 1 if fx - ix < 0.5 else ix + 1)
+        ys = (iy, iy - 1 if fy - iy < 0.5 else iy + 1)
+        zs = (iz, iz - 1 if fz - iz < 0.5 else iz + 1)
+        sw = self.W0
+        sv = self.W0 * self.base
+        grid = self.grid
+        for i in xs:
+            for j in ys:
+                for k in zs:
+                    for qx, qy, qz, v in grid.get((i, j, k), ()):
+                        d2 = (qx - x) * (qx - x) + (qy - y) * (qy - y) + (qz - z) * (qz - z)
+                        if d2 < R2:
+                            w = 1.0 - d2 / R2
+                            w *= w
+                            sw += w
+                            sv += w * v
+        return clamp(sv / sw, -1.0, 1.0)
+
+
+class _MiInfluence(object):
+    """Ivy: its Height fade (or none) and the layer's paint together, at(p) 0..1."""
+
+    def __init__(self, fade, paint):
+        self.fade, self.paint = fade, paint
+
+    def at(self, p):
+        f = 1.0 if self.fade is None else self.fade.at(p)
+        k = self.paint.at(p)
+        return f + k * (1.0 - f) if k > 0.0 else f * (1.0 + k)
+
+
+def _sc_paint_margin(margin, k, cov):
+    """A spot's coverage margin with influence k painted on it (cov: the
+    layer's Coverage): painted in, its coverage goes up by k of the way to
+    full (plus a little more near +1, so even poor spots fill); painted out,
+    down like a Height fade (Coverage x (1 + k), the best spots thinning
+    out too), none at -1."""
+    if k > 0.0:
+        return margin + k * (1.0 - cov) + 0.3 * k * k * k
+    if k < 0.0:
+        if k <= -0.999:
+            return -1.0
+        g = -k
+        return margin - g * cov - 0.6 * g * g * g
+    return margin
+
+
+def sc_paint_of(layer):
+    """The layer's paint for a build (_MiPaint), or None when nothing's painted."""
+    paint = (layer or {}).get("paint")
+    if not paint:
+        return None
+    mp = _MiPaint(paint)
+    return mp if (mp.grid or mp.base) else None
+
+
 # --------------------------------------------------------------- build
 def _mi_drop_repeats(mesh):
     """A mesh without corners that repeat a vertex: a face's back-to-back
@@ -35128,11 +35529,12 @@ def _sc_build_layer(layer, surf, draft=False):
     strokes = sc_drawing(layer)
     draw = _MiDrawing(strokes, float(s["draw_width"]) / scene_m_per_unit(), s["draw_falloff"], s["draw_follow"],
                       surf.nodes) if strokes else None
+    paint = sc_paint_of(layer)
     counts = {}
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
         ms.update(s)
-        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw, draft=draft)
+        out = moss_build(surf.nodes, ms, surf=surf, seeds=seeds, faces=faces, draw=draw, draft=draft, paint=paint)
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["clumps"] = out.get("clumps", 0)
         if draft:
@@ -35140,7 +35542,7 @@ def _sc_build_layer(layer, surf, draft=False):
     elif typ == "Ivy":
         ivs = dict(IVY_DEFAULTS)
         ivs.update(s)
-        out = ivy_build(surf.nodes, ivs, seeds, surf=surf, draw=draw)
+        out = ivy_build(surf.nodes, ivs, seeds, surf=surf, draw=draw, paint=paint)
         parts = {p: out.get(p) for p, _ in SC_TYPES[typ]["parts"]}
         counts["vines"], counts["leaves"] = out.get("vines", 0), out.get("leaves_n", 0)
     else:
@@ -35149,7 +35551,7 @@ def _sc_build_layer(layer, surf, draft=False):
         for t2, key in SC_DEBRIS_ITEMS.items():
             if t2 != typ:
                 ds[key] = 0.0
-        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw)
+        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw, paint=paint)
         parts = {part: out.get(src) for src, part in SC_DEBRIS_OUT[typ]}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
                   "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0), "specks": out.get("specks_n", 0)}
@@ -35858,6 +36260,8 @@ def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_
             layer["s"]["seed"] = int(layer["s"].get("seed", 1)) + 1
             layer["seeds"], layer["faces"] = list(src.get("seeds") or []), dict(src.get("faces") or {})
             layer["draw"] = json.loads(json.dumps(src.get("draw") or {}))
+            if src.get("paint"):
+                layer["paint"] = json.loads(json.dumps(src["paint"]))
         else:
             layer = _sc_new_layer(data, layer_type, settings)
             if points:
@@ -35911,6 +36315,30 @@ def sc_set_layer(root, lid, on=None, name=None, area=None, drawing=None):
                 _sc_add_drawn_surfaces(data, drawing)
             layer["draw"] = sc_store_drawing(drawing)
     return _sc_change(root, "Scatter layer", edit)
+
+
+def sc_set_paint(root, lid, paint, label="Scatter paint"):
+    """Set a layer's influence paint (an ScPaint or its dump; empty clears
+    it) (one Ctrl+Z: a brush stroke, a Flood, a Clear), then the regrow of
+    that layer (while paused: at Play)."""
+    if isinstance(paint, ScPaint):
+        paint = paint.dump()
+
+    def edit(data):
+        layer = sc_layer(data, lid)
+        if layer is None:
+            return
+        if paint:
+            layer["paint"] = paint
+        else:
+            layer.pop("paint", None)
+    return _sc_change(root, label, edit)
+
+
+def sc_paint(root, lid):
+    """A layer's influence paint to edit (ScPaint)."""
+    layer = sc_layer(sc_data(root), lid) if is_scatter(root) else None
+    return ScPaint((layer or {}).get("paint"))
 
 
 def sc_move_layer(root, lid, step):
@@ -36498,6 +36926,330 @@ class ScatterDrawer(SurfacePathDrawer):
         return sc_drawing_meshes(self.strokes)
 
 
+SC_PAINT_CTX = "unlokScatterPaintCtx"
+SC_PAINT_SHOW_RGB = {"in": (0.25, 0.95, 0.35), "out": (1.0, 0.28, 0.2), "none": (0.5, 0.5, 0.5)}
+
+
+class ScatterPainter(SurfacePathDrawer):
+    """Paint Influence (the Scatter panel): drag over the group's surfaces to
+    paint the layer being edited (Add / Remove / Smooth by Radius and
+    Opacity; Ctrl swaps Add and Remove, Shift smooths). Dabs fall every
+    quarter radius along the stroke; the stroke is one Ctrl+Z (on_stroke
+    stores it), and with Play on the layer grows again when it ends. While
+    the tool is on, painted cells show as green (in) / red (out) squares
+    and a ring shows the brush: both outside the undo queue, never saved,
+    and gone when the tool is."""
+
+    def __init__(self, on_change=None, on_stroke=None, get_brush=None):
+        super(ScatterPainter, self).__init__(on_stroke=lambda *a: None, get_smoothing=lambda: 0)
+        self.on_change = on_change
+        self.on_paint = on_stroke
+        self.get_brush = get_brush or (lambda: dict(SC_PAINT_DEFAULTS))
+        self.root = self.lid = None
+        self.paint = None
+        self.nodes, self.boxes, self.spaces = [], {}, {}
+        self.surf = None
+        self.show = self.ring = None
+        self._spots = {}
+        self._dabbed = False
+        self.last_dab = None
+        self.mode = SC_PAINT_MODES[0]
+        self._last_show = 0.0
+        self.dabs = 0
+
+    # ---------------------------------------------------------- tool
+    def activate(self, root, lid):
+        if cmds.draggerContext(SC_PAINT_CTX, exists=True):
+            cmds.deleteUI(SC_PAINT_CTX)
+        cmds.draggerContext(SC_PAINT_CTX, pressCommand=self._press, dragCommand=self._drag,
+                            releaseCommand=self._release, finalize=self._finalize, space="screen",
+                            cursor="crossHair", undoMode="step")
+        cmds.setToolTo(SC_PAINT_CTX)
+        self.target(root, lid)
+        self._changed()
+
+    @staticmethod
+    def is_active():
+        try:
+            return cmds.currentCtx() == SC_PAINT_CTX
+        except RuntimeError:
+            return False
+
+    def deactivate(self):
+        if self.is_active():
+            cmds.setToolTo("selectSuperContext")
+        self._delete_display()
+        self._changed()
+
+    def shutdown(self):
+        try:
+            self.deactivate()
+        except Exception:
+            traceback.print_exc()
+        self._delete_display()
+        if cmds.draggerContext(SC_PAINT_CTX, exists=True):
+            cmds.deleteUI(SC_PAINT_CTX)
+
+    def _finalize(self):  # the user picked another tool
+        try:
+            self._delete_display()
+        except Exception:
+            pass
+        QtCore.QTimer.singleShot(0, _guarded_call(self._changed))
+
+    def _changed(self):
+        if self.on_change is not None:
+            self.on_change()
+
+    def target(self, root, lid):
+        """Paint this layer of this group (the overlay shows its paint)."""
+        self.root, self.lid = root, lid
+        self.reload()
+
+    def reload(self):
+        """Read the layer's paint and the group's surfaces again (after an
+        undo, a Flood, a surface added)."""
+        self.paint = sc_paint(self.root, self.lid) if self.root and self.lid else None
+        self.nodes, self.boxes, self.spaces = [], {}, {}
+        if self.paint is not None:
+            for node in sc_surfaces(sc_data(self.root)):
+                if _log_shape(node):
+                    self.nodes.append(node)
+                    self.boxes[node] = _mi_world_box(node)
+                    info = _sc_paint_space(node)
+                    if info is not None:
+                        self.spaces[info[0]] = (node, info[1])
+        self.surf = None
+        self._spots = {}
+        self._update_display(force=True)
+
+    def _surface(self):
+        if self.surf is None:
+            self.surf = _MiSurface(self.nodes)
+        return self.surf
+
+    # ------------------------------------------------------ strokes
+    def _press(self):
+        try:
+            x, y, _ = cmds.draggerContext(SC_PAINT_CTX, q=True, anchorPoint=True)
+            self.press_at(x, y, cmds.draggerContext(SC_PAINT_CTX, q=True, modifier=True))
+        except Exception:
+            traceback.print_exc()
+
+    def _drag(self):
+        try:
+            x, y, _ = cmds.draggerContext(SC_PAINT_CTX, q=True, dragPoint=True)
+            self.drag_at(x, y)
+        except Exception:
+            traceback.print_exc()
+
+    def _brush(self):
+        b = dict(SC_PAINT_DEFAULTS)
+        b.update(self.get_brush() or {})
+        return b
+
+    def press_at(self, x, y, mod="none"):
+        """Start a stroke (only the group's surfaces take paint)."""
+        self._reset()
+        self.last_dab = None
+        self._dabbed = False
+        self.anchor = (x, y)
+        self.paint = sc_paint(self.root, self.lid) if self.root and self.lid and is_scatter(self.root) else None
+        if self.paint is None or not self.nodes:
+            self.anchor = None
+            return
+        self.paint.begin_stroke()
+        mode = self._brush()["mode"]
+        if mod == "ctrl" and mode != SC_PAINT_MODES[2]:
+            mode = SC_PAINT_MODES[1] if mode == SC_PAINT_MODES[0] else SC_PAINT_MODES[0]
+        elif mod == "shift":
+            mode = SC_PAINT_MODES[2]
+        self.mode = mode
+        self.candidates = self._make_candidates([get_dag_path(_log_shape(n)) for n in self.nodes])
+        self.last_screen = (x, y)
+        hit = self._cast(x, y)
+        if hit is not None:
+            self._dab((hit[0].x, hit[0].y, hit[0].z))
+            self._update_display()
+
+    def drag_at(self, x, y):
+        if self.anchor is None:
+            return
+        lx, ly = self.last_screen
+        if math.hypot(x - lx, y - ly) < 2.0:
+            return
+        self.last_screen = (x, y)
+        hit = self._cast(x, y)
+        if hit is None:
+            return
+        p = (hit[0].x, hit[0].y, hit[0].z)
+        r = self._radius()
+        if self.last_dab is None:
+            self._dab(p)
+        else:
+            d = _rl_len(_rl_sub(p, self.last_dab))
+            gap = 0.25 * r
+            if d < gap:
+                return
+            n = int(d / gap)
+            a = self.last_dab
+            for i in range(1, n + 1):
+                self._dab(_rl_lerp(a, p, i / float(n)))
+        self._update_display()
+
+    def release(self):
+        try:
+            if self.paint is not None:
+                self.paint.end_stroke()
+            if self._dabbed and self.on_paint is not None and self.paint is not None:
+                self.on_paint(self.paint)
+        finally:
+            self.anchor = None
+            self.last_dab = None
+            self._dabbed = False
+            self._update_display(force=True)
+
+    def _radius(self):
+        return max(1e-4, float(self._brush()["radius"])) / scene_m_per_unit()
+
+    def _dab(self, p):
+        r = self._radius()
+        near = []
+        for node in self.nodes:
+            bb = self.boxes.get(node)
+            if bb is None or not (bb[0] - r > p[0] or bb[3] + r < p[0] or bb[1] - r > p[1] or bb[4] + r < p[1] or
+                                  bb[2] - r > p[2] or bb[5] + r < p[2]):
+                near.append(node)
+        if near:
+            self.paint.dab(p, r, self._brush()["opacity"], self.mode, near)
+            self._dabbed = True
+            self.dabs += 1
+        self.last_dab = p
+        self._place_ring(p, r)
+
+    # ------------------------------------------------------ display
+    def _quiet_node(self, node):
+        for n in [node] + (cmds.listRelatives(node, shapes=True, fullPath=True) or []):
+            om.MFnDependencyNode(get_dag_path(n).node()).setDoNotWrite(True)  # never saved
+        cmds.setAttr(node + ".hiddenInOutliner", 1)
+        cmds.setAttr(node + ".overrideEnabled", 1)
+        cmds.setAttr(node + ".overrideDisplayType", 2)  # can't be picked in the viewport
+
+    def _make_display(self):
+        """The overlay mesh and the brush ring (made when the tool starts, never mid-stroke)."""
+        with NoUndo(), PreserveSelection():
+            if self.show is None or not cmds.objExists(self.show):
+                self.show = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
+                                                     constructionHistory=False, name="scatterPaintShow1")[0])
+                self._quiet_node(self.show)
+                shape = _log_shape(self.show)
+                cmds.setAttr(shape + ".displayColors", 1)
+                for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                             "visibleInRefractions"):
+                    if cmds.attributeQuery(attr, node=shape, exists=True):
+                        cmds.setAttr(shape + "." + attr, False)
+                cmds.setAttr(self.show + ".visibility", False)
+            if self.ring is None or not cmds.objExists(self.ring):
+                self.ring = long_name(cmds.circle(normal=(0, 1, 0), radius=1.0, sections=32, degree=1,
+                                                  constructionHistory=False, name="scatterPaintBrush1")[0])
+                self._quiet_node(self.ring)
+                shape = cmds.listRelatives(self.ring, shapes=True, fullPath=True)[0]
+                cmds.setAttr(shape + ".overrideRGBColors", 1)
+                cmds.setAttr(shape + ".overrideColorRGB", 1.0, 0.85, 0.2)
+                cmds.setAttr(shape + ".overrideEnabled", 1)
+                cmds.setAttr(shape + ".lineWidth", 2.0)
+                if cmds.attributeQuery("alwaysDrawOnTop", node=shape, exists=True):
+                    cmds.setAttr(shape + ".alwaysDrawOnTop", 1)
+                cmds.setAttr(self.ring + ".visibility", False)
+
+    def _delete_display(self):
+        with NoUndo():
+            for node in (self.show, self.ring):
+                if node and cmds.objExists(node):
+                    cmds.delete(node)
+        self.show = self.ring = None
+
+    def _place_ring(self, p, r):
+        if not self.ring or not cmds.objExists(self.ring):
+            return
+        c = self._surface().closest(p)
+        n = c[2] if c else (0.0, 1.0, 0.0)
+        with NoUndo():
+            ft = om.MFnTransform(get_dag_path(self.ring))
+            ft.setTranslation(om.MVector(p[0] + n[0] * 0.02 * r, p[1] + n[1] * 0.02 * r, p[2] + n[2] * 0.02 * r),
+                              om.MSpace.kTransform)
+            ft.setRotation(om.MQuaternion(om.MVector(0.0, 1.0, 0.0), om.MVector(*n)), om.MSpace.kTransform)
+            ft.setScale([r, r, r])
+            if not cmds.getAttr(self.ring + ".visibility"):
+                cmds.setAttr(self.ring + ".visibility", True)
+
+    def shown_cells(self):
+        """[(world point, normal, value)] of the painted cells the overlay shows."""
+        out = []
+        if self.paint is None:
+            return out
+        h = SC_PAINT_CELL / scene_m_per_unit()
+        for uid, (hl, cells) in self.paint.meshes.items():
+            space = self.spaces.get(uid)
+            if space is None:
+                continue
+            m16 = space[1]
+            for key, v in cells.items():
+                if abs(v) < 0.01:
+                    continue
+                spot = self._spots.get((uid, key))
+                if spot is None:
+                    w = _sc_paint_xform(m16, ((key[0] + 0.5) * hl, (key[1] + 0.5) * hl, (key[2] + 0.5) * hl))
+                    c = self._surface().closest(w)
+                    spot = self._spots[(uid, key)] = (c[1], c[2]) if c and c[0] <= 0.55 * h else False
+                if spot:
+                    out.append((spot[0], spot[1], v))
+        return out
+
+    def _update_display(self, force=False):
+        """Rebuild the overlay (at most every 0.15 s mid-stroke)."""
+        if self.paint is None or not self.is_active():
+            self._delete_display()
+            return
+        now = time.time()
+        if not force and now - self._last_show < 0.15:
+            return
+        self._last_show = now
+        if self.show is None or not cmds.objExists(self.show) or self.ring is None or not cmds.objExists(self.ring):
+            if self.anchor is not None:
+                return  # never make nodes mid-stroke
+            self._make_display()
+        h = SC_PAINT_CELL / scene_m_per_unit()
+        half, lift = 0.47 * h, 0.04 * h
+        pts, counts, conn, cols = [], [], [], []
+        grey = SC_PAINT_SHOW_RGB["none"]
+        for p, n, v in self.shown_cells():
+            t1, t2 = _mi_frame(n)
+            o = _rl_add(p, _rl_mul(n, lift))
+            k = len(pts)
+            for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                pts.append(om.MPoint(o[0] + (t1[0] * a + t2[0] * b) * half, o[1] + (t1[1] * a + t2[1] * b) * half,
+                                     o[2] + (t1[2] * a + t2[2] * b) * half))
+            counts.append(4)
+            conn.extend((k, k + 1, k + 2, k + 3))
+            rgb = SC_PAINT_SHOW_RGB["in" if v > 0.0 else "out"]
+            a = min(1.0, abs(v))
+            cols.append(om.MColor((grey[0] + (rgb[0] - grey[0]) * a, grey[1] + (rgb[1] - grey[1]) * a,
+                                   grey[2] + (rgb[2] - grey[2]) * a)))
+        with NoUndo():
+            if not counts:
+                if cmds.getAttr(self.show + ".visibility"):
+                    cmds.setAttr(self.show + ".visibility", False)
+                return
+            shape = _log_shape(self.show)
+            fn = om.MFnMesh(get_dag_path(shape))
+            fn.createInPlace(om.MPointArray(pts), counts, conn)
+            fn = om.MFnMesh(get_dag_path(shape))  # a fresh function set after the topology change
+            fn.setFaceColors(om.MColorArray(cols), list(range(len(counts))))
+            if not cmds.getAttr(self.show + ".visibility"):
+                cmds.setAttr(self.show + ".visibility", True)
+
+
 class ScatterPanel(QtWidgets.QWidget):
     TOOL_NAME = "Scatter"
     TOOL_TIP = "Scatter groups: moss, dry grass, dead leaves, leaf piles, moss tufts and ivy on your meshes, in " \
@@ -36523,6 +37275,8 @@ class ScatterPanel(QtWidgets.QWidget):
         self._undo_timer.setInterval(50)
         self._undo_timer.timeout.connect(_guarded(self._undo_timer, self._after_undo))
         self.drawer = ScatterDrawer(on_change=lambda: self._drawing_changed())
+        self.painter = ScatterPainter(on_change=lambda: self._drawing_changed(),
+                                      on_stroke=lambda paint: self._paint_stroke(paint), get_brush=lambda: self._brush())
         self.draw_sec = {}
         self.clump_sec = {}
         self.fade_sec = {}
@@ -36685,6 +37439,34 @@ class ScatterPanel(QtWidgets.QWidget):
                                                "drawing).")
         clear.clicked.connect(lambda *_: self.set_area(clear=True))
         card.add(button_row(pick, use_d, clear))
+        psec = self.paint_sec = Section("Influence paint", expanded=True)
+        self.paint_mode = SegmentField(SC_PAINT_MODES)
+        psec.add_row("Brush", self.paint_mode, "Add paints the layer in (more of it, even where it wouldn't grow by "
+                                               "itself), Remove paints it out, Smooth softens what's painted. While "
+                                               "painting, Ctrl swaps Add and Remove and Shift smooths.")
+        self.paint_radius = FloatField(0.01, 50.0, 0.02, 2.0, decimals=2, step=0.05)
+        self.paint_radius.setValue(SC_PAINT_DEFAULTS["radius"])
+        psec.add_row("Radius", self.paint_radius, "The brush's radius, in metres.")
+        self.paint_opacity = FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05)
+        self.paint_opacity.setValue(SC_PAINT_DEFAULTS["opacity"])
+        psec.add_row("Opacity", self.paint_opacity, "How far one stroke goes: 0.1 = a tenth of the way, so lots of "
+                                                    "strokes build it up subtly; 1 = all the way at once.")
+        self.paint_btn = secondary_button("Paint Influence", "Paint the layer's influence over the group's surfaces "
+                                                             "(drag; each stroke is one Ctrl+Z). With Play on the "
+                                                             "layer grows again when a stroke ends; paused, at Play.")
+        self.paint_btn.setCheckable(True)
+        self.paint_btn.clicked.connect(lambda *_: self.toggle_paint())
+        flood = secondary_button("Flood", "The brush over the whole layer at once: Add / Remove by Opacity "
+                                          "everywhere (Remove at 1, then paint it in only where you want it), or "
+                                          "Smooth everything painted (one Ctrl+Z).")
+        flood.clicked.connect(lambda *_: self.flood_paint())
+        clear_p = secondary_button("Clear", "Remove the layer's influence paint: it grows as it likes again (one "
+                                            "Ctrl+Z).")
+        clear_p.clicked.connect(lambda *_: self.flood_paint(clear=True))
+        psec.add_full(button_row(self.paint_btn, flood, clear_p))
+        self.paint_label = hint_label("")
+        psec.add_full(self.paint_label)
+        card.add(psec)
         col.addWidget(card)
 
         # ---- 3. layer settings
@@ -36910,6 +37692,8 @@ class ScatterPanel(QtWidgets.QWidget):
         extra = ("  (%d faces)" % fcs) if fcs else (("  (%d points)" % pts) if pts else "")
         if strokes:
             extra += "  (drawn, %d stroke%s)" % (strokes, "" if strokes == 1 else "s")
+        if layer.get("paint"):
+            extra += "  (painted)"
         return layer.get("name", layer["type"]) + extra + ("  (changed)" if changed else
                                                            ("  (draft)" if draft else ""))
 
@@ -37010,7 +37794,14 @@ class ScatterPanel(QtWidgets.QWidget):
         self.step_layers.set_state("current" if root else "todo")
         self.step_look.set_state("current" if root and self._lid else "todo")
         self.step_finish.set_state("todo")
-        if drawing:
+        painting = self._paint_states(root)
+        if painting:
+            b = self._brush()
+            self.next_banner.set_text("Drag over the group's surfaces to paint <b>%s</b> (%s, %d%%). Each stroke is "
+                                      "one Ctrl+Z; Ctrl swaps Add / Remove, Shift smooths." % (
+                                          (self._layer() or {}).get("name", ""), b["mode"],
+                                          int(round(100 * b["opacity"]))), tag="PAINTING", tone="active")
+        elif drawing:
             self.next_banner.set_text("Drag over any surfaces to draw (click for a spot). Ctrl+Z takes the last "
                                       "stroke back. Then <b>Scatter on Drawing</b>.", tag="DRAWING", tone="active")
         elif paused:
@@ -37206,6 +37997,84 @@ class ScatterPanel(QtWidgets.QWidget):
             self._update_states()
         except Exception:
             traceback.print_exc()
+
+    # ------------------------------------------------------ influence paint
+    def _brush(self):
+        return {"mode": self.paint_mode.value(), "radius": self.paint_radius.value(),
+                "opacity": self.paint_opacity.value()}
+
+    def _paint_states(self, root):
+        """Keep the brush on the layer being edited (off with none); the
+        Paint button and the paint's summary. Returns whether it's on."""
+        painting = self.painter.is_active()
+        if painting and (self.painter.root != root or self.painter.lid != self._lid):
+            if root and self._lid:
+                self.painter.target(root, self._lid)
+            else:
+                self.painter.deactivate()
+                painting = False
+        self.paint_btn.setChecked(painting)
+        self.paint_btn.setText("Stop Painting" if painting else "Paint Influence")
+        layer = self._layer() if root else None
+        text = ""
+        if layer is not None and layer.get("paint"):
+            sp = ScPaint(layer["paint"])
+            n = sp.count()
+            text = "Painted: %s cell%s (%s cm squares)" % (format(n, ","), "" if n == 1 else "s",
+                                                           int(round(SC_PAINT_CELL * 100)))
+            if abs(sp.base) >= 0.0005:
+                text += "; everywhere else %+d%% (Flood)" % int(round(100 * sp.base))
+            text += "."
+        elif layer is not None:
+            text = "Nothing painted: the layer grows where it likes."
+        self.paint_label.setText(text)
+        return painting
+
+    @ui_safe
+    def toggle_paint(self):
+        if self.painter.is_active():
+            self.painter.deactivate()
+            return
+        if not (self._alive() and self._layer()):
+            self.set_status("Pick a layer of a scatter group first: the brush paints its influence.", level="warn")
+            self._update_states()
+            return
+        self.painter.activate(self._root, self._lid)
+        self.set_status("Paint over the group's surfaces (%s). Each stroke is one Ctrl+Z; press Stop Painting "
+                        "(or pick another tool) when done." % self._brush()["mode"])
+
+    def _paint_stroke(self, paint):
+        """A stroke ended: stored on the layer (one Ctrl+Z), grown (paused: at Play)."""
+        root, lid = self.painter.root, self.painter.lid
+        if not root or not is_scatter(root):
+            return
+        t0 = time.time()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            rep = sc_set_paint(root, lid, paint)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._report("Painted", rep, t0)
+
+    @ui_safe
+    def flood_paint(self, clear=False):
+        if not (self._alive() and self._lid):
+            self.set_status("Pick a layer of a scatter group first.", level="warn")
+            return
+        sp = sc_paint(self._root, self._lid)
+        if clear:
+            if not sp.dump():
+                self.set_status("Nothing painted on this layer.")
+                return
+            sp.clear()
+        else:
+            b = self._brush()
+            sp.flood(b["opacity"], b["mode"])
+        self._structural("Cleared the paint in" if clear else "Flooded (%s) the paint in" % self._brush()["mode"],
+                         lambda: sc_set_paint(self._root, self._lid, sp, "Scatter paint clear" if clear else
+                                              "Scatter paint flood"))
+        if self.painter.is_active():
+            self.painter.reload()
 
     @ui_safe
     def toggle_drawing(self):
@@ -37471,6 +38340,8 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.set_status("Regrew %d scatter group(s) after the undo / redo." % len(done))
             elif sc_paused():
                 self.set_status("Undo / redo while paused: grows when you press Play.", level="warn")
+            if self.painter.is_active():  # an undone stroke: the overlay shows the paint as it is now
+                self.painter.reload()
             self._refresh()
         except Exception:
             traceback.print_exc()
@@ -37489,6 +38360,10 @@ class ScatterPanel(QtWidgets.QWidget):
             timer.stop()
         try:
             self.drawer.shutdown()
+        except Exception:
+            traceback.print_exc()
+        try:
+            self.painter.shutdown()
         except Exception:
             traceback.print_exc()
         reg = _registry()["jobs"]

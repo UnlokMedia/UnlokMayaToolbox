@@ -846,6 +846,23 @@ past their *Slope limit* (nothing up a wall with a low limit); moss still
 creeps up sheltered walls
 (Crevices).
 
+**Influence paint** (step 2, for the layer being edited): **Paint
+Influence**, then drag over the group's surfaces. *Add* paints the layer
+in (more of it, even where it wouldn't grow by itself), *Remove* paints it
+out, *Smooth* softens what's painted; Ctrl swaps Add and Remove, Shift
+smooths. *Radius* is in metres; *Opacity* is how far one stroke goes: 0.1
+nudges it a tenth of the way, so many strokes build it up subtly, 1 goes
+all the way at once. Painted spots show as green (in) / red (out) squares
+while the brush is on. Each stroke is one Ctrl+Z and the layer grows again
+when it ends (paused: at Play). **Flood** applies the brush to the whole
+layer (Remove at 1, then paint it in only where you want it); **Clear**
+drops the paint. Where nothing is painted the layer grows as before; with
+Coverage 0 it grows only where it's painted in. Moss, grass, leaves, piles,
+jungle leaves, tufts and specks get more or less coverage; ivy vines stop
+where it's painted out and start where it's painted in. It works inside a
+picked area or a drawing, together with the Height fade. The paint follows
+its mesh when it moves; Duplicate copies it.
+
 **Height fade** (every layer type, its own section): growth thins out with
 height on each object, *From base* (densest at the foot, fading going up:
 moss and ivy up columns) or *From top* (hanging from the top). *Fade by*
@@ -2032,6 +2049,17 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   column's foot and ivy stopping part way up after) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
+- `tests/test_scatter_paint.py`: headless influence paint tests (a dab's
+  cells and falloff, 10% strokes building up, Remove, Smooth, Flood /
+  Clear, a 2 m dab's speed; paint set on the layer taking moss, leaves and
+  grass out of / into half a floor with the other half as it was; ivy
+  avoiding a painted-out wall and growing only in a painted-in patch;
+  Coverage 0 growing only along a stroke; one Ctrl+Z per stroke, paused
+  strokes growing at Play, the paint following its mesh, Duplicate, Bake).
+  `tests/gui_scatter_paint.py` (`tests/run_gui_scatter_paint.mel`): the
+  brush in a real Maya, scripted strokes, the overlay, 10% strokes on a
+  wall, Ctrl+Z, Ctrl, Pause / Play, Flood and Clear, with before / after
+  pictures in `tests/_out/scatter_paint`.
 - `tests/test_quad_fill.py`: headless Quad Fill tests. Square, rectangular
   (the lost grid comes back exactly), uneven, L-shaped and odd holes in a
   grid, Offset / Span / Rings variations, a hole in a sphere (within 0.2% of

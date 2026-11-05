@@ -931,6 +931,50 @@
     `_SC_FADE` before More (`fade_sec`, opened for a faded layer),
     `_style_rows` shows by/part/height/soft by Height fade and Fade by
     (`row_lbl`).
+  - **Influence paint** (the user: "a brush to influence paint, to add /
+    remove influence ... not 100% opacity, but like 10% ... lots of strokes
+    to subtly influence parts"): a layer's `paint` = {"t": mesh uuids, "b":
+    base, "m": [[cell size in the mesh's units, [i, j, k, v, ...]]]}, values
+    -1 (none) .. 0 (unpainted, grows as before) .. +1 in 1/`SC_PAINT_Q`
+    steps, on a sparse grid of `SC_PAINT_CELL` (10 cm) cells local to each
+    mesh (follows it; not per vertex: guide meshes are a few big faces, the
+    reason Artisan maps were dropped). Only touched cells are stored; Flood
+    moves the base (unpainted surface) and every cell. Edit with `ScPaint`
+    (`dab(p, radius, opacity, mode, nodes)`: `_sc_paint_cells` samples each
+    triangle near p at half a cell inside the sphere (triangles from
+    `_sc_paint_tris`, a grid cached by mesh key), falloff (1 - t^2)^2;
+    Add / Remove step by opacity x falloff - between `begin_stroke` /
+    `end_stroke` (the brush's press / release) capped at that past where the
+    stroke found each cell, so overlapping dabs don't stack and a 10% stroke
+    adds 10% like Photoshop's stroke opacity - Smooth towards the 3x3x3 average
+    (cells the dab hit but nobody painted count as the base); `flood`,
+    `clear`, `dump`). Stored by `sc_set_paint` through `_sc_change`, so a
+    stroke / Flood / Clear is one Ctrl+Z, pending while paused, regrown at
+    Play, and in the layer JSON (cache keys, readback, Duplicate copies it,
+    Bake keeps it in `unlokScatterBaked` harmlessly). Build: `sc_paint_of` ->
+    `_MiPaint` (world grid of cell centres; `at(p)` = weighted average within
+    1.5 cells, `W0` of the base; `top` lets moss / debris grow at Coverage 0;
+    its repr is the cache token) passed as `paint=` to moss / debris / ivy
+    builds, which put it in `s["_paint"]` after `mi_settings_only`
+    (`_debris_field` copies it). `_moss_margins` after the fade:
+    `_sc_paint_margin` (k > 0: + k (1 - Coverage) + 0.3 k^3; k < 0: like the
+    fade, - g Coverage - 0.6 g^3, -1 at k = -1; Coverage 0: -1 unless painted
+    in), so picked faces / drawings still limit where it's sampled and paint
+    works inside them. Ivy: `_MiInfluence(fade, paint)` stands in for the
+    fade in `ivy_walk` (f + k (1 - f) / f (1 + k): vines stop, leaves thin);
+    `_ivy_auto_seeds` drops painted-out picks by chance and puts painted-in
+    ones first. Brush: `ScatterPainter` (a `SurfacePathDrawer`, context
+    `unlokScatterPaintCtx`, only the group's surfaces; dabs every quarter
+    radius; Ctrl swaps Add / Remove, Shift smooths; `press_at` / `drag_at` /
+    `release` scriptable; reads the paint fresh at each press so undo is
+    honoured) with an overlay mesh of green / red face-coloured squares
+    (cells within 0.55 cell of the surface, rebuilt every 0.15 s mid-stroke
+    by createInPlace, never made mid-stroke) and a ring: NoUndo,
+    doNotWrite, reference display, deleted with the tool. Panel: section
+    "Influence paint" in step 2 (Brush, Radius m, Opacity, Paint Influence /
+    Flood / Clear, `paint_label`), `(painted)` rows, PAINTING banner,
+    `_paint_states` keeps the brush on the layer being edited, `_after_undo`
+    reloads it.
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass
@@ -1113,9 +1157,7 @@
     `cos(limit) - 1e-6`, so a limit of 90 keeps upright faces.
   - `_mi_drop_repeats` cleans faces that repeat a vertex (the moss bed
     makes a few on the porch scene; Maya drops them and `assignUVs` fails).
-  - Not done (phases agreed with the user): an influence brush per layer (own stamp
-    brush; Artisan per-vertex maps tested fine but need dense meshes) (3),
-    bundles / variants per layer (palm, jungle foliage, pine cones; the
+  - Not done (phases agreed with the user): bundles / variants per layer (palm, jungle foliage, pine cones; the
     user's own meshes as a layer type) (4), group presets (5); converting
     an old mossPatch / ivy / debris group into a scatter group.
   - Tests: `tests/test_scatter.py`, `tests/gui_scatter.py` (pictures in
@@ -2409,6 +2451,8 @@ the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 `cmds.redo()` sends no Redo event, so GUI tests call `_rebuild_stale()`.
 Corrugated metal: `tests/test_corrugated_roof.py`. Clay tiles: `tests/test_tile_roof.py`.
 Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
+Scatter influence paint: `tests/test_scatter_paint.py`, GUI `tests/run_gui_scatter_paint.mel` (its
+pictures read the viewport back instead of playblasting, which empties the undo queue its Ctrl+Z checks need).
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
 (and `python tools/embed_reframe.py --check`). Launch time and every tool
