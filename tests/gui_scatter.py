@@ -466,6 +466,25 @@ def draft_mode(ns, panel, window):
     check("Draft off grows the drafts in full", not ns["sc_drafting"]() and not panel.draft_btn.isChecked() and
           verts("strands") > 0 and "(draft)" not in row(), panel.status.text())
 
+    def saved():
+        layer = [lay for lay in ns["sc_data"](root)["layers"] if lay["id"] == moss][0]
+        return ns["sc_settings"](layer)["coverage"]
+
+    # a slow layer (the speed pass: a drag at High queued a rebuild per tick): held slider, one update on release
+    field = panel.f["Moss"]["coverage"]
+    panel._slow = True
+    field.slider.setSliderDown(True)
+    field.setValue(0.47)
+    panel._pending.add("coverage")
+    panel._apply_pending()
+    held = "coverage" in panel._pending and panel._edit_timer.isActive() and abs(saved() - 0.47) > 1e-6
+    field.slider.setSliderDown(False)
+    panel._edit_timer.stop()
+    panel._apply_pending()
+    pump()
+    check("a slow layer waits while its slider is held, then updates once on release",
+          held and not panel._pending and abs(saved() - 0.47) < 1e-6, "held %s, coverage %s" % (held, saved()))
+
 
 def colonnade():
     """Columns 3 m high (decimetres) on a floor: A a cylinder; B1 and B2

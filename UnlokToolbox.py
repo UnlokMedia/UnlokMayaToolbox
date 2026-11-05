@@ -41,6 +41,7 @@ import bisect
 import collections
 import fnmatch
 import functools
+import gc
 import heapq
 import itertools
 import json
@@ -106,6 +107,23 @@ class NoUndo(object):
     def __exit__(self, *exc):
         if self._was_on:
             cmds.undoInfo(stateWithoutFlush=True)
+        return False
+
+
+class GcPaused(object):
+    """Python's cycle collector off for a big build (on again after, as it
+    was). A moss build makes millions of small tuples and lists; the
+    collector walking them all cost ~1 s of every live edit. Nothing in a
+    build makes cycles that need collecting there and then."""
+
+    def __enter__(self):
+        self._was_on = gc.isenabled()
+        gc.disable()
+        return self
+
+    def __exit__(self, *exc):
+        if self._was_on:
+            gc.enable()
         return False
 
 
@@ -1488,16 +1506,25 @@ def _rand12(seed, a, b, c):
     Several times cheaper than a random.Random per item, and stable: an
     item keeps its random values when the count or other items change.
     """
+    M = _MASK64
     x = (seed * 0x9E3779B97F4A7C15 ^ a * 0xBF58476D1CE4E5B9 ^ b * 0x94D049BB133111EB
-         ^ c * 0xD6E8FEB86659FD93) & _MASK64
-    out = []
-    for _ in range(3):
-        x = (x + 0x9E3779B97F4A7C15) & _MASK64
-        z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
-        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
-        z ^= z >> 31
-        out.extend(((z >> 48) & 0xFFFF, (z >> 32) & 0xFFFF, (z >> 16) & 0xFFFF, z & 0xFFFF))
-    return tuple(v * (1.0 / 65536.0) for v in out)
+         ^ c * 0xD6E8FEB86659FD93) & M
+    x = (x + 0x9E3779B97F4A7C15) & M  # the three steps written out (called millions of times)
+    z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & M
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M
+    z1 = z ^ (z >> 31)
+    x = (x + 0x9E3779B97F4A7C15) & M
+    z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & M
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M
+    z2 = z ^ (z >> 31)
+    x = (x + 0x9E3779B97F4A7C15) & M
+    z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & M
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & M
+    z3 = z ^ (z >> 31)
+    k = 1.0 / 65536.0
+    return (((z1 >> 48) & 0xFFFF) * k, ((z1 >> 32) & 0xFFFF) * k, ((z1 >> 16) & 0xFFFF) * k, (z1 & 0xFFFF) * k,
+            ((z2 >> 48) & 0xFFFF) * k, ((z2 >> 32) & 0xFFFF) * k, ((z2 >> 16) & 0xFFFF) * k, (z2 & 0xFFFF) * k,
+            ((z3 >> 48) & 0xFFFF) * k, ((z3 >> 32) & 0xFFFF) * k, ((z3 >> 16) & 0xFFFF) * k, (z3 & 0xFFFF) * k)
 
 
 class _SurfaceQuery(object):
@@ -30707,7 +30734,8 @@ MOSS_RAYS = {"Proxy": 5, "Normal": 7, "High": 9, "Hero": 12}
 MOSS_MAX_CANDIDATES = 9000
 MOSS_MAX_CUSHIONS = 120000  # cushion candidates
 _MI_MOSS_CACHE = collections.OrderedDict()  # (meshes, seed, sizes, detail) -> analysed spots, field, creases
-MOSS_CACHE_KEEP = 12  # spots + field + creases of the last 4 layouts: a few moss layers edited in turn stay warm
+MOSS_CACHE_KEEP = 24  # spots, candidates (with and without Patch size), creases: a few layouts and
+# Patch sizes, so a few moss layers edited in turn stay warm
 
 
 def _moss_spots(surf, sampler, s, R):
@@ -30723,8 +30751,23 @@ def _moss_spots(surf, sampler, s, R):
     hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return hit
-    m = scene_m_per_unit()
-    patch = max(1e-3, float(s["patch_size"]) / m)
+    # the rays don't depend on Patch size (only each spot's noise does): kept apart, so a Patch size edit
+    # doesn't cast them again
+    bkey = ("spots",) + key[:3] + key[4:]
+    base = _mi_cache_get(_MI_MOSS_CACHE, bkey)
+    if base is None:
+        base = _MI_MOSS_CACHE[bkey] = _moss_spots_base(surf, sampler, seed, R, detail)
+    patch = max(1e-3, float(s["patch_size"]) / scene_m_per_unit())
+    spots = [(p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r) for p, nrm, up, occ, edge, r in base]
+    _MI_MOSS_CACHE[key] = spots
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return spots
+
+
+def _moss_spots_base(surf, sampler, seed, R, detail):
+    """_moss_spots without the Patch size noise: (point, normal, up,
+    shelter, edge, randoms)."""
     n = int(min(MOSS_MAX_CANDIDATES, max(8, sampler.total / (math.pi * R * R) * 3.0)))
     K = MOSS_RAYS[detail]
     dirs = []  # round the hemisphere, low first: walls and floors next to a spot are what shelter it
@@ -30774,10 +30817,7 @@ def _moss_spots(surf, sampler, s, R):
                         crack = max(crack, 1.1 - dist)
                     break
         occ = min(1.0, occ + 0.8 * crack)
-        spots.append((p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r))
-    _MI_MOSS_CACHE[key] = spots
-    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
-        _MI_MOSS_CACHE.popitem(last=False)
+        spots.append((p, nrm, up, occ, edge, r))
     return spots
 
 
@@ -30816,7 +30856,36 @@ def _moss_field(surf, sampler, s, R):
     hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return spots, hit
+    # where the candidates are doesn't depend on Patch size (only their fine noise does): kept apart, so a
+    # Patch size edit keeps the bed's layout (its grid points read the same candidates) and only re-scores
+    bkey = ("cands", key[1], seed, key[3], detail, sampler.key)
+    base = _mi_cache_get(_MI_MOSS_CACHE, bkey)
+    if base is None:
+        base = _moss_field_base(sampler, spots, seed, R, RA)
+        _MI_MOSS_CACHE[bkey] = base
     patch = max(1e-3, float(s["patch_size"]) / scene_m_per_unit())
+    cands = _MossCands()
+    cands.base = base
+    for p, tn, r, near, memo, node, face in base:
+        a, b = (p[0] + p[1] * 0.71) / patch, (p[2] - p[1] * 0.53) / patch  # 2D is enough for a ragged edge
+        fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
+        cands.append((p, tn, r, near, fine, memo, node, face))  # memo: is it covered (worked out when first kept)
+    _MI_MOSS_CACHE[key] = cands
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return spots, cands
+
+
+class _MossCands(list):
+    """The field's candidates for one Patch size; `base` is the list they
+    were made from (their places, shared by every Patch size): the bed's
+    layout is keyed on it."""
+    __slots__ = ("base",)
+
+
+def _moss_field_base(sampler, spots, seed, R, RA):
+    """The field's candidates without their Patch size noise: [(point,
+    normal, randoms, [(spot index, weight)], memo, mesh, face id)]."""
     reach = 1.6 * RA
     grid = {}
     for j, sp in enumerate(spots):
@@ -30846,13 +30915,8 @@ def _moss_field(surf, sampler, s, R):
                             near.append((j, (1.0 - d / reach) ** 2 * (0.3 + 0.7 * dn) * lvl))
         if not near:
             continue
-        a, b = (p[0] + p[1] * 0.71) / patch, (p[2] - p[1] * 0.53) / patch  # 2D is enough for a ragged edge
-        fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
-        cands.append((p, tn, r, near, fine, {}, node, face))  # memo: is it covered (worked out when first kept)
-    _MI_MOSS_CACHE[key] = cands
-    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
-        _MI_MOSS_CACHE.popitem(last=False)
-    return spots, cands
+        cands.append((p, tn, r, near, {}, node, face))
+    return cands
 
 
 def _moss_noise3(x, y, z, seed):
@@ -30924,8 +30988,7 @@ def _mi_gather(surf, sampler, s, R, cands):
     looking up a point. Cached with the field."""
     seed = int(s["seed"])
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
-    key = ("gather", _mi_surf_keys(surf), seed, round(R, 9),
-           round(float(s["patch_size"]), 6), detail, sampler.key)
+    key = ("gather", _mi_surf_keys(surf), seed, round(R, 9), detail, sampler.key)  # (places only: not Patch size)
     hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return hit
@@ -31258,6 +31321,7 @@ def _moss_clip(poly, lines, eps):
     return poly
 
 
+_MUL = operator.mul
 _MI_MOSS_BEDS = collections.OrderedDict()  # bed layout key -> (grid point records, block polygons)
 _MI_MOSS_COVER = collections.OrderedDict()  # (meshes, clump size, faces) -> each mesh's covered faces
 
@@ -31349,6 +31413,7 @@ class _MossBed(object):
             buckets.setdefault((int(math.floor(p[0] / rk)), int(math.floor(p[1] / rk)),
                                 int(math.floor(p[2] / rk))), []).append(i)
         self.buckets = buckets
+        self.ob2 = [1e30 if o is None else o for o in self.ob]  # (for min(); None: nothing over it)
         self.flat = None  # each bucket's candidates as (index, point, normal), made when a block first needs them
         # a grid point's margin is a weighted mean of the candidates round it plus the ragged-edge noise, so a
         # block with no candidate above this can't show any moss: skipped without looking at its points
@@ -31370,7 +31435,7 @@ class _MossBed(object):
         self.near = 0.01 / scene_m_per_unit()
         self.thin = 0.1 * _mi_rest_scale(s)[0]  # sharp edges onto walls thinner than this aren't edges (Surface detail)
         key = ("bed", _mi_surf_keys(surf), self.seed, round(R, 9), round(tile, 9), k, round(self.thin, 9),
-               len(cands), id(cands),
+               len(cands), id(getattr(cands, "base", cands)),  # the candidates' places (not their Patch size)
                None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
         cache = _MI_MOSS_BEDS.get(key)
         if cache is None:
@@ -31379,12 +31444,12 @@ class _MossBed(object):
                 _MI_MOSS_COVER[cover] = {}
                 while len(_MI_MOSS_COVER) > 4:
                     _MI_MOSS_COVER.popitem(last=False)
-            cache = _MI_MOSS_BEDS[key] = ({}, {}, _MI_MOSS_COVER[cover], {})
+            cache = _MI_MOSS_BEDS[key] = ({}, {}, _MI_MOSS_COVER[cover], {}, [], getattr(cands, "base", cands))
             while len(_MI_MOSS_BEDS) > 4:
                 _MI_MOSS_BEDS.popitem(last=False)
         else:
             _MI_MOSS_BEDS.move_to_end(key)
-        self.recs, self.blocks, self.cov, self.bks = cache
+        self.recs, self.blocks, self.cov, self.bks, self.rl = cache[:5]  # (the last: keeps its key's id alive)
         self.pts, self.dirs, self.hf, self.core = [], [], [], []
         self.vid = {}
         self.faces_out = []  # (vertex ids, uv ids, stable key)
@@ -31500,7 +31565,7 @@ class _MossBed(object):
         # to a lap's edge, the board beside a rail): their "no moss" is theirs, it ran a fade up to the edge
         if room is not None and room < self.cover:
             hid = None
-        pairs = []
+        idx, ws = [], []
         for i, qx, qy, qz, nx, ny, nz in local:
             ex, ey, ez = qx - x, qy - y, qz - z
             d2 = ex * ex + ey * ey + ez * ez
@@ -31515,8 +31580,10 @@ class _MossBed(object):
             if hid is not None and hid[i]:
                 continue
             w = 1.0 - d2 / rk2
-            pairs.append((i, w * w * (0.25 + 0.75 * (dn if dn > 0.0 else 0.0)) * (1.0 - lv / lvmax)))
-        return [x, y, z, dx, dy, dz, taper, pairs, None, None, None, room]
+            idx.append(i)
+            ws.append(w * w * (0.25 + 0.75 * (dn if dn > 0.0 else 0.0)) * (1.0 - lv / lvmax))
+        # the candidates read and their weights apart, so _value sums them in C (map / sum)
+        return [x, y, z, dx, dy, dz, taper, tuple(idx), tuple(ws), None, None, None, room]
 
     def _not_under_own(self, local):
         """A block's candidates less those covered by the piece its face is on
@@ -31546,44 +31613,47 @@ class _MossBed(object):
 
     def _value(self, rec):
         """A grid point now: (position, lift direction, lift, core)."""
-        x, y, z, dx, dy, dz, taper, pairs = rec[:8]
-        mgs, ocs, obs = self.mg, self.oc, self.ob
-        tw, sm, so = 0.03, -0.015, 0.0
-        clear = 1e30 if rec[11] is None else rec[11]
-        for i, w in pairs:
-            tw += w
-            sm += w * mgs[i]
-            so += w * ocs[i]
-            ob = obs[i]
-            if ob is not None and ob < clear:
-                clear = ob
-        mg = sm / tw
+        x, y, z, dx, dy, dz, taper, idx, ws = rec[:9]
+        # the same sums, in the same order, as a loop over the pairs (sum adds its start first, then each
+        # product in turn), in C
+        tw = sum(ws, 0.03)
+        mg = sum(map(_MUL, ws, map(self.mg.__getitem__, idx)), -0.015) / tw
         if mg > -0.03 - 0.12 * self.mess:
-            if rec[8] is None:
+            if rec[9] is None:
                 s = 1.0 / (0.35 * self.R)
-                rec[8] = _moss_noise3(x * s, y * s, z * s, self.seed + 7)
-            mg += 0.12 * self.mess * rec[8]  # a ragged edge
+                rec[9] = _moss_noise3(x * s, y * s, z * s, self.seed + 7)
+            mg += 0.12 * self.mess * rec[9]  # a ragged edge
         c = clamp(mg / 0.3, 0.0, 1.0)
         c = c * c * (3.0 - 2.0 * c)
         pr = clamp((mg + 0.03) / 0.3, 0.0, 1.0)
-        pr = math.sqrt(pr * pr * (3.0 - 2.0 * pr))  # sloping up from the edge, rounding over: a rolled rim
-        h = self.H * pr * (0.5 + 0.5 * c) * (0.75 + 0.6 * clamp(so / tw * 1.7, 0.0, 1.0)) * taper
+        if pr > 0.0:
+            pr = math.sqrt(pr * pr * (3.0 - 2.0 * pr))  # sloping up from the edge, rounding over: a rolled rim
+            so = sum(map(_MUL, ws, map(self.oc.__getitem__, idx)), 0.0)
+            h = self.H * pr * (0.5 + 0.5 * c) * (0.75 + 0.6 * clamp(so / tw * 1.7, 0.0, 1.0)) * taper
+        else:
+            h = 0.0  # (what the product gives with pr 0: no need for the shelter sum)
         if h > 0.0:
             if self.var:
-                if rec[10] is None:
+                if rec[11] is None:
                     R = self.R
-                    rec[10] = _th_noise(x / (3.0 * R) + 0.37 * z / R, y / (3.0 * R) - 0.21 * z / R, self.seed + 29)
-                h *= 1.0 + self.var * 0.5 * rec[10]
+                    rec[11] = _th_noise(x / (3.0 * R) + 0.37 * z / R, y / (3.0 * R) - 0.21 * z / R, self.seed + 29)
+                h *= 1.0 + self.var * 0.5 * rec[11]
             if self.lump:  # packed cushions: rounded crowns, creases between them
-                if rec[9] is None:
+                if rec[10] is None:
                     s = 1.0 / (0.7 * self.R)
                     b = 0.65 * abs(_moss_noise3(x * s, y * s, z * s, self.seed + 21)) + \
                         0.35 * abs(_moss_noise3(x * s * 2.2, y * s * 2.2, z * s * 2.2, self.seed + 23))
-                    rec[9] = min(1.25, b / 0.4) ** 0.7
-                h *= 1.0 - self.lump + self.lump * rec[9]
+                    rec[10] = min(1.25, b / 0.4) ** 0.7
+                h *= 1.0 - self.lump + self.lump * rec[10]
         hf = h - self.tuck
-        if hf > 0.6 * clear:  # something just above (the candidates' rays out found it): stay clear of it
-            hf = 0.6 * clear
+        if hf > 0.0:  # something just above (the candidates' rays out found it): stay clear of it
+            clear = 1e30 if rec[12] is None else rec[12]
+            if idx:
+                ob = min(map(self.ob2.__getitem__, idx))
+                if ob < clear:
+                    clear = ob
+            if hf > 0.6 * clear:
+                hf = 0.6 * clear
         return (x + dx * hf, y + dy * hf, z + dz * hf), (dx, dy, dz), hf, c
 
     # ----------------------------------------------------------------- grid
@@ -31886,7 +31956,7 @@ class _MossBed(object):
         t1, t2, n, dp = ctx[:4]
         q = 1e-4 * e
         keys, uvs = [], []
-        recs = self.recs
+        recs, rl = self.recs, self.rl
         for u, v, gk in poly:
             if gk is not None:
                 key = gk if gk[0].__class__ is str else (pk, gk[0], gk[1])
@@ -31895,11 +31965,14 @@ class _MossBed(object):
                 y = u * t1[1] + v * t2[1] + dp * n[1]
                 z = u * t1[2] + v * t2[2] + dp * n[2]
                 key = (int(round(x / q)), int(round(y / q)), int(round(z / q)))
-            if key not in recs:
-                recs[key] = self._record(u, v, ctx, local)
-            keys.append(key)
-            uvs.append((clamp((u - ou) / tile, 0.0, 1.0), clamp((v - ov) / tile, 0.0, 1.0), ti, tj))
-        return tuple(keys), tuple(uvs), hash((pk, i, j, tkey[1])) & 0x7FFFFFFF
+            rid = recs.get(key)
+            if rid is None:  # each grid point gets a number in the layout: builds look it up by that
+                rid = recs[key] = len(rl)
+                rl.append(self._record(u, v, ctx, local))
+            keys.append(rid)
+            uvs.append((clamp((u - ou) / tile, 0.0, 1.0), clamp((v - ov) / tile, 0.0, 1.0)))
+        tile = (ti + 1048576) * 2097152 + (tj + 1048576)  # the UV tile as one number (0 .. 2^42)
+        return tuple(keys), tuple(uvs), hash((pk, i, j, tkey[1])) & 0x7FFFFFFF, tile
 
     def _seam_poly(self, poly, lines, eps):
         """A cell polygon with the points on the triangle's edges keyed by the
@@ -31976,51 +32049,71 @@ class _MossBed(object):
         return 0.0 if key[2] == min(va, vb) else 1.0
 
     def _emit(self, polys):
-        recs, vid, uvid = self.recs, self.vid, self.uvid
+        rl, vid, uvid = self.rl, self.vid, self.uvid
         hf, pts, dirs, core, us, vs = self.hf, self.pts, self.dirs, self.core, self.us, self.vs
         value, out = self._value, self.faces_out
-        for keys, uvs, fkey in polys:
-            vids, uids, exposed = [], [], False
-            for key, (uu, vv, ti, tj) in zip(keys, uvs):
-                vi = vid.get(key)
-                if vi is None:
-                    pos, d, h, c = value(recs[key])
-                    vi = vid[key] = len(pts)
-                    pts.append(pos)
-                    dirs.append(d)
-                    hf.append(h)
-                    core.append(c)
-                if not exposed and hf[vi] > 0.0:
-                    exposed = True
-                vids.append(vi)
-                ukey = (vi, ti, tj)
-                ui = uvid.get(ukey)
-                if ui is None:
-                    ui = uvid[ukey] = len(us)
-                    us.append(uu)
-                    vs.append(vv)
-                uids.append(ui)
-            if exposed:
+        vget, uget, hget = vid.get, uvid.get, hf.__getitem__
+        for keys, uvs, fkey, tile in polys:
+            vids = list(map(vget, keys))  # lookups in C; Python only for new points and UVs
+            if None in vids:
+                for n, vi in enumerate(vids):
+                    if vi is None:
+                        key = keys[n]
+                        vi = vget(key)  # met earlier in this face
+                        if vi is None:
+                            pos, d, h, c = value(rl[key])
+                            vi = vid[key] = len(pts)
+                            pts.append(pos)
+                            dirs.append(d)
+                            hf.append(h)
+                            core.append(c)
+                        vids[n] = vi
+            ukeys = [vi * 4398046511104 + tile for vi in vids]  # a UV per point and tile (one number)
+            uids = list(map(uget, ukeys))
+            if None in uids:
+                for n, ui in enumerate(uids):
+                    if ui is None:
+                        ukey = ukeys[n]
+                        ui = uget(ukey)
+                        if ui is None:
+                            ui = uvid[ukey] = len(us)
+                            us.append(uvs[n][0])
+                            vs.append(uvs[n][1])
+                        uids[n] = ui
+            if max(map(hget, vids)) > 0.0:
                 out.append((vids, uids, fkey))
 
     def mesh(self):
         """The bed as (points, counts, connects, us, vs, uv ids), unused points dropped."""
         remap, pts, counts, conn, uvi = {}, [], [], [], []
         uremap, us, vs = {}, [], []
+        rget, uget = remap.get, uremap.get
+        P, U, V = self.pts, self.us, self.vs
         for vids, uvs, _ in self.faces_out:
             counts.append(len(vids))
-            for vi, ui in zip(vids, uvs):
-                r = remap.get(vi)
-                if r is None:
-                    r = remap[vi] = len(pts)
-                    pts.append(self.pts[vi])
-                conn.append(r)
-                r = uremap.get(ui)
-                if r is None:
-                    r = uremap[ui] = len(us)
-                    us.append(self.us[ui])
-                    vs.append(self.vs[ui])
-                uvi.append(r)
+            got = list(map(rget, vids))
+            if None in got:
+                for n, r in enumerate(got):
+                    if r is None:
+                        vi = vids[n]
+                        r = rget(vi)
+                        if r is None:
+                            r = remap[vi] = len(pts)
+                            pts.append(P[vi])
+                        got[n] = r
+            conn.extend(got)
+            got = list(map(uget, uvs))
+            if None in got:
+                for n, r in enumerate(got):
+                    if r is None:
+                        ui = uvs[n]
+                        r = uget(ui)
+                        if r is None:
+                            r = uremap[ui] = len(us)
+                            us.append(U[ui])
+                            vs.append(V[ui])
+                        got[n] = r
+            uvi.extend(got)
         return pts, counts, conn, us, vs, uvi
 
 
@@ -32064,6 +32157,7 @@ class _MossDetail(object):
         self.columns = s["stack_layout"] == "Atlas columns"
         self.S, self.C = _mi_mesh(), _mi_mesh()
         self.capped = False
+        self._tpl = {}  # each ribbon / star shape's UVs and corners, the same for every one of them
 
     def _uv(self, u, v, stack):
         return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
@@ -32123,6 +32217,10 @@ class _MossDetail(object):
             nc = int(lam_c + r0[2]) if lam_c > 0.0 else 0
             if not (ns or nh or nc):
                 continue
+            pa, pb, pc = P[a], P[b], P[c]
+            da, db, dc = D[a], D[b], D[c]
+            ca, cb, cc = CORE[a], CORE[b], CORE[c]
+            f0, f1, f2 = fn
             for kind, count in (("s", ns), ("h", nh), ("c", nc)):
                 for q in range(count):
                     r = _rand12(seed, key, q * 4 + (1 if kind == "s" else (2 if kind == "h" else 3)), 47)
@@ -32130,10 +32228,17 @@ class _MossDetail(object):
                     if w1 + w2 > 1.0:
                         w1, w2 = 1.0 - w1, 1.0 - w2
                     w0 = 1.0 - w1 - w2
-                    pos = tuple(P[a][i] * w0 + P[b][i] * w1 + P[c][i] * w2 for i in range(3))
-                    d = _rl_norm(tuple(D[a][i] * w0 + D[b][i] * w1 + D[c][i] * w2 for i in range(3)), fn)
-                    nrm = _rl_norm(_rl_add(_rl_mul(fn, 0.5), _rl_mul(d, 0.5)), fn)
-                    core = CORE[a] * w0 + CORE[b] * w1 + CORE[c] * w2
+                    pos = (pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2,
+                           pa[2] * w0 + pb[2] * w1 + pc[2] * w2)
+                    x = da[0] * w0 + db[0] * w1 + dc[0] * w2  # _rl_norm written out, here and below
+                    y = da[1] * w0 + db[1] * w1 + dc[1] * w2
+                    z = da[2] * w0 + db[2] * w1 + dc[2] * w2
+                    ln = sqrt(x * x + y * y + z * z)
+                    d = (x / ln, y / ln, z / ln) if ln > 1e-12 else fn
+                    x, y, z = f0 * 0.5 + d[0] * 0.5, f1 * 0.5 + d[1] * 0.5, f2 * 0.5 + d[2] * 0.5
+                    ln = sqrt(x * x + y * y + z * z)
+                    nrm = (x / ln, y / ln, z / ln) if ln > 1e-12 else fn
+                    core = ca * w0 + cb * w1 + cc * w2
                     if kind == "s":
                         self._shoot(pos, nrm, core, r)
                     elif kind == "h":
@@ -32156,19 +32261,31 @@ class _MossDetail(object):
         pts, counts, conn, us, vs, uvi = mesh
         b = len(pts)
         last = len(spine) - 1
-        for k, (p, w) in enumerate(zip(spine, widths)):
-            pts.append(_rl_add(p, _rl_mul(side, -w)))
-            pts.append(_rl_add(p, _rl_mul(side, w)))
-            vv = v0 + (v1 - v0) * k / float(last)
-            for uu in (u0, u1):
-                x, y = self._uv(uu, vv, stack)
-                us.append(x)
-                vs.append(y)
-        for k in range(last):
-            a = b + 2 * k
-            counts.append(4)
-            conn.extend((a, a + 1, a + 3, a + 2))
-            uvi.extend((a, a + 1, a + 3, a + 2))
+        sx, sy, sz = side
+        for p, w in zip(spine, widths):
+            nw = -w
+            pts.append((p[0] + sx * nw, p[1] + sy * nw, p[2] + sz * nw))
+            pts.append((p[0] + sx * w, p[1] + sy * w, p[2] + sz * w))
+        key = (last, u0, u1, v0, v1, stack)
+        t = self._tpl.get(key)
+        if t is None:  # its UVs and quads (offsets from its first point) are the same for every one like it
+            tu, tv, quads = [], [], []
+            for k in range(last + 1):
+                vv = v0 + (v1 - v0) * k / float(last)
+                for uu in (u0, u1):
+                    x, y = self._uv(uu, vv, stack)
+                    tu.append(x)
+                    tv.append(y)
+            for k in range(last):
+                a = 2 * k
+                quads.extend((a, a + 1, a + 3, a + 2))
+            t = self._tpl[key] = (tu, tv, [4] * last, tuple(quads))
+        us.extend(t[0])
+        vs.extend(t[1])
+        counts.extend(t[2])
+        ids = list(map(b.__add__, t[3]))
+        conn.extend(ids)
+        uvi.extend(ids)
 
     def _star(self, mesh, c, d, leaves, leaf, lift, rot, stack):
         """A rosette of leaves round axis d at c: the star a moss shoot shows from above."""
@@ -32176,35 +32293,52 @@ class _MossDetail(object):
         s1, s2 = _mi_frame(d, rot)
         b = len(pts)
         pts.append(c)
-        x, y = self._uv(0.625, 0.625, stack)
-        us.append(x)
-        vs.append(y)
+        key = (leaves, stack)
+        t = self._tpl.get(key)
+        if t is None:  # the ring's angles, UVs and triangles are the same for every star like it
+            step = math.pi / leaves
+            ring, tris = [], []
+            x, y = self._uv(0.625, 0.625, stack)
+            tu, tv = [x], [y]
+            for i in range(2 * leaves):
+                th = i * step
+                outer = i % 2 == 0
+                ct, st = math.cos(th), math.sin(th)
+                ring.append((ct, st, outer))
+                rr = 0.37 if outer else 0.09
+                x, y = self._uv(0.625 + ct * rr, 0.625 + st * rr, stack)
+                tu.append(x)
+                tv.append(y)
+            for i in range(2 * leaves):
+                tris.extend((0, 1 + i, 1 + (i + 1) % (2 * leaves)))
+            t = self._tpl[key] = (ring, tu, tv, [3] * (2 * leaves), tuple(tris))
         cl, sl = math.cos(lift), math.sin(lift)
-        step = math.pi / leaves
-        for i in range(2 * leaves):
-            th = i * step
-            outer = i % 2 == 0
-            r = leaf * (cl if outer else 0.22)
-            up = leaf * (sl if outer else 0.04)
-            ct, st = math.cos(th), math.sin(th)
-            pts.append((c[0] + (s1[0] * ct + s2[0] * st) * r + d[0] * up,
-                        c[1] + (s1[1] * ct + s2[1] * st) * r + d[1] * up,
-                        c[2] + (s1[2] * ct + s2[2] * st) * r + d[2] * up))
-            rr = 0.37 if outer else 0.09
-            x, y = self._uv(0.625 + ct * rr, 0.625 + st * rr, stack)
-            us.append(x)
-            vs.append(y)
-        for i in range(2 * leaves):
-            j = (i + 1) % (2 * leaves)
-            counts.append(3)
-            conn.extend((b, b + 1 + i, b + 1 + j))
-            uvi.extend((b, b + 1 + i, b + 1 + j))
+        ro, ri, uo, ui = leaf * cl, leaf * 0.22, leaf * sl, leaf * 0.04
+        c0, c1, c2 = c
+        a0, a1, a2 = s1
+        b0, b1, b2 = s2
+        d0, d1, d2 = d
+        for ct, st, outer in t[0]:
+            r, up = (ro, uo) if outer else (ri, ui)
+            pts.append((c0 + (a0 * ct + b0 * st) * r + d0 * up,
+                        c1 + (a1 * ct + b1 * st) * r + d1 * up,
+                        c2 + (a2 * ct + b2 * st) * r + d2 * up))
+        us.extend(t[1])
+        vs.extend(t[2])
+        counts.extend(t[3])
+        ids = list(map(b.__add__, t[4]))
+        conn.extend(ids)
+        uvi.extend(ids)
 
     def _lean(self, nrm, r, amount):
         t1, t2 = _mi_frame(nrm, r[9] * 6.2832)
-        d = _rl_add(nrm, _rl_add(_rl_mul(t1, (r[3] - 0.5) * 2.0 * amount), _rl_mul(t2, (r[4] - 0.5) * 2.0 * amount)))
+        ka, kb = (r[3] - 0.5) * 2.0 * amount, (r[4] - 0.5) * 2.0 * amount
         sag = self.droop * 0.25 * (1.0 - nrm[1])
-        return _rl_norm((d[0], d[1] - sag, d[2]), nrm)
+        x = nrm[0] + (t1[0] * ka + t2[0] * kb)
+        y = nrm[1] + (t1[1] * ka + t2[1] * kb) - sag
+        z = nrm[2] + (t1[2] * ka + t2[2] * kb)
+        n = math.sqrt(x * x + y * y + z * z)
+        return (x / n, y / n, z / n) if n > 1e-12 else nrm
 
     def _shoot(self, pos, nrm, core, r):
         L = self.L * (0.6 + 0.8 * r[2]) * (0.55 + 0.45 * core)
@@ -32219,14 +32353,26 @@ class _MossDetail(object):
         n = 32 if self.kind == "leafy" else 15
         if self._full(mesh, n):
             return
-        root = _rl_add(pos, _rl_mul(nrm, -0.35 * L))
-        bend = _rl_mul(_mi_frame(d, r[6] * 6.2832)[0], 0.08 * L)
+        kr = -0.35 * L  # the vector helpers written out (the same sums): thousands of shoots
+        r0, r1, r2 = pos[0] + nrm[0] * kr, pos[1] + nrm[1] * kr, pos[2] + nrm[2] * kr
+        perp = _rl_any_perp(d)  # what _mi_frame(d, ...) turns, both times
+        ang = r[6] * 6.2832
+        bt = _mi_rotate(perp, d, ang) if ang else perp
+        kb = 0.08 * L
+        bx, by, bz = bt[0] * kb, bt[1] * kb, bt[2] * kb
+        d0, d1, d2 = d
         segs = 3 if self.kind == "leafy" else 2
-        spine = [_rl_add(_rl_add(root, _rl_mul(d, L * f)), _rl_mul(bend, f * f))
-                 for f in (k / float(segs) for k in range(segs + 1))]
+        spine = []
+        for k in range(segs + 1):
+            f = k / float(segs)
+            lf, ff = L * f, f * f
+            spine.append((r0 + d0 * lf + bx * ff, r1 + d1 * lf + by * ff, r2 + d2 * lf + bz * ff))
         tip = spine[-1]
-        top = _rl_norm(_rl_sub(spine[-1], spine[-2]), d)
-        side = _mi_frame(d, rot)[0]
+        pv = spine[-2]
+        x, y, z = tip[0] - pv[0], tip[1] - pv[1], tip[2] - pv[2]
+        ln = math.sqrt(x * x + y * y + z * z)
+        top = (x / ln, y / ln, z / ln) if ln > 1e-12 else d
+        side = _mi_rotate(perp, d, rot) if rot else perp
         self._ribbon(mesh, spine, [0.05 * L * (1.0 - 0.5 * k / float(segs)) for k in range(segs + 1)], side,
                      0.0, 0.1, stack)
         if self.kind == "leafy":
@@ -34811,7 +34957,8 @@ def grow_moss_ivy(kind, targets, settings=None, seeds=None, select=False, faces=
     s = mi_settings_only(kind, settings)
     seeds = list(seeds or [])[:MI_MAX_SEEDS]
     faces = {long_name(k): v for k, v in (faces or {}).items() if v} if kind != "Ivy" else {}
-    built = mi_build(kind, targets, s, seeds, {k: set(v) for k, v in faces.items()} if faces else None)
+    with GcPaused():
+        built = mi_build(kind, targets, s, seeds, {k: set(v) for k, v in faces.items()} if faces else None)
     stem = MI_STEMS[kind]
     with UndoChunk("Grow %s" % kind):
         num = _th_free_number(stem + "%04d_GRP")
@@ -34858,7 +35005,8 @@ def update_moss_ivy(changes, attr=MI_SETTINGS):
             report["lost"].append(root)
         s = mi_settings_only(kind, data)
         try:
-            built = mi_build(kind, targets, s, mi_seed_points(data), mi_face_mask(data) if kind != "Ivy" else None)
+            with GcPaused():
+                built = mi_build(kind, targets, s, mi_seed_points(data), mi_face_mask(data) if kind != "Ivy" else None)
         except (ValueError, RuntimeError) as exc:
             report["errors"].append((root, str(exc)))
             continue
@@ -35654,13 +35802,8 @@ def _mi_drop_repeats(mesh):
     if not mesh or not mesh[1]:
         return mesh
     pts, counts, conn, us, vs, uvi = mesh
-    k, bad = 0, False
-    for c in counts:
-        if len(set(conn[k:k + c])) != c:
-            bad = True
-            break
-        k += c
-    if not bad:
+    it = iter(conn)  # each face's distinct corners, counted in C (a big shoots part has ~1M corners)
+    if list(map(len, map(set, map(itertools.islice, itertools.repeat(it), counts)))) == list(counts):
         return mesh
     nc, ncon, nuv = [], [], []
     k = 0
@@ -36143,7 +36286,7 @@ def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
     try:
         with Progress("Scatter: growing %s" % short_name(root), [("grow", 1)]) as pr:
             pr.stage("grow", 1, "Growing")
-            with NoUndo():
+            with NoUndo(), GcPaused():
                 placed, report, meshes = sc_build(root, data, only=only, readback=readback, draft=draft)
     except (Cancelled, ScatterTooBig) as exc:
         return _sc_stopped(root, data, exc)
@@ -37579,6 +37722,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._edit_timer.setSingleShot(True)
         self._edit_timer.setInterval(60)
         self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
+        self._slow = False  # the last update took a while: a slider drag updates once, on release
         self._undo_timer = QtCore.QTimer(self)
         self._undo_timer.setSingleShot(True)
         self._undo_timer.setInterval(50)
@@ -38323,8 +38467,19 @@ class ScatterPanel(QtWidgets.QWidget):
         self._pending.add(key)
         self._edit_timer.start()
 
+    def _dragging(self):
+        """A slider of this layer's settings is held down right now."""
+        for widget in self.f.get(self._type(), {}).values():
+            slider = getattr(widget, "slider", None)
+            if slider is not None and slider.isSliderDown():
+                return True
+        return False
+
     @ui_safe
     def _apply_pending(self):
+        if self._pending and self._slow and self._dragging():
+            self._edit_timer.start()  # a slow layer (moss at High: seconds a build): grow once the slider's let go
+            return
         keys, self._pending = self._pending, set()
         if not keys or not self._alive() or not self._layer():
             return
@@ -38335,6 +38490,7 @@ class ScatterPanel(QtWidgets.QWidget):
             rep = sc_update(self._root, self._lid, {k: values[k] for k in keys})
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
+        self._slow = time.time() - t0 > 0.3
         self._report("Updated", rep, t0)
 
     def _udim_changed(self):

@@ -1390,9 +1390,28 @@
       (~3x faster). `_MI_MOSS_CACHE` (spots, field, creases) keeps the last
       `MOSS_CACHE_KEEP` entries, refreshed on use (`_mi_cache_get`): before,
       a hit didn't count as a use and each kind trimmed to its own size, so
-      a few moss layers edited in turn pushed each other out. All of it
-      gives exactly the same meshes (checked old vs new, bit for bit). `MOSS_MAX_CELLS` grows the cell
+      a few moss layers edited in turn pushed each other out. `MOSS_MAX_CELLS` grows the cell
       on huge areas (`capped`).
+    - **Speed pass (2026-11-05, the user: "it's so laggy"):** Patch size
+      no longer redoes the rays: spots and candidates are cached without
+      it (`_moss_spots_base`, `_moss_field_base`; Patch size only adds its
+      noise on top, `_MossCands.base` keys the bed layout), ~14 s -> ~4 s
+      at High. Bed records are lists in `self.rl` looked up by int id
+      (noise slots 9-11, room 12), `_value` sums in C (`sum(map(...))`),
+      `_emit` / `mesh()` look up with `map` and only loop for new points;
+      shoots: ribbon / star templates (`_tpl`), the vector maths written
+      out, `_rand12` unrolled. Tried and dropped: reusing a triangle's
+      shoots when its corners didn't move (Slope -1 s, Coverage nothing:
+      its edits move nearly every point; +0.25 s and the memory on every
+      other edit). `GcPaused` (Python's cycle
+      collector off) round `sc_regrow`'s and Moss & Ivy's builds: the
+      collector walking the cached records cost ~1 s an edit.
+      `_mi_drop_repeats` checks in C. Scatter panel: once an update took
+      over 0.3 s, a slider drag updates once, on release (`_dragging`).
+      Check a change with `tests/bench_moss.py` (`--nogc`, `--profile`,
+      `--hash`): old and new in one process, topology and UVs must match
+      exactly; points match to ~1e-9 (the engine isn't bit for bit the
+      same from one run to the next, ~2e-10, even old vs old).
   - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
     sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,
     tufts (5-point leaf stars on the bed); High 0.14 R, shoots (2-segment
