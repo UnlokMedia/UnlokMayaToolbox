@@ -33965,6 +33965,8 @@ class _MiDropField(object):
             while len(_MI_DROP_FIELDS) > 4:
                 _MI_DROP_FIELDS.popitem(last=False)
         self.nodes = nodes
+        self.exacts = nodes.setdefault("exact", {})  # exact(): (x, z, height step) -> height, kept with the nodes
+        self.q = cell / 2.0  # (leaves in a pile or close together share rays)
         self.stack = None  # a _MiDropStack: the leaves laid so far count as surface too
 
     def _node(self, i, k, b):
@@ -34020,6 +34022,164 @@ class _MiDropField(object):
             s = self.stack.top(x, z, y + 2.0 * self.band)
             if s > v:
                 v = s
+        return v
+
+    def exact(self, x, z, y, far, coarse=False):
+        """The surface's height right under (x, z), seen from a little over
+        y (rays cast half a cell apart, so points close together share
+        them, each kept with the slope it hit and carried over to the point
+        asked: exact on a ramp, a rock or a corrugation's flank, where the
+        nodes' top / top_wide read up to a cell's slope high and leaves
+        rested on them float). MI_DROP_VOID: nothing within far under y;
+        MI_DROP_INSIDE: the ray starts inside something. coarse: a cell
+        apart (a pile's hundreds of leaves on one floor)."""
+        q = self.c if coarse else self.q
+        st = 4.0 * self.c  # (one ray for points within 4 cells' height of each other: a pile's leaves)
+        key = (int(round(x / q)), int(round(z / q)), int(math.floor(y / st)), coarse)
+        v = self.exacts.get(key)
+        if v is None:
+            if len(self.exacts) > 300000:
+                self.exacts.clear()
+            top = (key[2] + 1) * st + self.c
+            hit = self.surf.ray((key[0] * q, top, key[1] * q), (0.0, -1.0, 0.0), top - y + far)
+            if hit is None:
+                v = (MI_DROP_VOID, 0.0, 0.0)
+            elif hit[2][1] < -0.2:
+                v = (MI_DROP_INSIDE, 0.0, 0.0)
+            else:
+                ny = max(0.3, hit[2][1])  # (a steep side: no steeper than about 3 to 1)
+                v = (hit[1][1], -hit[2][0] / ny, -hit[2][2] / ny)
+            self.exacts[key] = v
+        h, sx, sz = v
+        if MI_DROP_VOID < h < MI_DROP_INSIDE:
+            h += sx * (x - key[0] * q) + sz * (z - key[1] * q)
+        return h
+
+
+class _MiLeafTris(object):
+    """The leaves a build has laid so far as their triangles, cell apart in
+    a grid seen from above: the exact height of the leaf under a point (the
+    contact pass; _MiDropStack keeps only the highest point per cell, so a
+    leaf rested on it sits on the curled edge of one beside it)."""
+
+    def __init__(self, cell):
+        self.c = cell
+        self.cells = {}
+        self.points = {}  # cell -> [laid points]: rims()
+        self.high = {}  # cell -> its highest laid point
+
+    def lay(self, pts, conn, k0):
+        """Adds quads conn[k0:] (4 point indices each; a triangle repeats
+        its last point)."""
+        c, cells, floor = self.c, self.cells, math.floor
+        high, at = self.high, {}
+        for i in set(conn[k0:]):
+            p = pts[i]
+            key = at[i] = (int(floor(p[0] / c)), int(floor(p[2] / c)))
+            self.points.setdefault(key, []).append(p)
+            if high.get(key, MI_DROP_VOID) < p[1]:
+                high[key] = p[1]
+        for k in range(k0, len(conn) - 3, 4):
+            ia, ib, ic, id_ = conn[k], conn[k + 1], conn[k + 2], conn[k + 3]
+            a, b, cc, d = pts[ia], pts[ib], pts[ic], pts[id_]
+            for (p, q, r), (kp, kq, kr) in (((a, b, cc), (at[ia], at[ib], at[ic])),
+                                            ((a, cc, d), (at[ia], at[ic], at[id_]))):
+                den = (q[2] - r[2]) * (p[0] - r[0]) + (r[0] - q[0]) * (p[2] - r[2])
+                if abs(den) < 1e-12:
+                    continue
+                # (r, then the barycentric rows for p and q, then the heights) - top() in a few multiplies
+                tri = (r[0], r[2], (q[2] - r[2]) / den, (r[0] - q[0]) / den, (r[2] - p[2]) / den,
+                       (p[0] - r[0]) / den, p[1], q[1], r[1])
+                i0, i1 = min(kp[0], kq[0], kr[0]), max(kp[0], kq[0], kr[0])
+                j0, j1 = min(kp[1], kq[1], kr[1]), max(kp[1], kq[1], kr[1])
+                if i0 == i1 and j0 == j1:
+                    cells.setdefault((i0, j0), []).append(tri)
+                    continue
+                for i in range(i0, i1 + 1):
+                    for j in range(j0, j1 + 1):
+                        cells.setdefault((i, j), []).append(tri)
+
+    def lay_mesh(self, mesh, lift=0.0):
+        """Adds a mesh (a moss bed: Rest on moss) lifted by lift, its faces
+        as fans of triangles."""
+        pts, counts, conn = mesh[0], mesh[1], mesh[2]
+        up = [(p[0], p[1] + lift, p[2]) for p in pts]
+        k, quads = 0, []
+        for n in counts:
+            ids = conn[k:k + n]
+            k += n
+            for a in range(1, n - 1):
+                quads.extend((ids[0], ids[a], ids[a + 1], ids[a + 1]))
+        self.lay(up, quads, 0)
+
+    def rims(self, pts, start, quads, lift, over):
+        """Raises a piece's faces over the laid leaves' points under them (a
+        curled rim between its own points would poke through it): each
+        triangle by the most such a point is over it (+ lift), all three
+        corners; points more than over above it are over it, not under.
+        Cells whose highest point is under a quad are passed over. Returns
+        how many triangles it raised."""
+        c, cells, high, floor = self.c, self.points, self.high, math.floor
+        raised = 0
+        for _ in range(2):
+            moved = False
+            for q in quads:
+                a, b, r, d = (pts[start + k] for k in q)
+                lo = min(a[1], b[1], r[1], d[1]) - lift
+                found = []
+                for i in range(int(floor(min(a[0], b[0], r[0], d[0]) / c)),
+                               int(floor(max(a[0], b[0], r[0], d[0]) / c)) + 1):
+                    for k in range(int(floor(min(a[2], b[2], r[2], d[2]) / c)),
+                                   int(floor(max(a[2], b[2], r[2], d[2]) / c)) + 1):
+                        if high.get((i, k), MI_DROP_VOID) > lo:
+                            found.extend(p for p in cells[(i, k)] if p[1] > lo)
+                if not found:
+                    continue
+                for t in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                    ia, ib, ic = start + t[0], start + t[1], start + t[2]
+                    a, b, r = pts[ia], pts[ib], pts[ic]
+                    den = (b[2] - r[2]) * (a[0] - r[0]) + (r[0] - b[0]) * (a[2] - r[2])
+                    if abs(den) < 1e-12:
+                        continue
+                    worst = 0.0
+                    lo_t = min(a[1], b[1], r[1]) - lift
+                    hi_t = max(a[1], b[1], r[1]) - lift + over
+                    for x, y, z in found:
+                        if y <= lo_t or y > hi_t:
+                            continue  # under all of it, or far over it
+                        w1 = ((b[2] - r[2]) * (x - r[0]) + (r[0] - b[0]) * (z - r[2])) / den
+                        w2 = ((r[2] - a[2]) * (x - r[0]) + (a[0] - r[0]) * (z - r[2])) / den
+                        if w1 < 0.0 or w2 < 0.0 or w1 + w2 > 1.0:
+                            continue
+                        e = y + lift - (w1 * a[1] + w2 * b[1] + (1.0 - w1 - w2) * r[1])
+                        if worst < e <= over:
+                            worst = e
+                    if worst > 0.0:
+                        for j in (ia, ib, ic):
+                            p = pts[j]
+                            pts[j] = (p[0], p[1] + worst, p[2])
+                        moved = True
+                        raised += 1
+            if not moved:
+                break
+        return raised
+
+    def top(self, x, z, ylim):
+        """The highest leaf triangle right under (x, z) no higher than ylim;
+        MI_DROP_VOID: none."""
+        v = MI_DROP_VOID
+        for rx, rz, a1, a2, b1, b2, h1, h2, h3 in self.cells.get((int(math.floor(x / self.c)),
+                                                                 int(math.floor(z / self.c))), ()):
+            dx, dz = x - rx, z - rz
+            w1 = a1 * dx + a2 * dz
+            if w1 < -1e-6:
+                continue
+            w2 = b1 * dx + b2 * dz
+            if w2 < -1e-6 or w1 + w2 > 1.0 + 1e-6:
+                continue
+            h = w1 * h1 + w2 * h2 + (1.0 - w1 - w2) * h3
+            if v < h <= ylim:
+                v = h
         return v
 
 
@@ -34294,6 +34454,101 @@ def _mi_drop_settle(field, pts, start, yq, contacts, L, droop, lift):
         pts[j] = (x, y, z)
 
 
+def _mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far, relief=None, quads=None, over=None,
+                     coarse=False, most=160):
+    """The contact pass after a piece's rest and settle (the user,
+    2026-11-05: "lots of floating leaves ... no proper draping onto the
+    surface"): what's right under each of its points (field.exact: the
+    surface by a ray at the point; tris: the leaves laid before it, up to
+    over above a point that was put through one) -
+    1. the whole piece comes down onto the nearest of it (the rest rides on
+       the field's nodes and laid leaves' highest points, a little high on
+       a slope or beside another leaf);
+    2. it bends down onto what's under it: each point by
+       D(v) = min over w (base(w) + kappa |v - w|^2), the most a sheet whose
+       curve is limited by kappa (stiffness: Drape) can come down without
+       any point going through - it sags into a trough, lies over a crest
+       and onto the leaf under it. base = the gap less the point's relief
+       (its height over the piece's own lowest: curl, cup, crumple), so the
+       sheet under the relief is what bends and a cupped leaf lies on its
+       midrib with its edges still turned up. Points with nothing within
+       reach under them (past an edge: settle's drape; between rails it
+       bridges) move with the nearest one that has;
+    3. no point under what's under it (+ lift). Points whose ray starts
+       inside something (a pile leaf's corner in a wall's foot) stay put;
+    4. no face through a laid leaf's point (tris.rims: a curled rim
+       between its own points).
+    Returns (how far it came down as a whole, points pushed back up), or
+    None when nothing at all is under it (it would float: the caller drops
+    it)."""
+    n = len(pts) - start
+    if n <= 0:
+        return 0.0, 0
+    over = 4.0 * lift if over is None else over
+    sup, gap, stuck = [], [], set()
+    for j in range(start, len(pts)):
+        x, y, z = pts[j]
+        h = field.exact(x, z, y, far, coarse)
+        if h >= MI_DROP_INSIDE:
+            stuck.add(j - start)
+            h = MI_DROP_VOID
+        sup.append(h)
+    if tris is not None:
+        top = tris.top
+        for i in range(n):
+            x, y, z = pts[start + i]
+            t = top(x, z, y + over)
+            if t > sup[i]:
+                sup[i] = t
+    for i in range(n):
+        y, h = pts[start + i][1], sup[i]
+        gap.append(y - lift - h if i not in stuck and MI_DROP_VOID < h and y - h < far else None)
+    held = [g for g in gap if g is not None]
+    if not held:
+        return None
+    g0 = max(0.0, min(held))
+    tiny = 0.05 * lift
+    base = [None if g is None else max(0.0, g - g0 - (relief[i] if relief else 0.0)) for i, g in enumerate(gap)]
+    near = [i for i in range(n) if base[i] is not None and gap[i] - g0 <= reach]
+    D = [0.0 if i in stuck else None for i in range(n)]
+    up = [i for i in near if base[i] > tiny]  # the rest already lie on what's under them
+    for i in near:
+        D[i] = base[i]
+    if up:
+        xs = [pts[start + i][0] for i in range(n)]
+        zs = [pts[start + i][2] for i in range(n)]
+        P = near if len(near) <= most else near[::int(math.ceil(len(near) / float(most)))]
+        pw = sorted((base[i], xs[i], zs[i]) for i in P)
+        for i in up:
+            x, z = xs[i], zs[i]
+            best = base[i]
+            for wg, wx, wz in pw:
+                if wg >= best:
+                    break  # sorted: none lower after this
+                v = wg + kappa * ((x - wx) ** 2 + (z - wz) ** 2)
+                if v < best:
+                    best = v
+            D[i] = best
+        for i in range(n):
+            if D[i] is None:  # past an edge: with the nearest point that rests
+                x, z = xs[i], zs[i]
+                k = min(near, key=lambda m: (xs[m] - x) ** 2 + (zs[m] - z) ** 2) if near else None
+                D[i] = D[k] if k is not None else 0.0
+    pushed = 0
+    for i in range(n):
+        if i in stuck:
+            continue
+        x, y, z = pts[start + i]
+        y -= g0 + (D[i] or 0.0)
+        if gap[i] is not None and y < sup[i] + lift - 1e-9:
+            y = sup[i] + lift
+            pushed += 1
+        pts[start + i] = (x, y, z)
+    if tris is not None and quads:
+        pushed += tris.rims(pts, start, quads, lift, over)
+    return g0, pushed
+
+
 class _DebrisBuild(object):
     """Grass, leaves, piles and tufts on the meshes (world space)."""
 
@@ -34334,6 +34589,8 @@ class _DebrisBuild(object):
         self.drape = clamp(float(s.get("drape", 0.5)), 0.0, 1.0)
         self.fields = {}
         self.stack = None  # the leaves laid so far (_MiDropStack, made with the first field)
+        self.tris = None  # ... as triangles (_MiLeafTris): the contact pass
+        self.contact = {"lowered": 0, "pushed": 0, "removed": 0}  # what the contact pass fixed
         tried = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * self.R * self.R) * 4.5)))
         self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
         self.cover = 0.05 / m
@@ -34426,10 +34683,34 @@ class _DebrisBuild(object):
             f = self.fields[(cell, band)] = _MiDropField(self.surf, cell, band)
             if self.stack is None:
                 self.stack = _MiDropStack(0.01 / self.m)
+                self.tris = _MiLeafTris(0.02 / self.m)
                 for mesh, lift in self.s.get("_rest_on") or ():  # Rest on moss: the moss bed is ground too
                     self.stack.lay_mesh(mesh, lift)
+                    self.tris.lay_mesh(mesh, lift)
             f.stack = self.stack
         return f
+
+    def _contact(self, pts, b, L, bend, relief=None, quads=None, pile=False):
+        """A leaf's contact pass (_mi_drop_contact): down onto what's under
+        it and bent onto it (bend / L: stiffness), checked; False (its
+        points taken off) when nothing is under it at all."""
+        field = self._field(L)
+        m = self.m
+        got = _mi_drop_contact(field, self.tris, pts, b, self.lift, bend / L,
+                               clamp(0.3 * L, 0.015 / m, 0.03 / m), max(L, 0.1 / m), relief, quads,
+                               max(2.0 * field.c, 0.1 * L), pile)  # reach under 4 cm: across rails it bridges
+        st = self.contact
+        if got is None:
+            st["removed"] += 1
+            for mesh in (self.L, self.J, self.JD):
+                if len(mesh[0]) > b and mesh[0] is pts:
+                    del mesh[0][b:], mesh[3][b:], mesh[4][b:]
+            return False
+        if got[0] > 0.002 / m:
+            st["lowered"] += 1
+        if got[1]:
+            st["pushed"] += 1
+        return True
 
     def _drop(self, base, n, X, F, L, samples):
         """A loose piece's rest (_mi_drop_pose); landing against a wall it
@@ -34735,6 +35016,13 @@ class _DebrisBuild(object):
                         pts[j] = _rl_add(pts[j], _rl_mul(c[2], self.lift - dh))
         else:
             _mi_drop_settle(field, pts, b, yq, contacts, L, 0.5 * self.drape, self.lift)
+        if not self._contact(pts, b, L, 0.3 + 1.5 * self.drape,
+                             [((hi - z) if flip else (z - lo)) * L for x, f, z in grid],
+                             None if lift > 0.0 else  # (in a pile: no rim pass, under the leaves over it)
+                             [(k * (cols + 1) + j, k * (cols + 1) + j + 1, (k + 1) * (cols + 1) + j + 1,
+                               (k + 1) * (cols + 1) + j) for k in range(rows) for j in range(cols)], lift > 0.0):
+            self.counts["leaves"] -= 1
+            return
         k0 = len(conn)
         for k in range(rows):
             for j in range(cols):
@@ -34744,6 +35032,7 @@ class _DebrisBuild(object):
                 conn.extend(quad)
                 uvi.extend(quad)
         self.stack.lay(pts, conn, k0)  # the next leaves land on it
+        self.tris.lay(pts, conn, k0)
 
     def _pile(self, c, n, r, ci=-1):
         """A small pile of leaves where it fell: in a crease (a gutter, the
@@ -34993,12 +35282,17 @@ class _DebrisBuild(object):
             us.append(u)
             vs.append(v)
         _mi_drop_settle(field, pts, b, yq, contacts, L, self.drape * (0.9 if green else 0.5), lifted)
+        if not self._contact(pts, b, L, (0.4 + 3.0 * self.drape) if green else (0.3 + 2.0 * self.drape),
+                             [q[2] * L for q in pts_l], quads):
+            self.counts["jungle"] -= 1
+            return
         k0 = len(conn)
         for q in quads:
             counts.append(4)
             conn.extend(b + j for j in q)
             uvi.extend(b + j for j in q)
         self.stack.lay(pts, conn, k0)  # the next leaves land on it
+        self.tris.lay(pts, conn, k0)
 
     def _blade_local(self, r, shape, green):
         """A whole leaf's points (x, f, z), quads and UVs (0..1 over the
@@ -35238,7 +35532,8 @@ def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, paint=N
     return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "jungle": tuple(b.J),
             "jungle_dry": tuple(b.JD), "specks": tuple(b.md.S), "dirt": tuple(b.DT), "bunches": b.counts["bunches"],
             "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
-            "jungle_n": b.counts["jungle"], "specks_n": b.counts["specks"], "capped": b.capped}
+            "jungle_n": b.counts["jungle"], "specks_n": b.counts["specks"], "capped": b.capped,
+            "contact": dict(b.contact)}
 
 
 def mi_build(kind, nodes, s, seeds=None, faces=None):

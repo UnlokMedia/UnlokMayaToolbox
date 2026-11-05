@@ -688,7 +688,8 @@ def jungle():
         along += (max(xs) - min(xs)) > 1.5 * (max(zs) - min(zs))
     check("in a gutter they lie along it", len(shells) >= 2 and along >= 0.7 * len(shells),
           "%d of %d along" % (along, len(shells)))
-    ys = [p[1] for sh in shells for p in sh if 7.3 < p[2] < 8.7]
+    # (in its length: a leaf past an end hangs down over it)
+    ys = [p[1] for sh in shells for p in sh if 7.3 < p[2] < 8.7 and -15.0 < p[0] < 15.0]
     check("riding up its sides, not through them", ys and min(ys) > 0.55 and not sum(in_sides(sh) for sh in shells),
           "lowest %.2f, %d points in its sides" % (min(ys) if ys else 0, sum(in_sides(sh) for sh in shells)))
     big = gutter_leaves(0.45, 10.0)
@@ -1478,7 +1479,9 @@ def dropped_leaves():
               "%d leaves crossing another (%d small, %d Paddle, %d Broad; deepest %.1f mm)" % (
                   through, thr[0][0], thr[1][0], thr[2][0], 100.0 * max(x[1] for x in thr)))
         if roof is not None:  # (a ball's own slope is steeper than that)
-            most = 52.0 if roof else 48.0
+            # (a small leaf leaning off a rail's end or a sheet's edge drapes down onto what's under it:
+            # its best fit plane a few degrees steeper than the stiff rest's)
+            most = 55.0 if roof else 52.0
             ps = sorted((drop_pitch(p), at(p)) for p in sm if len(p) > 3 and held(surf, p))
             pb = sorted((drop_pitch(p), at(p)) for p in bg if len(p) > 3 and held(surf, p))
             ts, tb_ = sum(1 for p in sm if tall(p) and held(surf, p)), sum(1 for p in bg if tall(p) and held(surf, p))

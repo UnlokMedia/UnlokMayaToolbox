@@ -1154,9 +1154,58 @@
       Drape x 0.5 small, 0.9 green, 0.5 dry), then clamped to top_wide +
       lift (asked from yq, or from the point's own height once it has
       drooped a band below, so a gutter under an eave counts).
+    - **Contact pass** (the user, 2026-11-05: "lots of floating leaves and
+      bad interaction between leaves ... no proper draping"; wanted the gaps
+      to surfaces and other leaves fixed and a check that finds and fixes
+      floaters). Measured first (`tests/test_leaf_contact.py --measure`):
+      on a 30 degree ramp every leaf floated (up to 2 cm), on corrugated
+      and glass roofs over 90%, big leaves up to 6 cm, because the nodes'
+      `top` / `top_wide` read the max of the nodes round a point (a cell's
+      slope high), `_MiDropStack` keeps only each cell's highest leaf
+      point (a leaf rests on the curled edge of the one beside it) and the
+      rest is rigid (bridges dips). Now after the settle every leaf (small,
+      pile, big) goes through `_DebrisBuild._contact` ->
+      `_mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far,
+      relief, quads, over, coarse)`. Per point, support =
+      `_MiDropField.exact` (rays straight down half a cell apart, a cell
+      apart for pile leaves (`coarse`), from 1-5 cm over the point, each
+      kept with its hit's slope (normal, no steeper than about 3:1) and
+      carried over to the point asked, so shared rays stay exact on a
+      ramp / rock / corrugation flank; cached in the field's
+      `nodes["exact"]` (survives rebuilds); an underside hit = the point is
+      inside something: it stays put) and `_MiLeafTris.top` (laid leaves
+      as triangles in 2 cm cells, barycentric rows precomputed; counts a
+      leaf up to `over` = max(2 cells, 0.1 L) above the point: one put
+      through it comes up on top; Rest on moss lays the moss bed in too,
+      `lay_mesh`). Then (1) the whole piece comes down by its smallest
+      gap; (2) it bends: D(v) = min over w (base(w) + kappa |v - w|^2) over
+      the points whose gap is within reach (0.3 L in 1.5 .. 3 cm: across 4
+      cm rails it bridges), base = gap minus the point's own relief (its
+      curl / cup / crumple over the piece's lowest, so the sheet under the
+      curl bends and a cupped leaf keeps its edges up); points already
+      touching skip the loop; points past reach (over an edge, the settle's
+      arc already drooped them) move with the nearest one in reach; kappa =
+      bend / L, bend 0.3 + 1.5 Drape small and pile leaves (stiffer: they
+      folded over rails and mullions), 0.4 + 3 Drape green, 0.3 + 2 Drape
+      dry; (3) no point under its support + lift; (4) `_MiLeafTris.rims`:
+      each triangle raised over any laid leaf point under it (a curled rim
+      between its own points poked through the leaf laid on it; cells whose
+      highest point is under the quad are skipped) - not for pile leaves
+      (buried; it cost a second a pile build). Nothing under it at all:
+      the leaf is taken off (`removed`). The build's `contact` dict
+      (lowered / pushed / removed) is in `debris_build`'s result. After: no
+      leaf over 5 mm off anything in any scene but the odd one whose face
+      rests on a mullion's edge between its points (rails' grating left out
+      of the measure: leaves rest across rails), the curl kept (`air` 0.1 -
+      0.4). Cost: small and big leaves 5-10%, Leaf piles about 1.65x main
+      (2.2 -> 3.7 s on test_scatter's yard). A small leaf leaning off a rail
+      end or a sheet's edge now drapes down onto the floor below, its fit
+      plane up to about 53 degrees (test_scatter's limit 52 yard / 55 roofs,
+      was 48 / 52 for the stiff rest). Pile leaves come down onto the leaves
+      under them too (no air pockets in the mound).
     `drape` (0.5) in `DEBRIS_DEFAULTS` and on Leaves / Leaf piles / Jungle
-    leaves (More). Pile leaves (lift > 0) keep their pile placement but are
-    laid in the stack. `_leaf_spine` is gone.
+    leaves (More). Pile leaves (lift > 0) keep their pile placement, then
+    the contact pass, and are laid in the stack. `_leaf_spine` is gone.
   - **Moss Style** (the user, 2026-11-04: the carpet "can become a bit
     heavy ... it doesn't always have to be one object ... a scattered thing
     instead of this growth. Or maybe there's a setting to toggle"): `style`
@@ -2675,6 +2724,9 @@ Corrugated metal: `tests/test_corrugated_roof.py`. Clay tiles: `tests/test_tile_
 Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
 Scatter influence paint: `tests/test_scatter_paint.py`, GUI `tests/run_gui_scatter_paint.mel` (its
 pictures read the viewport back instead of playblasting, which empties the undo queue its Ctrl+Z checks need).
+Dropped leaves touching what they lie on: `tests/test_leaf_contact.py` (`--measure` prints the gaps per scene
+and layer); low close-up pictures from GUI `tests/run_gui_leaf_pics.mel` (`UNLOK_TOOLBOX` an older copy for
+"before", `UNLOK_PIC_TAG` a file name prefix; `tests/_out/leaf_pics`).
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
 (and `python tools/embed_reframe.py --check`). Launch time and every tool
