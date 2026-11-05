@@ -497,15 +497,22 @@ detail (just its shell, instant), get the shape right, then raise
        adds leaves tied along each verge.
      - **Caps:** leaves laid over the ridge, down each hip and round a
        cone's apex from the crest down both sides, ending at the courses'
-       height so they blend in, under a pole along the crest (*Cap the
-       ridge, hips and apex*). Courses wrap continuously round hipped ends.
+       height so they blend in (*Cap the ridge, hips and apex*), under a
+       pole along the ridge and each hip (*Ridge and hip poles*, a switch of
+       its own: off, the poles go and the cap leaves stay just as they
+       were). The cap leaves are laid in handfuls, each leaf resting on the
+       one before and one side lapping over the other at the ridge, so they
+       never cut through each other; *Messiness* turns, lengthens, twists,
+       droops and breaks them, lays the odd stray leaf over the rest and
+       packs them closer so the cap stays covered. The poles rest in the top
+       of the cap. Courses wrap continuously round hipped ends.
      - **Form:** **Cards** (one card per tile / frond for an alpha-mapped
        texture; each fills 0..1; caps stay leaflets), **Leaflets** (each
        leaflet a flat tapered strip) or **3D Leaflets** (creased down the
        midrib, rounder sticks). Leaflets share one UV layout: the leaflet in
        true proportions in the left 85% of 0..1 (so a leaf texture with
        alpha fits its outline), sticks, rachis and poles in the strip on the
-       right (*Sticks, rachis and ridge poles*); stacks and mirroring as
+       right (*Sticks and rachis*); stacks and mirroring as
        below.
      - **Curl** bends every leaflet across its width (not along it): above
        0 it arches (edges down to the roof), below 0 it cups (edges up), 1 is

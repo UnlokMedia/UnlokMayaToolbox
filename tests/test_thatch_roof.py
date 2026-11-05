@@ -636,11 +636,11 @@ def run():
     tb["update_thatch_roofs"]({root: {"frame_subd": False}})
     fr = tb["thatch_parts"](root)["frame"]
     check("Sub-D off: back to _GEP", fr.endswith("_GEP"), fr)
-    tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False, "sticks": False}})
+    tb["update_thatch_roofs"]({root: {"frame_style": "Bamboo", "frame_subd": False, "ridge_poles": False}})
     fbb, sbb = bbox(fr), bbox(parts["straw"])  # (no ridge pole: it rides on top of the cap)
     check("the frame sits under the thatch, rafters out to the eaves", fbb[4] < sbb[4] - 0.08 and 1.6 < fbb[1] < 2.6,
           "frame y %.2f..%.2f, thatch top %.2f" % (fbb[1], fbb[4], sbb[4]))
-    tb["update_thatch_roofs"]({root: {"sticks": True}})
+    tb["update_thatch_roofs"]({root: {"ridge_poles": True}})
     n_wide = mesh_fn(tb, fr).numVertices
     tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.075}})
     check("closer rafters: more of them", mesh_fn(tb, fr).numVertices > n_wide * 1.1,
@@ -724,7 +724,29 @@ def run():
     check("ridge / hip poles sit in the frame's mesh (with the sticks without a frame)",
           mesh_fn(tb, parts["sticks"]).numPolygons > with_frame,
           "%d -> %d stick faces" % (with_frame, mesh_fn(tb, parts["sticks"]).numPolygons))
-    tb["update_thatch_roofs"]({root: {"frame": True}})
+    # the user, 2026-11-02: the poles look like they float on the cap; turning them off mustn't open the ridge
+    capped = [tuple(q) for q in mesh_fn(tb, parts["straw"]).getPoints()]
+    tb["update_thatch_roofs"]({root: {"ridge_poles": False}})
+    bare = [tuple(q) for q in mesh_fn(tb, parts["straw"]).getPoints()]
+    check("Ridge and hip poles off: only the poles go (the cap leaves, sticks and rachis stay exactly)",
+          mesh_fn(tb, parts["sticks"]).numPolygons == with_frame and bare == capped,
+          "%d stick faces (%d without poles), %d / %d leaf points" % (
+              mesh_fn(tb, parts["sticks"]).numPolygons, with_frame, len(bare), len(capped)))
+    d = tb["thatch_data"](root)
+    d.pop("ridge_poles")
+    d["sticks"] = False
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], json.dumps(d), type="string")
+    check("an older roof with Sticks off keeps its poles off", tb["thatch_data"](root)["ridge_poles"] is False)
+    d["sticks"] = True
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], json.dumps(d), type="string")
+    check("and with Sticks on, on", tb["thatch_data"](root)["ridge_poles"] is True)
+    d["version"] = 5  # built before the poles switch and the layered cap leaves
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], json.dumps(d), type="string")
+    check("a roof built before the poles switch and messy cap leaves (version 5) is flagged for Upgrade",
+          tb["THATCH_VERSION"] >= 6 and tb["thatch_needs_upgrade"](root))
+    d["version"] = tb["THATCH_VERSION"]
+    cmds.setAttr(root + "." + tb["THATCH_SETTINGS"], json.dumps(d), type="string")
+    tb["update_thatch_roofs"]({root: {"frame": True, "ridge_poles": True}})
     # upgrade an old roof in place
     cmds.undoInfo(state=True, infinity=True)
     cmds.delete(fr)

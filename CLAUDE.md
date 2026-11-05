@@ -370,6 +370,27 @@
       and `_th_flush_cut` moves every straw / sticks / underlay / frame
       point past the verge back onto its plane (all thatch styles).
       Overhang sets where the cut is. Metal ignores it.
+    - **Cap leaves** (`crest()`, the user 2026-11-04: on a messy roof the
+      caps stayed neat and clumped, leaves clipping through each other).
+      Laid in handfuls (2 to `cap_hand`, more when messy) along the crest:
+      each leaf `cap_step` above the one before (a hip's fan of headings
+      in fractions of a step), so neighbours always differ in height; a
+      reset at each new handful. The ridge's second side (`over=True`)
+      laps over the first near the crest (fades by a quarter of the leaf).
+      A leaf's top point moved onto the crest uses its own lift (with one
+      shared `top` they all met there). The tips come down half their
+      extra. Messiness: turn, length, twist, droop, width, broken leaves,
+      strays laid over a handful's top; spacing `cap_gap` (closer with
+      mess) keeps turned leaves covering. `pole()` sits at the cap's mean
+      height (plus the lap on the ridge), a little bedded in.
+    - **Ridge poles** (`ridge_poles`, the user 2026-11-02: the poles looked
+      like they floated on the cap, and turning the cap off to lose them
+      opened the ridge): `pole()` checks `ridge_poles`, not `sticks` or the
+      cap leaves, so off drops only the poles (the straw is identical).
+      `thatch_data` and an older user preset without the key follow
+      `sticks`, which used to switch them.
+      `THATCH_VERSION` 6 (both changes): older roofs show Upgrade, which
+      rebuilds them with the new cap and the poles following their Sticks.
     - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
       sticks, rachis and (without a frame) poles are the roof's `sticks`
       part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from

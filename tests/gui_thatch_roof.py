@@ -261,6 +261,17 @@ def main():
     edit(verge_a="Hanging", end_b="Gable")
     check("palm rows show (fronds section), straw piece sizes hide", not panel._rows["frond_form"][1].isHidden() and
           panel._rows["piece_width"][1].isHidden() and not panel._rows["detail"][1].isHidden())
+    # Ridge and hip poles: a switch of their own, the cap leaves stay
+    frame_on(straw, direction=(0.5, 0.9, 1.0), dist=0.7)
+    snap("17c_ridge_poles_on.png")
+    pts_on = cmds.xform(straw + ".vtx[*]", q=True, worldSpace=True, translation=True)
+    edit(ridge_poles=False)
+    check("Ridge and hip poles: its own checkbox; off keeps the cap leaves exactly",
+          not panel.f["ridge_poles"].isHidden() and ns["thatch_data"](root)["ridge_poles"] is False and
+          ns["thatch_data"](root)["ridge_fronds"] is True and
+          cmds.xform(straw + ".vtx[*]", q=True, worldSpace=True, translation=True) == pts_on)
+    snap("17c_ridge_poles_off.png")
+    edit(ridge_poles=True)
     scroll = [a for a in panel.findChildren(QtWidgets.QScrollArea) if a.isVisible()][0]
     panel.more_sec.header.setChecked(True)
     scroll.ensureWidgetVisible(panel.main_sec, 0, 0)
