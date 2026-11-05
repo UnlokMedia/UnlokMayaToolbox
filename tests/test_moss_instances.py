@@ -207,6 +207,22 @@ def run():
     tb["sc_remove_layer"](root, data["layers"][0]["id"])
     check("removing the layer removes its instanced shoots", not tb["sc_shoots"](root))
 
+    # Ctrl+Z / Ctrl+Y / Ctrl+Z over a new group, then any command (Maya frees the undone nodes): this crashed
+    # Maya when the particle shape came before the instancer
+    cmds.file(new=True, force=True)
+    stone = rock()
+    rep = tb["create_scatter_group"]([stone], "Moss", dict(s, detail="Normal"), select=False)
+    node = list(tb["sc_shoots"](rep["root"]).values())[0]
+    kids = cmds.listRelatives(node, children=True, fullPath=True)
+    check("the instancer comes first under the shoots node", cmds.nodeType(kids[0]) == "instancer",
+          str([cmds.nodeType(k) for k in kids]))
+    cmds.undo()
+    cmds.redo()
+    tb["sc_sync"]()
+    cmds.undo()
+    cmds.polyCube(name="afterUndo")
+    check("a new group undone, redone, undone, then a new command: Maya carries on", cmds.objExists("afterUndo"))
+
 
 try:
     run()

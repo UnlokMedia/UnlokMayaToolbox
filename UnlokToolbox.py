@@ -36397,9 +36397,21 @@ def _sc_fill_shoots(node, mesh, sg=None):
     inst = cmds.particleInstancer(ps, addObject=True, object=shapes, cycle="None", rotation="rotationPP",
                                   scale="scalePP", objectIndex="indexPP", rotationUnits="Degrees")
     inst = cmds.parent(inst, node)[0]
-    cmds.rename(node + "|" + inst, stem + "_INS")
+    inst = cmds.rename(node + "|" + inst, stem + "_INS")
+    _sc_shoots_order(node)
     per = [f for _, f, _ in split]
     return sum(per[i] for i in data["index"])
+
+
+def _sc_shoots_order(node):
+    """The instancer first under a shoots node. Maya frees a deleted
+    hierarchy's nodes in child order: with the particle shape first, the
+    instancer was left copying a freed particle's points and Maya crashed
+    (a group grown, Ctrl+Z, Ctrl+Y, Ctrl+Z, then any command)."""
+    kids = cmds.listRelatives(node, children=True, fullPath=True) or []
+    inst = [k for k in kids if cmds.nodeType(k) == "instancer"]
+    if inst and kids[0] != inst[0]:
+        cmds.reorder(inst[0], front=True)
 
 
 def _sc_read_shoots(node):
@@ -36820,6 +36832,8 @@ def _sc_write_layer_shoots(root, layer, placed, shoots, parts):
     if _SC_WROTE.get((root, key)) != sig or not _sc_shoot_nodes(node)[1]:
         _sc_fill_shoots(node, mesh, sg=_sc_sg(parts.get(layer["id"] + "/strands")))
         _SC_WROTE[(root, key)] = sig
+    else:
+        _sc_shoots_order(node)  # (one written before the fix)
     if not cmds.getAttr(node + ".visibility"):
         cmds.setAttr(node + ".visibility", True)
     per = [f for _, f, _ in mesh[6]]
