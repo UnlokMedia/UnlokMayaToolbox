@@ -1744,6 +1744,74 @@
     it). The panel shows it in step 3 (amber label, card tone warn), the
     NEXT banner mentions it, and the status after Fill repeats the fix.
 
+- **Lazy tabs** (launch speed, 2026-11-04; the user: "make the toolbox
+  launch faster"): `CategoryPage` builds a tool's panel the first time it's
+  shown (`panel(i)` / `show_tool(i)`; until then its stack slot is an empty
+  placeholder, replaced in place so `stack.setCurrentWidget(panel)` still
+  works). The window builds only the first tab's first tool before showing;
+  `tabs.currentChanged` builds the rest on demand. A panel whose build raises
+  becomes `_ToolFailed` (the toolbox still opens). `window.panels()` builds
+  everything (the GUI tests use it); the window itself uses
+  `built_panels()` (shutdown on close). Build times land in
+  `_registry()["build_times"]`. **Scene upkeep for unbuilt panels:**
+  `TOOL_UPKEEP` lists what a panel does on Undo / Redo
+  (`rebuild_stale_ropes`, `rebuild_stale_thatch`, `sc_sync`); the window's
+  own Undo / Redo jobs run those for panels not built yet, so a redo still
+  re-ties a rope with the Rope tab never opened. Add a row when a new panel
+  gains scene upkeep. Smart UDIM starts with `_links_dirty = True` (it may be
+  built long after the scene loaded, so it catches up on followed groups at
+  its first refresh). `tests/gui_launch_time.py` (`run_gui_launch_time.mel`)
+  measures read / compile / module / show / first paint and a real Script
+  Editor paste, and opens every tool once.
+- **Renamer** (Naming tab; UnlokRenamer ported in, 2026-11-04, the user:
+  "incorporate unlok renamer too"). Module-level engine: `ur_parse_name`,
+  `ur_family_key`, `ur_compose_name`, `ur_generate_name(opts, index)` (opts =
+  the panel's fields, `UR_RENAME_DEFAULTS`), `ur_fields_from_name` (Set From
+  Selection; returns explicit fields plus `group`, and the panel applies
+  `UR_GROUP_MODE` / `UR_GEOMETRY_MODE` first when the mode flips, as the
+  standalone checkbox did), `ur_rename`, `ur_transforms`, the four
+  `ur_scan_*`, `ur_family_targets` (pure: the family-renumber engine) and
+  `ur_fix_families`; panel `RenamerPanel`, results `RenamerIssueDialog`
+  (re-scans after each fix). Kept from the standalone: names, parsing,
+  numbering, UUID two-pass renames (`_ur_rename_pairs`), checks and their
+  wording. Changed for the toolbox: renames and fixes are one UndoChunk each
+  (the standalone had no undo chunk), errors go to the status line, one
+  narrow column. Shares `UR_MATERIALS` / `UR_COLORS` / `UR_SUFFIXES` and the
+  split helpers with Smart UDIM. `tests/test_renamer.py` compares the maths
+  with the standalone `unlok_renamer.py` (loaded from the UnlokRenamer repo
+  when it's there); keep them in step if either changes. Smart UDIM's
+  **Open Renamer** selects the listed meshes and calls
+  `open_toolbox_tool("Renamer")` (the old "is unlok_renamer loaded" lookup is
+  gone).
+- **Reframe** (Camera tab; the user's MayaReframeTool, embedded 2026-11-04).
+  It stays its own project (`../../MayaReframeTool`, `Build/scripts/reframe`,
+  its own tests and paste build). `tools/embed_reframe.py` copies its
+  package into `_REFRAME_SOURCES` between the BEGIN / END REFRAME SOURCES
+  markers as string literals (non-ASCII as `\uXXXX` escapes, decoding back
+  exactly); `--check` says whether it's current. Edit Reframe there, then
+  re-run the script; never edit the embedded block by hand.
+  `reframe_package()` installs an in-memory importer (flag `_reframe_bundle`,
+  the same one the standalone bundle uses, so either paste cleans up the
+  other) and imports it, once per paste (`_REFRAME_STAMP`); nothing of it is
+  compiled at paste time. `ReframeToolPanel` hosts Reframe's own
+  `sidebar.ReframePanel` (a `MayaQWidgetDockableMixin` widget; parented into
+  the panel it behaves as a plain widget) and calls its `shutdown()`. The
+  Match window still opens as Reframe's own floating workspaceControl.
+  Exceptions to the toolbox rules, kept as Reframe's behaviour: Export Match
+  Data writes a JSON file the user picks, the strip's "Show in Explorer"
+  starts explorer, and its UI callbacks don't go through `ui_safe`.
+  `tests/test_reframe_embed.py`.
+- **Shelf button** (the user, 2026-11-04: an icon "so it can be installed
+  as part of the AM_custom shelf"). `shelf/install_shelf_button.py` (run in
+  Maya, not part of the paste) copies `shelf/TAB_UnlokToolbox_icon_128px.png`
+  into prefs `icons/tabIcons`, backs the shelf file up to `.bak`, replaces
+  our button or an old pasted-toolbox button in place and saves shelves;
+  the button execs `UnlokToolbox.py` from the main clone into `__main__`
+  (like a paste). `tools/make_shelf_icon.py` draws the icons (the AM_Custom
+  tab style: 403 x 128 pill, coloured block + white symbol, Poppins Bold).
+  Never edit `shelf_AM_Custom.mel` while the user's Maya is open: Maya
+  rewrites shelves on exit.
+
 ## Speed on big assets
 - `expand_members` (MFnSet.getMembers) and `SmartUdimAsset.meshes()`
   (MItDag) use the API: 0.74 s down to 0.08 s per refresh at 3,000
@@ -2102,6 +2170,9 @@ the output folder. The Roof tool's GUI test is `tests/run_gui_thatch_roof.mel`
 Corrugated metal: `tests/test_corrugated_roof.py`. Clay tiles: `tests/test_tile_roof.py`.
 Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
+Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
+(and `python tools/embed_reframe.py --check`). Launch time and every tool
+opening: GUI `tests/run_gui_launch_time.mel`.
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
   `cat > file` without a heredoc, hang. Write patch scripts to files and
   run `python script.py`.

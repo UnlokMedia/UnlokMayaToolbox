@@ -1,0 +1,2 @@
+// Launch with MAYA_APP_DIR set to an empty folder and UNLOK_TEST_DIR to this folder, then  maya.exe -script <this file>
+python("import os; exec(compile(open(os.path.join(os.environ['UNLOK_TEST_DIR'], 'gui_shelf_button.py')).read(), 'gui_shelf_button.py', 'exec'), {'__name__': 'gui_shelf_button'})");

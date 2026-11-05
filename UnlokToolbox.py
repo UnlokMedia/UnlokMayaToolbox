@@ -27,6 +27,14 @@ UV
     Smart UDIM    - sort an asset into UDIM sections and material groups
                     (plain Maya sets, UnlokRenamer naming), clean geometry
                     and report UV problems before layout.
+Naming
+    Renamer       - UnlokRenamer: name geometry and groups to the Unlok
+                    convention, and check a hierarchy (duplicates, invalid
+                    names, soft warnings, material variants) with fixes.
+Camera
+    Reframe       - match a camera to concept art or a photo by clicking
+                    matching points on the model and the image (position,
+                    rotation, focal length, lens shift).
 """
 
 import bisect
@@ -11408,40 +11416,6 @@ def selection_items():
     return items
 
 
-_RENAMER_SPEC = []
-
-
-def _renamer_importable():
-    """Is unlok_renamer importable? Looked up once (it walks sys.path)."""
-    if not _RENAMER_SPEC:
-        try:
-            import importlib.util
-            _RENAMER_SPEC.append(importlib.util.find_spec("unlok_renamer") is not None)
-        except Exception:
-            _RENAMER_SPEC.append(False)
-    return _RENAMER_SPEC[0]
-
-
-def _unlok_renamer_main():
-    """UnlokRenamer's main(): from the Script Editor if it was pasted and run
-    there (secure setups), else from an importable unlok_renamer.py; None if
-    neither."""
-    import __main__
-    if hasattr(__main__, "RenamerWindow") and callable(getattr(__main__, "main", None)):
-        return __main__.main
-    try:
-        if _renamer_importable():
-            import unlok_renamer
-            return unlok_renamer.main
-    except Exception:
-        pass
-    return None
-
-
-def _unlok_renamer_available():
-    return _unlok_renamer_main() is not None
-
-
 LEVEL_COLORS = {"fixed": "#6fbf73", "warn": "#e0b050", "skip": "#e07a5f", "info": "#a8a8a8"}
 SHEET_SIZES = {"Small": 256, "Medium": 512, "Large": 1024}
 
@@ -12264,7 +12238,9 @@ class SmartUdimPanel(QtWidgets.QWidget):
         self._refresh_timer.setInterval(60)
         self._refresh_timer.timeout.connect(_guarded(self._refresh_timer, self._timed_refresh))
         self._quiet = False  # building our own helper mesh (UV Editor labels): not a reason to refresh
-        self._links_dirty = False  # something was reparented / created: check the followed groups
+        # Something was reparented / created: check the followed groups. True to start with: the panel
+        # is built when the UV tab first opens, and groups may have changed since the scene loaded.
+        self._links_dirty = True
         self._reparented = set()
         self._inspect_timer = QtCore.QTimer(self)  # selection changed: update the inspector
         self._inspect_timer.setSingleShot(True)
@@ -12494,7 +12470,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
         # ---- 4. names
         card = self.naming_section = StepCard(4, "Fix names", "Meshes whose names break the UnlokRenamer "
-                                                              "convention. Fix them there, then Scan again.")
+                                                              "convention. Fix them in the Renamer (Naming "
+                                                              "tab), then Scan again.")
         self.naming_list = QtWidgets.QTreeWidget()
         self.naming_list.setColumnCount(2)
         self.naming_list.setHeaderLabels(["Mesh", "Problem"])
@@ -12506,7 +12483,8 @@ class SmartUdimPanel(QtWidgets.QWidget):
         sel_all = secondary_button("Select All", "Select every mesh listed.")
         sel_all.clicked.connect(lambda *_: self._select_nodes(
             [n["node"] for n in (self.snapshot or {}).get("naming", [])]))
-        self.renamer_btn = secondary_button("Open UnlokRenamer")
+        self.renamer_btn = secondary_button("Open Renamer", "Select the meshes listed (or the rows you picked) "
+                                                            "and open the Renamer in the Naming tab.")
         self.renamer_btn.clicked.connect(lambda *_: self.open_renamer())
         card.add(button_row(sel_all, self.renamer_btn))
         col.addWidget(card)
@@ -13283,11 +13261,6 @@ class SmartUdimPanel(QtWidgets.QWidget):
             self.naming_list.addTopLevelItem(item)
         self.naming_section.title.setText("Fix names%s" % (
             "  (%d)" % len(naming) if naming else ""))
-        available = _unlok_renamer_available()
-        self.renamer_btn.setEnabled(available)
-        self.renamer_btn.setToolTip("Open UnlokRenamer to fix these names." if available else
-                                    "UnlokRenamer isn't loaded in this Maya session (paste and run "
-                                    "unlok_renamer.py once, then re-scan).")
         self._update_guidance()
 
     def _fill_report(self):
@@ -15159,12 +15132,10 @@ class SmartUdimPanel(QtWidgets.QWidget):
 
     @ui_safe
     def open_renamer(self):
-        opener = _unlok_renamer_main()
-        if opener is None:
-            self.set_status("UnlokRenamer isn't loaded: paste unlok_renamer.py into the Script Editor and run it "
-                            "once, then try again.", level="warn")
-            return
-        opener()
+        picked = [it.data(0, QtCore.Qt.UserRole) for it in self.naming_list.selectedItems()]
+        self._select_nodes(picked or [n["node"] for n in (self.snapshot or {}).get("naming", [])])
+        if open_toolbox_tool("Renamer") is None:
+            self.set_status("The Renamer is in the toolbox's Naming tab.", level="warn")
 
     # ======================================================== helpers
     def _parent_section(self, material_set):
@@ -36890,6 +36861,5784 @@ class QuadFillPanel(QtWidgets.QWidget):
 
 
 # =============================================================================
+# Renamer (UnlokRenamer, ported into the toolbox)
+# =============================================================================
+# The naming tool from the UnlokRenamer repository (unlok_renamer.py 1.1.0),
+# folded in so one paste has everything. Same convention, same parsing, same
+# family-renumber engine; the lists and split helpers above (UR_MATERIALS,
+# ur_split_material_color_variant, ...) are shared with Smart UDIM. What
+# changed for the toolbox: every rename is one Ctrl+Z (the standalone tool
+# renamed outside any undo chunk), errors go to the panel's status line
+# instead of message boxes, and the layout is one narrow column.
+
+UR_POSITIONS = ["C", "L", "R", "B", "F", "U", "D", "LF", "RF", "LB", "RB"]
+UR_NUMBERS = ["###", "####", "#####", "######"]
+UR_PADDING = 4
+UR_TEMP_PREFIX = "UNLOK_TMP_"
+
+# The Rename tab's fields with the standalone tool's defaults.
+UR_RENAME_DEFAULTS = {
+    "group": False,
+    "use_material": True, "material": "stone", "color": "Default", "variant": "",
+    "use_position": True, "position": "C",
+    "use_name": True, "name": "",
+    "use_number": True, "number": "####", "underscore": False,
+    "use_suffix": True, "suffix": "GES",
+}
+
+
+def ur_parse_name(name):
+    """(stem, suffix, number, underscore, ndigits) of a convention name.
+
+    'paintGrey_C_wing0001_GEP'  -> ('paintGrey_C_wing', 'GEP', 1, False, 4)
+    'paintGrey_C_wing_0001_GEP' -> ('paintGrey_C_wing', 'GEP', 1, True, 4)
+    'wing_GEP1'                 -> ('wing', 'GEP', None, False, 0)
+    The suffix has its variant digits stripped (GEP1 -> GEP), or is None; the
+    stem never ends in a digit."""
+    parts = name.split('_')
+    suffix = None
+    body = name
+    if len(parts) > 1:
+        base, _ = ur_base_suffix_of(parts[-1])
+        if base is not None:
+            suffix = base
+            body = '_'.join(parts[:-1])
+    number_match = re.search(r'(\d+)$', body)
+    if number_match:
+        digits = number_match.group(1)
+        pre = body[:number_match.start()]
+        underscore = pre.endswith('_')
+        return (pre[:-1] if underscore else pre), suffix, int(digits), underscore, len(digits)
+    return body, suffix, None, False, 0
+
+
+def ur_family_key(name):
+    """(stem, suffix) ignoring the trailing number, so every member of a
+    numbered series shares it: wing0001_GEP, wing_0002_GEP, wing_GEP and
+    wing_GEP3 are all ('wing', 'GEP')."""
+    stem, suffix, _, _, _ = ur_parse_name(name)
+    return (stem, suffix)
+
+
+def ur_compose_name(stem, suffix, number, underscore, padding):
+    """Rebuild a convention name from its parts."""
+    name = stem + ('_' if underscore and stem else '') + str(number).zfill(padding)
+    return name + '_' + suffix if suffix else name
+
+
+def ur_material_variant_issues(names):
+    """{display text: [names]} for materials used both with and without a
+    variant letter (glassClear next to glassClearA: a wildcard like
+    glassClear* in Houdini catches both) and for variant letters with gaps
+    (glassClearC but no A or B). Groups and names without a recognised
+    suffix or material are ignored."""
+    families = {}
+    for name in names:
+        parts = name.split('_')
+        if len(parts) < 2:
+            continue
+        base, _ = ur_base_suffix_of(parts[-1])
+        if base is None or base == "GRP":
+            continue
+        material, color, variant = ur_split_material_color_variant(parts[0])
+        if material is None:
+            continue
+        stem = parts[0][:len(parts[0]) - len(variant)]
+        families.setdefault(stem, {}).setdefault(variant, []).append(name)
+    issues = {}
+    for stem, variants in sorted(families.items()):
+        letters = sorted(v for v in variants if v)
+        if not letters:
+            continue
+        if '' in variants:
+            display = "{0} used with and without a variant ({0} and {1}): a wildcard like {0}* catches both".format(
+                stem, ", ".join(stem + v for v in letters))
+            issues[display] = sorted(n for v in [''] + letters for n in variants[v])
+        missing = [chr(c) for c in range(ord('A'), ord(letters[-1])) if chr(c) not in variants]
+        if missing:
+            display = "{} has variant(s) {} but no {}".format(stem, ", ".join(letters), ", ".join(missing))
+            issues[display] = sorted(n for v in letters for n in variants[v])
+    return issues
+
+
+def ur_invalid_reason(name):
+    """A short reason if the name breaks the convention in a way the fix can
+    repair (suffix variant GEP1, under-padded number wing1), else None."""
+    parts = name.split('_')
+    if len(parts) < 2:
+        return None
+    base, digits = ur_base_suffix_of(parts[-1])
+    if base is None:
+        return None  # no recognised suffix: a soft check
+    if digits:
+        return "suffix variant"
+    number_match = re.search(r'(\d+)$', '_'.join(parts[:-1]))
+    if number_match and len(number_match.group(1)) < UR_PADDING:
+        return "under-padded number"
+    return None
+
+
+def ur_soft_reasons(name):
+    """Warnings with no automatic fix (the right value is ambiguous)."""
+    parts = name.split('_')
+    base, _ = ur_base_suffix_of(parts[-1]) if parts else (None, '')
+    if base is None:
+        return ["Unrecognized suffix"]
+    if base == "GRP":
+        return []  # groups only need name + suffix
+    reasons = []
+    body_tokens = parts[:-1]
+    if not re.search(r'\d', '_'.join(body_tokens)):
+        reasons.append("Missing number")
+    if not body_tokens or (ur_split_material_color(body_tokens[0])[0] is None
+                           and body_tokens[0] not in UR_MATERIALS):
+        reasons.append("Material not like woodBrown")
+    if not any(token in UR_POSITIONS for token in body_tokens):
+        reasons.append("Missing position")
+    return reasons
+
+
+def ur_material_color(opts):
+    material = (opts.get("material") or "").strip()
+    color = (opts.get("color") or "").strip()
+    if not material or not color:
+        return ""
+    variant = (opts.get("variant") or "").strip().upper()
+    return material[0].lower() + material[1:] + color[0].upper() + color[1:] + variant
+
+
+def ur_generate_name(opts, index=1):
+    """The name the Rename fields make for the index-th object."""
+    o = dict(UR_RENAME_DEFAULTS)
+    o.update(opts or {})
+    parts = []
+    if o["use_material"]:
+        parts.append(ur_material_color(o))
+    if o["use_position"]:
+        parts.append((o["position"] or "").strip())
+    name = (o["name"] or "").strip() if o["use_name"] else ""
+    if o["use_number"]:
+        number_str = str(index).zfill(len(o["number"]))
+        if o["underscore"]:
+            if name:
+                parts.append(name)
+            parts.append(number_str)
+        else:
+            parts.append(name + number_str)
+    elif name:
+        parts.append(name)
+    if o["use_suffix"]:
+        parts.append((o["suffix"] or "").strip())
+    return "_".join(p for p in parts if p)
+
+
+def _ur_number_pattern(digits):
+    pattern = "#" * len(digits)
+    return pattern if pattern in UR_NUMBERS else "####"  # a stray 1-2 digit variant: the default
+
+
+def ur_fields_from_name(name):
+    """Set From Selection: the Rename fields that name implies, as
+    (changes, None), or (None, error). Handles all three formats, groups and
+    suffix variants (GEP1 reads as GEP and turns numbering on, so a set of
+    duplicates can be renumbered)."""
+    obj = name.split("|")[-1]
+    parts = obj.split("_")
+    raw_suffix = parts[-1] if parts else ""
+    suffix, variant_digits = ur_base_suffix_of(raw_suffix)
+    if suffix is None:
+        return None, "The selected object's suffix '%s' isn't one the convention knows (%s)." % (
+            raw_suffix, ", ".join(UR_SUFFIXES))
+    has_variant = bool(variant_digits)
+    parts[-1] = suffix
+    if suffix == "GRP":
+        group = {"group": True}
+        if len(parts) == 2:
+            group.update(name=parts[0], suffix=suffix)
+            if has_variant:  # name_GRP1: number it so duplicates can renumber
+                group.update(use_number=True, underscore=True, number="####")
+            else:
+                group.update(use_number=False)
+            return group, None
+        if len(parts) == 3 and parts[1].isdigit():
+            group.update(name=parts[0], use_number=True, underscore=True,
+                         number=_ur_number_pattern(parts[1]), suffix=parts[2])
+            return group, None
+        return None, "The group name doesn't fit the convention: expected <name>_GRP or <name>_####_GRP."
+
+    def material(token):
+        mat, col, var = ur_split_material_color_variant(token)
+        if mat is None:
+            return None, ("Couldn't read a material from '%s': expected a lowercase word then capitalised "
+                          "word(s), like paintGrey, woodMoulding or glassClearA (optional variant letter)." % token)
+        return {"material": mat, "color": col, "variant": var}, None
+
+    fields = {"group": False}
+    if len(parts) == 5 and parts[3].isdigit():  # paintGrey_C_hiResBlockA_0001_GEP
+        mat, err = material(parts[0])
+        if err:
+            return None, err
+        fields.update(mat)
+        fields.update(position=parts[1], name=parts[2], use_number=True, underscore=True,
+                      number=_ur_number_pattern(parts[3]), suffix=parts[4])
+        return fields, None
+    if len(parts) == 4:  # ..._hiResBlockA_GEP / ..._hiResBlockA0001_GEP / ..._hiResBlockA_GEP1
+        mat, err = material(parts[0])
+        if err:
+            return None, err
+        match = re.search(r'(\d+)$', parts[2])
+        object_name = parts[2][:match.start()] if match else parts[2]
+        fields.update(mat)
+        fields.update(position=parts[1], name=object_name, suffix=parts[3])
+        if match:
+            fields.update(use_number=True, underscore=False, number=_ur_number_pattern(match.group(1)))
+        elif has_variant:
+            fields.update(use_number=True, underscore=False, number="####")
+        else:
+            fields.update(use_number=False)
+        return fields, None
+    return None, ("The selected name doesn't fit the convention. Expected "
+                  "<materialColor>_<Position>_<description>_<####>_<suffix>, "
+                  "<materialColor>_<Position>_<description><####>_<suffix> or "
+                  "<materialColor>_<Position>_<description>_<suffix>.")
+
+
+# Group Mode on / off sets these, as the standalone tool's checkbox did.
+UR_GROUP_MODE = {"group": True, "use_material": False, "use_position": False, "use_name": True,
+                 "use_number": False, "use_suffix": True, "suffix": "GRP"}
+UR_GEOMETRY_MODE = {"group": False, "use_material": True, "use_position": True, "use_name": True,
+                    "use_number": True, "use_suffix": True, "suffix": "GES"}
+
+
+def _ur_uuids(nodes):
+    out = []
+    for node in nodes:
+        found = cmds.ls(node, uuid=True)
+        if found:
+            out.append(found[0])
+    return out
+
+
+def _ur_path(uid):
+    found = cmds.ls(uid, long=True)
+    return found[0] if found else None
+
+
+def _ur_rename_pairs(pairs):
+    """[(uuid, new name)]: every node gets a throwaway name first, so a target
+    equal to another node's current name can't collide on the way (a
+    collision makes Maya append digits to the suffix: GES -> GES1). Returns
+    {uuid: name Maya gave it}."""
+    for uid, _ in pairs:
+        path = _ur_path(uid)
+        if path:
+            try:
+                cmds.rename(path, UR_TEMP_PREFIX + uid.replace('-', '_'))
+            except Exception:
+                pass
+    out = {}
+    for uid, target in pairs:
+        path = _ur_path(uid)
+        if path:
+            try:
+                out[uid] = cmds.rename(path, target)
+            except Exception:
+                pass
+    return out
+
+
+def ur_rename(nodes, opts):
+    """Rename nodes in order with the Rename fields, numbered 1, 2, 3...
+    Several nodes always get numbers (else every name would collide).
+    One Ctrl+Z. Returns [new names]."""
+    nodes = list(nodes or [])
+    if not nodes:
+        return []
+    o = dict(UR_RENAME_DEFAULTS)
+    o.update(opts or {})
+    if len(nodes) > 1:
+        o["use_number"] = True
+    uuids = _ur_uuids(nodes)
+    with UndoChunk("Renamer: rename"):
+        done = _ur_rename_pairs([(uid, ur_generate_name(o, i)) for i, uid in enumerate(uuids, 1)])
+    return [done[uid] for uid in uuids if uid in done]
+
+
+def ur_transforms(root):
+    """Every transform under root (full paths); shapes rename with their
+    transform, so they'd only be phantom duplicates."""
+    return cmds.listRelatives(root, allDescendents=True, fullPath=True, type="transform") or []
+
+
+def _ur_by_name(transforms):
+    by_name = {}
+    for obj in transforms:
+        by_name.setdefault(obj.split('|')[-1], []).append(obj)
+    return by_name
+
+
+def ur_scan_duplicates(transforms):
+    """{display: [objects]}: families holding two or more nodes with one name."""
+    families = {}
+    for name, objs in _ur_by_name(transforms).items():
+        if len(objs) < 2:
+            continue
+        entry = families.setdefault(ur_family_key(name), {"objs": [], "names": {}})
+        entry["objs"].extend(objs)
+        entry["names"][name] = len(objs)
+    return {", ".join("{} x{}".format(n, c) for n, c in sorted(e["names"].items())): e["objs"]
+            for e in families.values()}
+
+
+def ur_scan_invalid(transforms):
+    """{display: [objects]}: names the fix can repair, grouped by family."""
+    families = {}
+    for obj in transforms:
+        short = obj.split('|')[-1]
+        reason = ur_invalid_reason(short)
+        if reason is None:
+            continue
+        entry = families.setdefault(ur_family_key(short), {"objs": [], "names": set(), "reasons": set()})
+        entry["objs"].append(obj)
+        entry["names"].add(short)
+        entry["reasons"].add(reason)
+    return {"{}  [{}]".format(", ".join(sorted(e["names"])), "/".join(sorted(e["reasons"]))): e["objs"]
+            for e in families.values()}
+
+
+def ur_scan_soft(transforms):
+    """{reason: [objects]}: warnings only."""
+    issues = {}
+    for obj in transforms:
+        for reason in ur_soft_reasons(obj.split('|')[-1]):
+            issues.setdefault(reason, []).append(obj)
+    return issues
+
+
+def ur_scan_variants(transforms):
+    """{display: [objects]}: material variant clashes and gaps."""
+    by_name = _ur_by_name(transforms)
+    return {display: [obj for name in names for obj in by_name[name]]
+            for display, names in ur_material_variant_issues(by_name).items()}
+
+
+def ur_family_targets(key, members):
+    """Give every member of one family a unique number. members = [(uuid,
+    short name)]; returns [(uuid, new name)] for the ones that change.
+
+    Valid (>= 1), unique numbers are kept; only clashes, missing numbers and
+    suffix variants get the smallest free number. Style (underscore or not)
+    is the family's majority, attached on a tie; padding is
+    max(4, widest existing, digits the count needs). Idempotent and
+    collision-free: a duplicated chair0003_GES in chair0001..0005 becomes
+    chair0006_GES and the rest stay."""
+    stem, suffix = key
+    parsed = []
+    for uid, short in members:
+        _, _, number, underscore, ndigits = ur_parse_name(short)
+        parsed.append((uid, short, number, underscore, ndigits))
+    count = len(parsed)
+    numbered = [p for p in parsed if p[2] is not None]
+    underscore_style = bool(numbered) and sum(1 for p in numbered if p[3]) * 2 > len(numbered)
+    padding = max([UR_PADDING, len(str(count))] + [p[4] for p in parsed])
+    order = sorted(range(count), key=lambda i: (parsed[i][2] is None, parsed[i][2] or 0, parsed[i][1]))
+    used = set()
+    assigned = {}
+    for i in order:
+        number = parsed[i][2]
+        if number is not None and number >= 1 and number not in used:
+            used.add(number)
+            assigned[i] = number
+    next_free = 1
+    for i in order:
+        if i in assigned:
+            continue
+        while next_free in used:
+            next_free += 1
+        used.add(next_free)
+        assigned[i] = next_free
+    out = []
+    for i in range(count):
+        target = ur_compose_name(stem, suffix, assigned[i], underscore_style, padding)
+        if target != parsed[i][1]:
+            out.append((parsed[i][0], target))
+    return out
+
+
+def ur_fix_families(root, objects):
+    """The one fix for Duplicates and Invalid Naming: renumber every family
+    the objects belong to (read from their names, so stale paths from an
+    earlier fix still work), across everything under root. One Ctrl+Z.
+    Returns how many nodes were renamed."""
+    keys = set(ur_family_key(obj.split('|')[-1]) for obj in objects)
+    members = {}
+    for obj in ur_transforms(root):
+        short = obj.split('|')[-1]
+        key = ur_family_key(short)
+        if key in keys:
+            found = cmds.ls(obj, uuid=True)
+            if found:
+                members.setdefault(key, []).append((found[0], short))
+    pairs = []
+    for key, mem in members.items():
+        pairs.extend(ur_family_targets(key, mem))
+    if pairs:
+        with UndoChunk("Renamer: fix names"):
+            _ur_rename_pairs(pairs)
+    return len(pairs)
+
+
+UR_CHECKS = [
+    # key, button, title, scan, fixable
+    ("duplicates", "Check Duplicates", "Duplicates", ur_scan_duplicates, True),
+    ("invalid", "Check Invalid Naming  (auto-fixable)", "Invalid Naming (auto-fixable)", ur_scan_invalid, True),
+    ("soft", "Soft Checks  (warnings, select only)", "Soft Checks (warnings)", ur_scan_soft, False),
+    ("variants", "Check Material Variants  (select only)", "Material Variants (review)", ur_scan_variants, False),
+]
+UR_CHECK_CLEAN = {"duplicates": "No duplicates found.", "invalid": "No fixable naming issues found.",
+                  "soft": "No warnings: everything looks good.",
+                  "variants": "No clashing or missing variants found."}
+
+
+class RenamerIssueDialog(QtWidgets.QDialog):
+    """The results of one check: a row per issue with Select (and Fix), plus
+    Select All / Fix All. It re-scans after every fix, so the list is always
+    the live scene and empties out when everything is fixed."""
+
+    def __init__(self, rescan, title, fix=None, parent=None):
+        super(RenamerIssueDialog, self).__init__(parent)
+        self.setWindowTitle(title)
+        self.rescan = rescan
+        self.fix = fix
+        self.issues = rescan()
+        lay = QtWidgets.QVBoxLayout(self)
+        self.info = QtWidgets.QLabel()
+        lay.addWidget(self.info)
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Issue / Name", "Count", "Actions"])
+        self.table.setColumnWidth(0, 380)
+        self.table.setColumnWidth(1, 60)
+        self.table.setColumnWidth(2, 160)
+        lay.addWidget(self.table)
+        row = QtWidgets.QHBoxLayout()
+        select_all = secondary_button("Select All", "Select every object listed.")
+        select_all.clicked.connect(lambda *_: self.select_all())
+        row.addWidget(select_all)
+        if fix is not None:
+            fix_all = QtWidgets.QPushButton("Fix All")
+            fix_all.setStyleSheet("background-color: %s; color: white; font-weight: 700;" % ACCENT)
+            fix_all.setToolTip("Renumber every family listed. One Ctrl+Z.")
+            fix_all.clicked.connect(lambda *_: self.fix_all())
+            row.addWidget(fix_all)
+        close = secondary_button("Close")
+        close.clicked.connect(lambda *_: self.close())
+        row.addWidget(close)
+        lay.addLayout(row)
+        self.resize(660, 460)
+        self.refresh()
+
+    def set_status(self, text, level="info"):  # for ui_safe
+        self.info.setText(text)
+
+    def refresh(self):
+        self.info.setText("%d issue group(s):" % len(self.issues))
+        self.table.setRowCount(0)
+        for r, (name, objects) in enumerate(sorted(self.issues.items())):
+            self.table.insertRow(r)
+            item = QtWidgets.QTableWidgetItem(name)
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+            item.setToolTip(name)
+            self.table.setItem(r, 0, item)
+            count = QtWidgets.QTableWidgetItem(str(len(objects)))
+            count.setFlags(count.flags() & ~QtCore.Qt.ItemIsEditable)
+            count.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.table.setItem(r, 1, count)
+            cell = QtWidgets.QWidget()
+            cl = QtWidgets.QHBoxLayout(cell)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(2)
+            select = QtWidgets.QPushButton("Select")
+            select.clicked.connect(lambda *_, n=name: self.select_one(n))
+            cl.addWidget(select)
+            if self.fix is not None:
+                fix = QtWidgets.QPushButton("Fix")
+                fix.clicked.connect(lambda *_, n=name: self.fix_one(n))
+                cl.addWidget(fix)
+            self.table.setCellWidget(r, 2, cell)
+            self.table.setRowHeight(r, 28)
+
+    def _select(self, objects):
+        objects = [o for o in objects if cmds.objExists(o)]
+        if objects:
+            cmds.select(objects, replace=True)
+
+    @ui_safe
+    def select_one(self, name):
+        self._select(self.issues.get(name, []))
+
+    @ui_safe
+    def select_all(self):
+        self._select([o for objs in self.issues.values() for o in objs])
+
+    def reload(self):
+        self.issues = self.rescan()
+        if not self.issues:
+            self.info.setText("No remaining issues.")
+            self.table.setRowCount(0)
+            QtCore.QTimer.singleShot(600, self.close)
+            return
+        self.refresh()
+
+    @ui_safe
+    def fix_one(self, name):
+        self.fix(self.issues.get(name, []))
+        self.reload()
+
+    @ui_safe
+    def fix_all(self):
+        self.fix([o for objs in self.issues.values() for o in objs])
+        self.reload()
+
+
+class RenamerPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Renamer"
+    TOOL_TIP = "Name geometry and groups to the Unlok convention, and check a hierarchy's names."
+
+    def __init__(self, parent=None):
+        super(RenamerPanel, self).__init__(parent)
+        self.root = None
+        self.dialog = None
+        self._loading = False
+        self._jobs = []
+        self._sel_timer = QtCore.QTimer(self)
+        self._sel_timer.setSingleShot(True)
+        self._sel_timer.setInterval(120)
+        self._sel_timer.timeout.connect(_guarded(self._sel_timer, self._update_guidance))
+        self._build()
+        self.set_fields(UR_RENAME_DEFAULTS)
+        self._install_jobs()
+
+    def _install_jobs(self):
+        if maya_main_window() is None:
+            return
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", self._selection_changed])]
+        _registry()["jobs"].extend(self._jobs)
+
+    def _selection_changed(self):
+        if self.isVisible():
+            self._sel_timer.start()
+
+    # ============================================================== layout
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Renamer", "Name geometry to the Unlok convention "
+                                           "(woodBrown_C_plank0001_GEP) and check a whole hierarchy's names. "
+                                           "UnlokRenamer, inside the toolbox."))
+        self.next_banner = NextBanner()
+        tl.addWidget(self.next_banner)
+        outer.addWidget(top)
+        scroll, col = scroll_column()
+        outer.addWidget(scroll, 1)
+
+        # ---- 1. rename
+        card = self.step_rename = StepCard(1, "Rename", "Set the parts, select objects, Rename. Several "
+                                                        "objects are numbered 1, 2, 3 in selection order.")
+        self.f = {}
+        self.f["group"] = CheckField("Group Mode")
+        self.f["group"].setToolTip("Name groups: <name>_GRP or <name>_####_GRP.")
+        card.add(self.f["group"])
+        grid = Section("", header=False)
+        self.f["use_material"] = CheckField("Material")
+        self.f["material"] = self._combo(UR_MATERIALS)
+        self.f["color"] = self._combo(UR_COLORS)
+        self.f["variant"] = QtWidgets.QLineEdit()
+        self.f["variant"].setMaxLength(1)
+        self.f["variant"].setFixedWidth(34)
+        self.f["variant"].setPlaceholderText("A-Z")
+        self.f["variant"].setToolTip("Optional variant letter after the colour, for different looks of the same "
+                                     "material: glassClearA, glassClearB. Leave empty for none.")
+        self.f["variant"].setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression("[A-Za-z]?"), self.f["variant"]))
+        mat = QtWidgets.QWidget()
+        ml = QtWidgets.QHBoxLayout(mat)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(4)
+        ml.addWidget(self.f["material"], 1)
+        ml.addWidget(self.f["color"], 1)
+        ml.addWidget(self.f["variant"])
+        self._row(grid, "use_material", mat, "A lowercase word then capitalised word(s): woodBrown, "
+                                             "woodMoulding. Type your own; the lists are presets.")
+        self.f["use_position"] = CheckField("Position")
+        self.f["position"] = self._combo(UR_POSITIONS, editable=False)
+        self._row(grid, "use_position", self.f["position"], "C centre, L / R left / right, F / B front / back, "
+                                                            "U / D up / down, LF RF LB RB corners.")
+        self.f["use_name"] = CheckField("Name")
+        self.f["name"] = QtWidgets.QLineEdit()
+        self.f["name"].setPlaceholderText("description, no spaces")
+        self._row(grid, "use_name", self.f["name"], "What it is: plank, hiResBlockA, mainDoor.")
+        self.f["use_number"] = CheckField("Numbers")
+        self.f["number"] = self._combo(UR_NUMBERS, editable=False)
+        self.f["underscore"] = CheckField("Underscore before number")
+        self.f["underscore"].setToolTip("Checked: plank_0001 (legacy). Unchecked: plank0001 (default).")
+        num = QtWidgets.QWidget()
+        nl = QtWidgets.QHBoxLayout(num)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(6)
+        nl.addWidget(self.f["number"])
+        nl.addWidget(self.f["underscore"], 1)
+        self._row(grid, "use_number", num, "Padding. Several selected objects always get numbers.")
+        self.f["use_suffix"] = CheckField("Suffix")
+        self.f["suffix"] = self._combo(UR_SUFFIXES, editable=False)
+        self._row(grid, "use_suffix", self.f["suffix"], "GES / GEP / PLY ... geometry types, GRP for groups.")
+        card.add(grid)
+        self.preview = QtWidgets.QLineEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setToolTip("The first selected object's new name (the next ones count up).")
+        card.add(self.preview)
+        self.set_btn = secondary_button("Set From Selection", "Read the parts from the selected object's name "
+                                                              "(any of the three formats, or a group).")
+        self.set_btn.clicked.connect(lambda *_: self.set_from_selection())
+        self.rename_btn = primary_button("Rename Selected")
+        self.rename_btn.setMinimumHeight(28)
+        self.rename_btn.setToolTip("Rename the selected objects with the name above. One Ctrl+Z.")
+        self.rename_btn.clicked.connect(lambda *_: self.rename_selected())
+        card.add(button_row(self.set_btn, self.rename_btn))
+        col.addWidget(card)
+
+        # ---- 2. checks
+        card = self.step_checks = StepCard(2, "Check a hierarchy", "Set a root, then run the checks on everything "
+                                                                   "under it.")
+        self.root_edit = QtWidgets.QLineEdit()
+        self.root_edit.setReadOnly(True)
+        self.root_edit.setPlaceholderText("No root yet")
+        root_btn = secondary_button("Set Root from Selection", "Remember the selected group as the root, so you "
+                                                               "can run several checks in a row.")
+        root_btn.clicked.connect(lambda *_: self.set_root())
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.root_edit, 1)
+        row.addWidget(root_btn)
+        card.add_layout(row)
+        self.check_btns = {}
+        for key, label, title, scan, fixable in UR_CHECKS:
+            btn = secondary_button(label)
+            btn.clicked.connect(lambda *_, k=key: self.run_check(k))
+            self.check_btns[key] = btn
+            card.add(btn)
+        card.add(hint_label("Fixes renumber the whole family (same base, any number), keeping numbers that are "
+                            "already unique and only reassigning clashes, so one pass clears everything and a "
+                            "second finds nothing.\n"
+                            "Duplicates: one name used more than once. Invalid Naming: suffix variants (GEP1) "
+                            "and under-padded numbers. Soft Checks: missing number / position, material not "
+                            "like woodBrown. Material Variants: glassClear next to glassClearA (wildcards catch "
+                            "both) or gaps in the letters. The last two are review only."))
+        col.addWidget(card)
+        col.addStretch(1)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        outer.addWidget(self.status)
+
+        for key, w in self.f.items():
+            if isinstance(w, QtWidgets.QLineEdit):
+                w.textChanged.connect(lambda *_: self._changed())
+            elif isinstance(w, QtWidgets.QComboBox):
+                w.currentTextChanged.connect(lambda *_: self._changed())
+        for key in ("use_material", "use_position", "use_name", "use_number", "use_suffix", "underscore"):
+            self.f[key].changed.connect(lambda *_: self._changed())
+        self.f["group"].changed.connect(lambda *_: self.group_mode_changed())
+
+    def _combo(self, items, editable=True):
+        c = _guard_focus(_Combo())
+        c.addItems(list(items))
+        c.setEditable(editable)
+        return c
+
+    def _row(self, grid, check, widget, tip):
+        self.f[check].setToolTip(tip)
+        widget.setToolTip(tip)
+        grid.grid.addWidget(self.f[check], grid._row, 0)
+        grid.grid.addWidget(widget, grid._row, 1)
+        grid._row += 1
+
+    # ============================================================== state
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def fields(self):
+        out = {}
+        for key, w in self.f.items():
+            if isinstance(w, QtWidgets.QLineEdit):
+                out[key] = w.text()
+            elif isinstance(w, QtWidgets.QComboBox):
+                out[key] = w.currentText()
+            else:
+                out[key] = w.value()
+        return out
+
+    def set_fields(self, values):
+        self._loading = True
+        try:
+            for key, v in values.items():
+                w = self.f.get(key)
+                if w is None:
+                    continue
+                if isinstance(w, QtWidgets.QLineEdit):
+                    w.setText(v)
+                elif isinstance(w, QtWidgets.QComboBox):
+                    w.setCurrentText(v)
+                else:
+                    w.setValue(v)
+        finally:
+            self._loading = False
+        self._changed()
+
+    def _changed(self):
+        if self._loading:
+            return
+        for check, widgets in (("use_material", ("material", "color", "variant")), ("use_position", ("position",)),
+                               ("use_name", ("name",)), ("use_number", ("number",)), ("use_suffix", ("suffix",))):
+            for key in widgets:
+                self.f[key].setEnabled(self.f[check].value())
+        self.preview.setText(ur_generate_name(self.fields(), 1))
+        self._update_guidance()
+
+    def group_mode_changed(self):
+        self.set_fields(UR_GROUP_MODE if self.f["group"].value() else UR_GEOMETRY_MODE)
+
+    def _update_guidance(self):
+        name = self.preview.text()
+        sel = cmds.ls(selection=True) if maya_main_window() is not None else []
+        if not name:
+            self.next_banner.set_text("Turn on at least one part of the name.", tone="warn")
+        elif not sel:
+            self.next_banner.set_text("Select the objects to rename (or one to <b>Set From Selection</b>). "
+                                      "They'll be <b>%s</b>%s." % (name, ", ... counting up" if
+                                                                   self.f["use_number"].value() else ""))
+        else:
+            self.next_banner.set_text("<b>Rename Selected</b>: %d object(s) to <b>%s</b>%s." % (
+                len(sel), name, ", ..." if len(sel) > 1 else ""))
+        self.step_rename.set_state("current")
+        self.step_checks.set_state("done" if self.root else "todo")
+
+    def showEvent(self, event):
+        super(RenamerPanel, self).showEvent(event)
+        self._sel_timer.start()
+
+    # ============================================================ actions
+    @ui_safe
+    def set_from_selection(self):
+        sel = cmds.ls(selection=True, long=False)
+        if not sel:
+            self.set_status("Nothing selected.", level="warn")
+            return
+        fields, error = ur_fields_from_name(sel[0])
+        if error:
+            self.set_status(error, level="warn")
+            return
+        if fields["group"] != self.f["group"].value():
+            # As the standalone tool's Group Mode checkbox did: switching mode resets the parts first.
+            self.set_fields(UR_GROUP_MODE if fields["group"] else UR_GEOMETRY_MODE)
+        self.set_fields(fields)
+        self.set_status("Read the parts from %s." % sel[0].split("|")[-1])
+
+    @ui_safe
+    def rename_selected(self):
+        sel = cmds.ls(selection=True, long=True)
+        if not sel:
+            self.set_status("Nothing selected.", level="warn")
+            return
+        if len(sel) > 1 and not self.f["use_number"].value():
+            self.f["use_number"].setValue(True)  # several objects need numbers, as the standalone tool did
+            self._changed()
+        names = ur_rename(sel, self.fields())
+        self.set_status("Renamed %d object(s)%s. Ctrl+Z undoes it." % (
+            len(names), (": " + ", ".join(names[:3]) + (" ..." if len(names) > 3 else "")) if names else ""),
+            level="fixed")
+        self._update_guidance()
+
+    @ui_safe
+    def set_root(self, root=None):
+        if root is None:
+            sel = cmds.ls(selection=True, long=True)
+            if not sel:
+                self.set_status("Select an object or group to use as the root.", level="warn")
+                return
+            root = sel[0]
+        self.root = root
+        self.root_edit.setText(root.split("|")[-1])
+        self.root_edit.setToolTip(root)
+        self.set_status("Root: %s. Run a check." % root.split("|")[-1])
+        self._update_guidance()
+
+    def _transforms(self):
+        if not self.root or not cmds.objExists(self.root):
+            return None
+        return ur_transforms(self.root)
+
+    def scan(self, key):
+        """{display: [objects]} for one check on the current root ({} if none)."""
+        transforms = self._transforms()
+        if transforms is None:
+            return {}
+        return dict((k, s) for k, b, t, s, f in UR_CHECKS)[key](transforms)
+
+    def fix(self, objects):
+        if self.root and cmds.objExists(self.root):
+            n = ur_fix_families(self.root, objects)
+            self.set_status("Renamed %d object(s). Ctrl+Z undoes it." % n, level="fixed")
+
+    @ui_safe
+    def run_check(self, key, modal=True):
+        if self._transforms() is None:
+            self.set_status("Set a root first (select a group, then Set Root from Selection).", level="warn")
+            return None
+        issues = self.scan(key)
+        if not issues:
+            self.set_status(UR_CHECK_CLEAN[key], level="fixed")
+            return None
+        _, _, title, _, fixable = [c for c in UR_CHECKS if c[0] == key][0]
+        self.set_status("%s: %d issue group(s)." % (title, len(issues)), level="warn")
+        if self.dialog is not None:
+            try:
+                self.dialog.close()
+            except Exception:
+                pass
+        self.dialog = RenamerIssueDialog(lambda: self.scan(key), title, self.fix if fixable else None,
+                                         parent=self.window())
+        if modal:
+            self.dialog.exec_()
+        else:
+            self.dialog.show()
+        return self.dialog
+
+    def shutdown(self):
+        self._sel_timer.stop()
+        if self.dialog is not None:
+            try:
+                self.dialog.close()
+            except Exception:
+                pass
+            self.dialog = None
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+
+
+# =============================================================================
+# Reframe (camera matching; the user's MayaReframeTool, embedded)
+# =============================================================================
+# Reframe matches a Maya camera to concept art or a photo from clicked point
+# pairs (position, rotation, focal length, lens shift). It's its own project
+# with its own tests; the toolbox carries its package as source text (below,
+# written by tools/embed_reframe.py) and serves it to Python from memory the
+# first time the Reframe tab opens, exactly like Reframe's own paste build.
+# Nothing is compiled or imported at paste time. Scenes keep only native
+# nodes (the ReframeData network node, RF_pt_### locators, RF_cam_* cameras),
+# so they open with the standalone Reframe too, and either can carry on.
+
+# --- BEGIN REFRAME SOURCES (generated by tools/embed_reframe.py from MayaReframeTool; edit Reframe there, then re-run) ---
+REFRAME_VERSION = '1.1.0'
+_REFRAME_SOURCES = {
+# ------------------------------------------------------------
+# reframe
+# ------------------------------------------------------------
+'reframe': (True, '''"""
+Reframe \u2014 match a Maya camera to concept art or photos by clicking matching
+points on a model (scan / blockout / concept model) and on the image.
+
+Runs from source or pasted into the Script Editor (dist/Reframe.py): no plugin,
+no compiled code, no third-party packages. Scenes use only native Maya nodes.
+
+    import reframe
+    reframe.show()
+"""
+__version__ = "1.1.0"
+
+# PySide6 (Maya 2025+) / PySide2 (Maya 2017\u20132024) shim \u2014 UI modules import Qt
+# from here. Qt is optional so the pure-maths core can run outside Maya.
+try:
+    from PySide6 import QtWidgets, QtCore, QtGui
+    from PySide6.QtCore import Qt
+    _PYSIDE_VERSION = 6
+except ImportError:
+    try:
+        from PySide2 import QtWidgets, QtCore, QtGui
+        from PySide2.QtCore import Qt
+        _PYSIDE_VERSION = 2
+    except ImportError:
+        QtWidgets = QtCore = QtGui = Qt = None
+        _PYSIDE_VERSION = 0
+
+__all__ = ["QtWidgets", "QtCore", "QtGui", "Qt", "_PYSIDE_VERSION", "show", "close"]
+
+
+def show():
+    """Open (or raise) the Reframe panel."""
+    from reframe.ui.sidebar import show_panel
+    return show_panel()
+
+
+def close():
+    """Close the panel and remove its Maya callbacks."""
+    from reframe.ui.sidebar import close_panel
+    close_panel()
+'''),
+# ------------------------------------------------------------
+# reframe.core
+# ------------------------------------------------------------
+'reframe.core': (True, '''# Reframe core package
+'''),
+# ------------------------------------------------------------
+# reframe.core.camera_solver
+# ------------------------------------------------------------
+'reframe.core.camera_solver': (False, '''"""
+camera_solver.py \u2014 Reframe Camera Match Solver
+----------------------------------------------
+Solves a camera (pose, focal length and optionally lens shift) from N pairs of
+3D scene points and 2D image points. This is the core of the Match workflow:
+the artist clicks points on a scan / blockout / concept model and the matching
+points on a concept image, and this module finds the camera that lines them up.
+
+Pure Python \u2014 no numpy, no Maya \u2014 so Reframe runs by pasting into any Maya's
+Script Editor with nothing installed. The linear algebra it needs (symmetric
+eigen-decomposition, nearest rotation, small dense solves) is at the bottom.
+
+Pipeline: initial guesses (DLT, plane homography, P3P over a focal sweep) \u2192
+robust Levenberg\u2013Marquardt on each \u2192 keep the lowest-cost camera.
+
+Conventions (Maya-native, so results apply to a Maya camera without conversion)
+  Image     pixel coords, origin top-left, u right, v down. Size (W, H).
+  Camera    position C (world), rotation R (3x3, columns = camera X/Y/Z axes in
+            world). Camera looks down its -Z axis with +Y up.
+  Rotation  R = Ry(pan) @ Rx(tilt) @ Rz(roll) \u2014 Maya rotateOrder "zxy" with
+            rotateX = tilt, rotateY = pan, rotateZ = roll.
+  Project   p = R^T (X - C),  d = -p.z (depth, > 0 in front)
+            u = cx + f * p.x / d,  v = cy - f * p.y / d
+            cx = W/2 + shift_x,  cy = H/2 + shift_y   (focal and shift in px)
+
+Constraints the artist can set (SolveSettings)
+  solve_focal=False      use focal_px as-is (known lens)
+  solve_shift=True       free principal point (off-centre crop / lens shift)
+  lock_roll=True         horizon stays level (roll = 0)
+  keep_verticals=True    two-point perspective: tilt = roll = 0, vertical lens
+                         shift solved instead so world verticals stay vertical
+  camera_height=h        camera world Y fixed at h
+
+Robustness
+  Concept art is often painted with inconsistent perspective, so the fit uses a
+  Huber loss: points that disagree with the rest are down-weighted rather than
+  dragging the whole camera, and are reported via SolveResult.outliers.
+"""
+import itertools
+import math
+
+# Parameter vector layout
+_PAN, _TILT, _ROLL, _CX, _CY, _CZ, _LOGF, _SX, _SY = range(9)
+_N_PARAMS = 9
+
+# Minimum solve-able configuration
+MIN_POINTS = 4
+
+
+class SolveSettings:
+    def __init__(
+        self,
+        solve_focal=True,
+        focal_px=None,
+        solve_shift=False,
+        lock_roll=False,
+        keep_verticals=False,
+        camera_height=None,
+        huber_px=None,
+        weights=None,
+    ):
+        self.solve_focal = solve_focal
+        self.focal_px = focal_px            # required when solve_focal is False
+        self.solve_shift = solve_shift
+        self.lock_roll = lock_roll
+        self.keep_verticals = keep_verticals
+        self.camera_height = camera_height
+        self.huber_px = huber_px            # None \u2192 0.5% of the image's long edge
+        self.weights = weights              # per-point weights; 0 disables a point
+
+
+class CameraParams:
+    """A camera in solver terms. Angles in radians, focal/shift in pixels."""
+
+    def __init__(self, pan, tilt, roll, position, focal_px, shift=(0.0, 0.0)):
+        self.pan = float(pan)
+        self.tilt = float(tilt)
+        self.roll = float(roll)
+        self.position = tuple(float(v) for v in position)
+        self.focal_px = float(focal_px)
+        self.shift = tuple(float(v) for v in shift)
+
+    @property
+    def rotation(self):
+        return rotation_from_euler(self.pan, self.tilt, self.roll)
+
+    def rotate_degrees(self):
+        """Maya (rotateX, rotateY, rotateZ) in degrees for rotateOrder zxy."""
+        return (math.degrees(self.tilt), math.degrees(self.pan), math.degrees(self.roll))
+
+    def __repr__(self):
+        rx, ry, rz = self.rotate_degrees()
+        pos = ", ".join(f"{v:.4f}" for v in self.position)
+        return (
+            f"CameraParams(rot=({rx:.3f}, {ry:.3f}, {rz:.3f})deg, pos=({pos}), "
+            f"f={self.focal_px:.2f}px, shift=({self.shift[0]:.2f}, {self.shift[1]:.2f}))"
+        )
+
+
+class SolveResult:
+    def __init__(self):
+        self.success = False
+        self.message = ""
+        self.camera = None              # CameraParams
+        self.errors_px = None           # [N] reprojection error per point
+        self.rms_px = float("nan")      # RMS over enabled points
+        self.outliers = []              # indices of points the fit disagrees with
+        self.focal_sigma_px = None      # 1-sigma focal uncertainty (if solved)
+        self.warnings = []
+
+    def __repr__(self):
+        return (
+            f"SolveResult(success={self.success}, rms={self.rms_px:.3f}px, "
+            f"camera={self.camera}, outliers={self.outliers}, warnings={self.warnings})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------------------
+
+def rotation_from_euler(pan, tilt, roll):
+    """R = Ry(pan) @ Rx(tilt) @ Rz(roll), as a 3x3 nested list."""
+    ca, sa = math.cos(pan), math.sin(pan)
+    cb, sb = math.cos(tilt), math.sin(tilt)
+    cc, sc = math.cos(roll), math.sin(roll)
+    return [
+        [ca * cc + sa * sb * sc, -ca * sc + sa * sb * cc, sa * cb],
+        [cb * sc, cb * cc, -sb],
+        [-sa * cc + ca * sb * sc, sa * sc + ca * sb * cc, ca * cb],
+    ]
+
+
+def euler_from_rotation(r):
+    """Inverse of rotation_from_euler \u2192 (pan, tilt, roll). Accepts any r[i][j]."""
+    tilt = math.asin(max(-1.0, min(1.0, -r[1][2])))
+    pan = math.atan2(r[0][2], r[2][2])
+    roll = math.atan2(r[1][0], r[1][1])
+    return pan, tilt, roll
+
+
+def project(camera, points_3d, image_size):
+    """Project world points through a CameraParams \u2192 ([(u, v)], [depth])."""
+    return _project_vec(_pack(camera), _as_points(points_3d, 3), image_size)
+
+
+def _project_vec(x, pts, image_size):
+    w, h = image_size
+    r = rotation_from_euler(x[_PAN], x[_TILT], x[_ROLL])
+    r00, r01, r02 = r[0]
+    r10, r11, r12 = r[1]
+    r20, r21, r22 = r[2]
+    cx, cy, cz = x[_CX], x[_CY], x[_CZ]
+    f = math.exp(x[_LOGF])
+    u0 = w / 2.0 + x[_SX]
+    v0 = h / 2.0 + x[_SY]
+    uv, depth = [], []
+    for X, Y, Z in pts:
+        dx, dy, dz = X - cx, Y - cy, Z - cz
+        px = r00 * dx + r10 * dy + r20 * dz
+        py = r01 * dx + r11 * dy + r21 * dz
+        pz = r02 * dx + r12 * dy + r22 * dz
+        d = -pz
+        sd = d if abs(d) > 1e-12 else 1e-12
+        uv.append((u0 + f * px / sd, v0 - f * py / sd))
+        depth.append(d)
+    return uv, depth
+
+
+def _pack(cam):
+    return [cam.pan, cam.tilt, cam.roll, cam.position[0], cam.position[1], cam.position[2],
+            math.log(cam.focal_px), cam.shift[0], cam.shift[1]]
+
+
+def _unpack(x):
+    return CameraParams(x[_PAN], x[_TILT], x[_ROLL], x[_CX:_CZ + 1], math.exp(x[_LOGF]), x[_SX:_SY + 1])
+
+
+def _camera_from_cv(r_cv, t_cv, focal_px, shift=(0.0, 0.0)):
+    """Convert an OpenCV-convention pose (X_cam = R X + t, +Z forward, +Y down)."""
+    rt = _transpose(r_cv)
+    r_maya = [[row[0], -row[1], -row[2]] for row in rt]      # R^T @ diag(1,-1,-1)
+    position = _scale(_mat_vec(rt, t_cv), -1.0)
+    pan, tilt, roll = euler_from_rotation(r_maya)
+    return CameraParams(pan, tilt, roll, position, focal_px, shift)
+
+
+def _as_points(pts, dim):
+    return [tuple(float(v) for v in p[:dim]) for p in pts]
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def solve(points_3d, points_2d, image_size, settings=None, seed=None):
+    """
+    Solve a camera from 2D-3D correspondences.
+
+    points_3d   N x (x, y, z) world positions (any units)
+    points_2d   N x (u, v) pixel positions (origin top-left, v down)
+    image_size  (W, H) in pixels
+    settings    SolveSettings (defaults: solve pose + focal, centred lens)
+    seed        optional CameraParams used as an extra initial guess
+                (e.g. the artist's current rough camera)
+    """
+    settings = settings or SolveSettings()
+    result = SolveResult()
+
+    pts3 = _as_points(points_3d, 3)
+    pts2 = _as_points(points_2d, 2)
+    n = len(pts3)
+    if len(pts2) != n:
+        result.message = "points_3d and points_2d must have the same length."
+        return result
+
+    weights = [1.0] * n if settings.weights is None else [float(v) for v in settings.weights]
+    enabled = [wt > 0 for wt in weights]
+    n_enabled = sum(enabled)
+
+    free = _free_mask(settings)
+    n_free = sum(free)
+    if not settings.solve_focal and not settings.focal_px:
+        result.message = "focal_px is required when solve_focal is False."
+        return result
+    # Pose alone needs 4; solving focal from 4 is technically possible but too
+    # fragile for hand-placed points, so ask for 5.
+    need = max(MIN_POINTS + int(bool(settings.solve_focal)), n_free // 2 + 1)
+    if n_enabled < need:
+        result.message = f"Need at least {need} enabled point pairs for these settings (have {n_enabled})."
+        return result
+
+    # Normalise the world so numeric steps and tolerances are scale-free
+    # (lidar in metres or centimetres, blockouts at arbitrary scale).
+    active3 = [p for p, e in zip(pts3, enabled) if e]
+    active2 = [p for p, e in zip(pts2, enabled) if e]
+    mu = _mean(active3)
+    scale = math.sqrt(sum(_norm2(_sub(p, mu)) for p in active3) / len(active3)) or 1.0
+    norm3 = [_scale(_sub(p, mu), 1.0 / scale) for p in pts3]
+    norm_active = [p for p, e in zip(norm3, enabled) if e]
+
+    w, h = image_size
+    huber = settings.huber_px or 0.005 * max(w, h)
+
+    fixed = _fixed_values(settings, mu, scale)
+    candidates = _initial_guesses(norm_active, active2, image_size, settings)
+    if seed is not None:
+        s = CameraParams(seed.pan, seed.tilt, seed.roll, _scale(_sub(seed.position, mu), 1.0 / scale),
+                         seed.focal_px, seed.shift)
+        candidates.insert(0, _pack(s))
+    if not candidates:
+        result.message = "Could not find an initial camera. Add more points, spread in depth."
+        return result
+
+    best = None
+    for x0 in candidates:
+        for x_init in _constrained_starts(x0, free, fixed, norm3, pts2, image_size, weights, huber):
+            x, cost = _levenberg_marquardt(x_init, free, norm3, pts2, image_size, weights, huber)
+            if x is not None and (best is None or cost < best[1]):
+                best = (x, cost)
+
+    if best is None:
+        result.message = "Solve did not converge \u2014 every solution put points behind the camera."
+        return result
+
+    x = best[0]
+    uv, depth = _project_vec(x, norm3, image_size)
+    errors = [math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(uv, pts2)]
+
+    cam = _unpack(x)
+    cam.position = tuple(_add(_scale(cam.position, scale), mu))
+
+    result.success = True
+    result.camera = cam
+    result.errors_px = errors
+    active_err = [e for e, en in zip(errors, enabled) if en]
+    result.rms_px = math.sqrt(sum(e * e for e in active_err) / len(active_err))
+    result.outliers = [i for i, (e, en) in enumerate(zip(errors, enabled)) if en and e > 3.0 * huber]
+    result.message = f"Solved {n_enabled} points, RMS {result.rms_px:.2f}px."
+
+    if any(d <= 0 for d, en in zip(depth, enabled) if en):
+        result.warnings.append("Some points are behind the solved camera.")
+    if result.outliers:
+        result.warnings.append(
+            f"{len(result.outliers)} point(s) disagree with the rest of the image \u2014 "
+            "check them or reduce their weight."
+        )
+
+    if settings.solve_focal:
+        sigma = _focal_sigma(x, free, norm3, pts2, image_size, weights, huber)
+        result.focal_sigma_px = sigma
+        logf_min, logf_max = _focal_limits(w)
+        if min(x[_LOGF] - logf_min, logf_max - x[_LOGF]) < 0.05:
+            result.warnings.append(
+                "Focal length hit the plausible-lens limit \u2014 the image's perspective "
+                "doesn't pin it down. Lock the focal length or add points at other depths."
+            )
+        elif sigma is None or sigma > 0.1 * cam.focal_px:
+            result.warnings.append(
+                "Focal length is poorly constrained. Add points at different depths "
+                "(near and far, high and low), or lock the focal length."
+            )
+        if _is_coplanar(norm_active):
+            result.warnings.append(
+                "All 3D points lie on one plane. Focal length and distance trade off "
+                "against each other \u2014 add points off the plane if you can."
+            )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Constraints
+# ---------------------------------------------------------------------------
+
+def _free_mask(settings):
+    free = [True] * _N_PARAMS
+    free[_LOGF] = bool(settings.solve_focal)
+    free[_SX] = bool(settings.solve_shift)
+    free[_SY] = bool(settings.solve_shift or settings.keep_verticals)
+    if settings.lock_roll or settings.keep_verticals:
+        free[_ROLL] = False
+    if settings.keep_verticals:
+        free[_TILT] = False
+    if settings.camera_height is not None:
+        free[_CY] = False
+    return free
+
+
+def _fixed_values(settings, mu, scale):
+    """Values imposed on locked parameters (normalised space)."""
+    fixed = {}
+    if not settings.solve_focal:
+        fixed[_LOGF] = math.log(settings.focal_px)
+    if not (settings.solve_shift or settings.keep_verticals):
+        fixed[_SY] = 0.0
+    if not settings.solve_shift:
+        fixed[_SX] = 0.0
+    if settings.lock_roll or settings.keep_verticals:
+        fixed[_ROLL] = 0.0
+    if settings.keep_verticals:
+        fixed[_TILT] = 0.0
+    if settings.camera_height is not None:
+        fixed[_CY] = (settings.camera_height - mu[1]) / scale
+    return fixed
+
+
+def _constrained_starts(x0, free, fixed, pts3, pts2, image_size, weights, huber):
+    """
+    Starting points that satisfy the constraints. Besides imposing the locked
+    values directly, try relaxing first (all pose + focal free) and then locking,
+    which helps when the locks move the camera a long way from its initial guess.
+    """
+    x = list(x0)
+    for i, v in fixed.items():
+        x[i] = v
+    starts = [x]
+
+    # Only worth relaxing when the locks actually move the start
+    # (e.g. the default zero lens shift doesn't \u2014 guesses are already centred).
+    if fixed and max(abs(a - b) for a, b in zip(x, x0)) > 1e-9:
+        relaxed_free = list(free)
+        for i in (_PAN, _TILT, _ROLL, _CX, _CY, _CZ):
+            relaxed_free[i] = True
+        relaxed_free[_LOGF] = _LOGF not in fixed or free[_LOGF]
+        xr, _ = _levenberg_marquardt(list(x0), relaxed_free, pts3, pts2, image_size, weights, huber)
+        if xr is not None:
+            for i, v in fixed.items():
+                xr[i] = v
+            starts.append(xr)
+    return starts
+
+
+# ---------------------------------------------------------------------------
+# Initial guesses
+# ---------------------------------------------------------------------------
+
+def _initial_guesses(pts3, pts2, image_size, settings):
+    """Candidate starting cameras (packed, normalised world)."""
+    w, h = image_size
+    guesses = []
+    known_f = None if settings.solve_focal else settings.focal_px
+
+    # 1. Full DLT: needs 6+ points not all on one plane. Gives focal directly.
+    if len(pts3) >= 6 and not _is_coplanar(pts3):
+        cam = _dlt_camera(pts3, pts2, image_size)
+        if cam is not None:
+            if known_f:
+                cam.focal_px = known_f
+            guesses.append(_pack(cam))
+
+    # 2. Plane-based: homography of the best-fit plane. Exact for planar
+    #    scenes, a rough starting point otherwise. Works from 4 points.
+    focals = [known_f] if known_f else list(_focal_sweep(w))
+    plane = _plane_frame(pts3)
+    centred = [(u - w / 2.0, v - h / 2.0) for u, v in pts2]
+    hom = _homography(plane[1], centred)
+    if hom is not None:
+        if not known_f:
+            f_est = _focal_from_homography(hom)
+            if f_est:
+                focals.insert(0, f_est)
+        for f in focals:
+            cam = _camera_from_plane_homography(hom, plane, f)
+            if cam is not None:
+                guesses.append(_pack(cam))
+
+    # 3. P3P on well-spread point triplets across the focal sweep. Handles the
+    #    common 5\u20136 point case that DLT and the plane fit can't.
+    guesses.extend(_p3p_guesses(pts3, pts2, image_size, focals))
+
+    # Keep the best few by reprojection error so LM runs stay cheap
+    scored = []
+    logf_min, logf_max = _focal_limits(w)
+    for x in guesses:
+        x[_LOGF] = min(max(x[_LOGF], logf_min), logf_max)
+        uv, d = _project_vec(x, pts3, image_size)
+        if sum(1 for di in d if di > 0) < 0.5 * len(d):
+            continue
+        err = _trimmed_error([math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(uv, pts2)])
+        scored.append((err, x))
+    scored.sort(key=lambda t: t[0])
+    return [x for _, x in scored[:6]]
+
+
+def _trimmed_error(errors):
+    """
+    Mean error over the best 80% of points. Robust to a few bad points, but
+    unlike the median it still separates candidates when there are only 4\u20135
+    points (a P3P pose fits its own 3 points exactly, so the median of 4 errors
+    is always 0).
+    """
+    n = len(errors)
+    keep = max(n - n // 5, 1)
+    return sum(sorted(errors)[:keep]) / keep
+
+
+def _focal_sweep(width):
+    """Focal lengths (px) covering ~12mm to ~300mm on a 36mm-wide film back."""
+    lo, hi, n = 12.0 / 36.0, 300.0 / 36.0, 9
+    return [width * lo * (hi / lo) ** (i / (n - 1)) for i in range(n)]
+
+
+def _focal_limits(width):
+    """Plausible focal range (log px): ~4mm to ~2000mm on a 36mm-wide film back.
+    Stops near-affine fits running off to 'telephoto from miles away'."""
+    return math.log(width * 4.0 / 36.0), math.log(width * 2000.0 / 36.0)
+
+
+def _dlt_camera(pts3, pts2, image_size):
+    """Direct linear transform \u2192 decomposed camera, or None."""
+    t2, n2 = _hartley_2d(pts2)
+    t3, n3 = _hartley_3d(pts3)
+    ata = [[0.0] * 12 for _ in range(12)]
+    for (X, Y, Z), (u, v) in zip(n3, n2):
+        for row in ([X, Y, Z, 1, 0, 0, 0, 0, -u * X, -u * Y, -u * Z, -u],
+                    [0, 0, 0, 0, X, Y, Z, 1, -v * X, -v * Y, -v * Z, -v]):
+            _accumulate_outer(ata, row)
+    vec = _smallest_eigenvector(ata)
+    p_norm = [vec[0:4], vec[4:8], vec[8:12]]
+    p = _mat_mul(_mat_mul(_inverse(t2), p_norm), t3)
+
+    m = [row[:3] for row in p]
+    det = _det3(m)
+    if abs(det) < 1e-12:
+        return None
+    if det < 0:
+        p = [[-v for v in row] for row in p]
+        m = [row[:3] for row in p]
+    k, r = _rq3(m)
+    # RQ is unique up to signs \u2014 make K's diagonal positive
+    for i in range(3):
+        if k[i][i] < 0:
+            for j in range(3):
+                k[j][i] = -k[j][i]
+                r[i][j] = -r[i][j]
+    if _det3(r) < 0:
+        return None
+    f = 0.5 * (k[0][0] + k[1][1]) / k[2][2]
+    if not math.isfinite(f) or f <= 0:
+        return None
+    centre = _scale(_solve(m, [row[3] for row in p]), -1.0)
+    t = _scale(_mat_vec(r, centre), -1.0)
+    cam = _camera_from_cv(r, t, f)
+    # Principal point from the DLT is noisy; start centred and let LM decide.
+    _, d = _project_vec(_pack(cam), pts3, image_size)
+    if sum(1 for di in d if di > 0) < 0.5 * len(d):
+        return None
+    return cam
+
+
+def _rq3(m):
+    """RQ decomposition of a 3x3 matrix (m = K R, K upper-triangular) via QR."""
+    flip = [[0, 0, 1], [0, 1, 0], [1, 0, 0]]
+    a = _transpose(_mat_mul(flip, m))
+    q, rr = _qr3(a)
+    k = _mat_mul(_mat_mul(flip, _transpose(rr)), flip)
+    r = _mat_mul(flip, _transpose(q))
+    return k, r
+
+
+def _qr3(a):
+    """Modified Gram\u2013Schmidt QR of a 3x3 matrix \u2192 (Q, R)."""
+    cols = [[a[i][j] for i in range(3)] for j in range(3)]
+    q_cols, r = [], [[0.0] * 3 for _ in range(3)]
+    for j in range(3):
+        v = list(cols[j])
+        for i, qc in enumerate(q_cols):
+            r[i][j] = _dot(qc, v)
+            v = _sub(v, _scale(qc, r[i][j]))
+        r[j][j] = _norm(v)
+        q_cols.append(_scale(v, 1.0 / r[j][j]) if r[j][j] > 1e-300 else v)
+    q = [[q_cols[j][i] for j in range(3)] for i in range(3)]
+    return q, r
+
+
+def _hartley_2d(pts):
+    c = _mean(pts)
+    mean_dist = sum(math.hypot(p[0] - c[0], p[1] - c[1]) for p in pts) / len(pts) or 1.0
+    s = math.sqrt(2) / mean_dist
+    t = [[s, 0, -s * c[0]], [0, s, -s * c[1]], [0, 0, 1]]
+    return t, [((p[0] - c[0]) * s, (p[1] - c[1]) * s) for p in pts]
+
+
+def _hartley_3d(pts):
+    c = _mean(pts)
+    mean_dist = sum(_norm(_sub(p, c)) for p in pts) / len(pts) or 1.0
+    s = math.sqrt(3) / mean_dist
+    t = [[s, 0, 0, -s * c[0]], [0, s, 0, -s * c[1]], [0, 0, s, -s * c[2]], [0, 0, 0, 1]]
+    return t, [_scale(_sub(p, c), s) for p in pts]
+
+
+def _plane_frame(pts3):
+    """Best-fit plane \u2192 (E, 2D coords, centroid). E columns: e1, e2, normal (det +1)."""
+    c = _mean(pts3)
+    cov = [[0.0] * 3 for _ in range(3)]
+    for p in pts3:
+        _accumulate_outer(cov, _sub(p, c))
+    _, vecs = _eigh(cov)                    # ascending: normal first
+    e1, e2, nrm = vecs[2], vecs[1], vecs[0]
+    if _dot(_cross(e1, e2), nrm) < 0:
+        nrm = _scale(nrm, -1.0)
+    e = [[e1[i], e2[i], nrm[i]] for i in range(3)]   # columns e1, e2, n
+    q = [(_dot(_sub(p, c), e1), _dot(_sub(p, c), e2)) for p in pts3]
+    return e, q, c
+
+
+def _homography(src, dst):
+    """Normalised DLT homography src \u2192 dst (lists of 2D points), or None."""
+    if len(src) < 4:
+        return None
+    ts, ns = _hartley_2d(src)
+    td, nd = _hartley_2d(dst)
+    ata = [[0.0] * 9 for _ in range(9)]
+    for (x, y), (u, v) in zip(ns, nd):
+        _accumulate_outer(ata, [x, y, 1, 0, 0, 0, -u * x, -u * y, -u])
+        _accumulate_outer(ata, [0, 0, 0, x, y, 1, -v * x, -v * y, -v])
+    vec = _smallest_eigenvector(ata)
+    hm = _mat_mul(_mat_mul(_inverse(td), [vec[0:3], vec[3:6], vec[6:9]]), ts)
+    if abs(hm[2][2]) > 1e-12:
+        hm = [[v / hm[2][2] for v in row] for row in hm]
+    return hm
+
+
+def _focal_from_homography(hm):
+    """
+    Focal (px) from a plane homography with a centred principal point and square
+    pixels. Uses h1'wh2 = 0 and h1'wh1 = h2'wh2 with w = diag(1/f^2, 1/f^2, 1).
+    Returns None when the plane is too close to fronto-parallel to tell.
+    """
+    h1 = [hm[i][0] for i in range(3)]
+    h2 = [hm[i][1] for i in range(3)]
+    estimates = []
+    den = h1[2] * h2[2]
+    if abs(den) > 1e-12:
+        f2 = -(h1[0] * h2[0] + h1[1] * h2[1]) / den
+        if f2 > 0:
+            estimates.append(f2)
+    den = h1[2] ** 2 - h2[2] ** 2
+    if abs(den) > 1e-12:
+        f2 = -((h1[0] ** 2 + h1[1] ** 2) - (h2[0] ** 2 + h2[1] ** 2)) / den
+        if f2 > 0:
+            estimates.append(f2)
+    if not estimates:
+        return None
+    estimates.sort()
+    mid = len(estimates) // 2
+    f2 = estimates[mid] if len(estimates) % 2 else 0.5 * (estimates[mid - 1] + estimates[mid])
+    f = math.sqrt(f2)
+    return f if math.isfinite(f) else None
+
+
+def _camera_from_plane_homography(hm, plane, f):
+    """Pose from a homography plane(2D) \u2192 centred image, for focal f."""
+    e, _, c = plane
+    b = [[hm[0][j] / f for j in range(3)], [hm[1][j] / f for j in range(3)], list(hm[2])]
+    b1 = [b[i][0] for i in range(3)]
+    b2 = [b[i][1] for i in range(3)]
+    b3 = [b[i][2] for i in range(3)]
+    norm = 0.5 * (_norm(b1) + _norm(b2))
+    if norm < 1e-12:
+        return None
+    sign = -1.0 if b3[2] < 0 else 1.0     # plane origin must be in front (cv: +Z forward)
+    k = sign / norm
+    r1, r2, t = _scale(b1, k), _scale(b2, k), _scale(b3, k)
+    r3 = _cross(r1, r2)
+    r_p = _nearest_rotation([[r1[i], r2[i], r3[i]] for i in range(3)])
+    # X_cam = R_p E^T (X - c) + t
+    r_cv = _mat_mul(r_p, _transpose(e))
+    t_cv = _sub(t, _mat_vec(r_cv, c))
+    return _camera_from_cv(r_cv, t_cv, f)
+
+
+def _p3p_guesses(pts3, pts2, image_size, focals, max_triplets=12):
+    """For each focal, the best P3P pose (scored on all points) from the widest triplets."""
+    w, h = image_size
+    triplets = list(itertools.combinations(range(len(pts3)), 3))
+    if len(triplets) > max_triplets:
+        def area(t):
+            a, b, c = pts2[t[0]], pts2[t[1]], pts2[t[2]]
+            return abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+        triplets = sorted(triplets, key=area, reverse=True)[:max_triplets]
+
+    out = []
+    for f in focals:
+        rays = []
+        for u, v in pts2:
+            ray = ((u - w / 2.0) / f, (v - h / 2.0) / f, 1.0)
+            rays.append(_scale(ray, 1.0 / _norm(ray)))
+        best = None
+        for tri in triplets:
+            for r_cv, t_cv in _p3p([rays[i] for i in tri], [pts3[i] for i in tri]):
+                errs, in_front = [], True
+                for (X, u_v) in zip(pts3, pts2):
+                    pc = _add(_mat_vec(r_cv, X), t_cv)
+                    if pc[2] <= 0:
+                        in_front = False
+                        break
+                    errs.append(math.hypot(f * pc[0] / pc[2] + w / 2.0 - u_v[0],
+                                           f * pc[1] / pc[2] + h / 2.0 - u_v[1]))
+                if not in_front:
+                    continue
+                err = _trimmed_error(errs)
+                if best is None or err < best[0]:
+                    best = (err, r_cv, t_cv)
+        if best is not None:
+            out.append(_pack(_camera_from_cv(best[1], best[2], f)))
+    return out
+
+
+def _p3p(rays, world, grid=240, bisect_steps=40):
+    """
+    Perspective-3-point: camera poses (R, t in OpenCV convention) that place the
+    three world points on the three unit rays. Solved numerically in the depth
+    ratio v = s3/s1 (law of cosines), which avoids the fragile closed-form
+    quartic: bracket sign changes on a log grid, then bisect. Up to 4 solutions.
+    """
+    b1, b2, b3 = rays
+    p1, p2, p3 = world
+    a2 = _norm2(_sub(p2, p3))
+    b2_ = _norm2(_sub(p1, p3))
+    c2 = _norm2(_sub(p1, p2))
+    if min(a2, b2_, c2) < 1e-18:
+        return []
+    ca, cb, cg = _dot(b2, b3), _dot(b1, b3), _dot(b1, b2)
+    k_ratio, a_ratio = c2 / b2_, a2 / b2_
+
+    def evaluate(v, sign):
+        q = 1 + v * v - 2 * v * cb
+        disc = cg * cg - 1 + k_ratio * q
+        if disc < 0:
+            return None, None
+        u = cg + sign * math.sqrt(disc)
+        return u, u * u + v * v - 2 * u * v * ca - a_ratio * q
+
+    solutions = []
+    log_lo, log_hi = math.log(1e-3), math.log(1e3)
+    vs = [math.exp(log_lo + (log_hi - log_lo) * i / (grid - 1)) for i in range(grid)]
+    for sign in (1.0, -1.0):
+        prev_v, prev_g = None, None
+        for v in vs:
+            _, g = evaluate(v, sign)
+            if g is not None and prev_g is not None and (g > 0) != (prev_g > 0):
+                lo, hi, g_lo = prev_v, v, prev_g
+                for _ in range(bisect_steps):
+                    mid = 0.5 * (lo + hi)
+                    _, g_mid = evaluate(mid, sign)
+                    if g_mid is None:
+                        break
+                    if (g_mid > 0) == (g_lo > 0):
+                        lo, g_lo = mid, g_mid
+                    else:
+                        hi = mid
+                root = 0.5 * (lo + hi)
+                u, _ = evaluate(root, sign)
+                if u is not None and u > 0:
+                    s1 = math.sqrt(b2_ / (1 + root * root - 2 * root * cb))
+                    cam_pts = [_scale(b1, s1), _scale(b2, u * s1), _scale(b3, root * s1)]
+                    solutions.append(_rigid_transform(world, cam_pts))
+            prev_v, prev_g = v, g
+    return solutions
+
+
+def _rigid_transform(src, dst):
+    """Least-squares R, t with dst \u2248 R @ src + t (Horn / Kabsch)."""
+    sc, dc = _mean(src), _mean(dst)
+    m = [[0.0] * 3 for _ in range(3)]
+    for s, d in zip(src, dst):
+        ds, dd = _sub(s, sc), _sub(d, dc)
+        for i in range(3):
+            for j in range(3):
+                m[i][j] += dd[i] * ds[j]
+    r = _nearest_rotation(m)
+    return r, _sub(dc, _mat_vec(r, sc))
+
+
+def _is_coplanar(pts3, threshold=0.02):
+    if len(pts3) < 4:
+        return True
+    c = _mean(pts3)
+    cov = [[0.0] * 3 for _ in range(3)]
+    for p in pts3:
+        _accumulate_outer(cov, _sub(p, c))
+    vals, _ = _eigh(cov)
+    s_max = math.sqrt(max(vals[2], 0.0))
+    s_min = math.sqrt(max(vals[0], 0.0))
+    return s_max < 1e-12 or (s_min / s_max) < threshold
+
+
+# ---------------------------------------------------------------------------
+# Robust Levenberg\u2013Marquardt
+# ---------------------------------------------------------------------------
+
+def _robust_weight(e, huber, user_w):
+    return user_w if e <= huber else user_w * huber / max(e, 1e-12)
+
+
+def _robust_cost(errors, huber, user_w):
+    total = 0.0
+    for e, wt in zip(errors, user_w):
+        if wt > 0:
+            total += wt * (0.5 * e * e if e <= huber else huber * (e - 0.5 * huber))
+    return total
+
+
+def _residuals(x, pts3, pts2, image_size):
+    uv, d = _project_vec(x, pts3, image_size)
+    r = []
+    for (u, v), (tu, tv) in zip(uv, pts2):
+        r.append(u - tu)
+        r.append(v - tv)
+    return r, d
+
+
+def _jacobian(x, free_idx, pts3, pts2, image_size):
+    """Central-difference Jacobian, returned as columns (one list per free param)."""
+    cols = []
+    for i in free_idx:
+        step = 1e-6 * max(1.0, abs(x[i]))
+        xp, xm = list(x), list(x)
+        xp[i] += step
+        xm[i] -= step
+        rp, _ = _residuals(xp, pts3, pts2, image_size)
+        rm, _ = _residuals(xm, pts3, pts2, image_size)
+        inv = 1.0 / (2 * step)
+        cols.append([(a - b) * inv for a, b in zip(rp, rm)])
+    return cols
+
+
+def _point_errors(r):
+    return [math.hypot(r[2 * i], r[2 * i + 1]) for i in range(len(r) // 2)]
+
+
+def _normal_equations(cols, r, wts):
+    """(J^T W J, J^T W r) with per-point weights applied to both residual rows."""
+    k = len(cols)
+    w2 = [wt for wt in wts for _ in (0, 1)]
+    wcols = [[c * wt for c, wt in zip(col, w2)] for col in cols]
+    a = [[_dot(wcols[i], cols[j]) for j in range(k)] for i in range(k)]
+    g = [_dot(wcols[i], r) for i in range(k)]
+    return a, g
+
+
+def _levenberg_marquardt(x0, free, pts3, pts2, image_size, user_w, huber, max_iter=100):
+    """Returns (x, robust cost) or (None, inf) if no valid solution."""
+    free_idx = [i for i, fr in enumerate(free) if fr]
+    logf_min, logf_max = _focal_limits(image_size[0])
+
+    def evaluate(x):
+        if free[_LOGF] and not (logf_min <= x[_LOGF] <= logf_max):
+            return None, None, math.inf
+        r, d = _residuals(x, pts3, pts2, image_size)
+        if any(di <= 1e-9 for di, wt in zip(d, user_w) if wt > 0):
+            return None, None, math.inf
+        e = _point_errors(r)
+        return r, e, _robust_cost(e, huber, user_w)
+
+    x = list(x0)
+    r, e, cost = evaluate(x)
+    if r is None:
+        return None, math.inf
+
+    lam = 1e-3
+    for _ in range(max_iter):
+        wts = [_robust_weight(ei, huber, wt) if wt > 0 else 0.0 for ei, wt in zip(e, user_w)]
+        cols = _jacobian(x, free_idx, pts3, pts2, image_size)
+        a, g = _normal_equations(cols, r, wts)
+
+        improved = converged = False
+        for _ in range(12):
+            damped = [row[:] for row in a]
+            for i in range(len(damped)):
+                damped[i][i] += lam * max(a[i][i], 1e-9)
+            try:
+                delta = _scale(_solve(damped, g), -1.0)
+            except ZeroDivisionError:
+                lam *= 10
+                continue
+            x_new = list(x)
+            for i, dv in zip(free_idx, delta):
+                x_new[i] += dv
+            r_new, e_new, cost_new = evaluate(x_new)
+            if cost_new < cost:
+                converged = (cost - cost_new) <= 1e-10 * max(cost, 1e-12) or _norm(delta) < 1e-10
+                x, r, e, cost = x_new, r_new, e_new, cost_new
+                lam = max(lam / 3.0, 1e-12)
+                improved = True
+                break
+            lam *= 4.0
+        if not improved or converged:
+            break
+    return x, cost
+
+
+def _focal_sigma(x, free, pts3, pts2, image_size, user_w, huber):
+    """1-sigma focal uncertainty (px) from the Gauss-Newton covariance."""
+    free_idx = [i for i, fr in enumerate(free) if fr]
+    if _LOGF not in free_idx:
+        return None
+    r, _ = _residuals(x, pts3, pts2, image_size)
+    e = _point_errors(r)
+    wts = [_robust_weight(ei, huber, wt) if wt > 0 else 0.0 for ei, wt in zip(e, user_w)]
+    dof = 2 * sum(1 for wt in user_w if wt > 0) - len(free_idx)
+    if dof <= 0:
+        return None
+    sigma2 = sum(wt * (r[2 * i] ** 2 + r[2 * i + 1] ** 2) for i, wt in enumerate(wts)) / dof
+    # Floor the noise so a perfect synthetic fit still reports conditioning
+    sigma2 = max(sigma2, 0.25)
+    cols = _jacobian(x, free_idx, pts3, pts2, image_size)
+    a, _ = _normal_equations(cols, r, wts)
+    try:
+        cov = _inverse(a)
+    except ZeroDivisionError:
+        return None
+    col = free_idx.index(_LOGF)
+    var = cov[col][col] * sigma2
+    if not math.isfinite(var) or var < 0:
+        return None
+    return math.exp(x[_LOGF]) * math.sqrt(var)
+
+
+# ---------------------------------------------------------------------------
+# Small linear algebra (pure Python)
+# ---------------------------------------------------------------------------
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _add(a, b):
+    return [x + y for x, y in zip(a, b)]
+
+
+def _sub(a, b):
+    return [x - y for x, y in zip(a, b)]
+
+
+def _scale(a, s):
+    return [x * s for x in a]
+
+
+def _norm2(a):
+    return sum(x * x for x in a)
+
+
+def _norm(a):
+    return math.sqrt(_norm2(a))
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def _mean(pts):
+    n = float(len(pts))
+    return [sum(p[i] for p in pts) / n for i in range(len(pts[0]))]
+
+
+def _transpose(m):
+    return [list(col) for col in zip(*m)]
+
+
+def _mat_vec(m, v):
+    return [_dot(row, v) for row in m]
+
+
+def _mat_mul(a, b):
+    bt = _transpose(b)
+    return [[_dot(row, col) for col in bt] for row in a]
+
+
+def _det3(m):
+    return (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+
+
+def _accumulate_outer(acc, row):
+    """acc += row row^T (symmetric)."""
+    n = len(row)
+    for i in range(n):
+        ri = row[i]
+        if ri == 0:
+            continue
+        acc_i = acc[i]
+        for j in range(n):
+            acc_i[j] += ri * row[j]
+
+
+def _solve(a, b):
+    """Solve a x = b by Gaussian elimination with partial pivoting."""
+    n = len(a)
+    m = [list(row) + [b[i]] for i, row in enumerate(a)]
+    scale = max(abs(v) for row in a for v in row) or 1.0
+    for col in range(n):
+        piv = max(range(col, n), key=lambda i: abs(m[i][col]))
+        if abs(m[piv][col]) <= 1e-14 * scale:
+            raise ZeroDivisionError("singular matrix")
+        m[col], m[piv] = m[piv], m[col]
+        pivot = m[col][col]
+        for i in range(col + 1, n):
+            factor = m[i][col] / pivot
+            if factor:
+                mi, mc = m[i], m[col]
+                for j in range(col, n + 1):
+                    mi[j] -= factor * mc[j]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (m[i][n] - sum(m[i][j] * x[j] for j in range(i + 1, n))) / m[i][i]
+    return x
+
+
+def _inverse(a):
+    n = len(a)
+    cols = [_solve(a, [1.0 if i == j else 0.0 for i in range(n)]) for j in range(n)]
+    return _transpose(cols)
+
+
+def _eigh(a, max_sweeps=100):
+    """
+    Symmetric eigen-decomposition (cyclic Jacobi). Returns (values ascending,
+    vectors) where vectors[k] is the unit eigenvector for values[k].
+    """
+    n = len(a)
+    a = [list(row) for row in a]
+    v = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+    total = sum(x * x for row in a for x in row) or 1.0
+    for _ in range(max_sweeps):
+        off = sum(a[i][j] ** 2 for i in range(n) for j in range(i + 1, n))
+        if off <= 1e-30 * total:
+            break
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                apq = a[p][q]
+                if abs(apq) < 1e-300:
+                    continue
+                theta = (a[q][q] - a[p][p]) / (2.0 * apq)
+                t = (1.0 if theta >= 0 else -1.0) / (abs(theta) + math.sqrt(theta * theta + 1.0))
+                c = 1.0 / math.sqrt(t * t + 1.0)
+                s = t * c
+                for k in range(n):
+                    akp, akq = a[k][p], a[k][q]
+                    a[k][p] = c * akp - s * akq
+                    a[k][q] = s * akp + c * akq
+                ap, aq = a[p], a[q]
+                for k in range(n):
+                    apk, aqk = ap[k], aq[k]
+                    ap[k] = c * apk - s * aqk
+                    aq[k] = s * apk + c * aqk
+                for k in range(n):
+                    vkp, vkq = v[k][p], v[k][q]
+                    v[k][p] = c * vkp - s * vkq
+                    v[k][q] = s * vkp + c * vkq
+    order = sorted(range(n), key=lambda i: a[i][i])
+    return [a[i][i] for i in order], [[v[k][i] for k in range(n)] for i in order]
+
+
+def _smallest_eigenvector(a):
+    return _eigh(a)[1][0]
+
+
+def _nearest_rotation(m):
+    """
+    Rotation R maximising trace(R^T m) \u2014 the orthogonal Procrustes / Kabsch
+    solution \u2014 via Horn's quaternion method (largest eigenvector of a 4x4).
+    For m = sum(d_i s_i^T) this is the R best mapping s_i onto d_i.
+    """
+    sxx, sxy, sxz = m[0][0], m[1][0], m[2][0]     # Horn's S = m^T
+    syx, syy, syz = m[0][1], m[1][1], m[2][1]
+    szx, szy, szz = m[0][2], m[1][2], m[2][2]
+    n = [
+        [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+        [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+        [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
+        [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz],
+    ]
+    q0, qx, qy, qz = _eigh(n)[1][-1]
+    return [
+        [q0 * q0 + qx * qx - qy * qy - qz * qz, 2 * (qx * qy - q0 * qz), 2 * (qx * qz + q0 * qy)],
+        [2 * (qy * qx + q0 * qz), q0 * q0 - qx * qx + qy * qy - qz * qz, 2 * (qy * qz - q0 * qx)],
+        [2 * (qz * qx - q0 * qy), 2 * (qz * qy + q0 * qx), q0 * q0 - qx * qx - qy * qy + qz * qz],
+    ]
+'''),
+# ------------------------------------------------------------
+# reframe.core.camera_utils
+# ------------------------------------------------------------
+'reframe.core.camera_utils': (False, '''"""
+camera_utils.py \u2014 Reframe Camera Management
+--------------------------------------------
+Creates RF_cam_* cameras bound to reference images, shows the image through
+the camera with a native imagePlane, and converts between Maya cameras and
+camera_solver.CameraParams.
+
+Conventions shared with camera_solver:
+  - rotateOrder zxy with rotateX = tilt, rotateY = pan, rotateZ = roll
+  - horizontal film aperture is kept; vertical aperture follows the image
+    aspect, so the film gate matches the image exactly
+  - focal / lens shift in the solver are pixels of the reference image
+
+All edits use cmds so they are undoable; wrap multi-step edits in undo_chunk().
+"""
+import contextlib
+import math
+import os
+import re
+
+import maya.api.OpenMaya as om
+import maya.cmds as cmds
+
+MM_PER_INCH = 25.4
+DEFAULT_FILM_WIDTH_IN = 36.0 / MM_PER_INCH     # full-frame 36mm
+ROTATE_ORDER_ZXY = 2                           # Maya enum: xyz yzx zxy xzy yxz zyx
+
+# Film back presets (horizontal width in inches) \u2014 vertical follows the image
+FILM_BACK_PRESETS = {
+    "Full Frame 35mm": 36.0 / MM_PER_INCH,
+    "APS-C (Canon)": 22.3 / MM_PER_INCH,
+    "APS-C (Nikon/Sony)": 23.5 / MM_PER_INCH,
+    "Micro 4/3": 17.3 / MM_PER_INCH,
+    "Super35": 24.89 / MM_PER_INCH,
+    "iPhone (main, approx)": 9.8 / MM_PER_INCH,
+}
+
+
+@contextlib.contextmanager
+def no_undo():
+    """
+    Run view-only / derived changes without recording them in Maya's undo queue,
+    so Ctrl+Z always undoes the artist's last real action. Restores the previous
+    undo state (doesn't switch undo on if it was off).
+    """
+    was_on = cmds.undoInfo(query=True, stateWithoutFlush=True)
+    if was_on:
+        cmds.undoInfo(stateWithoutFlush=False)
+    try:
+        yield
+    finally:
+        if was_on:
+            cmds.undoInfo(stateWithoutFlush=True)
+
+
+@contextlib.contextmanager
+def undo_chunk(name="Reframe"):
+    cmds.undoInfo(openChunk=True, chunkName=name)
+    try:
+        yield
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# ---------------------------------------------------------------------------
+# Camera creation
+# ---------------------------------------------------------------------------
+
+def camera_base_name(image_path):
+    """RF_cam_<stem> \u2014 Maya-safe."""
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", stem)
+    return f"RF_cam_{stem}"
+
+
+def create_ref_camera(image_path, image_width, image_height):
+    """
+    Create a camera for a reference image. Returns the camera *transform* name
+    (unique; Maya appends a number if the name is taken, so two images with the
+    same file name get separate cameras).
+    """
+    transform, shape = cmds.camera()
+    transform = cmds.rename(transform, camera_base_name(image_path))
+    shape = cmds.listRelatives(transform, shapes=True, fullPath=True)[0]
+    cmds.rename(shape, transform.split("|")[-1] + "Shape")
+    shape = camera_shape(transform)
+
+    cmds.setAttr(f"{transform}.rotateOrder", ROTATE_ORDER_ZXY)
+    cmds.setAttr(f"{shape}.focalLength", 35.0)
+    set_film_back(transform, DEFAULT_FILM_WIDTH_IN, image_width, image_height)
+    cmds.setAttr(f"{shape}.filmFit", 1)    # horizontal
+    cmds.setAttr(f"{shape}.nearClipPlane", 0.1)
+    cmds.setAttr(f"{shape}.farClipPlane", 1.0e6)
+    om.MGlobal.displayInfo(f"[Reframe] Created camera: {transform}")
+    return transform
+
+
+def camera_shape(transform):
+    shapes = cmds.listRelatives(transform, shapes=True, type="camera", fullPath=True) or []
+    if not shapes:
+        raise ValueError(f"{transform} has no camera shape")
+    return shapes[0]
+
+
+def camera_transform(node):
+    """Accept a camera transform or shape and return the transform."""
+    if cmds.nodeType(node) == "camera":
+        return cmds.listRelatives(node, parent=True, fullPath=True)[0]
+    return node
+
+
+def set_film_back(transform, width_in, image_width, image_height):
+    """Horizontal aperture = width_in; vertical follows the image aspect."""
+    shape = camera_shape(transform)
+    cmds.setAttr(f"{shape}.horizontalFilmAperture", float(width_in))
+    cmds.setAttr(f"{shape}.verticalFilmAperture", float(width_in) * image_height / image_width)
+
+
+# ---------------------------------------------------------------------------
+# Image plane
+# ---------------------------------------------------------------------------
+
+def ensure_image_plane(transform, image_path):
+    """
+    Attach (or update) an imagePlane showing image_path through this camera.
+    Returns the imagePlane shape. Maya handles texture caching and EXR itself.
+    """
+    shape = camera_shape(transform)
+    existing = _image_plane_shape(shape)
+    if existing is None:
+        cmds.imagePlane(camera=shape, fileName=image_path, showInAllViews=False)
+        existing = _image_plane_shape(shape)
+    else:
+        cmds.setAttr(f"{existing}.imageName", image_path, type="string")
+    cmds.setAttr(f"{existing}.fit", 1)               # best fit \u2192 fills the film gate
+    cmds.setAttr(f"{existing}.displayOnlyIfCurrent", True)
+    return existing
+
+
+def set_image_plane_opacity(transform, opacity):
+    ip = _image_plane_shape(camera_shape(transform))
+    if ip:
+        cmds.setAttr(f"{ip}.alphaGain", max(0.0, min(1.0, float(opacity))))
+
+
+def apply_overlay(transform, overlay):
+    """
+    Apply State.overlay image settings to this camera's imagePlane:
+    opacity, and whether the image draws over the model (just past the near
+    clip plane) or behind it (near the far clip plane).
+    """
+    shape = camera_shape(transform)
+    ip = _image_plane_shape(shape)
+    if not ip:
+        return
+    cmds.setAttr(f"{ip}.alphaGain", max(0.0, min(1.0, float(overlay.get("opacity", 0.6)))))
+    near = cmds.getAttr(f"{shape}.nearClipPlane")
+    far = cmds.getAttr(f"{shape}.farClipPlane")
+    depth = near * 1.5 if overlay.get("image_front", True) else far * 0.9
+    cmds.setAttr(f"{ip}.depth", depth)
+
+
+def set_image_plane_visible(transform, visible):
+    ip = _image_plane_shape(camera_shape(transform))
+    if ip:
+        cmds.setAttr(f"{ip}.displayMode", 3 if visible else 0)   # 3 = RGBA, 0 = none
+
+
+def _image_plane_shape(cam_shape):
+    for plug in cmds.listConnections(f"{cam_shape}.imagePlane", source=True, destination=False) or []:
+        shapes = cmds.listRelatives(plug, shapes=True, type="imagePlane", fullPath=True)
+        if shapes:
+            return shapes[0]
+        if cmds.nodeType(plug) == "imagePlane":
+            return plug
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Solver <-> Maya camera
+# ---------------------------------------------------------------------------
+
+def focal_px_to_mm(focal_px, image_width, film_width_in):
+    return focal_px / image_width * film_width_in * MM_PER_INCH
+
+
+def focal_mm_to_px(focal_mm, image_width, film_width_in):
+    return focal_mm / (film_width_in * MM_PER_INCH) * image_width
+
+
+def apply_camera_params(transform, params, image_width, image_height):
+    """
+    Set a Maya camera from camera_solver.CameraParams. Undoable.
+
+    Lens shift (principal point offset in px, v down) maps to film offset:
+    positive horizontalFilmOffset moves the view window right, which puts the
+    optical centre left of the image centre \u2014 hence the sign flip on X.
+    """
+    shape = camera_shape(transform)
+    film_w = cmds.getAttr(f"{shape}.horizontalFilmAperture")
+    set_film_back(transform, film_w, image_width, image_height)
+    film_h = cmds.getAttr(f"{shape}.verticalFilmAperture")
+
+    cmds.setAttr(f"{shape}.focalLength", focal_px_to_mm(params.focal_px, image_width, film_w))
+    cmds.setAttr(f"{shape}.horizontalFilmOffset", -params.shift[0] / image_width * film_w)
+    cmds.setAttr(f"{shape}.verticalFilmOffset", params.shift[1] / image_height * film_h)
+
+    cmds.setAttr(f"{transform}.rotateOrder", ROTATE_ORDER_ZXY)
+    rx, ry, rz = params.rotate_degrees()
+    cmds.xform(transform, worldSpace=True, translation=tuple(float(v) for v in params.position))
+    cmds.setAttr(f"{transform}.rotate", rx, ry, rz)
+
+
+def read_camera_params(transform, image_width, image_height):
+    """
+    Read a Maya camera as camera_solver.CameraParams (for use as a solve seed
+    or to project points). Works for any rotate order and parenting.
+    """
+    from reframe.core.camera_solver import CameraParams, euler_from_rotation
+
+    shape = camera_shape(transform)
+    film_w = cmds.getAttr(f"{shape}.horizontalFilmAperture")
+    film_h = cmds.getAttr(f"{shape}.verticalFilmAperture")
+    focal_px = focal_mm_to_px(cmds.getAttr(f"{shape}.focalLength"), image_width, film_w)
+    shift = (
+        -cmds.getAttr(f"{shape}.horizontalFilmOffset") / film_w * image_width,
+        cmds.getAttr(f"{shape}.verticalFilmOffset") / film_h * image_height,
+    )
+
+    m = cmds.xform(transform, query=True, worldSpace=True, matrix=True)
+    axes = []
+    for i in range(3):                        # rows = camera X/Y/Z axes; strip scale
+        row = m[4 * i:4 * i + 3]
+        length = sum(v * v for v in row) ** 0.5 or 1.0
+        axes.append([v / length for v in row])
+    rotation = [[axes[j][i] for j in range(3)] for i in range(3)]   # columns = axes
+    pan, tilt, roll = euler_from_rotation(rotation)
+    return CameraParams(pan, tilt, roll, m[12:15], focal_px, shift)
+
+
+def look_through(transform, panel=None):
+    """Point a model panel at this camera (the focused one, else the first)."""
+    panel = panel or cmds.getPanel(withFocus=True)
+    if not panel or cmds.getPanel(typeOf=panel) != "modelPanel":
+        panels = cmds.getPanel(type="modelPanel") or []
+        visible = set(cmds.getPanel(visiblePanels=True) or [])
+        panels = [p for p in panels if p in visible] or panels
+        if not panels:
+            return
+        panel = panels[0]
+    cmds.lookThru(panel, transform)
+'''),
+# ------------------------------------------------------------
+# reframe.core.image_utils
+# ------------------------------------------------------------
+'reframe.core.image_utils': (False, '''"""
+image_utils.py \u2014 Reframe image loading
+--------------------------------------
+Loads reference images for the thumbnail strip and the image viewer using only
+what ships with Maya:
+  - Qt's QImage for the common formats (JPG, PNG, TIFF, BMP)
+  - Maya's own reader (MImage) for everything else it supports \u2014 EXR, PSD,
+    IFF, TGA, HDR \u2014 converted to 8-bit for display
+
+(The viewport shows images through a native imagePlane, which reads all of
+these itself.)
+"""
+import ctypes
+import os
+
+from reframe import QtCore, QtGui
+
+SUPPORTED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp",
+    ".exr", ".psd", ".iff", ".tga", ".hdr",
+}
+
+
+class ImageInfo:
+    def __init__(self, path):
+        self.path = path
+        self.filename = os.path.basename(path)
+        self.width = 0
+        self.height = 0
+
+
+def is_supported(path):
+    return os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS
+
+
+def load_image_info(path):
+    """Image dimensions without decoding the whole file where possible."""
+    info = ImageInfo(path)
+    if not os.path.isfile(path):
+        return info
+    size = QtGui.QImageReader(path).size()
+    if size.isValid():
+        info.width, info.height = size.width(), size.height()
+    else:
+        qimg = _load_with_maya(path)
+        if qimg is not None:
+            info.width, info.height = qimg.width(), qimg.height()
+    return info
+
+
+def load_as_qimage(path):
+    """QImage for display, or None."""
+    if not path or not os.path.isfile(path):
+        return None
+    qimg = QtGui.QImage(path)
+    if not qimg.isNull():
+        return qimg
+    return _load_with_maya(path)
+
+
+def thumbnail(path, w, h):
+    """w\u00d7h QPixmap thumbnail (grey placeholder if the image can't be read)."""
+    qimg = load_as_qimage(path)
+    if qimg is None or qimg.isNull():
+        pix = QtGui.QPixmap(w, h)
+        pix.fill(QtGui.QColor("#3a3a3a"))
+        return pix
+    small = qimg.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    return QtGui.QPixmap.fromImage(small)
+
+
+def _load_with_maya(path):
+    """Read any Maya-supported image via MImage \u2192 QImage (8-bit RGBA)."""
+    try:
+        import maya.api.OpenMaya as om
+        image = om.MImage()
+        image.readFromFile(path, om.MImage.kByte)
+        w, h = image.getSize()
+        if not w or not h:
+            return None
+        data = ctypes.string_at(image.pixels(), w * h * 4)
+    except Exception:
+        return None
+    qimg = QtGui.QImage(data, w, h, w * 4, QtGui.QImage.Format_RGBA8888)
+    return qimg.mirrored(False, True)   # MImage rows are bottom-up; mirrored() also copies
+'''),
+# ------------------------------------------------------------
+# reframe.core.match
+# ------------------------------------------------------------
+'reframe.core.match': (False, '''"""
+match.py \u2014 Reframe camera-match orchestration
+---------------------------------------------
+Glue between the scene State, the solver and Maya cameras:
+  ensure_camera(ref)          create / repair the reference's camera + image plane
+  solve_ref(state, ref)       gather point pairs \u2192 solve \u2192 apply to camera (undoable)
+  project_points(state, ref)  where the current camera puts each 3D point (pixels)
+  horizon_line(ref)           the true horizon in image pixels, for the viewer
+"""
+import math
+
+import maya.cmds as cmds
+import maya.api.OpenMaya as om
+
+from reframe.core import camera_solver as cs
+from reframe.core import camera_utils as cu
+from reframe.core import state as st
+
+
+def ensure_camera(ref):
+    """Make sure ref['camera'] exists and shows the image. Returns the transform."""
+    cam = ref.get("camera")
+    if not cam or not cmds.objExists(cam):
+        cam = cu.create_ref_camera(ref["path"], ref["width"], ref["height"])
+        ref["camera"] = cmds.ls(cam, long=True)[0]
+    cu.ensure_image_plane(ref["camera"], ref["path"])
+    return ref["camera"]
+
+
+def gather_pairs(state, ref):
+    """Points that have both a 3D locator and a 2D position on this ref."""
+    ids, pts3, pts2, weights = [], [], [], []
+    for p in state.points:
+        uv = state.uv(ref, p["id"])
+        pos = st.point_position(p["locator"])
+        if uv is None or pos is None:
+            continue
+        ids.append(p["id"])
+        pts3.append(pos)
+        pts2.append(uv)
+        weights.append(1.0 if state.is_enabled(ref, p["id"]) else 0.0)
+    return ids, pts3, pts2, weights
+
+
+def solver_settings(ref, weights):
+    s = ref["settings"]
+    cam = ref.get("camera")
+    film_w = cmds.getAttr(cu.camera_shape(cam) + ".horizontalFilmAperture") if cam else cu.DEFAULT_FILM_WIDTH_IN
+    return cs.SolveSettings(
+        solve_focal=s["solve_focal"],
+        focal_px=cu.focal_mm_to_px(s["focal_mm"], ref["width"], film_w),
+        solve_shift=s["solve_shift"],
+        lock_roll=s["lock_roll"],
+        keep_verticals=s["keep_verticals"],
+        camera_height=s["height"] if s["lock_height"] else None,
+        weights=weights,
+    )
+
+
+def solve_ref(state, ref, apply=True):
+    """
+    Solve ref's camera from its point pairs. On success the camera is updated in
+    one undo chunk. The outcome is stored in ref['solve'] (caller saves state).
+    Returns the camera_solver.SolveResult.
+    """
+    cam = ensure_camera(ref)
+    ids, pts3, pts2, weights = gather_pairs(state, ref)
+    image_size = (ref["width"], ref["height"])
+    settings = solver_settings(ref, weights)
+
+    seed = None
+    try:
+        seed = cu.read_camera_params(cam, *image_size)
+    except Exception:
+        pass
+
+    if len(ids) == 0:
+        result = cs.SolveResult()
+        result.message = "No complete point pairs yet \u2014 each point needs a 3D and a 2D position."
+    else:
+        result = cs.solve(pts3, pts2, image_size, settings, seed=seed)
+
+    summary = {
+        "ok": bool(result.success),
+        "message": result.message,
+        "warnings": list(result.warnings),
+        "pairs": len(ids),
+    }
+    if result.success:
+        if apply:
+            with cu.undo_chunk("Reframe Solve"):
+                cu.apply_camera_params(cam, result.camera, *image_size)
+        film_w = cmds.getAttr(cu.camera_shape(cam) + ".horizontalFilmAperture")
+        summary.update(
+            rms=result.rms_px,
+            errors={str(pid): float(e) for pid, e in zip(ids, result.errors_px)},
+            outliers=[ids[i] for i in result.outliers],
+            focal_mm=cu.focal_px_to_mm(result.camera.focal_px, ref["width"], film_w),
+            focal_sigma_mm=(
+                cu.focal_px_to_mm(result.focal_sigma_px, ref["width"], film_w)
+                if result.focal_sigma_px is not None else None
+            ),
+        )
+        om.MGlobal.displayInfo(
+            f"[Reframe] {result.message} Focal {summary['focal_mm']:.1f}mm."
+            + (" " + " ".join(result.warnings) if result.warnings else "")
+        )
+    ref["solve"] = summary
+    st.update_point_display(state, ref)
+    return result
+
+
+def project_points(state, ref):
+    """{pid: (u, v)} for every 3D point in front of ref's current camera."""
+    cam = ref.get("camera")
+    if not cam or not cmds.objExists(cam):
+        return {}
+    params = cu.read_camera_params(cam, ref["width"], ref["height"])
+    out = {}
+    for p in state.points:
+        pos = st.point_position(p["locator"])
+        if pos is None:
+            continue
+        uv, depth = cs.project(params, [pos], (ref["width"], ref["height"]))
+        if depth[0] > 0:
+            out[p["id"]] = (float(uv[0][0]), float(uv[0][1]))
+    return out
+
+
+def horizon_line(ref):
+    """
+    The camera's true horizon (vanishing line of the world's horizontal plane)
+    as two image points ((u0, v0), (u1, v1)), or None if it can't be drawn.
+    """
+    cam = ref.get("camera")
+    if not cam or not cmds.objExists(cam):
+        return None
+    w, h = ref["width"], ref["height"]
+    params = cu.read_camera_params(cam, w, h)
+    r = params.rotation
+    fwd = (-r[0][2], -r[1][2], -r[2][2])
+    horiz = math.hypot(fwd[0], fwd[2])
+    if horiz < 1e-6:
+        return None                     # looking straight up / down
+    f = (fwd[0] / horiz, 0.0, fwd[2] / horiz)
+    right = (-f[2], 0.0, f[0])          # horizontal, perpendicular to f
+    far = 1.0e6
+    pts = []
+    for s in (-1.0, 1.0):
+        d = (f[0] + s * right[0], 0.0, f[2] + s * right[2])
+        pts.append(tuple(params.position[i] + far * d[i] for i in range(3)))
+    uv, depth = cs.project(params, pts, (w, h))
+    if min(depth) <= 0:
+        return None
+    return uv[0], uv[1]
+'''),
+# ------------------------------------------------------------
+# reframe.core.pick
+# ------------------------------------------------------------
+'reframe.core.pick': (False, '''"""
+pick.py \u2014 placing 3D match points
+---------------------------------
+  LineupGeometry          the meshes you line up against, prepared once so every
+                          click afterwards is near-instant, even on huge scans
+  selection_position()    world position of the current selection (components
+                          are averaged), for "3D from selection"
+  PickTool                viewport click tool: each left-click raycasts the
+                          lineup geometry and hands the hit to a callback
+
+Performance on heavy geometry
+  MFnMesh.closestIntersection with an acceleration grid is ~0.1 ms per ray on a
+  multi-million-triangle mesh once the grid exists; building the grid is the
+  expensive part (and uses memory). So:
+    - picking only ever considers the lineup geometry (never "every visible
+      mesh" in a heavy scene)
+    - prepare() builds all grids up front, with progress, instead of on a click
+    - each click tests the ray against every mesh's world bounding box first, so
+      meshes the ray can't hit are never touched
+Point clouds without faces can't be raycast \u2014 select vertices and use
+"3D from Selection" instead.
+"""
+import sys
+import traceback
+
+import maya.api.OpenMaya as om
+import maya.api.OpenMayaUI as omui
+import maya.cmds as cmds
+
+
+# ---------------------------------------------------------------------------
+# Lineup geometry
+# ---------------------------------------------------------------------------
+
+def resolve_meshes(nodes):
+    """Mesh shapes (long names) under the given nodes \u2014 transforms, groups or shapes."""
+    if not nodes:
+        return []
+    found = cmds.ls(nodes, dag=True, type="mesh", noIntermediate=True, long=True) or []
+    return sorted(set(found))
+
+
+class _Target:
+    def __init__(self, mesh):
+        sel = om.MSelectionList()
+        sel.add(mesh)
+        self.name = mesh
+        self.dag = sel.getDagPath(0)
+        self.fn = om.MFnMesh(self.dag)
+        self.faces = self.fn.numPolygons
+        self.signature = None
+        self.bbox_min = self.bbox_max = None
+        self.refresh()
+
+    def refresh(self):
+        """Update the world bounding box if the mesh moved or changed."""
+        if not self.exists():
+            raise RuntimeError(f"{self.name} no longer exists")
+        matrix = self.dag.inclusiveMatrix()
+        signature = (self.fn.numPolygons, tuple(matrix))
+        if signature == self.signature:
+            return
+        self.signature = signature
+        box = om.MFnDagNode(self.dag).boundingBox      # object space
+        lo, hi = box.min, box.max
+        corners = [om.MPoint(x, y, z) * matrix for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
+        pad = 1e-6 * max(1.0, max(abs(c[i]) for c in corners for i in range(3)))
+        self.bbox_min = [min(c[i] for c in corners) - pad for i in range(3)]
+        self.bbox_max = [max(c[i] for c in corners) + pad for i in range(3)]
+
+    def exists(self):
+        # Deleted nodes stay alive in the undo queue, so check the DAG by name too
+        return self.dag.isValid() and cmds.objExists(self.name)
+
+    def ray_hits_box(self, src, direction):
+        """Slab test: does the ray (forward only) intersect the world bounding box?"""
+        t_near, t_far = 0.0, float("inf")
+        for i in range(3):
+            if abs(direction[i]) < 1e-15:
+                if src[i] < self.bbox_min[i] or src[i] > self.bbox_max[i]:
+                    return False
+                continue
+            t1 = (self.bbox_min[i] - src[i]) / direction[i]
+            t2 = (self.bbox_max[i] - src[i]) / direction[i]
+            if t1 > t2:
+                t1, t2 = t2, t1
+            t_near, t_far = max(t_near, t1), min(t_far, t2)
+            if t_near > t_far:
+                return False
+        return True
+
+    def intersect(self, src, direction):
+        hit = self.fn.closestIntersection(
+            om.MFloatPoint(*src), om.MFloatVector(*direction), om.MSpace.kWorld, 1.0e12, False,
+            accelParams=om.MFnMesh.autoUniformGridParams(),
+        )
+        if hit is None:
+            return None
+        point, param, face = hit[0], hit[1], hit[2]
+        return param, (point.x, point.y, point.z), face
+
+    def warm_up(self):
+        """Build (and let Maya cache) the acceleration grid with one ray through the box."""
+        centre = [(a + b) / 2.0 for a, b in zip(self.bbox_min, self.bbox_max)]
+        src = [centre[0], self.bbox_max[1] + 1.0, centre[2]]
+        self.intersect(src, (0.0, -1.0, 0.0))
+
+
+class LineupGeometry:
+    """The set of meshes Reframe picks against, with prepared intersection grids."""
+
+    def __init__(self):
+        self._targets = {}
+
+    @property
+    def meshes(self):
+        return sorted(self._targets)
+
+    @property
+    def face_count(self):
+        return sum(t.faces for t in self._targets.values())
+
+    def is_prepared_for(self, meshes):
+        return set(meshes) == set(self._targets) and all(t.exists() for t in self._targets.values())
+
+    def prepare(self, meshes, progress=None):
+        """
+        Build pick data for these mesh shapes. progress(i, n, name) is called per
+        mesh and may return False to cancel. Returns the list actually prepared.
+        """
+        meshes = [m for m in meshes if cmds.objExists(m)]
+        targets = {}
+        for i, mesh in enumerate(meshes):
+            if progress is not None and progress(i, len(meshes), mesh) is False:
+                break
+            existing = self._targets.get(mesh)
+            try:
+                target = existing if existing is not None else _Target(mesh)
+                target.refresh()
+                target.warm_up()
+            except RuntimeError:
+                continue
+            targets[mesh] = target
+        self._targets = targets
+        return self.meshes
+
+    def clear(self):
+        self._targets = {}
+
+    def raycast(self, source, direction, snap_to_vertex=False):
+        """
+        Nearest hit of a world ray on the lineup geometry.
+        Returns {"position": (x, y, z), "mesh": name, "face": int} or None.
+        """
+        best = None
+        for name, target in list(self._targets.items()):
+            try:
+                target.refresh()
+            except RuntimeError:            # mesh deleted since it was prepared
+                del self._targets[name]
+                continue
+            if not target.ray_hits_box(source, direction):
+                continue
+            hit = target.intersect(source, direction)
+            if hit is not None and (best is None or hit[0] < best[0]):
+                best = hit + (target,)
+        if best is None:
+            return None
+        _, position, face, target = best
+        if snap_to_vertex and face >= 0:
+            hit_pt = om.MPoint(*position)
+            position = min(
+                (tuple(target.fn.getPoint(v, om.MSpace.kWorld))[:3] for v in target.fn.getPolygonVertices(face)),
+                key=lambda p: om.MPoint(*p).distanceTo(hit_pt),
+            )
+        return {"position": tuple(float(v) for v in position), "mesh": target.name, "face": int(face)}
+
+
+def raycast(source, direction, meshes, snap_to_vertex=False):
+    """One-off raycast against the given mesh shapes (prepares them on the fly)."""
+    geo = LineupGeometry()
+    geo.prepare(meshes)
+    return geo.raycast(source, direction, snap_to_vertex)
+
+
+# ---------------------------------------------------------------------------
+# Selection
+# ---------------------------------------------------------------------------
+
+def selection_position():
+    """Average world position of the selection (vertices, faces, transforms), or None."""
+    sel = cmds.ls(selection=True, flatten=True, long=True) or []
+    if not sel:
+        return None
+    points = []
+    for item in sel:
+        if "." in item:
+            flat = cmds.xform(item, query=True, worldSpace=True, translation=True) or []
+            points += [flat[i:i + 3] for i in range(0, len(flat), 3)]
+        elif cmds.objectType(item, isAType="transform"):
+            points.append(cmds.xform(item, query=True, worldSpace=True, rotatePivot=True))
+    if not points:
+        return None
+    n = float(len(points))
+    return tuple(sum(p[i] for p in points) / n for i in range(3))
+
+
+# ---------------------------------------------------------------------------
+# Viewport click tool
+# ---------------------------------------------------------------------------
+
+def clicked_view():
+    """
+    The 3D view the artist just clicked: the model panel under the pointer, else
+    Maya's active view (a press makes the clicked view active). Keyboard focus is
+    deliberately not used \u2014 it's often the main perspective panel while you click
+    in Reframe's embedded viewport.
+    """
+    panel = cmds.getPanel(underPointer=True)
+    if panel and cmds.getPanel(typeOf=panel) == "modelPanel":
+        try:
+            return omui.M3dView.getM3dViewFromModelPanel(panel)
+        except RuntimeError:
+            pass
+    return omui.M3dView.active3dView()
+
+
+def screen_ray(x, y, view=None):
+    """World ray (source, direction) through port pixel (x, y) of a 3D view."""
+    view = view or clicked_view()
+    src, vec = om.MPoint(), om.MVector()
+    view.viewToWorld(int(x), int(y), src, vec)
+    return (src.x, src.y, src.z), (vec.x, vec.y, vec.z)
+
+
+def _dispatch_press():
+    """
+    The draggerContext's press command. It calls whatever handler is current, so a
+    context left over from an earlier paste of Reframe never calls into a panel
+    that no longer exists \u2014 and no exception ever propagates into Maya.
+    """
+    handler = getattr(sys.modules.get(__name__), "_ACTIVE_HANDLER", None)
+    if handler is None:
+        return
+    try:
+        handler()
+    except Exception:
+        om.MGlobal.displayError("[Reframe] Pick failed:\\n" + traceback.format_exc())
+
+
+_ACTIVE_HANDLER = None
+
+
+class PickTool:
+    """
+    Viewport tool: a left-click (no modifiers) raycasts the lineup geometry and
+    calls on_hit(hit_dict). Alt-navigation still works as normal.
+
+    Safe to start/stop repeatedly: the Maya context is created once and edited
+    afterwards, never deleted while it is the active tool.
+    """
+
+    CONTEXT = "reframePickCtx"
+
+    def __init__(self, geometry, on_hit, snap_to_vertex=lambda: False, on_miss=None):
+        self.geometry = geometry
+        self._on_hit = on_hit
+        self._on_miss = on_miss
+        self._snap = snap_to_vertex
+        self._previous_ctx = None
+
+    def start(self):
+        global _ACTIVE_HANDLER
+        _ACTIVE_HANDLER = self._on_press
+        if cmds.draggerContext(self.CONTEXT, exists=True):
+            cmds.draggerContext(self.CONTEXT, edit=True, pressCommand=_dispatch_press)
+        else:
+            cmds.draggerContext(
+                self.CONTEXT,
+                pressCommand=_dispatch_press,
+                cursor="crossHair",
+                space="screen",
+                undoMode="step",
+                name=self.CONTEXT,
+            )
+        current = cmds.currentCtx()
+        if current and current != self.CONTEXT:
+            self._previous_ctx = current
+        if current != self.CONTEXT:
+            cmds.setToolTo(self.CONTEXT)
+
+    def stop(self):
+        global _ACTIVE_HANDLER
+        if _ACTIVE_HANDLER == self._on_press:
+            _ACTIVE_HANDLER = None
+        if self.is_active():
+            cmds.setToolTo(self._previous_ctx or "selectSuperContext")
+
+    def is_active(self):
+        return cmds.currentCtx() == self.CONTEXT
+
+    def _on_press(self):
+        if cmds.draggerContext(self.CONTEXT, query=True, button=True) != 1:
+            return
+        if cmds.draggerContext(self.CONTEXT, query=True, modifier=True) not in ("none", None, ""):
+            return
+        x, y, _ = cmds.draggerContext(self.CONTEXT, query=True, anchorPoint=True)
+        source, direction = screen_ray(x, y)
+        hit = self.geometry.raycast(source, direction, snap_to_vertex=self._snap())
+        if hit is None:
+            if self._on_miss:
+                self._on_miss()
+            return
+        self._on_hit(hit)
+'''),
+# ------------------------------------------------------------
+# reframe.core.state
+# ------------------------------------------------------------
+'reframe.core.state': (False, '''"""
+state.py \u2014 Reframe scene state
+------------------------------
+Everything Reframe knows about a scene, stored as JSON on the ReframeData node.
+
+  points   3D match points, shared by every reference image. Each is a Maya
+           locator (RF_pt_###) under the RF_points group, so artists can see,
+           move, snap and undo them like any other node.
+  refs     reference images. Each has its own camera, its own 2D position for
+           any subset of the points (pixel coords, origin top-left, v down),
+           solve settings and the last solve result.
+  overlay  viewport display settings.
+
+State is plain data (testable without Maya); load() / save() and the locator
+helpers at the bottom are the only Maya-dependent parts. Everything in the
+scene is a native node (a "network" node with a string attribute, locators,
+annotations), so scenes open cleanly on machines without Reframe.
+"""
+import copy
+import json
+
+NODE_NAME = "ReframeData"
+POINTS_GROUP = "RF_points"
+SCHEMA_VERSION = 1
+
+DEFAULT_SETTINGS = {
+    "solve_focal": True,
+    "focal_mm": 35.0,
+    "solve_shift": False,
+    "lock_roll": False,
+    "keep_verticals": False,
+    "lock_height": False,
+    "height": 0.0,
+    "auto_solve": True,
+}
+
+DEFAULT_OVERLAY = {
+    "opacity": 0.6,
+    "image_front": True,
+    "thirds": False,
+    "centre": False,
+    "horizon": False,
+}
+
+
+class State:
+    def __init__(self, data=None):
+        data = copy.deepcopy(data) if data else {}
+        self.data = {
+            "version": SCHEMA_VERSION,
+            "points": data.get("points", []),
+            "refs": data.get("refs", []),
+            "active": data.get("active"),
+            "overlay": dict(DEFAULT_OVERLAY, **data.get("overlay", {})),
+            "geometry": data.get("geometry", []),     # lineup mesh shapes (long names)
+        }
+        for ref in self.data["refs"]:
+            ref["settings"] = dict(DEFAULT_SETTINGS, **ref.get("settings", {}))
+            ref.setdefault("uv", {})
+            ref.setdefault("disabled", [])
+            ref.setdefault("solve", None)
+
+    # -- serialisation ------------------------------------------------------
+
+    def to_json(self):
+        return json.dumps(self.data, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text):
+        try:
+            return cls(json.loads(text) if text else None)
+        except (TypeError, ValueError):
+            return cls()
+
+    # -- references ---------------------------------------------------------
+
+    @property
+    def refs(self):
+        return self.data["refs"]
+
+    @property
+    def overlay(self):
+        return self.data["overlay"]
+
+    def ref(self, ref_id):
+        for r in self.refs:
+            if r["id"] == ref_id:
+                return r
+        return None
+
+    def ref_by_path(self, path):
+        for r in self.refs:
+            if r["path"] == path:
+                return r
+        return None
+
+    @property
+    def active_ref(self):
+        return self.ref(self.data["active"]) if self.data["active"] else None
+
+    def set_active(self, ref_id):
+        self.data["active"] = ref_id if self.ref(ref_id) else None
+
+    def add_ref(self, path, width, height, camera=None):
+        existing = self.ref_by_path(path)
+        if existing:
+            return existing
+        n = 1 + max([int(r["id"][1:]) for r in self.refs] or [0])
+        ref = {
+            "id": f"r{n}",
+            "path": path,
+            "width": int(width),
+            "height": int(height),
+            "camera": camera,
+            "uv": {},
+            "disabled": [],
+            "settings": dict(DEFAULT_SETTINGS),
+            "solve": None,
+        }
+        self.refs.append(ref)
+        return ref
+
+    def remove_ref(self, ref_id):
+        self.data["refs"] = [r for r in self.refs if r["id"] != ref_id]
+        if self.data["active"] == ref_id:
+            self.data["active"] = self.refs[0]["id"] if self.refs else None
+
+    # -- points -------------------------------------------------------------
+
+    @property
+    def points(self):
+        return self.data["points"]
+
+    def point(self, pid):
+        for p in self.points:
+            if p["id"] == pid:
+                return p
+        return None
+
+    def next_point_id(self):
+        return 1 + max([p["id"] for p in self.points] or [0])
+
+    def add_point(self, locator=None, pid=None):
+        pid = pid or self.next_point_id()
+        self.points.append({"id": pid, "locator": locator})
+        return pid
+
+    def set_locator(self, pid, locator):
+        self.point(pid)["locator"] = locator
+
+    def remove_point(self, pid):
+        self.data["points"] = [p for p in self.points if p["id"] != pid]
+        for ref in self.refs:
+            ref["uv"].pop(str(pid), None)
+            if pid in ref["disabled"]:
+                ref["disabled"].remove(pid)
+
+    def uv(self, ref, pid):
+        v = ref["uv"].get(str(pid))
+        return tuple(v) if v else None
+
+    def set_uv(self, ref, pid, uv):
+        if uv is None:
+            ref["uv"].pop(str(pid), None)
+        else:
+            ref["uv"][str(pid)] = [float(uv[0]), float(uv[1])]
+
+    def is_enabled(self, ref, pid):
+        return pid not in ref["disabled"]
+
+    def set_enabled(self, ref, pid, enabled):
+        if enabled and pid in ref["disabled"]:
+            ref["disabled"].remove(pid)
+        elif not enabled and pid not in ref["disabled"]:
+            ref["disabled"].append(pid)
+
+    @property
+    def geometry(self):
+        return self.data["geometry"]
+
+    def set_geometry(self, meshes):
+        self.data["geometry"] = list(meshes)
+
+    # -- click-as-you-go pairing ----------------------------------------------
+    #
+    # Image clicks and model clicks each fill the OLDEST point that is waiting
+    # for that half, otherwise they start a new point. So any order works:
+    #   image, model, image, image, model, model  \u2192  pairs 1, 2, 3
+    # and on a second image, image clicks walk through the existing 3D points
+    # in order.
+
+    def waiting_for_image(self, ref):
+        """Points (in order) that have a 3D position but no 2D on this ref."""
+        return [p["id"] for p in self.points if p["locator"] and self.uv(ref, p["id"]) is None]
+
+    def waiting_for_model(self, ref):
+        """Points (in order) that have a 2D position on this ref but no 3D."""
+        return [p["id"] for p in self.points if not p["locator"] and self.uv(ref, p["id"]) is not None]
+
+    def point_for_image_click(self, ref):
+        """(pid, is_new) \u2014 which point an image click should set."""
+        waiting = self.waiting_for_image(ref)
+        return (waiting[0], False) if waiting else (self.next_point_id(), True)
+
+    def point_for_model_click(self, ref):
+        """(pid, is_new) \u2014 which point a model click should set."""
+        waiting = self.waiting_for_model(ref)
+        return (waiting[0], False) if waiting else (self.next_point_id(), True)
+
+
+# ---------------------------------------------------------------------------
+# Maya I/O
+# ---------------------------------------------------------------------------
+
+_ATTR = "reframeState"
+
+# Point display colours (linear RGB) \u2014 match the image viewer
+COLOR_UNMATCHED = (0.55, 0.55, 0.55)
+COLOR_UNSOLVED = (0.9, 0.9, 0.9)
+COLOR_GOOD = (0.15, 0.9, 0.35)
+COLOR_FAIR = (1.0, 0.75, 0.05)
+COLOR_BAD = (1.0, 0.15, 0.15)
+
+
+def load():
+    """Read State from the scene (empty State if there is no ReframeData node)."""
+    import maya.cmds as cmds
+    if not cmds.objExists(NODE_NAME) or not cmds.attributeQuery(_ATTR, node=NODE_NAME, exists=True):
+        return State()
+    state = State.from_json(cmds.getAttr(f"{NODE_NAME}.{_ATTR}"))
+    _prune_missing_locators(state)
+    return state
+
+
+def save(state):
+    """Write State to the scene (undoable). Creates the node if needed."""
+    import maya.cmds as cmds
+    if not cmds.objExists(NODE_NAME):
+        cmds.createNode("network", name=NODE_NAME, skipSelect=True)
+    if not cmds.attributeQuery(_ATTR, node=NODE_NAME, exists=True):
+        cmds.addAttr(NODE_NAME, longName=_ATTR, dataType="string")
+    cmds.setAttr(f"{NODE_NAME}.{_ATTR}", state.to_json(), type="string")
+
+
+def state_json_in_scene():
+    """The raw stored JSON ('' if none) \u2014 for cheap change detection."""
+    import maya.cmds as cmds
+    if not cmds.objExists(NODE_NAME) or not cmds.attributeQuery(_ATTR, node=NODE_NAME, exists=True):
+        return ""
+    return cmds.getAttr(f"{NODE_NAME}.{_ATTR}") or ""
+
+
+def create_point_locator(pid, position):
+    """A locator for match point pid, with a numbered label, under RF_points."""
+    import maya.cmds as cmds
+    if not cmds.objExists(POINTS_GROUP):
+        cmds.createNode("transform", name=POINTS_GROUP, skipSelect=True)
+    loc = cmds.spaceLocator(name=f"RF_pt_{pid:03d}")[0]
+    loc = cmds.parent(loc, POINTS_GROUP)[0]
+    cmds.xform(loc, worldSpace=True, translation=tuple(float(v) for v in position))
+    # Numbered label: an annotation parented under the locator, no arrow
+    ann_shape = cmds.annotate(loc, text=f" {pid}", point=(0, 0, 0))
+    ann = cmds.listRelatives(ann_shape, parent=True)[0]
+    ann = cmds.parent(ann, loc, relative=True)[0]
+    cmds.setAttr(f"{ann}.translate", 0, 0, 0)
+    cmds.setAttr(f"{ann_shape}.displayArrow", False)
+    cmds.rename(ann, f"RF_pt_{pid:03d}_label")
+    cmds.select(clear=True)
+    loc = cmds.ls(loc, long=True)[0]
+    set_point_color(loc, COLOR_UNSOLVED)
+    return loc
+
+
+def set_point_color(locator, rgb):
+    """Colour a point's locator and label (drawing override \u2014 native, undoable)."""
+    import maya.cmds as cmds
+    if not locator or not cmds.objExists(locator):
+        return
+    nodes = [locator] + (cmds.listRelatives(locator, allDescendents=True, fullPath=True) or [])
+    for node in nodes:
+        if cmds.nodeType(node) in ("locator", "annotationShape"):
+            cmds.setAttr(f"{node}.overrideEnabled", True)
+            cmds.setAttr(f"{node}.overrideRGBColors", True)
+            cmds.setAttr(f"{node}.overrideColorRGB", *rgb)
+
+
+def update_point_display(state, ref):
+    """Colour every point locator by its status / error on the given reference."""
+    solve = (ref or {}).get("solve") or {}
+    errors = solve.get("errors", {})
+    outliers = set(solve.get("outliers", []))
+    for p in state.points:
+        if not p["locator"]:
+            continue
+        if ref is None or state.uv(ref, p["id"]) is None:
+            color = COLOR_UNMATCHED
+        elif str(p["id"]) not in errors:
+            color = COLOR_UNSOLVED
+        else:
+            err = errors[str(p["id"])]
+            color = COLOR_BAD if (p["id"] in outliers or err > 8.0) else COLOR_FAIR if err > 3.0 else COLOR_GOOD
+        set_point_color(p["locator"], color)
+
+
+def point_position(locator):
+    import maya.cmds as cmds
+    if not locator or not cmds.objExists(locator):
+        return None
+    return tuple(cmds.xform(locator, query=True, worldSpace=True, translation=True))
+
+
+def delete_point_locator(locator):
+    import maya.cmds as cmds
+    if locator and cmds.objExists(locator):
+        cmds.delete(locator)
+
+
+def _prune_missing_locators(state):
+    """Artists may delete or rename locators; re-find by short name, else drop 3D."""
+    import maya.cmds as cmds
+    for p in state.points:
+        loc = p.get("locator")
+        if loc and not cmds.objExists(loc):
+            short = loc.split("|")[-1]
+            found = cmds.ls(short, long=True)
+            p["locator"] = found[0] if len(found) == 1 else None
+'''),
+# ------------------------------------------------------------
+# reframe.ui
+# ------------------------------------------------------------
+'reframe.ui': (True, '''# Reframe UI package
+'''),
+# ------------------------------------------------------------
+# reframe.ui.camera_panel
+# ------------------------------------------------------------
+'reframe.ui.camera_panel': (False, '''"""
+camera_panel.py \u2014 Reframe View panel
+------------------------------------
+Display and manual camera controls for the active reference:
+  - image opacity (the camera's imagePlane alphaGain)
+  - image over / behind the model
+  - image viewer guides: thirds, centre, true horizon
+  - sensor preset (changing it rescales focal length so the framing is kept)
+  - focal length, for manual tweaking after / instead of a solve
+  - Look Through / Select Camera / Match Window
+
+Camera position and rotation are left to Maya's own tools (tumble through the
+RF camera, channel box); the camera uses rotateOrder zxy so pan / tilt / roll
+map to rotateY / rotateX / rotateZ.
+"""
+from reframe import QtCore, QtWidgets, Qt
+from reframe.core import camera_utils as cu
+
+
+class CameraPanel(QtWidgets.QWidget):
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self.c = controller
+        self._refreshing = False
+        self._build()
+
+    def _build(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(6)
+
+        # Buttons
+        row = QtWidgets.QHBoxLayout()
+        for text, slot, tip in (
+            ("Look Through", self.c.look_through, "Look through this image's camera in the active viewport"),
+            ("Match Window", self.c.show_match_window, "Image and model side by side"),
+            ("Select Camera", self.c.select_camera, "Select the camera in Maya"),
+        ):
+            b = QtWidgets.QPushButton(text)
+            b.setObjectName("iconButton")
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        layout.addLayout(row)
+
+        # Overlay
+        box = QtWidgets.QGroupBox("Overlay")
+        grid = QtWidgets.QGridLayout(box)
+        grid.setContentsMargins(6, 8, 6, 6)
+        grid.addWidget(QtWidgets.QLabel("Image opacity"), 0, 0)
+        self.opacity = QtWidgets.QSlider(Qt.Horizontal)
+        self.opacity.setRange(0, 100)
+        self.opacity.valueChanged.connect(self._on_opacity)
+        self.opacity.sliderReleased.connect(self._on_opacity_released)
+        grid.addWidget(self.opacity, 0, 1, 1, 2)
+
+        self.front_chk = QtWidgets.QCheckBox("Image over model")
+        self.front_chk.setToolTip("Draw the image in front of the geometry (off: behind it, as a backdrop)")
+        grid.addWidget(self.front_chk, 3, 0, 1, 3)
+        guides_lbl = QtWidgets.QLabel("Image viewer guides")
+        guides_lbl.setObjectName("helpLabel")
+        grid.addWidget(guides_lbl, 1, 0, 1, 3)
+        self.thirds_chk = QtWidgets.QCheckBox("Thirds")
+        self.centre_chk = QtWidgets.QCheckBox("Centre")
+        self.horizon_chk = QtWidgets.QCheckBox("Horizon")
+        self.horizon_chk.setToolTip("True horizon (eye level) of the current camera")
+        grid.addWidget(self.thirds_chk, 2, 0)
+        grid.addWidget(self.centre_chk, 2, 1)
+        grid.addWidget(self.horizon_chk, 2, 2)
+        for chk, key in (
+            (self.thirds_chk, "thirds"),
+            (self.centre_chk, "centre"), (self.horizon_chk, "horizon"),
+            (self.front_chk, "image_front"),
+        ):
+            chk.toggled.connect(lambda on, k=key: self._refreshing or self.c.set_overlay(**{k: on}))
+        layout.addWidget(box)
+
+        # Camera
+        box = QtWidgets.QGroupBox("Camera")
+        grid = QtWidgets.QGridLayout(box)
+        grid.setContentsMargins(6, 8, 6, 6)
+        grid.addWidget(QtWidgets.QLabel("Sensor"), 0, 0)
+        self.sensor = QtWidgets.QComboBox()
+        self.sensor.addItem("Custom", None)
+        for name, width_in in cu.FILM_BACK_PRESETS.items():
+            self.sensor.addItem(f"{name} ({width_in * cu.MM_PER_INCH:.1f}mm)", width_in)
+        self.sensor.setToolTip("Changing sensor rescales focal length so the match is kept")
+        self.sensor.currentIndexChanged.connect(self._on_sensor)
+        grid.addWidget(self.sensor, 0, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Focal length"), 1, 0)
+        self.focal = QtWidgets.QDoubleSpinBox()
+        self.focal.setRange(2.0, 3000.0)
+        self.focal.setDecimals(2)
+        self.focal.setSuffix(" mm")
+        self.focal.editingFinished.connect(self._on_focal)
+        grid.addWidget(self.focal, 1, 1)
+
+        self.fov = QtWidgets.QLabel("")
+        self.fov.setObjectName("helpLabel")
+        grid.addWidget(self.fov, 2, 0, 1, 2)
+        layout.addWidget(box)
+        layout.addStretch()
+
+    # ------------------------------------------------------------------
+
+    def refresh(self):
+        import math
+        import maya.cmds as cmds
+
+        self._refreshing = True
+        try:
+            ov = self.c.state.overlay
+            self.opacity.setValue(int(round(ov["opacity"] * 100)))
+            self.thirds_chk.setChecked(ov["thirds"])
+            self.centre_chk.setChecked(ov["centre"])
+            self.horizon_chk.setChecked(ov["horizon"])
+            self.front_chk.setChecked(ov["image_front"])
+
+            cam = self.c.active_camera()
+            self.setEnabled(cam is not None)
+            if cam is None:
+                return
+            shape = cu.camera_shape(cam)
+            film_w = cmds.getAttr(shape + ".horizontalFilmAperture")
+            focal = cmds.getAttr(shape + ".focalLength")
+            idx = 0
+            for i in range(1, self.sensor.count()):
+                if abs(self.sensor.itemData(i) - film_w) < 1e-4:
+                    idx = i
+            self.sensor.setCurrentIndex(idx)
+            self.focal.setValue(focal)
+            film_h = cmds.getAttr(shape + ".verticalFilmAperture")
+            h_fov = math.degrees(2 * math.atan(film_w * cu.MM_PER_INCH / (2 * focal)))
+            v_fov = math.degrees(2 * math.atan(film_h * cu.MM_PER_INCH / (2 * focal)))
+            self.fov.setText(f"FOV {h_fov:.1f}\u00b0 \u00d7 {v_fov:.1f}\u00b0  \u00b7  sensor {film_w * cu.MM_PER_INCH:.1f}mm wide")
+        finally:
+            self._refreshing = False
+
+    def _on_opacity(self, value):
+        if not self._refreshing:
+            self.c.set_image_opacity(value / 100.0, save=False)
+
+    def _on_opacity_released(self):
+        self.c.set_image_opacity(self.opacity.value() / 100.0, save=True)
+
+    def _on_sensor(self, idx):
+        if self._refreshing:
+            return
+        width_in = self.sensor.itemData(idx)
+        if width_in:
+            self.c.set_sensor_width(width_in)
+
+    def _on_focal(self):
+        if not self._refreshing:
+            self.c.set_focal_mm(self.focal.value())
+'''),
+# ------------------------------------------------------------
+# reframe.ui.image_viewer
+# ------------------------------------------------------------
+'reframe.ui.image_viewer': (False, '''"""
+image_viewer.py \u2014 Reframe 2D image viewer
+-----------------------------------------
+A zoomable view of the active reference image where the artist places the 2D
+half of each match point.
+
+  Left-click empty image   place a 2D point (the panel decides which point)
+  Left-drag a marker       move that point's 2D position
+  Click a marker           select that point
+  Right-click a marker     clear 2D / enable-disable menu
+  Wheel                    zoom about the cursor
+  Middle-drag / Alt+drag   pan
+  F                        frame the image
+
+After a solve each point also shows where the current camera projects its 3D
+position (small ring) with a residual line to the clicked position, coloured
+by error \u2014 so "the painting cheats here" is visible at a glance.
+
+Scene coordinates are image pixels (origin top-left, v down), matching
+camera_solver.
+"""
+from reframe import QtCore, QtGui, QtWidgets, Qt, _PYSIDE_VERSION
+from reframe.core import image_utils
+
+if _PYSIDE_VERSION == 6:
+    from shiboken6 import isValid as _is_valid
+else:
+    from shiboken2 import isValid as _is_valid
+
+
+def _alive(item):
+    """False if Qt has already destroyed the C++ side of this item."""
+    return item is not None and _is_valid(item)
+
+MARKER_RADIUS = 7
+
+
+def error_color(err, outlier=False, enabled=True):
+    if not enabled:
+        return QtGui.QColor(110, 110, 110)
+    if err is None:
+        return QtGui.QColor(235, 235, 235)
+    if outlier or err > 8.0:
+        return QtGui.QColor(255, 70, 70)
+    if err > 3.0:
+        return QtGui.QColor(255, 200, 30)
+    return QtGui.QColor(70, 240, 115)
+
+
+class _Marker(QtWidgets.QGraphicsEllipseItem):
+    """A draggable 2D point marker with a constant on-screen size."""
+
+    def __init__(self, viewer, pid):
+        r = MARKER_RADIUS
+        super().__init__(-r, -r, 2 * r, 2 * r)
+        self.viewer = viewer
+        self.pid = pid
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setCursor(Qt.SizeAllCursor)
+        self.setZValue(10)
+        self.label = QtWidgets.QGraphicsSimpleTextItem(str(pid), self)
+        self.label.setPos(r + 2, -r - 4)
+        font = self.label.font()
+        font.setBold(True)
+        self.label.setFont(font)
+        self._press_pos = None
+
+    def style(self, color, selected):
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255) if selected else QtGui.QColor(0, 0, 0), 3 if selected else 2)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        fill = QtGui.QColor(color)
+        fill.setAlpha(170)
+        self.setBrush(fill)
+        self.label.setBrush(QtGui.QBrush(color))
+
+    def mousePressEvent(self, event):
+        self._press_pos = self.pos()
+        self.viewer.point_selected.emit(self.pid)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._press_pos is not None and self.pos() != self._press_pos:
+            p = self.pos()
+            self.viewer.uv_moved.emit(self.pid, p.x(), p.y())
+        self._press_pos = None
+
+    def itemChange(self, change, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            self.viewer._update_residual(self.pid)
+        return super().itemChange(change, value)
+
+    def contextMenuEvent(self, event):
+        self.viewer.point_selected.emit(self.pid)
+        menu = QtWidgets.QMenu()
+        clear = menu.addAction("Clear 2D position")
+        toggle = menu.addAction("Enable / disable in solve")
+        chosen = menu.exec_(event.screenPos())
+        if chosen == clear:
+            self.viewer.uv_cleared.emit(self.pid)
+        elif chosen == toggle:
+            self.viewer.enable_toggled.emit(self.pid)
+
+
+class _View(QtWidgets.QGraphicsView):
+    clicked = QtCore.Signal(float, float)
+
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+        self.setBackgroundBrush(QtGui.QColor(30, 30, 30))
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._pan_start = None
+        self._click_start = None
+
+    def wheelEvent(self, event):
+        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        self.scale(factor, factor)
+
+    def mousePressEvent(self, event):
+        alt = bool(event.modifiers() & Qt.AltModifier)
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and alt):
+            self._pan_start = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        if event.button() == Qt.LeftButton and not self._marker_at(event.pos()):
+            self._click_start = event.pos()
+            return
+        super().mousePressEvent(event)
+
+    def _marker_at(self, pos):
+        item = self.itemAt(pos)
+        while item is not None:
+            if isinstance(item, _Marker):
+                return True
+            item = item.parentItem()
+        return False
+
+    def contextMenuEvent(self, event):
+        if self._marker_at(event.pos()):
+            super().contextMenuEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_start is not None:
+            delta = event.pos() - self._pan_start
+            self._pan_start = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._pan_start is not None:
+            self._pan_start = None
+            self.setCursor(Qt.CrossCursor)
+            return
+        if self._click_start is not None:
+            moved = (event.pos() - self._click_start).manhattanLength()
+            self._click_start = None
+            if moved < 4:
+                p = self.mapToScene(event.pos())
+                self.clicked.emit(p.x(), p.y())
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F:
+            self.parent().frame()
+            return
+        super().keyPressEvent(event)
+
+
+class ImageViewer(QtWidgets.QWidget):
+    """
+    Signals:
+      uv_placed(u, v)          left-click on empty image
+      uv_moved(pid, u, v)      marker dragged
+      uv_cleared(pid)          'Clear 2D position'
+      point_selected(pid)      marker clicked
+      enable_toggled(pid)      'Enable / disable in solve'
+    """
+
+    uv_placed = QtCore.Signal(float, float)
+    uv_moved = QtCore.Signal(int, float, float)
+    uv_cleared = QtCore.Signal(int)
+    point_selected = QtCore.Signal(int)
+    enable_toggled = QtCore.Signal(int)
+
+    def __init__(self, parent=None, embedded=False):
+        if embedded:
+            super().__init__(parent)
+        else:
+            super().__init__(parent, Qt.Window | Qt.Tool)
+            self.setWindowTitle("Reframe \u2014 Image")
+            self.resize(1000, 650)
+        self.setObjectName("ReframeImageViewer")
+
+        self._scene = QtWidgets.QGraphicsScene(self)
+        self._view = _View(self._scene, self)
+        self._view.setCursor(Qt.CrossCursor)
+        self._view.clicked.connect(self._on_clicked)
+        self._pixmap_item = None
+        self._image_size = (0, 0)
+        self._markers = {}      # pid -> _Marker
+        self._projected = {}    # pid -> ring item
+        self._residuals = {}    # pid -> line item
+        self._proj_pos = {}     # pid -> QPointF
+        self._guides = []       # guide line items
+
+        self._status = QtWidgets.QLabel("")
+        self._status.setObjectName("viewerStatus")
+        hint = QtWidgets.QLabel("Click: place point   Drag marker: move   Wheel: zoom   Middle/Alt-drag: pan   F: frame")
+        hint.setObjectName("viewerHint")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._view, 1)
+        bar = QtWidgets.QHBoxLayout()
+        bar.setContentsMargins(8, 3, 8, 3)
+        bar.addWidget(hint)
+        bar.addStretch()
+        bar.addWidget(self._status)
+        layout.addLayout(bar)
+        self.setStyleSheet(
+            "QWidget#ReframeImageViewer { background: #232323; }"
+            "QLabel { color: #9a9a9a; font-size: 11px; }"
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_image(self, path, title=None):
+        self._scene.clear()
+        self._markers, self._projected, self._residuals, self._proj_pos = {}, {}, {}, {}
+        self._guides = []
+        self._pixmap_item = None
+        qimg = image_utils.load_as_qimage(path) if path else None
+        if qimg is None or qimg.isNull():
+            self._image_size = (0, 0)
+            self._status.setText("Could not load image" if path else "")
+            return
+        self._pixmap_item = self._scene.addPixmap(QtGui.QPixmap.fromImage(qimg))
+        self._pixmap_item.setTransformationMode(Qt.SmoothTransformation)
+        self._image_size = (qimg.width(), qimg.height())
+        margin = max(self._image_size) * 0.25
+        self._scene.setSceneRect(-margin, -margin, qimg.width() + 2 * margin, qimg.height() + 2 * margin)
+        self.setWindowTitle(f"Reframe \u2014 {title or path}")
+        QtCore.QTimer.singleShot(0, self.frame)
+
+    def frame(self):
+        if self._pixmap_item is not None:
+            self._view.fitInView(self._pixmap_item, Qt.KeepAspectRatio)
+
+    def set_points(self, points, selected=None):
+        """
+        points: list of dicts
+          {id, uv: (u,v)|None, projected: (u,v)|None, error: float|None,
+           outlier: bool, enabled: bool}
+        """
+        seen = set()
+        for p in points:
+            pid = p["id"]
+            seen.add(pid)
+            color = error_color(p.get("error"), p.get("outlier", False), p.get("enabled", True))
+
+            uv = p.get("uv")
+            marker = self._markers.get(pid)
+            if marker is not None and not _alive(marker):
+                del self._markers[pid]
+                marker = None
+            if uv is None:
+                if marker is not None:
+                    self._remove(marker)
+                    del self._markers[pid]
+            else:
+                if marker is None:
+                    marker = _Marker(self, pid)
+                    self._scene.addItem(marker)
+                    self._markers[pid] = marker
+                if marker.scene().mouseGrabberItem() is not marker:
+                    marker.setPos(QtCore.QPointF(*uv))
+                marker.style(color, pid == selected)
+
+            proj = p.get("projected")
+            ring = self._projected.get(pid)
+            if ring is not None and not _alive(ring):
+                del self._projected[pid]
+                ring = None
+            if proj is None:
+                if ring is not None:
+                    self._remove(ring)
+                    del self._projected[pid]
+                self._proj_pos.pop(pid, None)
+            else:
+                if ring is None:
+                    ring = QtWidgets.QGraphicsEllipseItem(-4, -4, 8, 8)
+                    ring.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
+                    ring.setZValue(5)
+                    self._scene.addItem(ring)
+                    self._projected[pid] = ring
+                pen = QtGui.QPen(color, 2)
+                pen.setCosmetic(True)
+                ring.setPen(pen)
+                ring.setPos(QtCore.QPointF(*proj))
+                self._proj_pos[pid] = QtCore.QPointF(*proj)
+            self._update_residual(pid, color)
+
+        for pid in list(self._markers):
+            if pid not in seen:
+                self._remove(self._markers.pop(pid))
+        for pid in list(self._projected):
+            if pid not in seen:
+                self._remove(self._projected.pop(pid))
+                self._proj_pos.pop(pid, None)
+        for pid in list(self._residuals):
+            if pid not in seen:
+                self._remove(self._residuals.pop(pid))
+
+    def set_guides(self, thirds=False, centre=False, horizon=None):
+        """Guide lines over the image; horizon is ((u0, v0), (u1, v1)) or None."""
+        for item in self._guides:
+            if _alive(item):
+                self._remove(item)
+        self._guides = []
+        w, h = self._image_size
+        if not w:
+            return
+        lines = []
+        if thirds:
+            lines += [((w * f, 0), (w * f, h), QtGui.QColor(255, 255, 255, 110)) for f in (1 / 3.0, 2 / 3.0)]
+            lines += [((0, h * f), (w, h * f), QtGui.QColor(255, 255, 255, 110)) for f in (1 / 3.0, 2 / 3.0)]
+        if centre:
+            lines += [((w / 2.0, 0), (w / 2.0, h), QtGui.QColor(80, 215, 255, 170)),
+                      ((0, h / 2.0), (w, h / 2.0), QtGui.QColor(80, 215, 255, 170))]
+        if horizon:
+            (u0, v0), (u1, v1) = horizon
+            if abs(u1 - u0) > 1e-9:
+                # extend across the whole image width
+                slope = (v1 - v0) / (u1 - u0)
+                a, b = (0.0, v0 - slope * u0), (float(w), v0 + slope * (w - u0))
+                lines.append((a, b, QtGui.QColor(255, 150, 50, 220)))
+        for (x0, y0), (x1, y1), color in lines:
+            pen = QtGui.QPen(color, 1.5)
+            pen.setCosmetic(True)
+            item = self._scene.addLine(QtCore.QLineF(x0, y0, x1, y1), pen)
+            item.setZValue(2)
+            self._guides.append(item)
+
+    def set_status(self, text):
+        self._status.setText(text)
+
+    # ------------------------------------------------------------------
+
+    def _remove(self, item):
+        if _alive(item) and item.scene() is self._scene:
+            self._scene.removeItem(item)
+
+    def _update_residual(self, pid, color=None):
+        marker = self._markers.get(pid)
+        proj = self._proj_pos.get(pid)
+        line = self._residuals.get(pid)
+        if line is not None and not _alive(line):
+            del self._residuals[pid]
+            line = None
+        if not _alive(marker) or proj is None:
+            if line is not None:
+                self._remove(line)
+                del self._residuals[pid]
+            return
+        if line is None:
+            line = self._scene.addLine(QtCore.QLineF())
+            line.setZValue(4)
+            self._residuals[pid] = line
+        if color is not None:
+            pen = QtGui.QPen(color, 1.5)
+            pen.setCosmetic(True)
+            line.setPen(pen)
+        line.setLine(QtCore.QLineF(marker.pos(), proj))
+
+    def _on_clicked(self, x, y):
+        w, h = self._image_size
+        if w and 0 <= x <= w and 0 <= y <= h:
+            self.uv_placed.emit(x, y)
+'''),
+# ------------------------------------------------------------
+# reframe.ui.match_panel
+# ------------------------------------------------------------
+'reframe.ui.match_panel': (False, '''"""
+match_panel.py \u2014 Reframe Match panel
+------------------------------------
+The main workflow UI: place matching points on the model (viewport) and the
+image (image viewer), tune solve constraints, read the result.
+
+It is a view over the controller (ReframePanel in sidebar.py): refresh() pulls
+from state, and user actions call controller methods.
+"""
+from reframe import QtCore, QtGui, QtWidgets, Qt
+from reframe.ui.image_viewer import error_color
+
+_COLS = ["#", "3D", "2D", "Error", "Use"]
+
+
+class MatchPanel(QtWidgets.QWidget):
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self.c = controller
+        self._refreshing = False
+        self._build()
+
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(6)
+
+        help_lbl = QtWidgets.QLabel(
+            "Open the <b>Match window</b>: the image and your model side by side. "
+            "Click a feature on either, then the same feature on the other \u2014 in any order, "
+            "as you go. 6+ pairs spread near/far and high/low also solve focal length."
+        )
+        help_lbl.setWordWrap(True)
+        help_lbl.setObjectName("helpLabel")
+        layout.addWidget(help_lbl)
+
+        open_btn = QtWidgets.QPushButton("Open Match Window")
+        open_btn.setObjectName("primaryButton")
+        open_btn.setToolTip("Image and model side by side \u2014 click matching features on both")
+        open_btn.clicked.connect(self.c.show_match_window)
+        layout.addWidget(open_btn)
+
+        row = QtWidgets.QHBoxLayout()
+        from_sel = QtWidgets.QPushButton("Model Point from Selection")
+        from_sel.setObjectName("iconButton")
+        from_sel.setToolTip(
+            "Use the selected vertices / object as the next model point "
+            "(e.g. for point clouds, which can't be clicked)"
+        )
+        from_sel.clicked.connect(self.c.point_from_selection)
+        row.addStretch()
+        row.addWidget(from_sel)
+        layout.addLayout(row)
+
+        # Points table
+        self.table = QtWidgets.QTableWidget(0, len(_COLS))
+        self.table.setHorizontalHeaderLabels(_COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(150)
+        self.table.itemSelectionChanged.connect(self._on_table_selection)
+        self.table.itemChanged.connect(self._on_item_changed)
+        self.table.cellDoubleClicked.connect(lambda r, _c: self.c.select_locator(self._row_pid(r)))
+        self.table.setToolTip("Double-click a row to select its locator in Maya")
+        layout.addWidget(self.table, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        del_btn = QtWidgets.QPushButton("Delete Point")
+        del_btn.setObjectName("iconButton")
+        del_btn.clicked.connect(lambda: self.c.delete_point(self.c.selected_pid))
+        clear2d = QtWidgets.QPushButton("Clear 2D")
+        clear2d.setObjectName("iconButton")
+        clear2d.setToolTip("Remove this point's position on the current image only")
+        clear2d.clicked.connect(lambda: self.c.clear_uv(self.c.selected_pid))
+        row.addWidget(del_btn)
+        row.addWidget(clear2d)
+        layout.addLayout(row)
+
+        # Settings
+        box = QtWidgets.QGroupBox("Solve")
+        form = QtWidgets.QGridLayout(box)
+        form.setContentsMargins(6, 8, 6, 6)
+        form.setVerticalSpacing(4)
+
+        self.solve_focal = QtWidgets.QCheckBox("Solve focal length")
+        self.focal_spin = QtWidgets.QDoubleSpinBox()
+        self.focal_spin.setRange(2.0, 3000.0)
+        self.focal_spin.setDecimals(1)
+        self.focal_spin.setSuffix(" mm")
+        self.focal_spin.setToolTip("Used when focal is locked (known lens)")
+        form.addWidget(self.solve_focal, 0, 0)
+        form.addWidget(self.focal_spin, 0, 1)
+
+        self.shift_chk = QtWidgets.QCheckBox("Solve lens shift")
+        self.shift_chk.setToolTip("Free principal point \u2014 for cropped / off-centre concept art")
+        self.roll_chk = QtWidgets.QCheckBox("Level horizon")
+        self.roll_chk.setToolTip("Lock camera roll to 0")
+        self.verticals_chk = QtWidgets.QCheckBox("Keep verticals vertical")
+        self.verticals_chk.setToolTip(
+            "Two-point perspective: no tilt or roll; vertical lens shift frames the shot instead"
+        )
+        self.height_chk = QtWidgets.QCheckBox("Lock camera height")
+        self.height_spin = QtWidgets.QDoubleSpinBox()
+        self.height_spin.setRange(-1e6, 1e6)
+        self.height_spin.setDecimals(3)
+        self.height_spin.setToolTip("Camera world Y, in scene units")
+        form.addWidget(self.shift_chk, 1, 0)
+        form.addWidget(self.roll_chk, 1, 1)
+        form.addWidget(self.verticals_chk, 2, 0, 1, 2)
+        form.addWidget(self.height_chk, 3, 0)
+        form.addWidget(self.height_spin, 3, 1)
+
+        self.auto_chk = QtWidgets.QCheckBox("Auto-solve")
+        self.auto_chk.setToolTip("Re-solve whenever points change")
+        solve_btn = QtWidgets.QPushButton("Solve Camera")
+        solve_btn.setObjectName("primaryButton")
+        solve_btn.clicked.connect(self.c.solve)
+        form.addWidget(self.auto_chk, 4, 0)
+        form.addWidget(solve_btn, 4, 1)
+        layout.addWidget(box)
+
+        for w in (self.solve_focal, self.shift_chk, self.roll_chk, self.verticals_chk, self.height_chk, self.auto_chk):
+            w.toggled.connect(self._on_settings_changed)
+        for w in (self.focal_spin, self.height_spin):
+            w.editingFinished.connect(self._on_settings_changed)
+
+        # Results
+        self.result_lbl = QtWidgets.QLabel("Not solved")
+        self.result_lbl.setObjectName("resultLabel")
+        self.result_lbl.setWordWrap(True)
+        self.warn_lbl = QtWidgets.QLabel("")
+        self.warn_lbl.setObjectName("warningLabel")
+        self.warn_lbl.setWordWrap(True)
+        layout.addWidget(self.result_lbl)
+        layout.addWidget(self.warn_lbl)
+
+    # ------------------------------------------------------------------
+    # Refresh from state
+    # ------------------------------------------------------------------
+
+    def refresh(self):
+        self._refreshing = True
+        try:
+            state, ref = self.c.state, self.c.active_ref
+            self.setEnabled(ref is not None)
+
+            solve = (ref or {}).get("solve") or {}
+            errors = solve.get("errors", {})
+            outliers = set(solve.get("outliers", []))
+
+            self.table.setRowCount(len(state.points))
+            select_row = None
+            for row, p in enumerate(state.points):
+                pid = p["id"]
+                has3 = bool(p["locator"])
+                has2 = ref is not None and state.uv(ref, pid) is not None
+                enabled = ref is None or state.is_enabled(ref, pid)
+                err = errors.get(str(pid))
+                cells = [
+                    str(pid),
+                    "\u2713" if has3 else "\u2014",
+                    "\u2713" if has2 else "\u2014",
+                    f"{err:.1f} px" if err is not None else "",
+                    "",
+                ]
+                for col, text in enumerate(cells):
+                    item = self.table.item(row, col)
+                    if item is None:
+                        item = QtWidgets.QTableWidgetItem()
+                        self.table.setItem(row, col, item)
+                    item.setText(text)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setData(Qt.UserRole, pid)
+                use = self.table.item(row, 4)
+                use.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                use.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+                self.table.item(row, 3).setForeground(QtGui.QBrush(error_color(err, pid in outliers, enabled)))
+                missing = QtGui.QColor("#e0a040")
+                self.table.item(row, 1).setForeground(QtGui.QBrush(QtGui.QColor("#cccccc") if has3 else missing))
+                self.table.item(row, 2).setForeground(QtGui.QBrush(QtGui.QColor("#cccccc") if has2 else missing))
+                if pid == self.c.selected_pid:
+                    select_row = row
+            if select_row is not None:
+                self.table.selectRow(select_row)
+            else:
+                self.table.clearSelection()
+
+            if ref is not None:
+                s = ref["settings"]
+                self.solve_focal.setChecked(s["solve_focal"])
+                self.focal_spin.setValue(s["focal_mm"])
+                self.focal_spin.setEnabled(not s["solve_focal"])
+                self.shift_chk.setChecked(s["solve_shift"])
+                self.roll_chk.setChecked(s["lock_roll"] or s["keep_verticals"])
+                self.roll_chk.setEnabled(not s["keep_verticals"])
+                self.verticals_chk.setChecked(s["keep_verticals"])
+                self.height_chk.setChecked(s["lock_height"])
+                self.height_spin.setValue(s["height"])
+                self.height_spin.setEnabled(s["lock_height"])
+                self.auto_chk.setChecked(s["auto_solve"])
+
+            self._show_result(solve)
+        finally:
+            self._refreshing = False
+
+    def _show_result(self, solve):
+        if not solve:
+            self.result_lbl.setText("Not solved")
+            self.warn_lbl.setText("")
+            return
+        if not solve.get("ok"):
+            self.result_lbl.setText(solve.get("message", "Not solved"))
+            self.warn_lbl.setText("")
+            return
+        focal = f"{solve['focal_mm']:.1f} mm"
+        if solve.get("focal_sigma_mm"):
+            focal += f" (\u00b1{solve['focal_sigma_mm']:.1f})"
+        rms = solve["rms"]
+        quality = "good" if rms < 3 else ("fair" if rms < 8 else "poor")
+        self.result_lbl.setText(
+            f"<b>RMS {rms:.2f} px</b> ({quality}) \u00b7 focal {focal} \u00b7 {solve['pairs']} pairs"
+        )
+        self.warn_lbl.setText("\\n".join("\u26a0 " + w for w in solve.get("warnings", [])))
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def _row_pid(self, row):
+        item = self.table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_table_selection(self):
+        if self._refreshing:
+            return
+        rows = self.table.selectionModel().selectedRows()
+        if rows:
+            self.c.select_point(self._row_pid(rows[0].row()))
+
+    def _on_item_changed(self, item):
+        if self._refreshing or item.column() != 4:
+            return
+        self.c.set_point_enabled(item.data(Qt.UserRole), item.checkState() == Qt.Checked)
+
+    def _on_settings_changed(self, *_):
+        if self._refreshing:
+            return
+        self.c.update_settings(
+            solve_focal=self.solve_focal.isChecked(),
+            focal_mm=self.focal_spin.value(),
+            solve_shift=self.shift_chk.isChecked(),
+            lock_roll=self.roll_chk.isChecked(),
+            keep_verticals=self.verticals_chk.isChecked(),
+            lock_height=self.height_chk.isChecked(),
+            height=self.height_spin.value(),
+            auto_solve=self.auto_chk.isChecked(),
+        )
+'''),
+# ------------------------------------------------------------
+# reframe.ui.match_window
+# ------------------------------------------------------------
+'reframe.ui.match_window': (False, '''"""
+match_window.py \u2014 Reframe Match window
+--------------------------------------
+Where the matching happens: the image on the left, a live Maya viewport of the
+lineup geometry on the right, side by side.
+
+  \u250c prompt: "Point 3: now click it on the MODEL \u2192"          [Picking \u25cf] \u2510
+  \u2502 Lineup geometry: scan_hi (4.5M faces) \u00b7 ready       [Use Selected]  \u2502
+  \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524
+  \u2502  image (click to place)      \u2502  Maya viewport (click to place)      \u2502
+  \u2502                              \u2502  [Free view] [Match camera] [Frame]  \u2502
+  \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524
+  \u2502 RMS 0.8 px \u00b7 focal 27.9 mm \u00b7 11 pairs                               \u2502
+  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518
+
+Click on the image or the model in any order: each click fills the oldest point
+waiting for that half (see State.point_for_image_click / point_for_model_click).
+
+The viewport is a real Maya modelPanel embedded in the window. It isolates the
+lineup geometry (so heavy scenes only draw what you're matching) and can look
+through a free navigation camera or through the solved match camera, where the
+image overlays the model.
+"""
+from reframe import QtCore, QtWidgets, Qt
+from reframe.core.camera_utils import no_undo
+from reframe.ui.image_viewer import ImageViewer
+
+import maya.cmds as cmds
+
+try:
+    from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
+except ImportError:     # very old Maya
+    MayaQWidgetDockableMixin = object
+
+NAV_CAMERA = "RF_viewCam"
+
+
+class MatchWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
+    OBJECT_NAME = "ReframeMatchWindow"
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent=parent)
+        self.c = controller
+        self.setObjectName(self.OBJECT_NAME)
+        self.setWindowTitle("Reframe \u2014 Match")
+        self.panel = None           # Maya modelPanel
+        self._pane = None
+        self.view_mode = "free"     # "free" | "match"
+        self._build()
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        top = QtWidgets.QHBoxLayout()
+        self.prompt = QtWidgets.QLabel("")
+        self.prompt.setObjectName("promptLabel")
+        top.addWidget(self.prompt, 1)
+        self.snap_chk = QtWidgets.QCheckBox("Snap to vertex")
+        self.snap_chk.setToolTip("Snap model clicks to the nearest vertex (good for scans)")
+        top.addWidget(self.snap_chk)
+        self.pick_btn = QtWidgets.QPushButton("Picking")
+        self.pick_btn.setCheckable(True)
+        self.pick_btn.setObjectName("primaryButton")
+        self.pick_btn.setToolTip(
+            "When on, left-clicks in the viewport place model points (Alt still navigates).\\n"
+            "Switching to another Maya tool pauses picking \u2014 click here to resume."
+        )
+        self.pick_btn.toggled.connect(self.c.set_picking)
+        top.addWidget(self.pick_btn)
+        layout.addLayout(top)
+
+        geo = QtWidgets.QHBoxLayout()
+        self.geo_lbl = QtWidgets.QLabel("")
+        self.geo_lbl.setObjectName("helpLabel")
+        geo.addWidget(self.geo_lbl, 1)
+        use_sel = QtWidgets.QPushButton("Use Selected as Lineup Geometry")
+        use_sel.setObjectName("iconButton")
+        use_sel.setToolTip(
+            "Select your scan / blockout / model (meshes or groups) and click this.\\n"
+            "Reframe prepares it once so clicks stay instant, and only draws it in this view."
+        )
+        use_sel.clicked.connect(self.c.set_lineup_geometry_from_selection)
+        geo.addWidget(use_sel)
+        layout.addLayout(geo)
+
+        self.splitter = QtWidgets.QSplitter(Qt.Horizontal)
+        self.splitter.setObjectName("ReframeMatchSplitter")
+        self.viewer = ImageViewer(self.splitter, embedded=True)
+        self.splitter.addWidget(self.viewer)
+
+        right = QtWidgets.QWidget()
+        right.setObjectName("ReframeViewColumn")
+        rv = QtWidgets.QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(2)
+        bar = QtWidgets.QHBoxLayout()
+        self.free_btn = QtWidgets.QPushButton("Free View")
+        self.match_btn = QtWidgets.QPushButton("Through Match Camera")
+        for b in (self.free_btn, self.match_btn):
+            b.setCheckable(True)
+            b.setObjectName("lockButton")
+            bar.addWidget(b)
+        self.free_btn.setToolTip("Navigate freely (Alt + mouse) to find features on the model")
+        self.match_btn.setToolTip("Look through the solved camera \u2014 the image overlays the model")
+        self.free_btn.clicked.connect(lambda: self.set_view_mode("free"))
+        self.match_btn.clicked.connect(lambda: self.set_view_mode("match"))
+        frame_btn = QtWidgets.QPushButton("Frame Geometry")
+        frame_btn.setObjectName("iconButton")
+        frame_btn.clicked.connect(self.frame_geometry)
+        bar.addStretch()
+        bar.addWidget(frame_btn)
+        rv.addLayout(bar)
+        self.view_host = QtWidgets.QWidget()
+        self.view_host.setObjectName("ReframeViewHost")
+        self.view_host.setMinimumSize(320, 240)
+        QtWidgets.QVBoxLayout(self.view_host).setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(self.view_host, 1)
+        self.splitter.addWidget(right)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.splitter, 1)
+
+        self.result_lbl = QtWidgets.QLabel("")
+        self.result_lbl.setObjectName("resultLabel")
+        self.result_lbl.setWordWrap(True)
+        layout.addWidget(self.result_lbl)
+
+        from reframe.ui.styles import STYLESHEET
+        self.setStyleSheet(STYLESHEET)
+
+    # ------------------------------------------------------------------
+    # Embedded Maya viewport
+    # ------------------------------------------------------------------
+
+    def build_viewport(self):
+        """Create the modelPanel inside view_host. Call after the window is shown."""
+        if self.panel and cmds.modelPanel(self.panel, exists=True):
+            return
+        # Create the Maya layout under our workspace control (a control Maya always
+        # knows by name), then move its Qt widget into the viewport host.
+        control = self.objectName() + "WorkspaceControl"
+        if not cmds.workspaceControl(control, exists=True):
+            raise RuntimeError("Reframe: the Match window must be shown before its viewport is built")
+        cmds.setParent(control)
+        self._pane = cmds.paneLayout(configuration="single")
+        self.panel = cmds.modelPanel(label="Reframe View", menuBarVisible=True, parent=self._pane)
+        cmds.modelEditor(
+            self.panel, edit=True, displayAppearance="smoothShaded", grid=False,
+            imagePlane=True, locators=True, cameras=False, lights=False,
+            nurbsCurves=False, joints=False, dimensions=False, handles=False,
+        )
+        self._pane_widget = _qt_widget(self._pane)
+        if self._pane_widget is None:
+            raise RuntimeError("Reframe: could not embed the viewport")
+        self.view_host.layout().addWidget(self._pane_widget)
+        cmds.setParent(top=True)
+        self.set_view_mode(self.view_mode)
+
+    def destroy_viewport(self):
+        """Delete the Maya panel before Qt tears down the window (avoids a crash)."""
+        if self.panel and cmds.modelPanel(self.panel, exists=True):
+            cmds.isolateSelect(self.panel, state=False)
+            cmds.deleteUI(self.panel, panel=True)
+        widget = getattr(self, "_pane_widget", None)
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+        self.panel = self._pane = self._pane_widget = None
+
+    def viewport_camera(self):
+        return cmds.modelPanel(self.panel, query=True, camera=True) if self.panel else None
+
+    def set_view_mode(self, mode):
+        cam = self.c.active_camera() if mode == "match" else None
+        if mode == "match" and not cam:
+            mode = "free"
+        self.view_mode = mode
+        self.free_btn.setChecked(mode == "free")
+        self.match_btn.setChecked(mode == "match")
+        if not self.panel:
+            return
+        with no_undo():             # view changes never go in the artist's undo queue
+            if mode == "match":
+                cmds.modelPanel(self.panel, edit=True, camera=cam)
+            else:
+                new_cam = not cmds.objExists(NAV_CAMERA)
+                cmds.modelPanel(self.panel, edit=True, camera=_nav_camera())
+                if new_cam:
+                    self.frame_geometry()
+
+    def frame_geometry(self):
+        if not self.panel:
+            return
+        meshes = [m for m in self.c.state.geometry if cmds.objExists(m)]
+        if self.view_mode == "match":
+            return      # never move the solved camera
+        cam = self.viewport_camera()
+        with no_undo():
+            if meshes:
+                cmds.viewFit(cam, meshes, fitFactor=0.9)
+            else:
+                cmds.viewFit(cam, all=True, fitFactor=0.9)
+
+    def update_isolation(self, nodes):
+        """Only draw the lineup geometry and Reframe's points in this view."""
+        if not self.panel:
+            return
+        nodes = [n for n in nodes if cmds.objExists(n)]
+        previous = cmds.ls(selection=True, long=True) or []
+        cmds.isolateSelect(self.panel, state=False)
+        if nodes:
+            cmds.select(nodes, replace=True)
+            cmds.isolateSelect(self.panel, state=True)
+        if previous:
+            cmds.select(previous, replace=True)
+        else:
+            cmds.select(clear=True)
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    def set_prompt(self, text):
+        self.prompt.setText(text)
+
+    def set_geometry_status(self, text):
+        self.geo_lbl.setText(text)
+
+    def set_result(self, text):
+        self.result_lbl.setText(text)
+
+    def set_picking_checked(self, on):
+        self.pick_btn.blockSignals(True)
+        self.pick_btn.setChecked(on)
+        self.pick_btn.setText("Picking \u25cf" if on else "Picking paused \u2014 click to resume")
+        self.pick_btn.blockSignals(False)
+
+    def dockCloseEventTriggered(self):
+        self.c.on_match_window_closed()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _nav_camera():
+    """A free navigation camera for the Match view (the user's persp is left alone)."""
+    if not cmds.objExists(NAV_CAMERA):
+        transform, _ = cmds.camera(name=NAV_CAMERA)
+        if transform != NAV_CAMERA:
+            cmds.rename(transform, NAV_CAMERA)
+        cmds.setAttr(NAV_CAMERA + ".translate", 28, 21, 28)
+        cmds.setAttr(NAV_CAMERA + ".rotate", -27.9, 45, 0)
+        shape = cmds.listRelatives(NAV_CAMERA, shapes=True, fullPath=True)[0]
+        cmds.setAttr(shape + ".farClipPlane", 1.0e6)
+        cmds.setAttr(NAV_CAMERA + ".visibility", False)
+    return NAV_CAMERA
+
+
+def _qt_widget(maya_layout):
+    import maya.OpenMayaUI as omui1
+    from reframe import _PYSIDE_VERSION
+    ptr = omui1.MQtUtil.findLayout(maya_layout)
+    if ptr is None:
+        return None
+    if _PYSIDE_VERSION == 6:
+        from shiboken6 import wrapInstance
+    else:
+        from shiboken2 import wrapInstance
+    return wrapInstance(int(ptr), QtWidgets.QWidget)
+'''),
+# ------------------------------------------------------------
+# reframe.ui.ref_strip
+# ------------------------------------------------------------
+'reframe.ui.ref_strip': (False, '''"""
+ref_strip.py \u2014 Reframe reference image strip
+--------------------------------------------
+Horizontal thumbnail strip of the scene's reference images. It is a view of
+State.refs: the panel calls set_refs() whenever state changes, and the strip
+only emits requests (add / activate / remove) back to the panel.
+
+  Drop files / "+ Add"   images_added(paths)
+  Click                  ref_activated(ref_id)
+  Right-click            Activate, Remove, Show in Explorer
+"""
+import os
+import subprocess
+import sys
+
+from reframe import QtCore, QtGui, QtWidgets, Qt
+from reframe.core import image_utils
+
+THUMB_SIZE = 72
+_thumb_cache = {}   # path -> QPixmap (thumbnails are slow for big EXRs)
+
+
+def _thumbnail(path):
+    pix = _thumb_cache.get(path)
+    if pix is None:
+        pix = image_utils.thumbnail(path, THUMB_SIZE, THUMB_SIZE)
+        _thumb_cache[path] = pix
+    return pix
+
+
+class RefStripWidget(QtWidgets.QWidget):
+    images_added = QtCore.Signal(list)
+    ref_activated = QtCore.Signal(str)
+    ref_removed = QtCore.Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ids = []
+
+        self._list = QtWidgets.QListWidget()
+        self._list.setViewMode(QtWidgets.QListWidget.IconMode)
+        self._list.setIconSize(QtCore.QSize(THUMB_SIZE, THUMB_SIZE))
+        self._list.setFlow(QtWidgets.QListWidget.LeftToRight)
+        self._list.setWrapping(False)
+        self._list.setMovement(QtWidgets.QListWidget.Static)
+        self._list.setFixedHeight(THUMB_SIZE + 38)
+        self._list.setSpacing(3)
+        self._list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
+        self._list.itemClicked.connect(self._on_clicked)
+        self._list.setToolTip("Click to activate \u00b7 Right-click for options \u00b7 Drop images here")
+        self._list.setAcceptDrops(False)
+        self.setAcceptDrops(True)
+
+        add_btn = QtWidgets.QPushButton("+ Add Image\u2026")
+        add_btn.setObjectName("iconButton")
+        add_btn.clicked.connect(self._on_browse)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        layout.addWidget(self._list)
+        layout.addWidget(add_btn)
+
+    def set_refs(self, refs, active_id):
+        self._list.blockSignals(True)
+        self._list.clear()
+        self._ids = []
+        for ref in refs:
+            name = os.path.basename(ref["path"])
+            item = QtWidgets.QListWidgetItem(QtGui.QIcon(_thumbnail(ref["path"])), _truncate(name, 12))
+            solve = ref.get("solve") or {}
+            status = f"RMS {solve['rms']:.2f}px" if solve.get("ok") else "not solved"
+            item.setToolTip(f"{name}\\n{ref['width']} \u00d7 {ref['height']}\\n{status}\\n{ref['path']}")
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            item.setSizeHint(QtCore.QSize(THUMB_SIZE + 10, THUMB_SIZE + 26))
+            if not os.path.isfile(ref["path"]):
+                item.setForeground(QtGui.QColor("#ff6666"))
+                item.setToolTip("File not found:\\n" + ref["path"])
+            self._list.addItem(item)
+            self._ids.append(ref["id"])
+            if ref["id"] == active_id:
+                item.setSelected(True)
+                self._list.setCurrentItem(item)
+        self._list.blockSignals(False)
+
+    # ------------------------------------------------------------------
+
+    def _on_clicked(self, item):
+        row = self._list.row(item)
+        if 0 <= row < len(self._ids):
+            self.ref_activated.emit(self._ids[row])
+
+    def _on_browse(self):
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Add Reference Images", "",
+            "Images (*.jpg *.jpeg *.png *.tif *.tiff *.exr *.psd *.bmp);;All Files (*)",
+        )
+        if files:
+            self.images_added.emit(files)
+
+    def _on_context_menu(self, pos):
+        item = self._list.itemAt(pos)
+        menu = QtWidgets.QMenu(self)
+        if item is None:
+            menu.addAction("Add Images\u2026", self._on_browse)
+        else:
+            ref_id = self._ids[self._list.row(item)]
+            menu.addAction("Activate", lambda: self.ref_activated.emit(ref_id))
+            menu.addAction("Remove", lambda: self.ref_removed.emit(ref_id))
+            menu.addSeparator()
+            path = item.toolTip().splitlines()[-1]
+            menu.addAction("Show in Explorer", lambda: _reveal(path))
+        menu.exec_(self._list.mapToGlobal(pos))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        paths = [p for p in paths if image_utils.is_supported(p)]
+        if paths:
+            self.images_added.emit(paths)
+        event.acceptProposedAction()
+
+
+def _truncate(text, n):
+    return text if len(text) <= n else text[: n - 1] + "\u2026"
+
+
+def _reveal(path):
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+'''),
+# ------------------------------------------------------------
+# reframe.ui.sidebar
+# ------------------------------------------------------------
+'reframe.ui.sidebar': (False, '''"""
+sidebar.py \u2014 Reframe main panel and controller
+----------------------------------------------
+A dockable workspaceControl (opened by pasting dist/Reframe.py, or reframe.show()) that owns
+the workflow:
+
+  \u250c Reference strip (thumbnails, + Add) \u2510
+  \u2502 active image info                   \u2502
+  \u251c [ Match ] [ View ] tabs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524
+  \u2502  Match: place points, point table,  \u2502
+  \u2502         solve constraints, results  \u2502
+  \u2502  View:  opacity, guides, sensor,    \u2502
+  \u2502         focal, look through         \u2502
+  \u2514 Export JSON \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518
+
+plus the Match window (ui/match_window.py): the image and a live Maya viewport
+side by side, where points are clicked in any order \u2014 each click fills the
+oldest point waiting for that half. Picking only ever raycasts the prepared
+lineup geometry (core/pick.py), so clicks stay instant on heavy scans.
+
+Data flow: every edit mutates the State and saves it to the ReframeData node
+inside one undo chunk, so Ctrl+Z in Maya undoes exactly the artist's last action
+and the panel follows (it watches the node and reloads when its JSON changes).
+
+The solved camera is *derived* data: a solve is scheduled a moment after any
+change (including undo/redo) and runs outside the undo queue. Clicks therefore
+register instantly \u2014 the solve never runs on the click itself \u2014 and undo never
+has to step through solves.
+"""
+import json
+import os
+
+import maya.api.OpenMaya as om
+import maya.cmds as cmds
+
+from reframe import QtCore, QtWidgets, Qt
+from reframe.core import camera_utils as cu
+from reframe.core import image_utils
+from reframe.core import match
+from reframe.core import pick
+from reframe.core import state as st
+from reframe.ui.camera_panel import CameraPanel
+from reframe.ui.match_panel import MatchPanel
+from reframe.ui.match_window import MatchWindow
+from reframe.ui.ref_strip import RefStripWidget
+
+try:
+    from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
+except ImportError:     # very old Maya
+    MayaQWidgetDockableMixin = object
+
+_PANEL = None
+_WATCH_INTERVAL_MS = 250
+_SOLVE_DELAY_MS = 150      # solve this long after the last change (keeps clicks instant)
+
+
+def show_panel():
+    """Open (or raise) the Reframe panel."""
+    global _PANEL
+    control = ReframePanel.OBJECT_NAME + "WorkspaceControl"
+    if _PANEL is not None:
+        try:
+            _PANEL.show(dockable=True)
+            if cmds.workspaceControl(control, exists=True):
+                cmds.workspaceControl(control, edit=True, restore=True)
+            return _PANEL
+        except RuntimeError:     # underlying C++ widget already deleted
+            _PANEL = None
+    if cmds.workspaceControl(control, exists=True):
+        cmds.deleteUI(control)
+    _PANEL = ReframePanel()
+    _PANEL.show(dockable=True, area="right", floating=False, retain=False, width=340)
+    return _PANEL
+
+
+def close_panel():
+    """Close the panel and remove all its Maya callbacks (used when re-pasting)."""
+    global _PANEL
+    if _PANEL is not None:
+        _PANEL.shutdown()
+    control = ReframePanel.OBJECT_NAME + "WorkspaceControl"
+    if cmds.workspaceControl(control, exists=True):
+        cmds.deleteUI(control)
+    _PANEL = None
+
+
+class ReframePanel(MayaQWidgetDockableMixin, QtWidgets.QWidget):
+    OBJECT_NAME = "ReframePanel"
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self.setObjectName(self.OBJECT_NAME)
+        self.setWindowTitle("Reframe")
+
+        self.state = st.load()
+        self.selected_pid = None
+        self.picking = False
+        self._saved_json = self.state.to_json()
+        self._callbacks = []
+        self._node_callback = None
+        self._node_deleted_cb = None
+        self._watch_key = None
+
+        self.match_window = None
+        self._viewer_path = None
+        self._flash = ""
+
+        self.geometry = pick.LineupGeometry()
+        self.pick_tool = pick.PickTool(
+            self.geometry, self.on_viewport_hit,
+            snap_to_vertex=lambda: bool(self.match_window and self.match_window.snap_chk.isChecked()),
+            on_miss=lambda: self._flash_prompt("Missed \u2014 click on the lineup geometry."),
+        )
+
+        self._build()
+        self._apply_stylesheet()
+        self._install_callbacks()
+
+        self._solve_timer = QtCore.QTimer(self)
+        self._solve_timer.setSingleShot(True)
+        self._solve_timer.setInterval(_SOLVE_DELAY_MS)
+        self._solve_timer.timeout.connect(self._run_scheduled_solve)
+
+        self._watch_timer = QtCore.QTimer(self)
+        self._watch_timer.setInterval(_WATCH_INTERVAL_MS)
+        self._watch_timer.timeout.connect(self._watch_scene)
+        self._watch_timer.start()
+
+        self.refresh()
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        body = QtWidgets.QWidget()
+        body.setObjectName("reframeBody")
+        layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+        scroll.setWidget(body)
+
+        self.strip = RefStripWidget()
+        self.strip.images_added.connect(self.add_images)
+        self.strip.ref_activated.connect(self.activate)
+        self.strip.ref_removed.connect(self.remove_ref)
+        layout.addWidget(self.strip)
+
+        self.active_lbl = QtWidgets.QLabel("Add a concept image or photo to start.")
+        self.active_lbl.setObjectName("activeRefLabel")
+        self.active_lbl.setWordWrap(True)
+        layout.addWidget(self.active_lbl)
+
+        self.tabs = QtWidgets.QTabWidget()
+        self.match_panel = MatchPanel(self)
+        self.camera_panel = CameraPanel(self)
+        self.tabs.addTab(self.match_panel, "Match")
+        self.tabs.addTab(self.camera_panel, "View")
+        layout.addWidget(self.tabs, 1)
+
+        export = QtWidgets.QPushButton("Export Match Data\u2026")
+        export.setObjectName("iconButton")
+        export.setToolTip("Save points, 2D positions and solved cameras as JSON")
+        export.clicked.connect(self.export_json)
+        layout.addWidget(export)
+
+    def _apply_stylesheet(self):
+        from reframe.ui.styles import STYLESHEET
+        self.setStyleSheet(STYLESHEET)
+
+    # ------------------------------------------------------------------
+    # Accessors used by sub-panels
+    # ------------------------------------------------------------------
+
+    @property
+    def active_ref(self):
+        return self.state.active_ref
+
+    def active_camera(self):
+        ref = self.active_ref
+        cam = ref.get("camera") if ref else None
+        return cam if cam and cmds.objExists(cam) else None
+
+    @property
+    def viewer(self):
+        return self.match_window.viewer if self.match_window is not None else None
+
+    # ------------------------------------------------------------------
+    # Refresh
+    # ------------------------------------------------------------------
+
+    def refresh(self):
+        ref = self.active_ref
+        self.strip.set_refs(self.state.refs, ref["id"] if ref else None)
+        if ref is None:
+            self.active_lbl.setText("Add a concept image or photo to start.")
+        else:
+            name = os.path.basename(ref["path"])
+            cam = self.active_camera()
+            self.active_lbl.setText(
+                f"<b>{name}</b> \u00b7 {ref['width']}\u00d7{ref['height']}"
+                + (f" \u00b7 {cam.split('|')[-1]}" if cam else "")
+            )
+        if self.selected_pid is not None and self.state.point(self.selected_pid) is None:
+            self.selected_pid = None
+        self.match_panel.refresh()
+        self.camera_panel.refresh()
+        self._refresh_viewer()
+        self._refresh_match_window()
+
+    def _refresh_viewer(self):
+        if self.viewer is None:
+            return
+        ref = self.active_ref
+        if ref is None:
+            self.viewer.set_image(None)
+            self._viewer_path = None
+            return
+        if self._viewer_path != ref["path"]:
+            self.viewer.set_image(ref["path"], os.path.basename(ref["path"]))
+            self._viewer_path = ref["path"]
+        solve = ref.get("solve") or {}
+        errors = solve.get("errors", {})
+        outliers = set(solve.get("outliers", []))
+        try:
+            projected = match.project_points(self.state, ref) if solve.get("ok") else {}
+        except Exception:
+            projected = {}
+        points = [
+            {
+                "id": p["id"],
+                "uv": self.state.uv(ref, p["id"]),
+                "projected": projected.get(p["id"]),
+                "error": errors.get(str(p["id"])),
+                "outlier": p["id"] in outliers,
+                "enabled": self.state.is_enabled(ref, p["id"]),
+            }
+            for p in self.state.points
+        ]
+        self.viewer.set_points(points, self.selected_pid)
+        ov = self.state.overlay
+        horizon = None
+        if ov.get("horizon"):
+            try:
+                horizon = match.horizon_line(ref)
+            except Exception:
+                horizon = None
+        self.viewer.set_guides(ov.get("thirds"), ov.get("centre"), horizon)
+        if solve.get("ok"):
+            self.viewer.set_status(f"RMS {solve['rms']:.2f} px \u00b7 focal {solve['focal_mm']:.1f} mm")
+        else:
+            self.viewer.set_status(solve.get("message", "") if solve else "")
+
+    def prompt_text(self):
+        """What the artist should click next."""
+        ref = self.active_ref
+        if ref is None:
+            return "Add a concept image or photo to start."
+        if not self.state.geometry:
+            return "Select your scan / blockout / model and click \u201cUse Selected as Lineup Geometry\u201d."
+        if self._flash:
+            return self._flash
+        for_model = self.state.waiting_for_model(ref)
+        for_image = self.state.waiting_for_image(ref)
+        if for_model:
+            more = f"  ({len(for_model) - 1} more waiting)" if len(for_model) > 1 else ""
+            return f"Point {for_model[0]}: now click it on the MODEL  \u2192{more}"
+        if for_image:
+            more = f"  ({len(for_image) - 1} more waiting)" if len(for_image) > 1 else ""
+            return f"\u2190  Point {for_image[0]}: now click it on the IMAGE{more}"
+        pairs = len(match.gather_pairs(self.state, ref)[0])
+        hint = "" if pairs >= 6 else f"  ({pairs} pairs \u2014 6+ spread near/far and high/low solves focal well)"
+        return f"Click a feature on the image or the model to add point {self.state.next_point_id()}.{hint}"
+
+    def _flash_prompt(self, text, ms=2500):
+        self._flash = text
+        self._refresh_match_window()
+        QtCore.QTimer.singleShot(ms, self._clear_flash)
+
+    def _clear_flash(self):
+        self._flash = ""
+        self._refresh_match_window()
+
+    def _refresh_match_window(self):
+        w = self.match_window
+        if w is None:
+            return
+        w.set_prompt(self.prompt_text())
+        if self.state.geometry:
+            prepared = self.geometry.is_prepared_for(self.state.geometry)
+            short = [m.split("|")[-2] if m.count("|") > 1 else m for m in self.state.geometry]
+            names = ", ".join(short[:3]) + (f" +{len(short) - 3}" if len(short) > 3 else "")
+            faces = self.geometry.face_count
+            w.set_geometry_status(
+                f"Lineup geometry: {names} \u00b7 {faces / 1e6:.2f}M faces \u00b7 {'ready' if prepared else 'not prepared'}"
+            )
+        else:
+            w.set_geometry_status("Lineup geometry: none")
+        w.set_picking_checked(self.picking and self.pick_tool.is_active())
+        solve = (self.active_ref or {}).get("solve") or {}
+        if solve.get("ok"):
+            focal = f"{solve['focal_mm']:.1f} mm"
+            if solve.get("focal_sigma_mm"):
+                focal += f" (\u00b1{solve['focal_sigma_mm']:.1f})"
+            text = f"<b>RMS {solve['rms']:.2f} px</b> \u00b7 focal {focal} \u00b7 {solve['pairs']} pairs"
+            if solve.get("warnings"):
+                text += "<br><span style='color:#ffcc55'>" + "<br>".join("\u26a0 " + x for x in solve["warnings"]) + "</span>"
+            w.set_result(text)
+        else:
+            w.set_result(solve.get("message", "") if solve else "")
+        w.match_btn.setEnabled(bool(solve.get("ok")))
+
+    # ------------------------------------------------------------------
+    # Commit helper: mutate \u2192 auto-solve \u2192 save, as one undo step
+    # ------------------------------------------------------------------
+
+    def _commit(self, name, mutate=None, solve="auto"):
+        """Apply an artist action as one undo step, then schedule a solve if wanted."""
+        with cu.undo_chunk(f"Reframe: {name}"):
+            if mutate is not None:
+                mutate()
+            st.update_point_display(self.state, self.active_ref)
+            self._save()
+        self._watch_key = self._scene_key()
+        self.refresh()
+        ref = self.active_ref
+        if ref is not None and (solve is True or (solve == "auto" and ref["settings"]["auto_solve"])):
+            self._schedule_solve(now=solve is True)
+
+    def _schedule_solve(self, now=False):
+        if now:
+            self._solve_timer.stop()
+            self._run_scheduled_solve()
+        else:
+            self._solve_timer.start()
+
+    def _run_scheduled_solve(self):
+        """Solve the active reference and apply it \u2014 derived data, kept out of undo."""
+        ref = self.active_ref
+        if ref is None:
+            return
+        with cu.no_undo():
+            if match.gather_pairs(self.state, ref)[0]:
+                match.solve_ref(self.state, ref)
+            else:
+                ref["solve"] = None
+            st.update_point_display(self.state, ref)
+            self._save()
+        self._watch_key = self._scene_key()
+        self.refresh()
+
+    def _save(self):
+        st.save(self.state)
+        self._saved_json = self.state.to_json()
+        self._attach_node_callback()
+
+    # ------------------------------------------------------------------
+    # References
+    # ------------------------------------------------------------------
+
+    def add_images(self, paths):
+        added = None
+        # Read the selection now: creating the image's camera replaces it
+        selected_meshes = pick.resolve_meshes(cmds.ls(selection=True, long=True))
+
+        def mutate():
+            nonlocal added
+            for path in paths:
+                path = path.replace("\\\\", "/")
+                info = image_utils.load_image_info(path)
+                if not info.width or not info.height:
+                    om.MGlobal.displayWarning(f"[Reframe] Could not read image size: {path}")
+                    continue
+                added = self.state.add_ref(path, info.width, info.height)
+            if added is not None:
+                self.state.set_active(added["id"])
+                cu.apply_overlay(match.ensure_camera(added), self.state.overlay)
+
+        self._commit("Add Image", mutate, solve=False)
+        if added is not None:
+            self.show_match_window(selected_meshes)
+
+    def activate(self, ref_id):
+        def mutate():
+            self.state.set_active(ref_id)
+            cu.apply_overlay(match.ensure_camera(self.active_ref), self.state.overlay)
+
+        self._commit("Activate Image", mutate, solve=False)
+        if self.match_window is not None:
+            self.match_window.set_view_mode(self.match_window.view_mode)
+
+    def remove_ref(self, ref_id):
+        ref = self.state.ref(ref_id)
+        if ref is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, "Remove Image",
+            f"Remove {os.path.basename(ref['path'])} from Reframe?\\n\\n"
+            "Its 2D points are removed. The camera stays in the scene.",
+        )
+        if answer == QtWidgets.QMessageBox.Yes:
+            self._commit("Remove Image", lambda: self.state.remove_ref(ref_id), solve=False)
+
+    # ------------------------------------------------------------------
+    # Points
+    # ------------------------------------------------------------------
+
+    def set_picking(self, on):
+        """Viewport clicks place model points while picking is on (Match window open)."""
+        if on and (self.active_ref is None or not self.state.geometry):
+            on = False
+        if on:
+            self.ensure_geometry_prepared()
+            self.pick_tool.start()
+        else:
+            self.pick_tool.stop()
+        self.picking = bool(on)
+        self._refresh_match_window()
+
+    def on_viewport_hit(self, hit):
+        self._place_model_point(hit["position"])
+
+    def point_from_selection(self):
+        pos = pick.selection_position()
+        if pos is None:
+            om.MGlobal.displayWarning("[Reframe] Select vertices, faces or an object first.")
+            return
+        self._place_model_point(pos)
+
+    def _place_model_point(self, position):
+        """A model click: fills the oldest point waiting for its 3D, else starts a new point."""
+        ref = self.active_ref
+        if ref is None:
+            return
+        pid, is_new = self.state.point_for_model_click(ref)
+
+        def mutate():
+            if is_new:
+                self.state.add_point(pid=pid)
+            loc = st.create_point_locator(pid, position)
+            self.state.set_locator(pid, loc)
+            self.selected_pid = pid
+
+        self._commit("Place Model Point", mutate)
+        self._isolate_new_point(pid)
+
+    def on_uv_placed(self, u, v):
+        """An image click: fills the oldest point waiting for its 2D, else starts a new point."""
+        ref = self.active_ref
+        if ref is None:
+            return
+        pid, is_new = self.state.point_for_image_click(ref)
+
+        def mutate():
+            if is_new:
+                self.state.add_point(pid=pid)
+            self.state.set_uv(ref, pid, (u, v))
+            self.selected_pid = pid
+
+        self._commit("Place Image Point", mutate)
+
+    def on_uv_moved(self, pid, u, v):
+        ref = self.active_ref
+        if ref is not None and self.state.point(pid):
+            self._commit("Move 2D Point", lambda: self.state.set_uv(ref, pid, (u, v)))
+
+    def clear_uv(self, pid):
+        ref = self.active_ref
+        if ref is not None and pid is not None:
+            self._commit("Clear 2D Point", lambda: self.state.set_uv(ref, pid, None))
+
+    def delete_point(self, pid):
+        p = self.state.point(pid) if pid is not None else None
+        if p is None:
+            return
+
+        def mutate():
+            st.delete_point_locator(p["locator"])
+            self.state.remove_point(pid)
+
+        self._commit("Delete Point", mutate)
+
+    def set_point_enabled(self, pid, enabled):
+        ref = self.active_ref
+        if ref is not None:
+            self._commit("Toggle Point", lambda: self.state.set_enabled(ref, pid, enabled))
+
+    def _toggle_enabled(self, pid):
+        ref = self.active_ref
+        if ref is not None:
+            self.set_point_enabled(pid, not self.state.is_enabled(ref, pid))
+
+    def select_point(self, pid):
+        if pid != self.selected_pid:
+            self.selected_pid = pid
+            self.match_panel.refresh()
+            self._refresh_viewer()
+
+    def select_locator(self, pid):
+        p = self.state.point(pid) if pid is not None else None
+        if p and p["locator"] and cmds.objExists(p["locator"]):
+            cmds.select(p["locator"], replace=True)
+
+    # ------------------------------------------------------------------
+    # Lineup geometry
+    # ------------------------------------------------------------------
+
+    def set_lineup_geometry_from_selection(self):
+        meshes = pick.resolve_meshes(cmds.ls(selection=True, long=True))
+        if not meshes:
+            QtWidgets.QMessageBox.information(
+                self.match_window or self, "Reframe",
+                "Select the scan / blockout / model you want to line up against\\n"
+                "(meshes or groups), then click this again.",
+            )
+            return
+        self._commit("Set Lineup Geometry", lambda: self.state.set_geometry(meshes), solve=False)
+        if not self.ensure_geometry_prepared():
+            return
+        if self.match_window is not None:
+            self._update_isolation()
+            self.match_window.frame_geometry()
+        self.set_picking(True)
+
+    def ensure_geometry_prepared(self):
+        """Build pick data for the lineup geometry if needed (with progress). Returns success."""
+        meshes = [m for m in self.state.geometry if cmds.objExists(m)]
+        if not meshes or self.geometry.is_prepared_for(meshes):
+            return bool(meshes)
+        dialog = QtWidgets.QProgressDialog("Preparing lineup geometry\u2026", "Cancel", 0, len(meshes),
+                                           self.match_window or self)
+        dialog.setWindowTitle("Reframe")
+        dialog.setMinimumDuration(300)
+        dialog.setWindowModality(Qt.WindowModal)
+
+        def progress(i, n, name):
+            dialog.setValue(i)
+            dialog.setLabelText(f"Preparing {name.split('|')[-1]}  ({i + 1}/{n})\u2026")
+            QtWidgets.QApplication.processEvents()
+            return not dialog.wasCanceled()
+
+        cmds.waitCursor(state=True)
+        try:
+            self.geometry.prepare(meshes, progress)
+        finally:
+            cmds.waitCursor(state=False)
+            dialog.setValue(len(meshes))
+            dialog.close()
+        self._refresh_match_window()
+        return self.geometry.is_prepared_for(meshes)
+
+    def _isolation_nodes(self):
+        nodes = list(self.state.geometry)
+        if cmds.objExists(st.POINTS_GROUP):
+            nodes.append(st.POINTS_GROUP)
+        return nodes
+
+    def _update_isolation(self):
+        if self.match_window is None:
+            return
+        with cu.no_undo():      # view-only change: keep it out of undo
+            self.match_window.update_isolation(self._isolation_nodes() if self.state.geometry else [])
+
+    def _isolate_new_point(self, pid):
+        w = self.match_window
+        p = self.state.point(pid)
+        if w is None or not w.panel or not p or not p["locator"] or not self.state.geometry:
+            return
+        if cmds.isolateSelect(w.panel, query=True, state=True):
+            with cu.no_undo():
+                cmds.isolateSelect(w.panel, addDagObject=p["locator"])
+
+    # ------------------------------------------------------------------
+    # Solve
+    # ------------------------------------------------------------------
+
+    def update_settings(self, **settings):
+        ref = self.active_ref
+        if ref is not None:
+            self._commit("Solve Settings", lambda: ref["settings"].update(settings))
+
+    def solve(self):
+        if self.active_ref is not None:
+            self._commit("Solve Camera", None, solve=True)
+
+    # ------------------------------------------------------------------
+    # View
+    # ------------------------------------------------------------------
+
+    def look_through(self):
+        cam = self.active_camera()
+        if cam:
+            cu.look_through(cam)
+
+    def select_camera(self):
+        cam = self.active_camera()
+        if cam:
+            cmds.select(cam, replace=True)
+
+    def show_viewer(self):
+        self.show_match_window()
+
+    def show_match_window(self, candidate_meshes=None):
+        """
+        Open (or raise) the Match window: image + live viewport side by side.
+        If no lineup geometry is set yet, the selected meshes (or candidate_meshes)
+        become the lineup geometry.
+        """
+        if self.active_ref is None:
+            return
+        if candidate_meshes is None:
+            candidate_meshes = pick.resolve_meshes(cmds.ls(selection=True, long=True))
+        control = MatchWindow.OBJECT_NAME + "WorkspaceControl"
+        if self.match_window is None:
+            if cmds.workspaceControl(control, exists=True):
+                cmds.deleteUI(control)
+            w = MatchWindow(self)
+            w.viewer.uv_placed.connect(self.on_uv_placed)
+            w.viewer.uv_moved.connect(self.on_uv_moved)
+            w.viewer.uv_cleared.connect(self.clear_uv)
+            w.viewer.point_selected.connect(self.select_point)
+            w.viewer.enable_toggled.connect(self._toggle_enabled)
+            self.match_window = w
+            w.show(dockable=True, floating=True, retain=False, width=1500, height=800)
+            w.build_viewport()
+            self._viewer_path = None
+            if not self.state.geometry and candidate_meshes:
+                self._commit("Set Lineup Geometry", lambda: self.state.set_geometry(candidate_meshes), solve=False)
+            if self.ensure_geometry_prepared():
+                self._update_isolation()
+                w.frame_geometry()
+            self.set_picking(bool(self.state.geometry))
+        else:
+            self.match_window.show(dockable=True)
+            if cmds.workspaceControl(control, exists=True):
+                cmds.workspaceControl(control, edit=True, restore=True)
+            if not self.picking and self.state.geometry:
+                self.set_picking(True)
+        self._viewer_path = None
+        self.refresh()
+
+    def close_match_window(self):
+        w = self.match_window
+        if w is None:
+            return
+        self.set_picking(False)
+        try:
+            w.destroy_viewport()
+        except Exception:
+            pass
+        self.match_window = None
+        control = MatchWindow.OBJECT_NAME + "WorkspaceControl"
+        if cmds.workspaceControl(control, exists=True):
+            cmds.deleteUI(control)
+
+    def on_match_window_closed(self):
+        """The user closed the Match window."""
+        w = self.match_window
+        self.set_picking(False)
+        if w is not None:
+            try:
+                w.destroy_viewport()
+            except Exception:
+                pass
+        self.match_window = None
+
+    def set_overlay(self, **values):
+        def mutate():
+            self.state.overlay.update(values)
+            cam = self.active_camera()
+            if cam:
+                cu.apply_overlay(cam, self.state.overlay)
+
+        self._commit("Overlay", mutate, solve=False)
+
+    def set_image_opacity(self, value, save=True):
+        cam = self.active_camera()
+        if cam:
+            cu.set_image_plane_opacity(cam, value)
+        if save:
+            self.set_overlay(opacity=value)
+
+    def set_sensor_width(self, width_in):
+        """Change film back width; rescale focal so the field of view (and match) holds."""
+        cam, ref = self.active_camera(), self.active_ref
+        if not cam:
+            return
+
+        def mutate():
+            shape = cu.camera_shape(cam)
+            old_w = cmds.getAttr(shape + ".horizontalFilmAperture")
+            focal = cmds.getAttr(shape + ".focalLength")
+            h_off = cmds.getAttr(shape + ".horizontalFilmOffset")
+            v_off = cmds.getAttr(shape + ".verticalFilmOffset")
+            k = width_in / old_w
+            cu.set_film_back(cam, width_in, ref["width"], ref["height"])
+            cmds.setAttr(shape + ".focalLength", focal * k)
+            cmds.setAttr(shape + ".horizontalFilmOffset", h_off * k)
+            cmds.setAttr(shape + ".verticalFilmOffset", v_off * k)
+            solve = ref.get("solve") or {}
+            if solve.get("ok"):
+                solve["focal_mm"] *= k
+                if solve.get("focal_sigma_mm"):
+                    solve["focal_sigma_mm"] *= k
+
+        self._commit("Change Sensor", mutate, solve=False)
+
+    def set_focal_mm(self, mm):
+        cam = self.active_camera()
+        if cam:
+            self._commit(
+                "Focal Length",
+                lambda: cmds.setAttr(cu.camera_shape(cam) + ".focalLength", mm),
+                solve=False,
+            )
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def export_json(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Reframe Data", "", "JSON (*.json)")
+        if not path:
+            return
+        data = json.loads(self.state.to_json())
+        for p in data["points"]:
+            p["position"] = st.point_position(p["locator"])
+        for ref in data["refs"]:
+            cam = ref.get("camera")
+            if cam and cmds.objExists(cam):
+                shape = cu.camera_shape(cam)
+                ref["camera_data"] = {
+                    "world_matrix": cmds.xform(cam, query=True, worldSpace=True, matrix=True),
+                    "focal_length_mm": cmds.getAttr(shape + ".focalLength"),
+                    "film_aperture_in": [
+                        cmds.getAttr(shape + ".horizontalFilmAperture"),
+                        cmds.getAttr(shape + ".verticalFilmAperture"),
+                    ],
+                    "film_offset_in": [
+                        cmds.getAttr(shape + ".horizontalFilmOffset"),
+                        cmds.getAttr(shape + ".verticalFilmOffset"),
+                    ],
+                }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        om.MGlobal.displayInfo(f"[Reframe] Exported to {path}")
+
+    # ------------------------------------------------------------------
+    # Maya callbacks
+    # ------------------------------------------------------------------
+
+    def _install_callbacks(self):
+        for msg in (om.MSceneMessage.kAfterOpen, om.MSceneMessage.kAfterNew):
+            self._callbacks.append(om.MSceneMessage.addCallback(msg, self._on_scene_changed))
+        self._attach_node_callback()
+
+    def _attach_node_callback(self):
+        if self._node_callback is not None or not cmds.objExists(st.NODE_NAME):
+            return
+        sel = om.MSelectionList()
+        sel.add(st.NODE_NAME)
+        node = sel.getDependNode(0)
+        self._node_callback = om.MNodeMessage.addAttributeChangedCallback(node, self._on_node_changed)
+        self._node_deleted_cb = om.MNodeMessage.addNodeAboutToDeleteCallback(node, self._on_node_deleted)
+
+    def _detach_node_callback(self):
+        for attr in ("_node_callback", "_node_deleted_cb"):
+            cb = getattr(self, attr, None)
+            if cb is not None:
+                try:
+                    om.MMessage.removeCallback(cb)
+                except RuntimeError:
+                    pass
+                setattr(self, attr, None)
+
+    def _on_node_changed(self, msg, plug, other, data):
+        # Our own saves are ignored; anything else (undo/redo, scripts) reloads
+        QtCore.QTimer.singleShot(0, self._reload_if_changed)
+
+    def _on_node_deleted(self, *args):
+        QtCore.QTimer.singleShot(0, self._on_scene_changed)
+
+    def _reload_if_changed(self):
+        if st.state_json_in_scene() != self._saved_json:
+            self._reload()
+
+    def _on_scene_changed(self, *args):
+        self._detach_node_callback()
+        self.set_picking(False)
+        self.geometry.clear()
+        self._viewer_path = None
+        self._reload()
+        if self.match_window is not None:
+            self.match_window.set_view_mode("free")
+            if self.ensure_geometry_prepared():
+                self._update_isolation()
+                self.set_picking(True)
+
+    def _reload(self):
+        self.state = st.load()
+        self._saved_json = self.state.to_json()
+        self._attach_node_callback()
+        self._watch_key = self._scene_key()
+        self.refresh()
+        ref = self.active_ref
+        if ref is not None and ref["settings"]["auto_solve"]:
+            self._schedule_solve()      # e.g. after undo/redo: keep the camera in step
+
+    def _watch_scene(self):
+        """Poll for camera / locator edits made with Maya's own tools."""
+        ref = self.active_ref
+        window_open = self.match_window is not None and self.match_window.isVisible()
+        if ref is None or not (self.isVisible() or window_open):
+            return
+        # Picking pauses if the artist switches to another Maya tool
+        if self.picking and not self.pick_tool.is_active():
+            self.picking = False
+            self._refresh_match_window()
+        key = self._scene_key()
+        previous = self._watch_key
+        self._watch_key = key
+        if key is None or previous is None or previous == key:
+            return
+        # Only edits made outside Reframe get here: _commit and _reload
+        # re-baseline the key, so our own changes never trigger a re-solve
+        # (which would also bury the artist's action under an extra undo step).
+        points_moved = previous[1] != key[1]
+        if points_moved and ref["settings"]["auto_solve"] and match.gather_pairs(self.state, ref)[0]:
+            self._schedule_solve()
+        else:
+            self.camera_panel.refresh()
+            self._refresh_viewer()
+
+    def _scene_key(self):
+        """(camera key, point positions key) for change detection, or None."""
+        try:
+            cam = self.active_camera()
+            cam_key = repr((
+                cmds.xform(cam, q=True, ws=True, matrix=True),
+                cmds.getAttr(cu.camera_shape(cam) + ".focalLength"),
+            )) if cam else ""
+            points_key = repr([(p["id"], st.point_position(p["locator"])) for p in self.state.points])
+        except Exception:
+            return None
+        return cam_key, points_key
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
+
+    def shutdown(self):
+        self._watch_timer.stop()
+        self._solve_timer.stop()
+        self.close_match_window()
+        self.pick_tool.stop()
+        for cb in self._callbacks:
+            try:
+                om.MMessage.removeCallback(cb)
+            except RuntimeError:
+                pass
+        self._callbacks = []
+        self._detach_node_callback()
+
+    def dockCloseEventTriggered(self):
+        self.shutdown()
+        global _PANEL
+        _PANEL = None
+
+
+def _maya_main_window():
+    import maya.OpenMayaUI as omui1
+    from reframe import _PYSIDE_VERSION
+    ptr = omui1.MQtUtil.mainWindow()
+    if ptr is None:
+        return None
+    if _PYSIDE_VERSION == 6:
+        from shiboken6 import wrapInstance
+    else:
+        from shiboken2 import wrapInstance
+    return wrapInstance(int(ptr), QtWidgets.QWidget)
+'''),
+# ------------------------------------------------------------
+# reframe.ui.styles
+# ------------------------------------------------------------
+'reframe.ui.styles': (False, '''"""Reframe Qt stylesheet (dark, matches Maya). A Python string so the tool
+needs no data files when pasted into the Script Editor."""
+
+STYLESHEET = """
+/* Reframe Dark Theme \u2014 matches Maya 2022-2025 dark UI */
+
+/* \u2500\u2500 Global \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QWidget {
+    background-color: #2b2b2b;
+    color: #cccccc;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 11px;
+    border: none;
+}
+
+QWidget:disabled {
+    color: #666666;
+}
+
+/* \u2500\u2500 Panels & Frames \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QFrame#sectionFrame {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-radius: 3px;
+    padding: 4px;
+}
+
+QFrame#separatorLine {
+    background-color: #444444;
+    max-height: 1px;
+    min-height: 1px;
+}
+
+/* \u2500\u2500 Labels \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QLabel {
+    background: transparent;
+    padding: 1px 2px;
+}
+
+QLabel#sectionHeader {
+    font-size: 10px;
+    font-weight: bold;
+    color: #888888;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 4px 2px 2px 2px;
+}
+
+QLabel#activeRefLabel {
+    color: #aaaaaa;
+    font-size: 10px;
+    font-style: italic;
+    padding: 2px 4px;
+}
+
+QLabel#confidenceBadge[confidence="green"] {
+    color: #44cc66;
+    font-weight: bold;
+}
+QLabel#confidenceBadge[confidence="amber"] {
+    color: #ffcc33;
+    font-weight: bold;
+}
+QLabel#confidenceBadge[confidence="red"] {
+    color: #ff4444;
+    font-weight: bold;
+}
+
+/* \u2500\u2500 Sliders \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QSlider::groove:horizontal {
+    background: #444444;
+    height: 4px;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    background: #5285a6;
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}
+
+QSlider::sub-page:horizontal {
+    background: #5285a6;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #6aa0c8;
+}
+
+QSlider::handle:horizontal:disabled {
+    background: #555555;
+}
+
+/* \u2500\u2500 SpinBoxes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QDoubleSpinBox, QSpinBox {
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    border-radius: 2px;
+    padding: 2px 4px;
+    color: #dddddd;
+    selection-background-color: #5285a6;
+}
+
+QDoubleSpinBox:focus, QSpinBox:focus {
+    border-color: #5285a6;
+}
+
+QDoubleSpinBox::up-button, QSpinBox::up-button,
+QDoubleSpinBox::down-button, QSpinBox::down-button {
+    background-color: #444444;
+    border: none;
+    width: 14px;
+}
+
+QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {
+    background-color: #5285a6;
+}
+
+/* \u2500\u2500 ComboBox \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QComboBox {
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    border-radius: 2px;
+    padding: 2px 6px;
+    color: #dddddd;
+}
+
+QComboBox:hover {
+    border-color: #5285a6;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 18px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    selection-background-color: #5285a6;
+    color: #dddddd;
+}
+
+/* \u2500\u2500 Buttons \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QPushButton {
+    background-color: #3f3f3f;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 4px 10px;
+    color: #cccccc;
+}
+
+QPushButton:hover {
+    background-color: #4a4a4a;
+    border-color: #5285a6;
+}
+
+QPushButton:pressed {
+    background-color: #3a3a3a;
+    border-color: #3d6a8a;
+}
+
+QPushButton:disabled {
+    background-color: #333333;
+    color: #555555;
+    border-color: #444444;
+}
+
+QPushButton#primaryButton {
+    background-color: #5285a6;
+    border-color: #3d6a8a;
+    color: #ffffff;
+    font-weight: bold;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #6aa0c8;
+}
+
+QPushButton#primaryButton:disabled {
+    background-color: #3a4a56;
+    color: #666666;
+}
+
+QPushButton#iconButton {
+    background-color: transparent;
+    border: none;
+    padding: 2px;
+}
+
+QPushButton#iconButton:hover {
+    background-color: #444444;
+    border-radius: 2px;
+}
+
+/* Lock/toggle buttons */
+QPushButton#lockButton {
+    background-color: transparent;
+    border: 1px solid #444444;
+    border-radius: 2px;
+    padding: 2px 4px;
+    color: #888888;
+    font-size: 9px;
+    min-width: 18px;
+    max-width: 18px;
+}
+
+QPushButton#lockButton[locked="true"] {
+    border-color: #5285a6;
+    color: #5285a6;
+}
+
+/* \u2500\u2500 Tabs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QTabWidget::pane {
+    border: 1px solid #444444;
+    background-color: #2b2b2b;
+}
+
+QTabBar::tab {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-bottom: none;
+    padding: 4px 10px;
+    color: #888888;
+    font-size: 10px;
+}
+
+QTabBar::tab:selected {
+    background-color: #2b2b2b;
+    color: #cccccc;
+    border-bottom: 2px solid #5285a6;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #3a3a3a;
+    color: #aaaaaa;
+}
+
+/* \u2500\u2500 List / Thumbnail Strip \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QListWidget {
+    background-color: #252525;
+    border: 1px solid #444444;
+    border-radius: 2px;
+    outline: none;
+}
+
+QListWidget::item {
+    border-radius: 2px;
+    padding: 2px;
+}
+
+QListWidget::item:selected {
+    background-color: #3a5a76;
+    color: #ffffff;
+}
+
+QListWidget::item:hover:!selected {
+    background-color: #3a3a3a;
+}
+
+/* \u2500\u2500 ScrollBars \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QScrollBar:horizontal {
+    background: #2b2b2b;
+    height: 8px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: #555555;
+    min-width: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #5285a6;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+
+QScrollBar:vertical {
+    background: #2b2b2b;
+    width: 8px;
+}
+
+QScrollBar::handle:vertical {
+    background: #555555;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #5285a6;
+}
+
+/* \u2500\u2500 CheckBoxes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QCheckBox {
+    spacing: 5px;
+    color: #cccccc;
+}
+
+QCheckBox::indicator {
+    width: 13px;
+    height: 13px;
+    background-color: #3a3a3a;
+    border: 1px solid #555555;
+    border-radius: 2px;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #5285a6;
+    border-color: #3d6a8a;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #5285a6;
+}
+
+/* \u2500\u2500 Tool Tips \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QToolTip {
+    background-color: #1e1e1e;
+    color: #cccccc;
+    border: 1px solid #444444;
+    padding: 3px 6px;
+    font-size: 10px;
+}
+
+/* \u2500\u2500 Dock Widget \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QDockWidget {
+    titlebar-close-icon: none;
+    titlebar-normal-icon: none;
+}
+
+QDockWidget::title {
+    background-color: #333333;
+    text-align: center;
+    padding: 4px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #888888;
+}
+
+/* \u2500\u2500 Reframe match workflow \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+QLabel#helpLabel {
+    color: #9a9a9a;
+}
+
+QLabel#resultLabel {
+    color: #dddddd;
+    padding: 4px 2px 0px 2px;
+}
+
+QLabel#warningLabel {
+    color: #ffcc55;
+}
+
+QGroupBox {
+    border: 1px solid #444444;
+    border-radius: 3px;
+    margin-top: 10px;
+    padding-top: 4px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 6px;
+    padding: 0 3px;
+    color: #888888;
+    font-weight: bold;
+}
+
+QTableWidget {
+    background-color: #262626;
+    alternate-background-color: #2d2d2d;
+    gridline-color: #3a3a3a;
+    border: 1px solid #444444;
+    selection-background-color: #3a5a76;
+}
+
+QHeaderView::section {
+    background-color: #333333;
+    color: #999999;
+    border: none;
+    border-right: 1px solid #3f3f3f;
+    padding: 2px 4px;
+}
+
+QPushButton#primaryButton:checked {
+    background-color: #c07a2a;
+    border-color: #e09a4a;
+}
+QLabel#promptLabel {
+    font-size: 15px;
+    font-weight: bold;
+    color: #ffd27a;
+    padding: 4px 6px;
+}
+"""
+'''),
+}
+# --- END REFRAME SOURCES ---
+
+_REFRAME_STAMP = object()  # this paste's copy; a re-paste brings a new one
+
+
+def reframe_package():
+    """The embedded reframe package, imported from memory (once per paste).
+
+    A copy from an earlier paste of the toolbox, or the standalone Reframe
+    (dist/Reframe.py), is closed and replaced first: two copies would fight
+    over one ReframeData node."""
+    import importlib.abc
+    import importlib.util
+    import sys
+    current = sys.modules.get("reframe")
+    if current is not None and getattr(current, "__unlok_stamp__", None) is _REFRAME_STAMP:
+        return current
+    if not _REFRAME_SOURCES:
+        raise RuntimeError("This copy of the toolbox has no Reframe sources (run tools/embed_reframe.py).")
+    if current is not None and hasattr(current, "close"):
+        try:
+            current.close()  # the standalone panel, if one is open
+        except Exception:
+            traceback.print_exc()
+    for name in [n for n in sys.modules if n == "reframe" or n.startswith("reframe.")]:
+        del sys.modules[name]
+    sys.meta_path[:] = [f for f in sys.meta_path if not getattr(f, "_reframe_bundle", False)]
+    sources = _REFRAME_SOURCES
+
+    class _ReframeImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        _reframe_bundle = True  # the standalone bundle's re-paste cleanup knows this flag
+
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname in sources:
+                return importlib.util.spec_from_loader(fullname, self, is_package=sources[fullname][0])
+            return None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            is_pkg, source = sources[module.__name__]
+            filename = "<reframe>/" + module.__name__.replace(".", "/") + ("/__init__.py" if is_pkg else ".py")
+            exec(compile(source, filename, "exec"), module.__dict__)
+
+    sys.meta_path.insert(0, _ReframeImporter())
+    import reframe
+    reframe.__unlok_stamp__ = _REFRAME_STAMP
+    return reframe
+
+
+class ReframeToolPanel(QtWidgets.QWidget):
+    TOOL_NAME = "Reframe"
+    TOOL_TIP = "Match a camera to concept art or a photo by clicking matching points on the model and the image."
+
+    def __init__(self, parent=None):
+        super(ReframeToolPanel, self).__init__(parent)
+        self.inner = None
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(6)
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QVBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(6)
+        tl.addWidget(ToolHeader("Reframe", "Match a camera to concept art or a photo: click a feature on the "
+                                           "model, then the same one on the image, five or more times. It "
+                                           "solves position, rotation and focal length. Reframe %s." %
+                                REFRAME_VERSION))
+        outer.addWidget(top)
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setContentsMargins(8, 0, 8, 6)
+        try:
+            reframe_package()
+            from reframe.ui import sidebar
+            self.inner = sidebar.ReframePanel(parent=self)
+            outer.addWidget(self.inner, 1)
+        except Exception as exc:
+            traceback.print_exc()
+            outer.addWidget(hint_label("Reframe couldn't start: %s (details in the Script Editor)." % exc), 1)
+        outer.addWidget(self.status)
+
+    def set_status(self, text, level="info"):
+        color = LEVEL_COLORS.get(level, "#a8a8a8") if level != "error" else "#e06060"
+        self.status.setText('<span style="color:%s">%s</span>' % (color, text))
+
+    def shutdown(self):
+        """Reframe's own teardown: timers, the Match window, the pick tool and
+        its scene / node callbacks."""
+        if self.inner is not None:
+            try:
+                self.inner.shutdown()
+            except Exception:
+                traceback.print_exc()
+            self.inner = None
+
+
+# =============================================================================
 # Toolbox window
 # =============================================================================
 
@@ -36898,25 +42647,57 @@ TOOL_REGISTRY = [
     ("Modeling", [PathScatterPanel, BevelResolverPanel, LogNoisePanel, RopeLashingPanel, ThatchRoofPanel,
                   ScatterPanel, QuadFillPanel]),
     ("UV", [SmartUdimPanel]),
+    ("Naming", [RenamerPanel]),
+    ("Camera", [ReframeToolPanel]),
+]
+
+# Panels are built the first time they're shown (launch speed). Scene upkeep
+# a panel does on Undo / Redo must still happen while the toolbox is open
+# and that panel hasn't been built yet, so the window runs it for them:
+# (panel class name, events, function name).
+TOOL_UPKEEP = [
+    ("RopeLashingPanel", ("Redo",), "rebuild_stale_ropes"),
+    ("ThatchRoofPanel", ("Redo",), "rebuild_stale_thatch"),
+    ("ScatterPanel", ("Undo", "Redo"), "sc_sync"),
 ]
 
 
+class _ToolFailed(QtWidgets.QWidget):
+    """Stands in for a panel whose build raised, so one broken tool can't
+    stop the toolbox opening."""
+
+    def __init__(self, cls, error, parent=None):
+        super(_ToolFailed, self).__init__(parent)
+        self.TOOL_NAME = cls.TOOL_NAME
+        self.TOOL_TIP = cls.TOOL_TIP
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(hint_label("%s couldn't open: %s\n(details in the Script Editor)" % (cls.TOOL_NAME, error)))
+        lay.addStretch(1)
+
+    def shutdown(self):
+        pass
+
+
 class CategoryPage(QtWidgets.QWidget):
+    """One category tab: a segment button per tool over a stack. A tool's
+    panel is built the first time it's shown; until then its slot in the
+    stack is an empty placeholder (building every panel up front was most
+    of the launch time)."""
+
     def __init__(self, tool_classes, parent=None):
         super(CategoryPage, self).__init__(parent)
+        self.tool_classes = list(tool_classes)
+        self._built = {}  # index -> panel
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 0)
         lay.setSpacing(4)
         self.stack = QtWidgets.QStackedWidget()
-        self.panels = []
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(6, 0, 6, 0)
         bar.setSpacing(2)
-        group = QtWidgets.QButtonGroup(self)
-        for i, cls in enumerate(tool_classes):
-            panel = cls()
-            self.panels.append(panel)
-            self.stack.addWidget(panel)
+        self.group = group = QtWidgets.QButtonGroup(self)
+        for i, cls in enumerate(self.tool_classes):
+            self.stack.addWidget(QtWidgets.QWidget())
             btn = QtWidgets.QPushButton(cls.TOOL_NAME)
             btn.setToolTip(cls.TOOL_TIP)
             btn.setCheckable(True)
@@ -36925,14 +42706,55 @@ class CategoryPage(QtWidgets.QWidget):
             group.addButton(btn, i)
             bar.addWidget(btn)
         bar.addStretch(1)
-        group.buttonClicked.connect(lambda b: self.stack.setCurrentIndex(group.id(b)))
-        if len(tool_classes) > 1:  # one tool: its own header says what it is
+        group.buttonClicked.connect(lambda b: self.show_tool(group.id(b)))
+        if len(self.tool_classes) > 1:  # one tool: its own header says what it is
             lay.addLayout(bar)
         else:
             for b in group.buttons():
                 b.setParent(None)
                 b.deleteLater()
         lay.addWidget(self.stack, 1)
+
+    @property
+    def panels(self):
+        """The panels built so far, in registry order."""
+        return [self._built[i] for i in sorted(self._built)]
+
+    def is_built(self, cls):
+        return any(type(p) is cls for p in self._built.values())
+
+    def panel(self, index):
+        """The tool's panel, built now if it hasn't been."""
+        panel = self._built.get(index)
+        if panel is not None:
+            return panel
+        cls = self.tool_classes[index]
+        t0 = time.time()
+        try:
+            panel = cls()
+        except Exception as exc:
+            traceback.print_exc()
+            panel = _ToolFailed(cls, exc)
+        _registry().setdefault("build_times", {})[cls.TOOL_NAME] = time.time() - t0
+        holder = self.stack.widget(index)
+        current = self.stack.currentIndex()
+        self.stack.insertWidget(index, panel)
+        self.stack.removeWidget(holder)
+        holder.deleteLater()
+        self.stack.setCurrentIndex(current)
+        self._built[index] = panel
+        return panel
+
+    def show_tool(self, index):
+        panel = self.panel(index)
+        self.stack.setCurrentWidget(panel)
+        btn = self.group.button(index)
+        if btn is not None and not btn.isChecked():
+            btn.setChecked(True)
+        return panel
+
+    def ensure_current(self):
+        return self.show_tool(max(0, self.stack.currentIndex()))
 
 
 class ToolboxWindow(QtWidgets.QWidget):
@@ -36965,17 +42787,94 @@ class ToolboxWindow(QtWidgets.QWidget):
             self.pages.append(page)
             self.tabs.addTab(page, category)
         lay.addWidget(self.tabs, 1)
+        self.pages[0].ensure_current()
+        self.tabs.currentChanged.connect(self._tab_changed)
 
-    def panels(self):
+        self._jobs = []
+        self._upkeep_events = set()
+        self._upkeep_timer = QtCore.QTimer(self)
+        self._upkeep_timer.setSingleShot(True)
+        self._upkeep_timer.setInterval(30)
+        self._upkeep_timer.timeout.connect(_guarded(self._upkeep_timer, self._run_upkeep))
+        if maya_main_window() is not None:
+            self._jobs = [cmds.scriptJob(event=[ev, lambda ev=ev: self._upkeep(ev)]) for ev in ("Undo", "Redo")]
+            _registry()["jobs"].extend(self._jobs)
+
+    def _tab_changed(self, index):
+        try:
+            if 0 <= index < len(self.pages):
+                self.pages[index].ensure_current()
+        except Exception:
+            traceback.print_exc()
+
+    def _upkeep(self, event):
+        self._upkeep_events.add(event)
+        self._upkeep_timer.start()
+
+    def _run_upkeep(self):
+        events, self._upkeep_events = self._upkeep_events, set()
+        built = set(type(p).__name__ for p in self.built_panels())
+        for cls_name, on, fn_name in TOOL_UPKEEP:
+            fn = globals().get(fn_name)
+            if cls_name in built or fn is None or not events.intersection(on):
+                continue
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+
+    def built_panels(self):
         return [p for page in self.pages for p in page.panels]
 
+    def panels(self):
+        """Every tool's panel, building any not built yet (tests use this;
+        the toolbox itself only builds what's shown)."""
+        for page in self.pages:
+            for i in range(len(page.tool_classes)):
+                page.panel(i)
+        return self.built_panels()
+
+    def show_tool(self, name):
+        """Switch to the tool called name (its TOOL_NAME); returns its panel."""
+        for ti, page in enumerate(self.pages):
+            for i, cls in enumerate(page.tool_classes):
+                if cls.TOOL_NAME == name:
+                    self.tabs.setCurrentIndex(ti)
+                    return page.show_tool(i)
+        return None
+
     def closeEvent(self, event):
-        for panel in self.panels():
+        self._upkeep_timer.stop()
+        reg = _registry()["jobs"]
+        for job in self._jobs:
+            try:
+                if cmds.scriptJob(exists=job):
+                    cmds.scriptJob(kill=job, force=True)
+            except Exception:
+                pass
+            if job in reg:
+                reg.remove(job)
+        self._jobs = []
+        for panel in self.built_panels():
             try:
                 panel.shutdown()
             except Exception:
                 traceback.print_exc()
         super(ToolboxWindow, self).closeEvent(event)
+
+
+def open_toolbox_tool(name):
+    """Show the open toolbox on the tool called name; None if no window."""
+    window = _registry().get("window")
+    try:
+        if window is None or not window.isVisible():
+            return None
+    except RuntimeError:  # its C++ side is gone
+        return None
+    panel = window.show_tool(name)
+    window.raise_()
+    window.activateWindow()
+    return panel
 
 
 def _close_existing():

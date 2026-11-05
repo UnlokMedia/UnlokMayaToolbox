@@ -16,6 +16,19 @@ Built for **Maya 2023** (Python 3.9, PySide2); also runs on 2024 and 2025.
 Running it again just replaces the window. To make a shelf button, select the
 pasted code in the Script Editor and middle-mouse-drag it onto a shelf.
 
+**AM_Custom shelf button** (machines with this repo): paste
+`shelf/install_shelf_button.py` into the Script Editor and run it once. It
+copies the icon (`shelf/TAB_UnlokToolbox_icon_128px.png`, same style as the
+other AM_Custom tab icons) into your prefs' `icons/tabIcons`, backs up
+`shelf_AM_Custom.mel` to `.bak`, adds the button (replacing an older button
+that holds a pasted copy of the toolbox) and saves the shelves. The button
+runs `UnlokToolbox.py` from the repo each time, so it's always the current
+version. `tools/make_shelf_icon.py` redraws the icons (Pillow).
+
+**Opening is quick:** only the first tab's first tool is built when the
+window opens; every other tool is built the first time you open it (a
+fraction of a second). A paste opens the window in about 1 s (it was about 1.5 s).
+
 **Scale: decimetres.** Unlok works at 1 scene unit = 10 cm. Maya has no
 decimetre setting, so those scenes say "cm", and the toolbox reads a "cm"
 scene as decimetres: texel density in px/m, the default thatch box, Path
@@ -1088,8 +1101,9 @@ density. The actual layout is still being built; see
      stack identical shells. You can make sets by hand too.
    - **In the tree:** double-click **TD %** to edit it; right-click for
      stacking, orientation, pins and section order.
-4. **Naming issues:** lists meshes whose names break the convention, so you
-   can fix them in UnlokRenamer and re-scan.
+4. **Naming issues:** lists meshes whose names break the convention.
+   **Open Renamer** selects them and switches to Naming > Renamer; fix
+   them there and re-scan.
 5. **Pre-process:**
    - **Fixes:** lamina faces, non-manifold geometry and zero-area faces.
    - **Warns:** about n-gons (they're left alone) and flipped UV faces.
@@ -1614,7 +1628,103 @@ density. The actual layout is still being built; see
 
 Every Smart UDIM action is a single Ctrl+Z.
 
+### Naming > Renamer
+
+UnlokRenamer, inside the toolbox: names geometry and groups to the Unlok
+convention and checks a whole hierarchy. Same rules and the same fix
+engine as the standalone `unlok_renamer.py`.
+
+**Rename**
+
+1. Set the parts: **Material** (a lowercase word then capitalised word(s),
+   `woodBrown`, `woodMoulding`; the lists are presets, type your own) plus an
+   optional **variant** letter (`glassClearA`), **Position** (C, L, R, F, B,
+   U, D, LF, RF, LB, RB), **Name**, **Numbers** (padding, and
+   *Underscore before number* for the legacy `plank_0001` style) and
+   **Suffix** (GES, GEP, PLY, ... GRP). Untick a part to leave it out.
+   **Group Mode** switches to `<name>_GRP` / `<name>_####_GRP`.
+2. The box under the fields shows the first name. **Set From Selection**
+   reads the parts back from a selected object's name (all three formats,
+   groups, and suffix variants: `GEP1` reads as `GEP` with numbering on).
+3. **Rename Selected**: the objects are named in selection order, numbered
+   1, 2, 3 (several objects always get numbers, or the names would clash).
+   One Ctrl+Z undoes the whole rename.
+
+**Check a hierarchy**
+
+Select the asset's top group and **Set Root from Selection**, then:
+
+- **Check Duplicates**: names used more than once.
+- **Check Invalid Naming**: suffix variants (`GEP1`) and under-padded
+  numbers (`wing1`).
+- **Soft Checks**: missing number or position, a material not like
+  `woodBrown`, an unknown suffix. Review only.
+- **Check Material Variants**: `glassClear` next to `glassClearA` (a
+  wildcard like `glassClear*` in Houdini catches both), or gaps in the
+  letters. Review only.
+
+Each check opens a list with **Select** per row and **Select All**; the
+first two also have **Fix** / **Fix All**. A fix renumbers the whole family
+(same base name, any number): numbers that are already unique stay, only
+clashes, missing numbers and variants get the smallest free number. So a
+copied `chair0003_GES` in a `chair0001..0005` series becomes
+`chair0006_GES` and nothing else moves, and running it again finds
+nothing. Every fix is one Ctrl+Z. The list re-checks the scene after each
+fix.
+
+Smart UDIM's **Fix names** step has an **Open Renamer** button: it selects
+the listed meshes and switches to this tab.
+
+### Camera > Reframe
+
+Reframe (the MayaReframeTool project; version shown in its header) matches a Maya
+camera to concept art or a photo by clicking matching points: position,
+rotation, **focal length**, and optionally lens shift. Uses: layout cameras
+from concept keyframes, camera projection onto blockouts, paintover and
+set-extension cameras, checking a concept against a scan.
+
+1. **+ Add Image...** (or drop images on the strip). Each image gets its own
+   `RF_cam_*` camera with the image on an image plane, and the Match window
+   opens: the image and a live viewport side by side.
+2. Select your scan / blockout and use it as the lineup geometry.
+3. Click a feature on the model, then the same feature on the image (either
+   order), five or more times, spread near and far, high and low. It solves
+   as you go: RMS error, focal length and its uncertainty, a per-point
+   error (red points disagree with the rest; untick **Use** to leave one out).
+4. **View > Look Through** to check the match. Options: solve focal or enter
+   it, lens shift, level horizon, keep verticals vertical, lock camera height.
+
+Everything is stored in the scene with native nodes (`ReframeData`,
+`RF_points`, `RF_cam_*`), so scenes open anywhere and the standalone
+Reframe can carry on from the toolbox's work and back. Ctrl+Z undoes point
+placement and solves. **Export Match Data...** writes a JSON file you
+choose (the one place it writes a file, and only when you ask).
+
+Reframe lives in its own project (`MayaReframeTool`); the toolbox carries a
+copy of its code and only loads it the first time you open this tab.
+Opening it closes a standalone Reframe panel if one is open (two would edit
+the same data).
+
 ## How it stays fast
+
+- **Opening:** tools are built when first shown, not at launch, and
+  Reframe's code is only compiled the first time its tab opens. Scene
+  upkeep that a tool does on Undo / Redo (rope and roof rebuilds, scatter
+  sync) runs from the window for tools not opened yet. Measured with
+  `tests/run_gui_launch_time.mel` on Maya 2024:
+
+  | Paste in Maya 2024 (median of runs) | Before | Now |
+  | --- | --- | --- |
+  | First paste, empty scene | 1.50 s | 0.94 s |
+  | Re-paste, empty scene | 1.65 s | 1.34 s |
+  | Re-paste, 300 meshes in the scene | 1.75 s | 1.25 s |
+  | Python building the window (profiled) | 0.67 s | 0.08 s |
+  | Compiling the file (unchanged) | 0.40 s | 0.40 s |
+
+  Measured with a render running on the same PC, so single runs vary by
+  +-0.3 s. What's left is compiling the file (0.4 s) and Qt showing and
+  painting the window. First opens of the other tools cost 0.01-0.35 s
+  each (Roof and Scatter are the slowest).
 
 - **Preview:** the live preview is a single `instancer` node whose point data
   is written directly from Python. There is no MASH network and there are no
@@ -1693,6 +1803,20 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
 - `tests/test_live_view.py`: shell outlines match their placements, the
   live-view hook, the background planner (same result, stops promptly),
   scene outlines and their density, the UV Editor label mesh.
+- `tests/test_renamer.py`: the Renamer (Naming tab): names, parsing and
+  the family fix match the standalone `unlok_renamer.py` (from the
+  UnlokRenamer repo when it's next to this one), Rename Selected and every
+  fix are one Ctrl+Z, the checks find and fix a built scene's problems.
+- `tests/test_reframe_embed.py`: the embedded Reframe matches the
+  MayaReframeTool package (`tools/embed_reframe.py --check`), nothing of it
+  loads until its tab opens, a re-paste replaces it cleanly, the solver
+  and scene state work.
+- `tools/embed_reframe.py [path] [--check]`: copies Reframe's package into
+  `UnlokToolbox.py` (edit Reframe in its own repo, then run this).
+- `tests/run_gui_launch_time.mel` (GUI, `tests/gui_launch_time.py`): times
+  a paste (read, compile, run, show, first paint) in an empty and a busy
+  scene and through a real Script Editor paste, then opens every tool once
+  (timings and pictures in `tests/_out/launch_time`).
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash
