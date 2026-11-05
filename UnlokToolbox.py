@@ -29269,7 +29269,14 @@ MOSS_DEFAULTS = {
     "strands": 1.0, "strand_length": 0.012, "droop": 0.5, "spread": 0.3, "lumps": 0.6, "capsules": 0.3,
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles",
     "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6,
-    "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5}
+    "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5,
+    "exposure": 0.0, "feather": 0.0, "strays": 0.0, "ragged": 0.0, "clump_merge": 0.0, "shoot_form": "Star",
+    "spill": 0.0}
+# the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
+# Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new")
+MOSS_NEW_LOOK = {"exposure": 0.6, "feather": 0.6, "strays": 0.5, "ragged": 0.6, "clump_merge": 0.6,
+                 "shoot_form": "Leafy"}
+MOSS_SHOOT_FORMS = ("Star", "Leafy")  # High / Hero instanced shoots: a leaf star at the tip, or leaves up the stem
 IVY_VINES_BY = ("In all", "Per mesh")  # Vines: the total, or on each mesh
 IVY_MAX_AUTO_VINES = 400                # Per mesh over many meshes: fewer each past it
 IVY_DEFAULTS = {
@@ -29283,6 +29290,7 @@ DEBRIS_DEFAULTS = {
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
+    "on_moss": False,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
@@ -30007,6 +30015,56 @@ def _mi_frame(n, ang=0.0):
 
 def _mi_mesh():
     return [], [], [], [], [], []  # points, counts, connects, us, vs, uv ids
+
+
+class _MiPts(list):
+    """A mesh's points that carry shading data: .col, an (r, g, b) per point
+    (or None), written to the colour set MOSS_COLOR_SET (Scatter moss)."""
+    __slots__ = ("col",)
+
+    def __init__(self, *a):
+        list.__init__(self, *a)
+        self.col = None
+
+
+MOSS_COLOR_SET = "mossData"  # per point: R a random value per cushion / shoot (carpet: a patch-sized noise),
+# G height in the bed (0 at the surface, 1 full thickness), B how far inside a patch (0 at its edge)
+
+
+def _mi_write_colors(shape, mesh):
+    """A mesh's shading data (its points' .col) into MOSS_COLOR_SET, or that
+    set removed when it has none (Arnold reads it: aiExportColors)."""
+    col = getattr(mesh[0], "col", None)
+    fn = om.MFnMesh(get_dag_path(shape))
+    have = fn.getColorSetNames()
+    if not col or len(col) != len(mesh[0]):
+        if MOSS_COLOR_SET in have:
+            fn.deleteColorSet(MOSS_COLOR_SET)
+        return False
+    if MOSS_COLOR_SET not in have:
+        fn.createColorSet(MOSS_COLOR_SET, False, rep=om.MFnMesh.kRGB)
+    fn.setCurrentColorSetName(MOSS_COLOR_SET)
+    fn.setColors(om.MColorArray([om.MColor((c[0], c[1], c[2], 1.0)) for c in col]), MOSS_COLOR_SET,
+                 rep=om.MFnMesh.kRGB)
+    fn.assignColors(mesh[2], MOSS_COLOR_SET)
+    if cmds.attributeQuery("aiExportColors", node=shape, exists=True) and not cmds.getAttr(shape + ".aiExportColors"):
+        cmds.setAttr(shape + ".aiExportColors", True)
+    return True
+
+
+def _mi_read_colors(fn, pts):
+    """The points again as _MiPts with their MOSS_COLOR_SET colours (by
+    vertex), or as they are when the mesh has none."""
+    if MOSS_COLOR_SET not in fn.getColorSetNames():
+        return pts
+    try:
+        cs = fn.getColors(MOSS_COLOR_SET)
+    except RuntimeError:
+        return pts
+    out = _MiPts(pts)
+    if len(cs) == len(pts):
+        out.col = [(c.r, c.g, c.b) for c in cs]
+    return out
 
 
 # ---------------------------------------------------------- moss rest surface
@@ -30775,7 +30833,8 @@ def _moss_spots(surf, sampler, s, R):
     coverage, slope, crevices and the other weights only re-score them."""
     seed = int(s["seed"])
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
-    key = (_mi_surf_keys(surf), seed, round(R, 9), round(float(s["patch_size"]), 6), detail,
+    rg = clamp(float(s.get("ragged", 0.0)), 0.0, 1.0)
+    key = (_mi_surf_keys(surf), seed, round(R, 9), (round(float(s["patch_size"]), 6), round(rg, 4)), detail,
            sampler.key)
     hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
@@ -30787,7 +30846,14 @@ def _moss_spots(surf, sampler, s, R):
     if base is None:
         base = _MI_MOSS_CACHE[bkey] = _moss_spots_base(surf, sampler, seed, R, detail)
     patch = max(1e-3, float(s["patch_size"]) / scene_m_per_unit())
-    spots = [(p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r) for p, nrm, up, occ, edge, r in base]
+    if rg > 0.0:  # Ragged outline: the patch noise looked up through a warp, so patches aren't soft blobs
+        wk, half = rg * 0.45 * patch, 0.5 * patch
+        spots = [(p, nrm, up, occ, edge, _mi_noise((p[0] + wk * _mi_noise(p, half, seed + 19),
+                                                    p[1] + wk * _mi_noise(p, half, seed + 20),
+                                                    p[2] + wk * _mi_noise(p, half, seed + 21)), patch, seed), r)
+                 for p, nrm, up, occ, edge, r in base]
+    else:
+        spots = [(p, nrm, up, occ, edge, _mi_noise(p, patch, seed), r) for p, nrm, up, occ, edge, r in base]
     _MI_MOSS_CACHE[key] = spots
     while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
         _MI_MOSS_CACHE.popitem(last=False)
@@ -30880,8 +30946,9 @@ def _moss_field(surf, sampler, s, R):
     detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
     RA = _moss_reach(R)
     spots = _moss_spots(surf, sampler, s, RA)
+    rg = clamp(float(s.get("ragged", 0.0)), 0.0, 1.0)
     key = ("field", _mi_surf_keys(surf), seed, round(R, 9),
-           round(float(s["patch_size"]), 6), detail, sampler.key)
+           (round(float(s["patch_size"]), 6), round(rg, 4)), detail, sampler.key)
     hit = _mi_cache_get(_MI_MOSS_CACHE, key)
     if hit is not None:
         return spots, hit
@@ -30897,7 +30964,13 @@ def _moss_field(surf, sampler, s, R):
     cands.base = base
     for p, tn, r, near, memo, node, face in base:
         a, b = (p[0] + p[1] * 0.71) / patch, (p[2] - p[1] * 0.53) / patch  # 2D is enough for a ragged edge
-        fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
+        if rg > 0.0:  # Ragged outline: warped (bays and spits, not a wobbly circle), plus a finer fray
+            a2 = a + rg * 0.22 * _th_noise(a * 1.7 + 5.1, b * 1.7 - 2.7, seed + 15)
+            b2 = b + rg * 0.22 * _th_noise(a * 1.7 - 8.3, b * 1.7 + 4.4, seed + 16)
+            fine = 0.6 * _th_noise(a2 * 4.5, b2 * 4.5, seed + 11) + 0.4 * _th_noise(a2 * 14.0, b2 * 14.0, seed + 13) \
+                + rg * 0.35 * _th_noise(a * 38.0, b * 38.0, seed + 17)
+        else:
+            fine = 0.6 * _th_noise(a * 4.5, b * 4.5, seed + 11) + 0.4 * _th_noise(a * 14.0, b * 14.0, seed + 13)
         cands.append((p, tn, r, near, fine, memo, node, face))  # memo: is it covered (worked out when first kept)
     _MI_MOSS_CACHE[key] = cands
     while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
@@ -31148,14 +31221,20 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     m = scene_m_per_unit()
     R = max(1e-4, float(s["clump_size"]) / m)
     thr = 1.0 - clamp(float(s["coverage"]), 0.0, 1.0)
-    rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0)
+    rag = 0.3 * clamp(float(s["mess"]), 0.0, 2.0) * (1.0 + 0.8 * clamp(float(s.get("ragged", 0.0)), 0.0, 1.0))
     spots, cands = _moss_field(surf, sampler, s, R)
     fade = _mi_fade(surf.nodes, s)
     paint = s.get("_paint")  # the layer's influence paint (_MiPaint), or None
     if fade is not None and not s.get("_up_only"):  # moss up a column's sides (the fade decides how high)
-        scores = [moss_score(sp, dict(s, slope=max(float(s["slope"]), 90.0))) for sp in spots]
+        s2 = dict(s, slope=max(float(s["slope"]), 90.0))
+        scores = [moss_score(sp, s2) for sp in spots]
     else:
         scores = [moss_score(sp, s) for sp in spots]
+    ew = clamp(float(s.get("exposure", 0.0)), 0.0, 1.0)
+    if ew > 0.0:  # Bare ridges: the crowns and ridges of the objects (seen at their own scale) dry out
+        ex = _moss_exposure(surf, sampler, s, R, spots)
+        scores = [v - ew * 0.9 * e * (0.7 + 0.3 * sp[5]) for v, e, sp in zip(scores, ex, spots)]
+    spill = _moss_spill(surf, s, cands)  # Floor spill: per candidate on a floor, its distance to the rest
     creases = clamp(float(s.get("creases", 0.0)), 0.0, 2.0)
     gat = _mi_gather(surf, sampler, s, R, cands)[0] if creases > 0.0 else None
     spread = max(1e-4, float(s["spread"]) / m)
@@ -31191,12 +31270,136 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
             if f < 1.0:
                 g = 1.0 - f  # coverage x f, and the best spots too near the top: patches thinning out
                 margin = margin - g * (1.0 - thr) - 0.6 * g * g * g if f > 0.0 else -1.0
+        if spill is not None and idx in spill[0]:  # on a floor: only near the foot of what stands on it
+            k = 1.0 - spill[0][idx] / spill[1]
+            margin = margin + 0.3 * k - 0.6 * (1.0 - k) * (1.0 - k) if k > 0.0 else -1.0
         if paint is not None:  # influence paint: more coverage where it's painted in, less where out
             k = paint.at(p)
             margin = -1.0 if thr >= 1.0 and k <= 0.0 else _sc_paint_margin(margin, k, 1.0 - thr)  # (Coverage 0:
             # only where it's painted in)
         rows.append((margin, occ / tw, edge / tw))
     return spots, cands, rows
+
+
+def _moss_exposure(surf, sampler, s, R, spots):
+    """Per spot, how exposed it is (0..1): more convex than its object is on
+    the whole (the surface curving away round it over ~30 cm: a boulder's
+    ridges, a block's edges; rounded tops count extra: crowns), less where
+    it's sheltered. Against the object's own average, so a smooth pebble
+    isn't all crown. Cached with the spots' places (Patch size and the
+    weights don't change it)."""
+    m = scene_m_per_unit()
+    RA = _moss_reach(R)
+    detail = s["detail"] if s["detail"] in MOSS_RAYS else "Normal"
+    key = ("expo", _mi_surf_keys(surf), int(s["seed"]), round(RA, 9), detail, sampler.key)
+    hit = _mi_cache_get(_MI_MOSS_CACHE, key)
+    if hit is not None:
+        return hit
+    RX = max(3.0 * RA, 0.3 / m)
+    grid = {}
+    for j, sp in enumerate(spots):
+        q = sp[0]
+        grid.setdefault((int(math.floor(q[0] / RX)), int(math.floor(q[1] / RX)), int(math.floor(q[2] / RX))),
+                        []).append(j)
+    conv = []
+    for j, sp in enumerate(spots):
+        _poll()
+        p, n = sp[0], sp[1]
+        kx, ky, kz = int(math.floor(p[0] / RX)), int(math.floor(p[1] / RX)), int(math.floor(p[2] / RX))
+        cs = ws = 0.0
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for k in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                        q, qn = spots[k][0], spots[k][1]
+                        ex, ey, ez = q[0] - p[0], q[1] - p[1], q[2] - p[2]
+                        d = math.sqrt(ex * ex + ey * ey + ez * ez)
+                        if d < 1e-9 or d > RX:
+                            continue
+                        w = 1.0 - d / RX
+                        # (n_q - n_p) . (q - p) / |q - p|: > 0 where the surface curves away (convex)
+                        cs += w * ((qn[0] - n[0]) * ex + (qn[1] - n[1]) * ey + (qn[2] - n[2]) * ez) / d
+                        ws += w
+        c = cs / ws if ws > 0.0 else 0.0  # a sphere gives ~RX / (2 radius), a flat face 0, an edge more
+        conv.append(c + 0.3 * max(0.0, n[1]) * min(1.0, max(0.0, c) / 0.3))  # rounded tops dry first
+    boxes = []
+    for node in surf.nodes:  # each spot's object (the smallest box it's in), for that object's average
+        try:
+            bb = cmds.exactWorldBoundingBox(node)
+        except Exception:
+            continue
+        boxes.append(((bb[3] - bb[0]) * (bb[4] - bb[1]) * (bb[5] - bb[2]), [v - 1e-3 / m for v in bb[:3]],
+                      [v + 1e-3 / m for v in bb[3:]]))
+    boxes.sort(key=lambda b: b[0])
+    owner, tot = [], {}
+    for sp, c in zip(spots, conv):
+        q, k = sp[0], -1
+        for i, (_, lo, hi) in enumerate(boxes):
+            if lo[0] <= q[0] <= hi[0] and lo[1] <= q[1] <= hi[1] and lo[2] <= q[2] <= hi[2]:
+                k = i
+                break
+        owner.append(k)
+        t = tot.setdefault(k, [0.0, 0])
+        t[0] += c
+        t[1] += 1
+    out = []
+    for sp, c, k in zip(spots, conv, owner):
+        e = clamp((c - tot[k][0] / tot[k][1] - 0.03) / 0.35, 0.0, 1.0)
+        e = e * e * (3.0 - 2.0 * e)
+        out.append(e * (1.0 - clamp(sp[3] * 1.7, 0.0, 1.0)))
+    _MI_MOSS_CACHE[key] = out
+    while len(_MI_MOSS_CACHE) > MOSS_CACHE_KEEP:
+        _MI_MOSS_CACHE.popitem(last=False)
+    return out
+
+
+def _moss_floor_nodes(nodes):
+    """The surfaces that are floors: flat for their size (a box under a
+    sixth as tall as it is wide both ways)."""
+    out = set()
+    for node in nodes:
+        try:
+            bb = cmds.exactWorldBoundingBox(node)
+        except Exception:
+            continue
+        if bb[4] - bb[1] < 0.16 * min(bb[3] - bb[0], bb[5] - bb[2]):
+            out.add(node)
+    return out
+
+
+def _moss_spill(surf, s, cands):
+    """Floor spill (metres, 0 = off): ({candidate index on a floor: distance
+    to the nearest candidate on anything else}, spill) when the surfaces
+    hold floors and other things, else None. Moss on a floor then only runs
+    out from the foot of what stands on it, thinning out by Spill."""
+    spill = float(s.get("spill", 0.0)) / scene_m_per_unit()
+    if spill <= 0.0:
+        return None
+    floors = _moss_floor_nodes(surf.nodes)
+    if not floors or len(floors) >= len(surf.nodes):
+        return None
+    grid, on = {}, []
+    for i, c in enumerate(cands):
+        p = c[0]
+        if c[6] in floors:
+            on.append(i)
+        else:
+            grid.setdefault((int(math.floor(p[0] / spill)), int(math.floor(p[1] / spill)),
+                             int(math.floor(p[2] / spill))), []).append(p)
+    dist = {}
+    for i in on:
+        p = cands[i][0]
+        kx, ky, kz = int(math.floor(p[0] / spill)), int(math.floor(p[1] / spill)), int(math.floor(p[2] / spill))
+        best = spill
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q in grid.get((kx + dx, ky + dy, kz + dz), ()):
+                        d = math.sqrt((q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 + (q[2] - p[2]) ** 2)
+                        if d < best:
+                            best = d
+        dist[i] = best
+    return dist, spill
 
 
 def moss_clumps(surf, sampler, s, seeds=None, faces=None):
@@ -31407,6 +31610,8 @@ class _MossBed(object):
         k = max(1, int(math.ceil(tile / (cell_f * R))))
         self.seed = int(s["seed"])
         self.mess = clamp(float(s["mess"]), 0.0, 2.0)
+        self.rn = 0.12 * self.mess * (1.0 + clamp(float(s.get("ragged", 0.0)), 0.0, 1.0))  # the edge's fray
+        self.feather = clamp(float(s.get("feather", 0.0)), 0.0, 1.0)  # Soft edges: thin out over a wider rim
         self.lump = clamp(float(s.get("lumps", 0.6)), 0.0, 1.0) if lumps_on else 0.0
         self.var = clamp(float(s["size_var"]), 0.0, 1.0)
         self.rk = rk = 1.3 * R
@@ -31449,7 +31654,7 @@ class _MossBed(object):
         self.flat = None  # each bucket's candidates as (index, point, normal), made when a block first needs them
         # a grid point's margin is a weighted mean of the candidates round it plus the ragged-edge noise, so a
         # block with no candidate above this can't show any moss: skipped without looking at its points
-        lo = -0.04 - 0.12 * self.mess
+        lo = -0.04 - self.rn
         mgs = self.mg
         self.hot = set(key for key, v in buckets.items() if any(mgs[i] > lo for i in v))
         # the bed's own cells: one Tile size tile = k cells (grown if the patch would be too big)
@@ -31650,16 +31855,19 @@ class _MossBed(object):
         # product in turn), in C
         tw = sum(ws, 0.03)
         mg = sum(map(_MUL, ws, map(self.mg.__getitem__, idx)), -0.015) / tw
-        if mg > -0.03 - 0.12 * self.mess:
+        if mg > -0.03 - self.rn:
             if rec[9] is None:
                 s = 1.0 / (0.35 * self.R)
                 rec[9] = _moss_noise3(x * s, y * s, z * s, self.seed + 7)
-            mg += 0.12 * self.mess * rec[9]  # a ragged edge
-        c = clamp(mg / 0.3, 0.0, 1.0)
+            mg += self.rn * rec[9]  # a ragged edge
+        fe = self.feather
+        c = clamp(mg / (0.3 * (1.0 + 0.5 * fe)), 0.0, 1.0)
         c = c * c * (3.0 - 2.0 * c)
-        pr = clamp((mg + 0.03) / 0.3, 0.0, 1.0)
+        pr = clamp((mg + 0.03) / (0.3 * (1.0 + fe)), 0.0, 1.0)
         if pr > 0.0:
-            pr = math.sqrt(pr * pr * (3.0 - 2.0 * pr))  # sloping up from the edge, rounding over: a rolled rim
+            pr = pr * pr * (3.0 - 2.0 * pr)
+            # sloping up from the edge, rounding over: a rolled rim; Soft edges: thin and wispy far into it
+            pr = math.sqrt(pr) if not fe else (1.0 - 0.6 * fe) * math.sqrt(pr) + 0.6 * fe * pr ** 1.2
             so = sum(map(_MUL, ws, map(self.oc.__getitem__, idx)), 0.0)
             h = self.H * pr * (0.5 + 0.5 * c) * (0.75 + 0.6 * clamp(so / tw * 1.7, 0.0, 1.0)) * taper
         else:
@@ -32116,11 +32324,14 @@ class _MossBed(object):
                 out.append((vids, uids, fkey))
 
     def mesh(self):
-        """The bed as (points, counts, connects, us, vs, uv ids), unused points dropped."""
-        remap, pts, counts, conn, uvi = {}, [], [], [], []
+        """The bed as (points, counts, connects, us, vs, uv ids), unused
+        points dropped; the points carry shading data (_MiPts .col)."""
+        remap, pts, counts, conn, uvi = {}, _MiPts(), [], [], []
         uremap, us, vs = {}, [], []
         rget, uget = remap.get, uremap.get
         P, U, V = self.pts, self.us, self.vs
+        HF, CORE, col = self.hf, self.core, []
+        ih, pz, sd = 1.0 / self.H, 6.0 * self.R, self.seed + 71
         for vids, uvs, _ in self.faces_out:
             counts.append(len(vids))
             got = list(map(rget, vids))
@@ -32131,7 +32342,10 @@ class _MossBed(object):
                         r = rget(vi)
                         if r is None:
                             r = remap[vi] = len(pts)
-                            pts.append(P[vi])
+                            q = P[vi]
+                            pts.append(q)
+                            col.append((0.5 + 0.5 * _th_noise((q[0] + q[1] * 0.71) / pz, (q[2] - q[1] * 0.53) / pz, sd),
+                                        max(0.0, min(1.0, HF[vi] * ih)), CORE[vi]))
                         got[n] = r
             conn.extend(got)
             got = list(map(uget, uvs))
@@ -32146,6 +32360,7 @@ class _MossBed(object):
                             vs.append(V[ui])
                         got[n] = r
             uvi.extend(got)
+        pts.col = col
         return pts, counts, conn, us, vs, uvi
 
 
@@ -32187,13 +32402,18 @@ class _MossDetail(object):
         self.seed = int(s["seed"])
         self.stacks = max(1, int(s["stacks"]))
         self.columns = s["stack_layout"] == "Atlas columns"
-        self.S, self.C = _mi_mesh(), _mi_mesh()
+        self.S, self.C = (_MiPts(), [], [], [], [], []), (_MiPts(), [], [], [], [], [])  # _mi_mesh, points with .col
+        self.Scol, self.Ccol = [], []  # shading data per point: (the item's random value, 0, core)
         self.capped = False
         self._tpl = {}  # each ribbon / star shape's UVs and corners, the same for every one of them
         # shoots as instances (Scatter: s["_instances"]): a few shoot shapes at unit length, each shoot their
         # place, turn and length (an instancer); hanging strands and capsules stay meshes
         self.inst = bool(s.get("_instances")) and self.kind in MOSS_INST_KINDS
         self.I = ([], [], [], [])  # root points, (x, y, z) axes, lengths, shape index
+        # Leafy: small cupped leaves all up the stem, half again as many shoots (laid out like instances
+        # either way; Shoots Mesh makes them real at the end, mesh_leafy: the geometry Bake would make)
+        self.leafy = self.kind in ("shoot", "leafy") and s.get("shoot_form") == MOSS_SHOOT_FORMS[1]
+        self.feather = clamp(float(s.get("feather", 0.0)), 0.0, 1.0)  # fewer shoots towards a patch's edge
 
     def _uv(self, u, v, stack):
         return _mi_stack_uv(u, v, stack, self.stacks, self.columns)
@@ -32204,7 +32424,7 @@ class _MossDetail(object):
             return self
         L = self.L
         per = {"tuft": 11, "shoot": 15, "leafy": 32}.get(self.kind, 0)
-        dens = self.rate * self.amount / (L * L)
+        dens = self.rate * self.amount / (L * L) * (1.5 if self.leafy else 1.0)
         hang = (0.12 + 0.25 * self.droop) * self.amount / (L * L) if self.hsegs and self.droop > 0.0 else 0.0
         caps = self.caps * (0.6 if self.kind != "tuft" else 0.15) / (L * L) if self.csides else 0.0
         hverts = 2 * (self.hsegs + 1)
@@ -32248,6 +32468,9 @@ class _MossDetail(object):
             _poll()  # a long build: the Working window, Esc / Cancel
             side = fn[1] < 0.35
             lam_s = ar * dens * keep_i
+            if self.feather:  # Soft edges: the shoots thin out towards the rim, not a cut lawn
+                cv = 1.0 - (CORE[a] + CORE[b] + CORE[c]) / 3.0
+                lam_s *= 1.0 - self.feather * 0.8 * cv * cv
             lam_h = 2.0 * ar * hang * keep_s if side else 0.0  # about half are gated out (curtains)
             lam_c = ar * caps * keep_c
             r0 = _rand4(seed, key, 0, 43)
@@ -32287,6 +32510,51 @@ class _MossDetail(object):
                         cl = _mi_noise(pos, 3.0 * bed.R, seed + 31)
                         if r[11] < clamp((cl + 0.7 * self.caps - 0.2) / 0.25, 0.0, 1.0):
                             self._capsule(pos, nrm, r)
+                    self._tag(r[9], core)
+        return self
+
+    def _tag(self, v, core):
+        """The points the last item made get its shading data."""
+        for pts, col in ((self.S[0], self.Scol), (self.C[0], self.Ccol)):
+            if len(col) < len(pts):
+                col.extend([(v, 0.0, core)] * (len(pts) - len(col)))
+
+    def mesh_leafy(self):
+        """Shoots Mesh with Leafy shoots: the shoots laid out as instances
+        made into real geometry in the strands mesh (each with its own
+        random shading value), thinned past MI_MAX_VERTS."""
+        if self.inst or not self.leafy or not self.I[0]:
+            return self
+        mesh, split = self.shapes()
+        pts, axes, lens, idx = self.I
+        S, col = self.S, self.Scol
+        room = MI_MAX_VERTS - len(S[0])
+        need = sum(split[i][0] for i in idx)
+        step = 1 if need <= room else int(math.ceil(need / float(max(1, room))))
+        if step > 1:
+            self.capped = True
+        keep = range(0, len(pts), step)
+        got = moss_instances_mesh(tuple(mesh) + (split, {"pos": [pts[i] for i in keep], "axes": [axes[i] for i in keep],
+                                                         "scale": [lens[i] for i in keep],
+                                                         "index": [idx[i] for i in keep]}))
+        self._tag(0.0, 0.0)
+        b, bu = len(S[0]), len(S[3])
+        S[0].extend(got[0])
+        S[1].extend(got[1])
+        S[2].extend([c + b for c in got[2]])
+        S[3].extend(got[3])
+        S[4].extend(got[4])
+        S[5].extend([c + bu for c in got[5]])
+        for i in keep:
+            col.extend([(_rand4(self.seed, i, 63, 7)[0], 0.0, 1.0)] * split[idx[i]][0])
+        self.I = ([], [], [], [])
+        return self
+
+    def colored(self):
+        """The points' shading data onto them (call once, at the end)."""
+        for pts, col in ((self.S[0], self.Scol), (self.C[0], self.Ccol)):
+            if col and len(col) == len(pts) and isinstance(pts, _MiPts):
+                pts.col = col
         return self
 
     def _full(self, mesh, n):
@@ -32384,7 +32652,7 @@ class _MossDetail(object):
         mesh = self.S
         d = self._lean(nrm, r, 0.18 + 0.12 * self.mess)
         rot = r[5] * 6.2832
-        if self.inst:
+        if self.inst or self.leafy:
             self._instance(pos, nrm, d, rot, L, stack, r)
             return
         if self.kind == "tuft":
@@ -32465,6 +32733,10 @@ class _MossDetail(object):
                         f = k / float(segs)
                         spine.append((bx * f * f, f, bz * f * f))
                     top = _rl_norm(_rl_sub(spine[-1], spine[-2]), Y)
+                    if self.leafy:
+                        self._leafy_shape(mesh, spine, bx, bz, stack, shape)
+                        split.append((len(mesh[0]) - at[0], len(mesh[1]) - at[1], len(mesh[2]) - at[2]))
+                        continue
                     self._ribbon(mesh, spine, [0.05 * (1.0 - 0.5 * k / float(segs)) for k in range(segs + 1)], X,
                                  0.0, 0.1, stack)
                     if self.kind == "leafy":
@@ -32474,6 +32746,101 @@ class _MossDetail(object):
                         self._star(mesh, spine[-1], top, 4, 0.42, 0.6, 0.0, stack)
                 split.append((len(mesh[0]) - at[0], len(mesh[1]) - at[1], len(mesh[2]) - at[2]))
         return mesh, split
+
+    def _leafy_shape(self, mesh, spine, bx, bz, stack, shape):
+        """A unit leafy shoot (Shoots shape Leafy): a thin stem with seven
+        pairs of small cupped leaves spiralling up it, spreading low down,
+        closing to a bud at the tip (leaves on the star's UVs, base at its
+        middle)."""
+        pts, counts, conn, us, vs, uvi = mesh
+        segs = len(spine) - 1
+        self._ribbon(mesh, spine, [0.035 * (1.0 - 0.5 * k / float(segs)) for k in range(segs + 1)], (1.0, 0.0, 0.0),
+                     0.0, 0.1, stack)
+        uv = [self._uv(u, v, stack) for u, v in ((0.64, 0.625), (0.80, 0.69), (0.99, 0.625), (0.80, 0.56))]
+        nodes = 7
+        for k in range(nodes):
+            f = 0.22 + 0.76 * k / float(nodes - 1)
+            base = (bx * f * f, f, bz * f * f)
+            ln = 0.27 * (1.0 - 0.5 * f)
+            el = math.radians(64.0 - 46.0 * f)  # from the stem: open low down, a closed bud at the tip
+            for j in range(2):
+                th = k * 2.39996 + j * math.pi + shape * 0.37
+                rx, rz = math.cos(th), math.sin(th)
+                d = (math.sin(el) * rx, math.cos(el), math.sin(el) * rz)
+                side = (-rz, 0.0, rx)  # round the stem
+                up = _rl_norm(_rl_sub((0.0, 1.0, 0.0), _rl_mul(d, d[1])), (0.0, 1.0, 0.0))  # its inner face
+                w = 0.17 * ln
+                cup = 0.3 * w
+                b = len(pts)
+                pts.append(base)
+                for sg in (1.0, None, -1.0):
+                    if sg is None:
+                        pts.append(_rl_add(base, _rl_mul(d, ln)))
+                    else:
+                        pts.append((base[0] + d[0] * 0.45 * ln + side[0] * w * sg + up[0] * cup,
+                                    base[1] + d[1] * 0.45 * ln + side[1] * w * sg + up[1] * cup,
+                                    base[2] + d[2] * 0.45 * ln + side[2] * w * sg + up[2] * cup))
+                u0 = len(us)
+                for u, v in uv:
+                    us.append(u)
+                    vs.append(v)
+                counts.extend((3, 3))
+                conn.extend((b, b + 1, b + 2, b, b + 2, b + 3))
+                uvi.extend((u0, u0 + 1, u0 + 2, u0, u0 + 2, u0 + 3))
+
+    def strays(self, surf, bm, s):
+        """Stray tufts (Strays): little tufts of shoots on the bare surface
+        just outside the patches: out from the bed's open edges (bm, its
+        mesh), thinning out with distance."""
+        st = clamp(float(s.get("strays", 0.0)), 0.0, 1.0)
+        if st <= 0.0 or not self.kind or self.amount <= 0.0 or not bm[1]:  # (Strands 0: no shoots, no strays)
+            return self
+        pts, counts, conn = bm[0], bm[1], bm[2]
+        R, seed = self.bed.R, self.seed
+        edges, k = {}, 0
+        for f, n in enumerate(counts):
+            for a in range(n):
+                i0, i1 = conn[k + a], conn[k + (a + 1) % n]
+                e = (i0, i1) if i0 < i1 else (i1, i0)
+                edges[e] = None if e in edges else f
+            k += n
+        starts, k = [], 0
+        for n in counts:
+            starts.append(k)
+            k += n
+        for (i0, i1), f in edges.items():
+            if f is None:
+                continue
+            r = _rand12(seed, i0 * 7919 + i1, 61, 7)
+            if r[0] >= st * 0.35:
+                continue
+            _poll()
+            p0, p1 = pts[i0], pts[i1]
+            n = counts[f]
+            ids = conn[starts[f]:starts[f] + n]
+            c = (sum(pts[q][0] for q in ids) / n, sum(pts[q][1] for q in ids) / n, sum(pts[q][2] for q in ids) / n)
+            m = _rl_mul(_rl_add(p0, p1), 0.5)
+            e = _rl_norm(_rl_sub(p1, p0))
+            o = _rl_sub(m, c)
+            o = _rl_norm(_rl_sub(o, _rl_mul(e, o[0] * e[0] + o[1] * e[1] + o[2] * e[2])))  # out, across the edge
+            d = R * (0.35 + 1.6 * r[1] * r[1])
+            t = 1.0 - d / (2.0 * R)  # 1 at the edge, ~0.2 out at the furthest
+            hub = surf.closest(_rl_add(m, _rl_mul(o, d)))
+            if hub is None:
+                continue
+            t1, t2 = _mi_frame(hub[2], r[2] * 6.2832)
+            for q in range(2 + int(r[3] * 10.0 * t)):  # a tuft: a couple of shoots to a dozen
+                rq = _rand12(seed, (i0 * 7919 + i1) * 16 + q, 62, 7)
+                rr, a = 0.3 * R * math.sqrt(rq[0]), rq[1] * 6.2832
+                ca, sa = rr * math.cos(a), rr * math.sin(a)
+                hp = hub[1]
+                hit = surf.closest((hp[0] + t1[0] * ca + t2[0] * sa, hp[1] + t1[1] * ca + t2[1] * sa,
+                                    hp[2] + t1[2] * ca + t2[2] * sa))
+                if hit is None or hit[2][1] < -0.35:
+                    continue
+                self._shoot(hit[1], hit[2], 0.15 + 0.35 * t, rq)
+                self._tag(rq[9], 0.15 + 0.35 * t)
+        return self
 
     def _hang(self, pos, nrm, core, r, clump=1.0):
         """A pendant strand: out of the moss, then down under its own weight,
@@ -32664,10 +33031,12 @@ class _MossClumps(object):
         self.hvar = clamp(float(s.get("clump_hvar", 0.0)), 0.0, 1.0)
         self.mounds = clamp(float(s.get("clump_mounds", 0.0)), 0.0, 1.0)
         self.ghvar = clamp(float(s.get("clump_ghvar", 0.0)), 0.0, 1.0)
+        self.merge = clamp(float(s.get("clump_merge", 0.0)), 0.0, 1.0)  # Merge: low, wide, running together
         self.cands, self.rows = cands, rows
         self.capped = False
         self.count = 0
         self.pts, self.dirs, self.hf, self.core = [], [], [], []
+        self.cr = []  # each point's cushion's random value (shading data)
         self.faces_out = []  # (vertex ids, uv ids, stable key): one UV per point here
         self.us, self.vs = [], []
 
@@ -32706,6 +33075,7 @@ class _MossClumps(object):
                 continue  # the gaps between groups: mostly bare, a stray cushion or two
             rad = R * (0.45 + 0.75 * pr) * (1.0 + self.var * (r[0] - 0.5))
             rad *= 1.0 + w * (0.3 * gg - 0.15)  # bigger in a group's middle, smaller strays
+            rad *= 1.0 + 0.3 * self.merge
             hr = _rand12(self.seed, i, 7, 97)  # heights: own randoms, so the layout above never moves
             mound = hr[1] < 0.4 * self.mounds
             if mound:
@@ -32716,7 +33086,7 @@ class _MossClumps(object):
                     for q in room.get((key[0] + dx, key[1] + dy, key[2] + dz), ())]
             # in a group cushions crowd and run into each other (Packing), in
             # the gaps they keep further apart; Grouping 0 = no overlap, even
-            lim = 1.0 - w * gg * (0.15 + 0.6 * self.pack) + w * (1.0 - gg) * 0.4
+            lim = (1.0 - w * gg * (0.15 + 0.6 * self.pack) + w * (1.0 - gg) * 0.4) * (1.0 - 0.4 * self.merge)
             if any(_rl_len(_rl_sub(p, q)) < lim * (rad + qr) for q, qr in near):
                 continue
             o = _moss_obstacle(self.surf, p, n, c[5], R)
@@ -32725,12 +33095,12 @@ class _MossClumps(object):
             if len(self.pts) + per > MI_MAX_VERTS:
                 self.capped = True
                 break
-            h = self.H * (0.55 + 0.45 * pr) * (0.8 + 0.5 * row[1]) * (0.8 + 0.4 * r[1])
+            h = self.H * (0.55 + 0.45 * pr) * (0.8 + 0.5 * row[1]) * (0.8 + 0.4 * r[1]) * (1.0 - 0.45 * self.merge)
             # Height variation (per cushion), Mounds (a few rise tall), Group
             # heights (per group, and taller towards a group's middle)
             h *= max(0.2, 1.0 + self.hvar * 1.5 * (hr[0] - 0.5))
             if mound:
-                h *= 1.8 + 1.7 * hr[2]
+                h *= 1.0 + (0.8 + 1.7 * hr[2]) * (1.0 - 0.6 * self.merge)
             if self.ghvar > 0.0:
                 h *= max(0.15, 1.0 + self.ghvar * (1.1 * hmap.get(i, 0.0) + 0.6 * w * (gg - 0.5)))
             if o is not None:
@@ -32791,6 +33161,7 @@ class _MossClumps(object):
                 dh *= 0.5 + 0.5 * fit / dr
                 dr = fit
             self._dome(i * 4 + d, q, n, dr, dh, pr, rr)
+            self.cr.extend([rr[3]] * (len(self.pts) - len(self.cr)))
         return True
 
     def _spoke(self, c, n, d, dists):
@@ -32881,6 +33252,8 @@ class _MossClumps(object):
                 x, y = f * rad * rj * ca, f * rad * rj * sa
                 if ri < rings:
                     z = h * math.sqrt(max(0.0, 1.0 - f ** 2.4))
+                    if self.merge:  # a low bell: the flank slopes away into the next cushion
+                        z = (1.0 - self.merge) * z + self.merge * h * max(0.0, 1.0 - f * f) ** 1.5
                     z *= 1.0 + 0.35 * lump * _th_noise(sx + x / rad * 2.5, sy + y / rad * 2.5, self.seed + 47)
                 else:
                     z = -0.08 * min(h, self.H)  # the rim tucks under (a tall mound's no deeper)
@@ -32907,16 +33280,20 @@ class _MossClumps(object):
                 self.faces_out.append((quad, quad, fkey + ri * segs + j))
 
     def mesh(self):
-        """The cushions as (points, counts, connects, us, vs, uv ids)."""
+        """The cushions as (points, counts, connects, us, vs, uv ids), the
+        points carrying shading data (_MiPts .col)."""
         counts, conn = [], []
         for vids, _, _ in self.faces_out:
             counts.append(len(vids))
             conn.extend(vids)
-        return list(self.pts), counts, conn, list(self.us), list(self.vs), list(conn)
+        pts = _MiPts(self.pts)
+        cr = self.cr + [0.5] * (len(self.pts) - len(self.cr))
+        pts.col = [(c, max(0.0, min(1.0, h)), k) for c, h, k in zip(cr, self.hf, self.core)]
+        return pts, counts, conn, list(self.us), list(self.vs), list(conn)
 
 
 MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "stack_layout", "udim",
-                    "shoot_instances")
+                    "shoot_instances", "strays", "shoot_form")
 MOSS_INST_KINDS = ("tuft", "shoot", "leafy")  # what can grow as instances (Scatter's Shoots: Instances)
 MOSS_INST_TURNS = 8  # instanced shoot shapes per stack: the bend turned round the stem in eighths
 MOSS_MAX_INSTANCES = 1500000  # instanced shoots per layer (meshes stop at MI_MAX_VERTS)
@@ -32964,9 +33341,15 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=Fal
                 _MI_MOSS_BUILT.popitem(last=False)
     bed, count = got
     det = _MossDetail(bed, dict(s, _instances=bool(instances)))
+    bm = None
     if not draft:
         det.build()
-    return {"moss": bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C), "clumps": count,
+        if float(s.get("strays", 0.0)) > 0.0 and det.kind:
+            bm = bed.mesh()
+            det.strays(surf, bm, s)
+        det.mesh_leafy()
+        det.colored()
+    return {"moss": bm or bed.mesh(), "strands": tuple(det.S), "capsules": tuple(det.C), "clumps": count,
             "shoots": moss_shoot_instances(det), "capped": bed.capped or det.capped}
 
 
@@ -33668,6 +34051,31 @@ class _MiDropStack(object):
                     if cells.get(key, MI_DROP_VOID) < y:
                         cells[key] = y
 
+    def lay_mesh(self, mesh, lift=0.0):
+        """Adds a mesh (a moss bed) lifted by lift: its points, face middles
+        and edge middles, so leaves rest on it (in among its shoots)."""
+        c, cells = self.c, self.cells
+        floor = math.floor
+        pts, counts, conn = mesh[0], mesh[1], mesh[2]
+
+        def put(x, y, z):
+            key = (int(floor(x / c)), int(floor(z / c)))
+            if cells.get(key, MI_DROP_VOID) < y:
+                cells[key] = y
+        for p in pts:
+            put(p[0], p[1] + lift, p[2])
+        k = 0
+        for n in counts:
+            ids = conn[k:k + n]
+            k += n
+            cx = sum(pts[i][0] for i in ids) / n
+            cy = sum(pts[i][1] for i in ids) / n
+            cz = sum(pts[i][2] for i in ids) / n
+            put(cx, cy + lift, cz)
+            for a in range(n):
+                p, q = pts[ids[a]], pts[ids[(a + 1) % n]]
+                put(0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]) + lift, 0.5 * (p[2] + q[2]))
+
     def top(self, x, z, ylim):
         """The highest leaf laid round (x, z) no higher than ylim (one far
         overhead doesn't count); MI_DROP_VOID: none."""
@@ -34016,6 +34424,8 @@ class _DebrisBuild(object):
             f = self.fields[(cell, band)] = _MiDropField(self.surf, cell, band)
             if self.stack is None:
                 self.stack = _MiDropStack(0.01 / self.m)
+                for mesh, lift in self.s.get("_rest_on") or ():  # Rest on moss: the moss bed is ground too
+                    self.stack.lay_mesh(mesh, lift)
             f.stack = self.stack
         return f
 
@@ -34798,16 +35208,19 @@ class _DebrisBuild(object):
                 uvi.extend(quad)
 
 
-def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, paint=None):
+def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, paint=None, rest_on=None):
     """Grow debris on meshes: {"grass": dry grass bunches, "litter": dead
     leaves (scattered and in piles), "tufts": tiny moss cushions, "jungle" /
     "jungle_dry": big leaves, green / dried, "specks" / "dirt": tiny moss
     stars and dirt flakes, "bunches", "leaves_n", "piles", "tufts_n",
     "jungle_n", "specks_n", "capped"} (world space). paint: influence
-    paint (_MiPaint)."""
+    paint (_MiPaint). rest_on: [(moss bed mesh, lift)]: dropped leaves land
+    on these too (Rest on moss)."""
     s = mi_settings_only("Debris", s)
     if paint is not None:
         s["_paint"] = paint
+    if rest_on:
+        s["_rest_on"] = rest_on
     surf = surf or _MiSurface(nodes)
     empty = {"grass": _mi_mesh(), "litter": _mi_mesh(), "tufts": _mi_mesh(), "jungle": _mi_mesh(),
              "jungle_dry": _mi_mesh(), "specks": _mi_mesh(), "dirt": _mi_mesh(), "bunches": 0, "leaves_n": 0,
@@ -35331,21 +35744,22 @@ SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patc
 SC_DEBRIS_COMMON = SC_PLACE + ("size_var", "detail", "seed", "stacks", "stack_layout") + tuple(MI_FADE_DEFAULTS)
 SC_TYPES = collections.OrderedDict([
     ("Moss", {"parts": (("moss", "mossGreen"), ("strands", "mossStrand"), ("capsules", "mossSpore")),
-              "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {"shoots": "Instances"}}),
+              "keys": tuple(k for k in MOSS_DEFAULTS if k != "udim"), "over": {"shoots": "Instances"},
+              "new": MOSS_NEW_LOOK}),
     ("Grass", {"parts": (("grass", "grassDry"),),
                "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
                                            "blade_width"),
                "over": {"slope": 40.0, "grass": 1.5}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
-                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape"),
-                "over": {"slope": 35.0, "leaves": 8.0}}),
+                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "on_moss"),
+                "over": {"slope": 35.0, "leaves": 8.0}, "new": {"on_moss": True}}),
     ("Leaf piles", {"parts": (("piles", "leafPile"),),
-                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape"),
-                    "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}}),
+                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape", "on_moss"),
+                    "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}, "new": {"on_moss": True}}),
     ("Jungle leaves", {"parts": (("green", "leafJungle"), ("dry", "leafJungleDry")),
                        "keys": SC_DEBRIS_COMMON + ("jungle", "jungle_size", "jungle_cluster", "jungle_shape",
-                                                   "jungle_green", "jungle_tear", "curl", "drape"),
-                       "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}}),
+                                                   "jungle_green", "jungle_tear", "curl", "drape", "on_moss"),
+                       "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}, "new": {"on_moss": True}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
                     "over": {"slope": 60.0, "tufts": 6.0}}),
     ("Specks", {"parts": (("specks", "mossSpeck"), ("dirt", "dirtSpeck")),
@@ -35416,6 +35830,7 @@ def _sc_new_layer(data, typ, settings=None, name=None):
         k += 1
         tag = str(k)
     s = sc_defaults(typ)
+    s.update(SC_TYPES[typ].get("new", {}))  # a new layer's look (older layers lack these keys: they keep theirs)
     s.update({k2: v for k2, v in (settings or {}).items() if k2 in s})
     return {"id": "L%d" % n, "type": typ, "tag": tag, "on": True, "s": s,
             "name": name or (typ + (" " + tag if tag else "")), "seeds": [], "faces": {}, "draw": {}}
@@ -36002,9 +36417,11 @@ def _mi_drop_repeats(mesh):
     return (pts, nc, ncon, us, vs, nuv)
 
 
-def _sc_build_layer(layer, surf, draft=False):
+def _sc_build_layer(layer, surf, draft=False, rest_on=None):
     """A layer's parts {part: mesh} and counts, built on the surfaces (draft:
-    a moss layer grows its quick look, "draft" in its counts)."""
+    a moss layer grows its quick look, "draft" in its counts; rest_on: the
+    group's moss beds grown before it, [(mesh, lift)], for leaves that Rest
+    on moss)."""
     typ = sc_type(layer.get("type"))
     s = sc_settings(layer)
     seeds = mi_seed_points(layer) or None
@@ -36038,7 +36455,8 @@ def _sc_build_layer(layer, surf, draft=False):
         for t2, key in SC_DEBRIS_ITEMS.items():
             if t2 != typ:
                 ds[key] = 0.0
-        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw, paint=paint)
+        out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw, paint=paint,
+                           rest_on=rest_on if s.get("on_moss") else None)
         parts = {part: out.get(src) for src, part in SC_DEBRIS_OUT[typ]}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
                   "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0), "specks": out.get("specks_n", 0)}
@@ -36119,7 +36537,7 @@ def _sc_read_part(node):
     uvc, uvi = fn.getAssignedUVs()
     if not len(us) or list(uvc) != list(counts):
         return None
-    pts = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+    pts = _mi_read_colors(fn, [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)])
     return pts, list(counts), list(conn), list(us), list(vs), list(uvi)
 
 
@@ -36179,18 +36597,31 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             saved = json.loads(cmds.getAttr(root + "." + SC_COUNTS) or "{}")
         except ValueError:
             saved = {}
+    rest, fresh = [], False  # the moss beds grown so far (Rest on moss), and whether one was grown just now
     for layer in data.get("layers", []):
         lid = layer["id"]
-        for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
+        typ = sc_type(layer.get("type"))
+        for part, _ in SC_TYPES[typ]["parts"]:
             order.append(lid + "/" + part)
         if not layer.get("on", True):
             continue
+        on_moss = typ in SC_DEBRIS_ITEMS and bool(sc_settings(layer).get("on_moss")) and bool(rest)
         key = (root, lid, json.dumps(layer, sort_keys=True), skey)
+        if on_moss:  # leaves that rest on the moss before them rebuild when it changes
+            key = key + (tuple((len(m[0]), len(m[1]), tuple(m[0][len(m[0]) // 2]) if m[0] else (), lift)
+                               for m, lift in rest),)
         hit = _SC_BUILT.get(key) if not (only and lid in only) else None
-        if hit is None and grown.get(lid) == layer and not (only and lid in only):
+        if hit is None and grown.get(lid) == layer and not (only and lid in only) and not (on_moss and fresh):
             hit = _sc_read_layer(root, layer, saved.get(lid))
         if hit is None:
-            hit = _sc_build_layer(layer, surf, draft) if surf.items else ({}, {})
+            kw = {"rest_on": list(rest)} if on_moss else {}
+            hit = _sc_build_layer(layer, surf, draft, **kw) if surf.items else ({}, {})
+            fresh = fresh or typ == "Moss"
+        if typ == "Moss" and hit[0].get("moss") and hit[0]["moss"][1]:
+            ls = sc_settings(layer)
+            tall = MOSS_DETAIL.get(ls.get("detail"), MOSS_DETAIL["Normal"])[1] and float(ls.get("strands", 0)) > 0
+            rest.append((hit[0]["moss"], 0.4 * float(ls.get("strand_length", 0.0)) / scene_m_per_unit()
+                         if tall else 0.0))
         if hit is not _SC_BUILT.get(key):
             _SC_BUILT[key] = hit
             while len(_SC_BUILT) > 32:
@@ -36777,6 +37208,7 @@ def _sc_write(root, data, placed, meshes):
             shape = _log_shape(node)
             if _SC_WROTE.get((root, key)) != sig or cmds.getAttr(shape + "." + MI_VERTS) != len(mesh[0]):
                 cmds.setAttr(shape + "." + MI_VERTS, _rope_fill(shape, mesh))
+                _mi_write_colors(shape, mesh)  # shading data (moss)
                 _SC_WROTE[(root, key)] = sig
             if not cmds.getAttr(node + ".visibility"):
                 cmds.setAttr(node + ".visibility", True)
@@ -36796,6 +37228,162 @@ def _sc_write(root, data, placed, meshes):
         else:
             cmds.select(clear=True)
     return faces
+
+
+MOSS_LOOK_PARTS = {"moss": "mossGreen", "strands": "mossStrand", "capsules": "mossSpore"}
+
+
+def _ml_node(kind, name, shader=False, **attrs):
+    n = cmds.shadingNode(kind, asShader=shader, asTexture=not shader, name=name, skipSelect=True)
+    for k, v in attrs.items():
+        if not cmds.attributeQuery(k, node=n, exists=True):
+            continue
+        if isinstance(v, (tuple, list)):
+            cmds.setAttr(n + "." + k, *v, type="double3")
+        elif isinstance(v, str):
+            cmds.setAttr(n + "." + k, v, type="string")
+        else:
+            cmds.setAttr(n + "." + k, v)
+    return n
+
+
+def _ml_noise(name, size, c1, c2, octaves=3, distortion=0.0):
+    """aiNoise in world space with features about size metres across."""
+    k = scene_m_per_unit() / max(1e-6, size)
+    return _ml_node("aiNoise", name, octaves=octaves, distortion=distortion, coordSpace=0, scale=(k, k, k),
+                    color1=c1, color2=c2)
+
+
+def _ml_range(name, src, lo, hi, out_lo=0.0, out_hi=1.0):
+    r = _ml_node("aiRange", name, inputMin=lo, inputMax=hi, outputMin=out_lo, outputMax=out_hi, smoothstep=1)
+    if src.endswith(("R", "G", "B")) and not src.endswith("outColor"):
+        for ch in "RGB":
+            cmds.connectAttr(src, r + ".input" + ch, force=True)
+    else:
+        cmds.connectAttr(src, r + ".input", force=True)
+    return r
+
+
+def _ml_layer(name, base, top, mix):
+    """aiLayerRgba: top (an attribute or an rgb) over base by mix."""
+    n = _ml_node("aiLayerRgba", name, enable1=1, enable2=1)
+    for slot, v in (("input1", base), ("input2", top)):
+        if isinstance(v, str):
+            cmds.connectAttr(v, n + "." + slot, force=True)
+        else:
+            cmds.setAttr(n + "." + slot, *v, type="double3")
+    cmds.connectAttr(mix, n + ".mix2", force=True)
+    return n
+
+
+def _ml_data(name, default=(0.5, 1.0, 1.0)):
+    """The moss shading data (MOSS_COLOR_SET) as Arnold user data; default
+    where a mesh has none (an older moss: no edge or height shading)."""
+    return _ml_node("aiUserDataColor", name, attribute=MOSS_COLOR_SET, default=default)
+
+
+def _ml_arnold_look():
+    """mossGreen / mossStrand / mossSpore aiStandardSurface networks: world
+    space hue patches and mottle, dry pale patches, drier at the patches'
+    edges and darker down in the bed (the shading data), per-cushion and
+    per-shoot hue shifts, subsurface and sheen. Returns {material: shader}."""
+    data = _ml_data("mossData_UDC")
+    hue = _ml_noise("mossHue_NOI", 0.3, (0.12, 0.25, 0.03), (0.32, 0.48, 0.07))
+    mott = _ml_noise("mossMottle_NOI", 0.035, (0, 0, 0), (1, 1, 1))
+    c = _ml_layer("mossMottle_LAY", hue + ".outColor", (0.05, 0.11, 0.02),
+                  _ml_range("mossMottle_RNG", mott + ".outColorR", 0.2, 0.8, 0.0, 0.5) + ".outColorR")
+    c = _ml_layer("mossCushion_LAY", c + ".outColor", (0.30, 0.42, 0.06),
+                  _ml_range("mossCushion_RNG", data + ".outColorR", 0.55, 1.0, 0.0, 0.45) + ".outColorR")
+    dry = _ml_noise("mossDry_NOI", 0.4, (0, 0, 0), (1, 1, 1), octaves=2)
+    c = _ml_layer("mossDry_LAY", c + ".outColor", (0.36, 0.38, 0.17),
+                  _ml_range("mossDry_RNG", dry + ".outColorR", 0.62, 0.8, 0.0, 0.6) + ".outColorR")
+    c = _ml_layer("mossEdge_LAY", c + ".outColor", (0.34, 0.36, 0.14),
+                  _ml_range("mossEdge_RNG", data + ".outColorB", 0.0, 0.6, 0.55, 0.0) + ".outColorR")
+    deep = _ml_node("aiMultiply", "mossDeep_MUL")
+    cmds.connectAttr(c + ".outColor", deep + ".input1", force=True)
+    cmds.connectAttr(_ml_range("mossDeep_RNG", data + ".outColorG", 0.0, 1.0, 0.45, 1.0) + ".outColor",
+                     deep + ".input2", force=True)
+    bed = _ml_node("aiStandardSurface", "mossGreen_MAT", shader=True, base=0.9, specular=0.25,
+                   specularRoughness=0.55, subsurface=0.35, subsurfaceScale=0.008 / scene_m_per_unit(),
+                   subsurfaceRadius=(0.5, 0.9, 0.2), sheen=0.45, sheenRoughness=0.35, sheenColor=(0.55, 0.65, 0.3))
+    cmds.connectAttr(deep + ".outColor", bed + ".baseColor", force=True)
+    cmds.connectAttr(c + ".outColor", bed + ".subsurfaceColor", force=True)
+    fib = _ml_noise("mossFibre_NOI", 0.007, (0, 0, 0), (1, 1, 1), distortion=2.0)
+    bump = _ml_node("aiBump2d", "mossFibre_BMP", bumpHeight=0.06)
+    cmds.connectAttr(fib + ".outColorR", bump + ".bumpMap", force=True)
+    cmds.connectAttr(bump + ".outValue", bed + ".normalCamera", force=True)
+    # shoots: thin translucent leaves; a hue shift per shoot (instances: Arnold's per-object random)
+    obj = _ml_node("aiUtility", "mossShootId_UTL", shadeMode=2)
+    modes = (cmds.attributeQuery("colorMode", node=obj, listEnum=True) or [""])[0].split(":")
+    if "obj" in modes:
+        cmds.setAttr(obj + ".colorMode", modes.index("obj"))
+    sdata = _ml_data("mossShootData_UDC")
+    cmds.connectAttr(obj + ".outColor", sdata + ".default", force=True)
+    sh = _ml_noise("mossShootHue_NOI", 0.3, (0.26, 0.42, 0.06), (0.50, 0.62, 0.12))
+    sc = _ml_layer("mossShoot_LAY", sh + ".outColor", (0.16, 0.30, 0.04),
+                   _ml_range("mossShoot_RNG", sdata + ".outColorR", 0.0, 1.0, 0.0, 0.6) + ".outColorR")
+    st = _ml_node("aiStandardSurface", "mossStrand_MAT", shader=True, base=0.9, specular=0.3, specularRoughness=0.45,
+                  thinWalled=1, subsurface=0.45, sheen=0.3, sheenRoughness=0.3)
+    cmds.connectAttr(sc + ".outColor", st + ".baseColor", force=True)
+    cmds.connectAttr(sc + ".outColor", st + ".subsurfaceColor", force=True)
+    cap = _ml_node("aiStandardSurface", "mossSpore_MAT", shader=True, base=0.9, specular=0.4, specularRoughness=0.4,
+                   thinWalled=1, subsurface=0.3, baseColor=(0.35, 0.12, 0.04), subsurfaceColor=(0.5, 0.18, 0.05))
+    return {"mossGreen": bed, "mossStrand": st, "mossSpore": cap}
+
+
+def _ml_plain_look():
+    """Without Arnold: flat standardSurface colours."""
+    out = {}
+    for name, rgb, extra in (("mossGreen", (0.16, 0.28, 0.04), {"subsurface": 0.3, "sheen": 0.4}),
+                             ("mossStrand", (0.32, 0.48, 0.08), {"thinWalled": 1, "subsurface": 0.4}),
+                             ("mossSpore", (0.35, 0.12, 0.04), {"thinWalled": 1})):
+        out[name] = _ml_node("standardSurface", name + "_MAT", shader=True, baseColor=rgb, specularRoughness=0.5,
+                             **extra)
+    return out
+
+
+def sc_moss_look(roots):
+    """A starter moss look (one Ctrl+Z): mossGreen_MAT / mossStrand_MAT /
+    mossSpore_MAT (aiStandardSurface networks with MtoA loaded, plain
+    standardSurface without), made once per scene and assigned to the
+    Moss layers' bed, strands, instanced shoots and capsules in roots.
+    Returns {"materials": [...], "parts": n, "arnold": bool}."""
+    arnold = bool(cmds.pluginInfo("mtoa", query=True, loaded=True))
+    with UndoChunk("Moss Look"):
+        mats = {}
+        for name in MOSS_LOOK_PARTS.values():
+            sg = name + "_SG"
+            if cmds.objExists(sg) and cmds.nodeType(sg) == "shadingEngine":
+                mats[name] = sg
+        if len(mats) < len(MOSS_LOOK_PARTS):
+            made = _ml_arnold_look() if arnold else _ml_plain_look()
+            for name, shader in made.items():
+                if name in mats:
+                    continue
+                sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=name + "_SG")
+                cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+                mats[name] = sg
+        n = 0
+        for root in roots:
+            data = sc_data(root)
+            parts, shoots = sc_parts(root), sc_shoots(root)
+            for layer in data.get("layers", []):
+                if sc_type(layer.get("type")) != "Moss":
+                    continue
+                for part, mat in MOSS_LOOK_PARTS.items():
+                    node = parts.get(layer["id"] + "/" + part)
+                    if node:
+                        cmds.sets(node, edit=True, forceElement=mats[mat])
+                        shape = _log_shape(node)
+                        if arnold and shape and cmds.attributeQuery("aiExportColors", node=shape, exists=True):
+                            cmds.setAttr(shape + ".aiExportColors", True)  # the shading data to Arnold
+                        n += 1
+                node = shoots.get(layer["id"] + "/shoots")
+                protos = _sc_shoot_nodes(node)[2] if node else []
+                if protos:
+                    cmds.sets(protos, edit=True, forceElement=mats["mossStrand"])
+                    n += 1
+    return {"materials": sorted(mats), "parts": n, "arnold": arnold}
 
 
 def _sc_bed_suffix(node, smooth):
@@ -37558,6 +38146,27 @@ SC_FIELDS = {
     "thickness": ("Thickness", _scf(0.0, 0.5, 0.0, 0.12, 3, 0.005),
                   "How thick the moss is, in metres (thicker inside a patch and in sheltered spots)."),
     "lumps": ("Lumps", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "Packed cushions with creases between them (0 = smooth)."),
+    "exposure": ("Bare ridges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                 "Keeps the most exposed places bare, where moss dries out: the crowns and ridges of rocks, the "
+                 "rounded tops of boards and posts (patchy, not a hard line). 0 = off."),
+    "spill": ("Floor spill", _scf(0.0, 10.0, 0.0, 1.0, 2, 0.05),
+              "With a floor among the surfaces (something flat and wide): moss on it only runs out from the "
+              "foot of what stands on it, thinning out over this many metres. 0 = the floor like any surface."),
+    "feather": ("Soft edges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "How gradually a patch thins out at its edge, the shoots too (0 = full thickness almost to the "
+                "edge)."),
+    "ragged": ("Ragged outline", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+               "Frays and warps the patches' outlines into bays, spits and stray bits (0 = smooth outlines)."),
+    "strays": ("Stray tufts", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+               "Little clusters of shoots on the bare surface just outside the patches (High and up)."),
+    "clump_merge": ("Merge", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Clumps: low, wide cushions that run into each other (0 = separate rounded domes)."),
+    "shoot_form": ("Shoot shape", lambda: SegmentField(MOSS_SHOOT_FORMS),
+                   "High and Hero shoots grown as instances: Star = a stem with a leaf star at its tip; Leafy = "
+                   "small cupped leaves all the way up the stem, and more shoots."),
+    "on_moss": ("Rest on moss", lambda: CheckField(""),
+                "Leaves dropped on this group's moss (layers above this one) rest on top of it, among its "
+                "shoots, instead of sinking through to the surface under it."),
     "surface": ("Surface", lambda: SegmentField(MOSS_SURFACES),
                 "What the moss sits on. Auto: meshes named _GES, _GED or _GEV are subdivided at render time, so "
                 "moss sits on their smooth surface (where the render will put it, corners pulled in); _GEP "
@@ -37679,11 +38288,12 @@ _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
     "Moss": [("", True, ["style", "coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands",
                          "capsules"]),
-             ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_hvar", "clump_mounds",
-                               "clump_ghvar"]),
-             ("Where it grows", True, _SC_WHERE),
+             ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_merge", "clump_hvar",
+                               "clump_mounds", "clump_ghvar"]),
+             ("Where it grows", True, _SC_WHERE + ["exposure", "spill"]),
+             ("Edges", False, ["feather", "ragged", "strays"]),
              ("Surface", False, ["surface", "surface_detail"]),
-             ("More", False, ["size_var", "strand_length", "droop", "detail", "shoots"]),
+             ("More", False, ["size_var", "strand_length", "droop", "detail", "shoots", "shoot_form"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
     "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),
@@ -37691,16 +38301,16 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
               ("UVs", False, ["stacks", "stack_layout"])],
     "Leaves": [("", True, ["coverage", "spread", "leaves", "leaf_size", "curl"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("More", False, ["drape", "size_var", "detail"]),
+               ("More", False, ["drape", "on_moss", "size_var", "detail"]),
                ("UVs", False, ["stacks", "stack_layout"])],
     "Leaf piles": [("", True, ["coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                   ("More", False, ["drape", "size_var", "detail"]),
+                   ("More", False, ["drape", "on_moss", "size_var", "detail"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
     "Jungle leaves": [("", True, ["coverage", "spread", "jungle", "jungle_size", "jungle_cluster", "jungle_shape",
                                   "jungle_green"]),
                       ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                      ("More", False, ["curl", "jungle_tear", "drape", "size_var", "detail"]),
+                      ("More", False, ["curl", "jungle_tear", "drape", "on_moss", "size_var", "detail"]),
                       ("UVs", False, ["stacks", "stack_layout"])],
     "Moss tufts": [("", True, ["coverage", "spread", "tufts", "tuft_size"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
@@ -38635,7 +39245,13 @@ class ScatterPanel(QtWidgets.QWidget):
         regrow.clicked.connect(lambda *_: self.regrow())
         bake = secondary_button("Bake", "Turn the group (or all of them) into plain meshes (one Ctrl+Z).")
         bake.clicked.connect(lambda *_: self.bake())
-        card.add(button_row(sel_all, regrow, bake))
+        look = secondary_button("Moss Look", "A starter moss material on the group's (or every group's) moss layers: "
+                                             "Arnold aiStandardSurface networks with hue patches, mottle, dry "
+                                             "patches, drier edges and darker depths from the moss's shading data "
+                                             "(colour set mossData), per-cushion and per-shoot hue shifts, "
+                                             "subsurface and sheen. Made once per scene (one Ctrl+Z).")
+        look.clicked.connect(lambda *_: self.moss_look())
+        card.add(button_row(sel_all, regrow, bake, look))
         col.addWidget(card)
         col.addStretch(1)
 
@@ -39572,6 +40188,21 @@ class ScatterPanel(QtWidgets.QWidget):
         self.set_status("Baked %d: plain meshes now. One Ctrl+Z undoes it." % len(done), level="fixed")
         self._root, self._lid = None, None
         self._refresh()
+
+    @ui_safe
+    def moss_look(self):
+        roots = [self._root] if self._alive() else sc_groups()
+        if not roots:
+            self.set_status("No scatter groups to give a moss look.", level="warn")
+            return
+        got = sc_moss_look(roots)
+        if not got["parts"]:
+            self.set_status("No moss layers in %s." % ("this group" if len(roots) == 1 else "the scatter groups"),
+                            level="warn")
+            return
+        self.set_status("Moss look on %d part(s): %s%s. One Ctrl+Z undoes it." % (
+            got["parts"], ", ".join(m + "_MAT" for m in got["materials"]),
+            "" if got["arnold"] else " (plain: load MtoA for the Arnold look)"), level="fixed")
 
     @ui_safe
     def load_preset(self):

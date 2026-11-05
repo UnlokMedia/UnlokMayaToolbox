@@ -879,9 +879,9 @@ def pause():
     built = []
     real = tb["_sc_build_layer"]
 
-    def counting(layer, surf, *rest):
+    def counting(layer, surf, *rest, **kw):
         built.append(layer["id"])
-        return real(layer, surf, *rest)
+        return real(layer, surf, *rest, **kw)
 
     tb["_sc_build_layer"] = counting
 
@@ -994,9 +994,9 @@ def old_scatter():
     built = []
     real = tb["_sc_build_layer"]
 
-    def counting(layer, surf, *rest):
+    def counting(layer, surf, *rest, **kw):
         built.append(layer["id"])
-        return real(layer, surf, *rest)
+        return real(layer, surf, *rest, **kw)
 
     tb["_sc_build_layer"] = counting
     parts = [(moss, "moss"), (leaves, "litter"), (grass, "grass")]
@@ -1066,7 +1066,7 @@ def draft():
     grp, nodes = yard()
     root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.5})["root"]
     moss = tb["sc_data"](root)["layers"][0]["id"]
-    _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0})
+    _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0, "on_moss": False})  # (not resting on it)
     keys = [moss + "/moss", moss + "/strands", leaves + "/litter"]
 
     def verts():

@@ -1473,6 +1473,67 @@
         `tests/test_moss_instances.py` checks the convention, every
         instance's matrix, tiles, Mesh mode, file size, reopen, Bake and
         undo, old layers and removal.
+  - **Realism pass (2026-11-05):** new keys in `MOSS_DEFAULTS` default to
+    what moss did before (exposure / feather / strays / ragged /
+    clump_merge 0, shoot_form Star, spill 0), so old groups and Moss & Ivy
+    regrow exactly as before (`test_moss_realism` compares against an
+    older toolbox with `UNLOK_OLD_TOOLBOX`). A NEW Scatter Moss layer gets
+    `MOSS_NEW_LOOK` through `SC_TYPES[...]["new"]` (applied by
+    `_sc_new_layer` only); Leaves / Leaf piles / Jungle leaves get
+    `on_moss` True the same way (`DEBRIS_DEFAULTS` False). Panel: Bare
+    ridges + Floor spill in "Where it grows", an "Edges" section (Soft
+    edges, Ragged outline, Stray tufts), Merge in Clumps, Shoot shape in
+    More, Rest on moss in the leaf types' More.
+    - **Bare ridges** (`exposure`, `_moss_exposure`, cached per spots):
+      per spot the weighted convexity over `RX = max(3 RA, 30 cm)`
+      (`sum w (n_q - n_p).(q - p)/d`, a sphere gives RX / 2r), plus
+      0.3 x up x min(1, conv / 0.3) for rounded tops, compared with the
+      average of the spot's object (the smallest bbox it's in): only
+      what's more convex than its object goes bare, so a smooth pebble
+      keeps its moss and a block's edges don't. Subtracted from the
+      scores in `_moss_margins` (x 0.9, patchy with the spot noise).
+    - **Ragged outline** (`ragged`): a domain warp on the spots' patch
+      noise and the candidates' fine noise (plus a 38x fray), more edge
+      noise in `_MossBed` (`self.rn`) and in `rag`. It's part of the
+      spots / field cache keys (patch entry is a (patch, ragged) tuple).
+    - **Soft edges** (`feather`): `_MossBed._value` widens the c / pr
+      ramps and blends sqrt toward pr^1.2; `_MossDetail.build` thins the
+      shoots by (1 - 0.8 fe (1 - core)^2).
+    - **Stray tufts** (`strays`, `MOSS_DETAIL_ONLY`): `_MossDetail.strays`
+      after build: out from the bed mesh's open edges (chance 0.35 st
+      per edge) 0.35-2 R, a tuft of 2-12 shoots via `surf.closest`.
+    - **Merge** (`clump_merge`, Clumps): wider (x1.3), packed closer,
+      lower (x0.55 at 1), mounds flattened, domes blend to a low bell.
+    - **Shoot shape** (`shoot_form`, `MOSS_SHOOT_FORMS` Star / Leafy,
+      `MOSS_DETAIL_ONLY`): Leafy = `_leafy_shape` (thin stem, 7 pairs of
+      cupped leaves, open low down, a bud at the tip, star UVs), 1.5x
+      the shoots. Always laid out like instances; Shoots Mesh makes them
+      real at the end (`mesh_leafy`, the geometry Bake makes).
+    - **Floor spill** (`spill`, metres): `_moss_floor_nodes` (bbox under
+      0.16 of its width) only when there are other surfaces too;
+      `_moss_spill` gives each floor candidate its distance to the
+      nearest non-floor candidate; past Spill no moss, inside it a bonus
+      tapering off.
+    - **Rest on moss** (`on_moss`, leaf debris): `sc_build` collects the
+      group's moss beds grown so far (`rest`, lifted 0.4 x strand
+      length when tall); an on_moss layer gets them as `rest_on`
+      (`debris_build` -> `s["_rest_on"]`) and `_DebrisBuild._field` lays
+      them into the drop stack (`_MiDropStack.lay_mesh`: points, face
+      and edge middles). Its cache key includes the beds; read back is
+      skipped when a moss layer was just grown.
+    - **Shading data:** moss meshes' points are `_MiPts` (a list with
+      `.col`) and `_sc_write` writes them to the colour set
+      `MOSS_COLOR_SET` "mossData" (`_mi_write_colors`, `aiExportColors`
+      on), read back by `_sc_read_part`. R: carpet a patch-sized noise,
+      Clumps a random per cushion, strands / capsules a random per item;
+      G: height in the bed (hf / H); B: core (0 at a patch edge).
+      Instanced shoots have none: the look uses aiUtility "obj" (a
+      random per instance) as the aiUserDataColor default.
+    - **Moss Look** (`sc_moss_look`, panel button by Bake): one Ctrl+Z;
+      mossGreen_MAT / mossStrand_MAT / mossSpore_MAT (+ `_SG`) made once
+      per scene (aiStandardSurface networks `_ml_arnold_look` with MtoA,
+      plain standardSurface without), on the Moss layers' bed, strands,
+      shoot shapes and capsules. Noise sizes in metres (`_ml_noise`).
   - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
     sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,
     tufts (5-point leaf stars on the bed); High 0.2 R, shoots (2-segment
