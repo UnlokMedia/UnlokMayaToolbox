@@ -360,7 +360,13 @@
       Past a gable verge (leaves carried past a course's end, ox / oz)
       `verge()` turns limp leaves down more the further out, and only sags
       stiff ones. Sticks are cut at the verge (they showed as a row of
-      pegs).
+      pegs). A leaf that walks off a gable verge sideways (`_th_walk` carries
+      straight on off the shell; slanted top-layer leaflets did, one stiff
+      horizontal spike per course, the user 2026-11-05), or a stiff one
+      carried past it, bows down: `verge_bend` turns each step from the
+      first point past the verge further down, lengths kept (just lowering
+      the points stretched them into long strands); limp more, both scaled
+      by `edge_hang`. Limp leaves carried past keep `verge()`.
     - **Gable edge** (`verge_a` / `verge_b`, `THATCH_VERGES` Hanging /
       Flush; own keys, shown only on a Gable end; the user, 2026-11-02:
       gable leaves hung like curtains and clipped a brick wall). Flush
@@ -391,6 +397,14 @@
       `sticks`, which used to switch them.
       `THATCH_VERSION` 6 (both changes): older roofs show Upgrade, which
       rebuilds them with the new cap and the poles following their Sticks.
+    - **Cap fold** (the user 2026-11-05: the backs of the ridge cap leaves
+      clipped through each other; curl them down a lot). `emit(arch=)`
+      adds curl (edges down) to every cap leaf, `crest(fold=True)` (the
+      ridge) prepends three rows mirrored over the crest that sink towards
+      the far roof (`vrow`: V by arc length), so each top end tucks under
+      the far side's cap leaves. Arched leaves are narrower over the roof:
+      `cap_gap` is 0.85 of the old spacing. Less twist on cap leaves.
+      `THATCH_VERSION` 7 (with the verge droop).
     - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
       sticks, rachis and (without a frame) poles are the roof's `sticks`
       part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from

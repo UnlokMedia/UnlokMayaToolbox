@@ -493,8 +493,10 @@ detail (just its shell, instant), get the shape right, then raise
        *Messiness*, *Droop*).
      - **Edges, two layers:** the under layer is limp, so past the eaves
        and gable verges its leaves hang down (*Edge hang*); the top layer
-       is stiff and sticks out further (*Reach at ends*). *Gable fringe*
-       adds leaves tied along each verge.
+       is stiff and sticks out further (*Reach at ends*). A slanted leaf
+       that runs off the side of a gable droops over the verge instead of
+       sticking straight out. *Gable fringe* adds leaves tied along each
+       verge.
      - **Caps:** leaves laid over the ridge, down each hip and round a
        cone's apex from the crest down both sides, ending at the courses'
        height so they blend in (*Cap the ridge, hips and apex*), under a
@@ -504,8 +506,11 @@ detail (just its shell, instant), get the shape right, then raise
        one before and one side lapping over the other at the ridge, so they
        never cut through each other; *Messiness* turns, lengthens, twists,
        droops and breaks them, lays the odd stray leaf over the rest and
-       packs them closer so the cap stays covered. The poles rest in the top
-       of the cap. Courses wrap continuously round hipped ends.
+       packs them closer so the cap stays covered. Each cap leaf is arched
+       (edges curled down), and on a ridge its top end folds over the crest
+       and curls down the far side, tucked under that side's leaves, so no
+       leaf ends stick up or show their backs along the ridge. The poles
+       rest in the top of the cap. Courses wrap continuously round hipped ends.
      - **Form:** **Cards** (one card per tile / frond for an alpha-mapped
        texture; each fills 0..1; caps stay leaflets), **Leaflets** (each
        leaflet a flat tapered strip) or **3D Leaflets** (creased down the
