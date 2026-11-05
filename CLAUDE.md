@@ -2176,6 +2176,25 @@
   its first refresh). `tests/gui_launch_time.py` (`run_gui_launch_time.mel`)
   measures read / compile / module / show / first paint and a real Script
   Editor paste, and opens every tool once.
+- **Selection callbacks only for the tab on screen** (the user, 2026-11-05:
+  Maya froze selecting meshes with the toolbox open, fine with it closed).
+  Every built panel keeps its SelectionChanged job, so a tab opened once
+  that session worked on every click: Quad Fill walked every edge of every
+  mesh picked whole (0.54 s for 200 small spheres, seconds on real
+  meshes). Rules: a panel's selection (and scene / undo) jobs go through
+  `_on_screen_job(self, timer)`, which starts the timer only while the
+  panel `isVisible()`; the panel's `showEvent` restarts it to catch up
+  once (Path Scatter's direct job checks `isVisible()` and skips when the
+  scene has no system). Quad Fill hunts a hole on a mesh picked whole only
+  when it's the only mesh picked (several: a note, pick an edge) and stops
+  at the second open border. `sc_selection` finds the scatter / moss
+  groups once (`_tagged_roots`) and only asks `sc_owner` / `_mi_part_of`
+  about nodes under one (`_under_any`); Scatter's `_update_states` reuses
+  the selection `_sync_from_selection` read (`_sel_now`). Measured with
+  `tests/gui_selection_speed.py` (200 spheres 64 x 64, every panel built,
+  Scatter tab): 0.66 s -> 0.02 s of toolbox work per selection change,
+  0.58 s -> 0.0002 s with the toolbox hidden. New panels: use
+  `_on_screen_job` and a catching-up `showEvent`.
 - **Renamer** (Naming tab; UnlokRenamer ported in, 2026-11-04, the user:
   "incorporate unlok renamer too"). Module-level engine: `ur_parse_name`,
   `ur_family_key`, `ur_compose_name`, `ur_generate_name(opts, index)` (opts =
@@ -2590,7 +2609,9 @@ pictures read the viewport back instead of playblasting, which empties the undo 
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
 (and `python tools/embed_reframe.py --check`). Launch time and every tool
-opening: GUI `tests/run_gui_launch_time.mel`.
+opening: GUI `tests/run_gui_launch_time.mel`. Selection speed with the
+toolbox open: GUI `tests/run_gui_selection_speed.mel` (`UNLOK_TOOLBOX` times
+another copy, `UNLOK_TEST_TAG` names the results file).
 - **Claude's shell here:** `python -` reading a heredoc or empty stdin, and
   `cat > file` without a heredoc, hang. Write patch scripts to files and
   run `python script.py`.

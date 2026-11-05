@@ -167,6 +167,21 @@ def _guarded(timer, fn):
     return slot
 
 
+def _on_screen_job(widget, timer):
+    """A scriptJob callback (SelectionChanged and the like) that starts a
+    panel's timer only while the panel is on screen. A hidden tab or a
+    closed toolbox does nothing per click (the user, 2026-11-05: selecting
+    meshes froze Maya with the toolbox open); the panel's showEvent
+    catches up once when it's shown."""
+    def job():
+        try:
+            if widget.isVisible():
+                timer.start()
+        except RuntimeError:  # the panel's C++ side is gone
+            pass
+    return job
+
+
 class WorkingDialog(QtWidgets.QDialog):
     """'Working...' window for long steps: what's happening, a bar, time
     left and Cancel. Modal, so nothing else in Maya can change the scene
@@ -3286,9 +3301,15 @@ class PathScatterPanel(QtWidgets.QWidget):
         ]
         _registry()["jobs"].extend(self._jobs)
 
+    def showEvent(self, event):
+        super(PathScatterPanel, self).showEvent(event)
+        QtCore.QTimer.singleShot(0, self._on_selection_changed)  # catch up on picks made while hidden
+
     def _on_selection_changed(self):
         try:
-            if SurfacePathDrawer.is_active():
+            if not self.isVisible() or SurfacePathDrawer.is_active():
+                return
+            if not PathScatterSystem.all_roots():  # nothing to pick: skip walking every selected node
                 return
             for node in cmds.ls(selection=True, long=True) or []:
                 system = PathScatterSystem.from_node(node)
@@ -16558,10 +16579,14 @@ class BevelResolverPanel(QtWidgets.QWidget):
             traceback.print_exc()
 
     # ======================================================= scene events
+    def showEvent(self, event):
+        QtWidgets.QWidget.showEvent(self, event)
+        self._sel_timer.start()  # selection changes while hidden were skipped
+
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()])]
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)])]
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
@@ -17232,10 +17257,14 @@ class LogNoisePanel(QtWidgets.QWidget):
         self._sync_from_selection()
 
     # ======================================================= scene events
+    def showEvent(self, event):
+        QtWidgets.QWidget.showEvent(self, event)
+        self._sel_timer.start()  # selection changes while hidden were skipped
+
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()])]
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)])]
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
@@ -20108,7 +20137,7 @@ class RopeLashingPanel(QtWidgets.QWidget):
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)]),
                       cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
         _registry()["jobs"].extend(self._jobs)
 
@@ -29191,7 +29220,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)]),
                       cmds.scriptJob(event=["Redo", lambda: self._redo_timer.start()])]
         _registry()["jobs"].extend(self._jobs)
 
@@ -37339,20 +37368,36 @@ def _sc_bake_shoots(root, lid, node):
     return new
 
 
+def _tagged_roots(attrs):
+    """Long names of the nodes carrying any of attrs (namespaced too)."""
+    pats = ["*." + a for a in attrs] + ["*:*." + a for a in attrs]
+    return tuple(set(cmds.ls(pats, objectsOnly=True, long=True) or []))
+
+
+def _under_any(node, roots):
+    """node (a long name) is one of roots or below one."""
+    return any(node == r or node.startswith(r + "|") for r in roots)
+
+
 def sc_selection():
     """{"root", "layer", "surfaces", "points", "faces"} from the selection:
     the scatter group (and layer, from a part) picked, meshes and groups
     that could be scattered onto, picked points and faces."""
     out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}}
+    # Groups are found once; a node is only asked about if it's under one (a
+    # 200-mesh pick asked every mesh, on every click, with the toolbox open).
+    sc_roots = _tagged_roots((SC_ATTR, SC_BAKED))
+    mi_roots = _tagged_roots((MI_SETTINGS, MI_BAKED))
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
-        root, lid = sc_owner(node)
-        if root:
-            if out["root"] is None:
-                out["root"], out["layer"] = root, lid
-            continue
+        if _under_any(node, sc_roots):
+            root, lid = sc_owner(node)
+            if root:
+                if out["root"] is None:
+                    out["root"], out["layer"] = root, lid
+                continue
         if cmds.objectType(node, isAType="shape"):
             node = long_name(cmds.listRelatives(node, parent=True, fullPath=True)[0])
-        if _mi_part_of(node) or not cmds.objectType(node, isAType="transform"):
+        if (_under_any(node, mi_roots) and _mi_part_of(node)) or not cmds.objectType(node, isAType="transform"):
             continue
         if node not in out["surfaces"]:
             out["surfaces"].append(node)
@@ -38268,6 +38313,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._root_uid = None  # its uuid: followed when it's moved (into a publish group, say)
         self._lid = None    # the layer being edited
         self._filling = False
+        self._sel_now = None  # the selection read by _sync_from_selection, while it refreshes
         self._sel_timer = QtCore.QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(80)
@@ -38929,7 +38975,7 @@ class ScatterPanel(QtWidgets.QWidget):
                 rough, "it" if nd == 1 else "them")) if nd else
                 "Draft: edit moss fast with a rough look, then grow it in full.")
         try:
-            sel = sc_selection()
+            sel = self._sel_now or sc_selection()
         except Exception:
             sel = {"surfaces": [], "points": [], "faces": {}}
         root = self._alive()
@@ -38995,7 +39041,11 @@ class ScatterPanel(QtWidgets.QWidget):
                     self._root, self._lid = sel["root"], None
                 if sel["layer"]:
                     self._lid = sel["layer"]
-            self._refresh()
+            self._sel_now = sel  # _update_states reuses it (a 200-mesh pick read it twice)
+            try:
+                self._refresh()
+            finally:
+                self._sel_now = None
         except Exception:
             traceback.print_exc()
 
@@ -39571,7 +39621,7 @@ class ScatterPanel(QtWidgets.QWidget):
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)]),
                       cmds.scriptJob(event=["Undo", lambda: self._undo_timer.start()]),
                       cmds.scriptJob(event=["Redo", lambda: self._undo_timer.start()])]
         _registry()["jobs"].extend(self._jobs)
@@ -40322,6 +40372,11 @@ def qf_selection():
                     if eit.onBoundary():
                         entry[1].append(e)
     out = []
+    wholes = [key for key, (dp, seeds, whole) in found.items() if whole and not seeds]
+    if len(found) > 1 and wholes:  # never hunt every picked mesh for holes on a click
+        notes.append("%d meshes picked whole: pick an edge on the hole to fill." % len(wholes))
+        for key in wholes:
+            del found[key]
     for key, (dp, seeds, whole) in found.items():
         name = short_name(om.MFnDagNode(dp.transform()).fullPathName())
         fn = om.MFnMesh(dp)
@@ -40340,6 +40395,8 @@ def qf_selection():
                 continue
         loops, done = [], set()
         for e in seeds:
+            if scanned and len(loops) > 1:  # it asks which anyway: don't walk the rest
+                break
             if e in done:
                 continue
             done.add(e)
@@ -40357,7 +40414,7 @@ def qf_selection():
                         done.add(ce)
             loops.append(loop)
         if scanned and len(loops) > 1:
-            notes.append("%s has %d open borders: pick an edge on the one to fill." % (name, len(loops)))
+            notes.append("%s has more than one open border: pick an edge on the one to fill." % name)
             continue
         if loops:
             out.append((key, loops))
@@ -40958,12 +41015,12 @@ class QuadFillPanel(QtWidgets.QWidget):
     def _install_jobs(self):
         if maya_main_window() is None:
             return
-        self._jobs = [cmds.scriptJob(event=["SelectionChanged", lambda: self._sel_timer.start()]),
+        self._jobs = [cmds.scriptJob(event=["SelectionChanged", _on_screen_job(self, self._sel_timer)]),
                       cmds.scriptJob(event=["PreFileNewOrOpened", lambda: self.preview.forget()]),
-                      cmds.scriptJob(event=["SceneOpened", lambda: self._sel_timer.start()]),
-                      cmds.scriptJob(event=["NewSceneOpened", lambda: self._sel_timer.start()]),
-                      cmds.scriptJob(event=["Undo", lambda: self._sel_timer.start()]),
-                      cmds.scriptJob(event=["Redo", lambda: self._sel_timer.start()])]
+                      cmds.scriptJob(event=["SceneOpened", _on_screen_job(self, self._sel_timer)]),
+                      cmds.scriptJob(event=["NewSceneOpened", _on_screen_job(self, self._sel_timer)]),
+                      cmds.scriptJob(event=["Undo", _on_screen_job(self, self._sel_timer)]),
+                      cmds.scriptJob(event=["Redo", _on_screen_job(self, self._sel_timer)])]
         _registry()["jobs"].extend(self._jobs)
 
     def showEvent(self, event):

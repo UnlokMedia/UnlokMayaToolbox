@@ -1915,6 +1915,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   a paste (read, compile, run, show, first paint) in an empty and a busy
   scene and through a real Script Editor paste, then opens every tool once
   (timings and pictures in `tests/_out/launch_time`).
+- `tests/run_gui_selection_speed.mel` (GUI, `tests/gui_selection_speed.py`):
+  times what the toolbox does per selection change with every tab opened
+  once and 200 detailed meshes picked (Scatter tab, Quad Fill tab, toolbox
+  hidden); results and profiles in `tests/_out/selection_speed`.
 - `tests/test_smart_udim.py`: headless Smart UDIM tests (naming, sets, scan,
   assignment, pre-process, undo):
   ```bash
