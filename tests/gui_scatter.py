@@ -47,14 +47,15 @@ def pump(n=5):
 
 
 def snap(name, width=1400, height=900):
+    """The viewport read back as it is (width / height: unused). Not a playblast: in a scripted session one
+    can empty the undo queue, and then a later Ctrl+Z check finds nothing to undo (it failed now and then)."""
+    import maya.OpenMaya as om1
+    import maya.OpenMayaUI as omui1
     path = os.path.join(OUT, name)
     cmds.refresh(force=True)
-    cmds.undoInfo(stateWithoutFlush=False)  # a playblast mustn't come between the test's edits and its undos
-    try:
-        cmds.playblast(frame=[cmds.currentTime(q=True)], format="image", compression="png", completeFilename=path,
-                       viewer=False, showOrnaments=False, percent=100, widthHeight=(width, height), offScreen=True)
-    finally:
-        cmds.undoInfo(stateWithoutFlush=True)
+    img = om1.MImage()
+    omui1.M3dView.active3dView().readColorBuffer(img, True)
+    img.writeToFile(path, "png")
     return path
 
 
