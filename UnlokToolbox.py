@@ -36203,28 +36203,56 @@ def create_scatter_group(surfaces, layer_type="Moss", settings=None, points=None
     layer["draw"] = sc_store_drawing(drawing)
     data["layers"].append(layer)
     with UndoChunk("New scatter group"):
-        num = _th_free_number(SC_STEM + "%04d_GRP")
-        root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (SC_STEM, num)))
-        cmds.addAttr(root, longName=SC_ATTR, dataType="string")
-        cmds.addAttr(root, longName=SC_STAMP, dataType="string")
-        _sc_set(root, data)
-        for attr in ("translate", "rotate", "scale"):  # parts are built in world space
-            for ax in "XYZ":
-                cmds.setAttr(root + "." + attr + ax, lock=True)
-        box = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
-                                      name="%s%04d_CTL" % (SC_STEM, num))[0])
-        box = long_name(cmds.parent(box, root)[0])
-        shape = _log_shape(box)
-        cmds.addAttr(box, longName=SC_BOX_ATTR, attributeType="bool", defaultValue=True)
-        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
-                     "visibleInRefractions"):
-            if cmds.attributeQuery(attr, node=shape, exists=True):
-                cmds.setAttr(shape + "." + attr, False)
-        cmds.setAttr(box + ".overrideEnabled", True)
-        cmds.setAttr(box + ".overrideShading", False)  # wireframe: click its edges to pick the group
-        if select:
-            cmds.select(root, replace=True)
+        root = _sc_new_root(data, select)
     return sc_regrow(root)
+
+
+def _sc_new_root(data, select=True):
+    """A scatteredObjects####_GRP holding data, with its box (inside the
+    caller's Ctrl+Z). Returns the group."""
+    num = _th_free_number(SC_STEM + "%04d_GRP")
+    root = long_name(cmds.group(empty=True, world=True, name="%s%04d_GRP" % (SC_STEM, num)))
+    cmds.addAttr(root, longName=SC_ATTR, dataType="string")
+    cmds.addAttr(root, longName=SC_STAMP, dataType="string")
+    _sc_set(root, data)
+    for attr in ("translate", "rotate", "scale"):  # parts are built in world space
+        for ax in "XYZ":
+            cmds.setAttr(root + "." + attr + ax, lock=True)
+    box = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
+                                  name="%s%04d_CTL" % (SC_STEM, num))[0])
+    box = long_name(cmds.parent(box, root)[0])
+    shape = _log_shape(box)
+    cmds.addAttr(box, longName=SC_BOX_ATTR, attributeType="bool", defaultValue=True)
+    for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                 "visibleInRefractions"):
+        if cmds.attributeQuery(attr, node=shape, exists=True):
+            cmds.setAttr(shape + "." + attr, False)
+    cmds.setAttr(box + ".overrideEnabled", True)
+    cmds.setAttr(box + ".overrideShading", False)  # wireframe: click its edges to pick the group
+    if select:
+        cmds.select(root, replace=True)
+    return root
+
+
+def sc_new_group_from(root, layers=False, select=True):
+    """A new scatter group on exactly what root scatters onto - its
+    surfaces, what's left out of them, its Start UDIM - (one Ctrl+Z):
+    blank (no layers: add some), or with layers=True a copy of every
+    layer (each a new seed, so it isn't the same scatter twice). Its box
+    goes round the surfaces. Returns the report
+    (with "root")."""
+    data = json.loads(json.dumps(sc_data(root)))  # all of it, its own copy
+    if layers:
+        for layer in data.get("layers") or []:
+            s = layer.setdefault("s", {})
+            s["seed"] = int(s.get("seed", 1)) + 1
+    else:
+        data["layers"], data["next"] = [], 1
+    if not sc_surfaces(data):
+        raise ValueError("%s has no surfaces left to scatter onto" % short_name(root))
+    with UndoChunk("Duplicate scatter group" if layers else "New scatter group from %s" % short_name(root)):
+        new = _sc_new_root(data, select)
+    return sc_regrow(new)
 
 
 def _sc_change(root, label, fn):
@@ -37397,6 +37425,14 @@ class ScatterPanel(QtWidgets.QWidget):
                                            "rest of the group stays.")
         rem_s.clicked.connect(lambda *_: self.remove_surfaces())
         card.add(button_row(add_s, rem_s))
+        from_g = secondary_button("New Group from This", "A new, empty scatter group on exactly what this one grows "
+                                                         "on (its surfaces, what's left out, its Start UDIM): no "
+                                                         "selecting them again. Then Add Layer (one Ctrl+Z).")
+        from_g.clicked.connect(lambda *_: self.new_group_from())
+        dup_g = secondary_button("Duplicate Group", "A copy of this scatter group: the same surfaces and every "
+                                                    "layer, each with a new seed (one Ctrl+Z).")
+        dup_g.clicked.connect(lambda *_: self.new_group_from(layers=True))
+        card.add(button_row(from_g, dup_g))
         col.addWidget(card)
 
         # ---- 2. layers
@@ -37934,6 +37970,22 @@ class ScatterPanel(QtWidgets.QWidget):
         self._root = rep["root"]
         self._lid = sc_data(self._root)["layers"][0]["id"]
         self._refresh()
+
+    @ui_safe
+    def new_group_from(self, layers=False):
+        if not self._alive():
+            self.set_status("Select a scatter group (click its box) first.", level="warn")
+            return
+        src = short_name(self._root)
+        rep = self._structural("Duplicated %s as" % src if layers else "Made from %s:" % src,
+                               lambda: sc_new_group_from(self._root, layers=layers))
+        self._root = rep["root"]
+        found = sc_data(self._root)["layers"]
+        self._lid = found[0]["id"] if found else None
+        self._refresh()
+        if not found:
+            self.set_status("Made %s on %s's surfaces, empty: pick a type and press <b>Add Layer</b>." % (
+                short_name(self._root), src))
 
     @ui_safe
     def add_surfaces(self):

@@ -824,7 +824,8 @@
   in layer order); scene side `create_scatter_group`, `sc_add_layer`,
   `sc_remove_layer`, `sc_set_layer` (on / name / area), `sc_move_layer`,
   `sc_set_surfaces`, `sc_update` (live), `sc_regrow`, `sc_sync`,
-  `bake_scatter`, `sc_selection`, `sc_owner`; panel `ScatterPanel`.
+  `bake_scatter`, `sc_selection`, `sc_owner`, `sc_new_group_from`; panel
+  `ScatterPanel`.
   - **Scene:** `scatteredObjects####_GRP` (transforms locked: parts are
     world space) with `unlokScatter` JSON {surfaces: [uuid], udim, next,
     layers: [{id "L<n>", type (`SC_TYPES`), tag ("" / "2"...: the number
@@ -847,6 +848,14 @@
     back. `sc_surface_names` lists each group's left-out items after it
     (kind "left out"); the panel shows them greyed, Add Selected puts list
     picks back, Remove ignores them.
+  - **New Group from This / Duplicate Group** (step 1; the user,
+    2026-11-05: "selected a bunch of objects, removed some, I just need to
+    be able to like duplicate that, but blank"): `sc_new_group_from(root,
+    layers)` copies the whole JSON (surfaces, exclude, udim), blank
+    (layers [], next 1) or with every layer, each seed + 1; one UndoChunk
+    around `_sc_new_root` (group + box, shared with
+    `create_scatter_group`), then the NoUndo regrow (no layers: the box
+    fits the surfaces).
   - **Undo model:** structure (layers, surfaces, areas, toggles) is an
     UndoChunk on the JSON (`_sc_change`; Delete deletes the layer's parts
     inside it). Geometry and part creation are NoUndo (tool-managed,

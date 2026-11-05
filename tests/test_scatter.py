@@ -9,8 +9,10 @@ parts scatteredObjects####, makes only parts that hold something, keeps
 leaves off the wall, gathers leaf piles at the wall's foot and in the
 gutter (drifts along them), gives every part its own UDIM tiles, and its
 layers turn on / off, duplicate, move and delete with one Ctrl+Z each
-(the undo / redo regrows what it built). Live edits stay out of the undo
-queue and only rebuild the layer edited; Bake drops the box and hidden
+(the undo / redo regrows what it built). New Group from This makes a
+new empty group on the same surfaces (what's left out too), Duplicate
+Group copies its layers with new seeds, one Ctrl+Z each. Live edits
+stay out of the undo queue and only rebuild the layer edited; Bake drops the box and hidden
 parts. Jungle leaves: big single leaves in clusters of 1-3, green and dry
 parts, lying on the surface, along a gutter. Removing a mesh inside the
 Maya group leaves just it out (nothing grows on it), adding it puts it back.
@@ -315,6 +317,58 @@ def run():
     p2 = tb["sc_parts"](r2)
     check("redo brings it back, regrown", r2 in done and p2 and all(
         len(points(tb, n)) > 4 for n in p2.values()), str(done))
+
+    # --- a new group from this one: the same surfaces (and what's left out of them), blank or with its layers
+    cmds.select(clear=True)  # (a selection is a Ctrl+Z step of its own)
+    pre = tb["sc_data"](root)
+    tb["sc_set_surfaces"](root, remove=[crate])
+    src = tb["sc_data"](root)
+    src_meshes = sorted(tb["sc_surfaces"](src))
+    rep3 = tb["sc_new_group_from"](root)
+    r3 = rep3["root"]
+    d3 = tb["sc_data"](r3)
+    check("New Group from This: a new group on the same surfaces, what's left out too, no layers",
+          sn(r3) == "scatteredObjects0003_GRP" and d3["surfaces"] == src["surfaces"] and
+          d3["exclude"] == src["exclude"] and d3["udim"] == src["udim"] and not d3["layers"] and
+          not tb["sc_parts"](r3) and sorted(tb["sc_surfaces"](d3)) == src_meshes and crate not in src_meshes,
+          "%s: %d surfaces, %d left out, %d layers" % (sn(r3), len(tb["sc_surfaces"](d3)), len(d3["exclude"]),
+                                                       len(d3["layers"])))
+    bb = cmds.exactWorldBoundingBox(tb["sc_box"](r3))
+    sb = cmds.exactWorldBoundingBox(src_meshes)
+    check("its box goes round those surfaces, and it's left selected",
+          all(abs(bb[k] - sb[k]) < 0.5 for k in range(6)) and cmds.ls(selection=True, long=True) == [r3],
+          "box %s, surfaces %s, selected %s" % (["%.1f" % v for v in bb], ["%.1f" % v for v in sb],
+                                                cmds.ls(selection=True)))
+    check("the group it came from is left as it was", tb["sc_data"](root) == src)
+    check("it's one Ctrl+Z", cmds.undoInfo(q=True, undoName=True).startswith("New scatter group from"),
+          cmds.undoInfo(q=True, undoName=True))
+    rep, l3 = tb["sc_add_layer"](r3, "Moss tufts")
+    check("Add Layer on it grows", rep["tufts"] > 5 and tb["sc_parts"](r3), "%d tufts" % rep["tufts"])
+    rep4 = tb["sc_new_group_from"](root, layers=True)
+    r4 = rep4["root"]
+    d4 = tb["sc_data"](r4)
+    pk = sorted(tb["sc_parts"](root))
+    check("Duplicate Group: the same surfaces and every layer, each with a new seed",
+          sn(r4) == "scatteredObjects0004_GRP" and d4["exclude"] == src["exclude"] and
+          [(l["id"], l["type"], l["name"]) for l in d4["layers"]] ==
+          [(l["id"], l["type"], l["name"]) for l in src["layers"]] and
+          all(a["s"]["seed"] != b["s"]["seed"] for a, b in zip(d4["layers"], src["layers"])) and
+          sorted(tb["sc_parts"](r4)) == pk and d4["next"] == src["next"],
+          "%s: %s parts vs %s" % (sn(r4), sorted(tb["sc_parts"](r4)), pk))
+    cmds.undo()
+    check("one Ctrl+Z removes the duplicate, nothing else", not cmds.objExists(r4) and cmds.objExists(r3) and
+          tb["sc_parts"](root) and tb["sc_data"](root) == src)
+    cmds.redo()
+    tb["sc_sync"]()
+    check("redo brings it back, regrown", cmds.objExists(r4) and sorted(tb["sc_parts"](r4)) == pk and all(
+        len(points(tb, n)) > 4 for n in tb["sc_parts"](r4).values() if cmds.getAttr(n + ".visibility")))
+    cmds.undo()
+    cmds.undo()  # the layer added
+    cmds.undo()
+    check("Ctrl+Z steps back past the new group", not cmds.objExists(r3) and cmds.objExists(root))
+    cmds.undo()  # the crate back in
+    tb["sc_sync"]()
+    check("... and past leaving the crate out", tb["sc_data"](root) == pre, cmds.undoInfo(q=True, undoName=True))
 
     # --- presets
     pr = tb["sc_preset"]("Leaf piles", "Gutters and wall bases")

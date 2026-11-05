@@ -768,6 +768,13 @@ you tune them.
    list and press **Add Selected** (or add it from the viewport) to put it
    back.
 
+   **New Group from This** makes a new, empty scatter group on exactly
+   what the open one grows on (its meshes and groups, what's left out of
+   them, its Start UDIM), so a selection you've built up with adds and
+   removes doesn't need making again: it opens in the panel, ready for
+   **Add Layer**. **Duplicate Group** does the same with a copy of every
+   layer, each with a new seed. One Ctrl+Z each.
+
    **Or draw instead of selecting:** **Draw on Surfaces**, then drag over
    any meshes (walls, a roof, the floor: nothing needs selecting; a click
    is a single spot). Ctrl+Z takes the last stroke back, Ctrl+Y puts it

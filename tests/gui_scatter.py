@@ -859,6 +859,49 @@ def jungle_leaves(ns, panel, window):
     window.grab().save(os.path.join(OUT, "11_panel_left_out.png"))
     look((0, 8, -2), (30, 34, 62))
     snap("11_floor_left_out.png")
+
+    # --- New Group from This / Duplicate Group: the same surfaces (the floor still left out), nothing reselected
+    def surf_rows():
+        return [panel.surf_list.item(i).text() for i in range(panel.surf_list.count())]
+
+    def button(text):
+        found = [b for b in panel.findChildren(QtWidgets.QPushButton) if b.text() == text]
+        return found[0] if found else None
+
+    def back_to_root():
+        cmds.select(root)
+        panel._sync_from_selection()
+        pump()
+
+    back_to_root()
+    rows, nl = surf_rows(), len(ns["sc_data"](root)["layers"])
+    b_from, b_dup = button("New Group from This"), button("Duplicate Group")
+    check("New Group from This and Duplicate Group show in step 1", b_from is not None and b_dup is not None and
+          b_from.isVisible() and b_dup.isVisible())
+    b_from.click()
+    pump()
+    new = panel._root
+    check("New Group from This: an empty group on the same surfaces (the floor left out too), open and selected",
+          new != root and ns["is_scatter"](new) and panel.layer_list.count() == 0 and surf_rows() == rows and
+          cmds.ls(selection=True, long=True) == [new] and "Add Layer" in panel.status.text(),
+          "%s vs %s | %s" % (surf_rows(), rows, panel.status.text()))
+    window.grab().save(os.path.join(OUT, "12_panel_new_group_from.png"))
+    cmds.undo()
+    pump()
+    check("one Ctrl+Z takes the new group away", not cmds.objExists(new) and cmds.objExists(root),
+          cmds.undoInfo(q=True, undoName=True))
+    back_to_root()
+    b_dup.click()
+    pump()
+    new = panel._root
+    check("Duplicate Group: the same surfaces and every layer, grown, open in the panel",
+          new != root and panel.layer_list.count() == nl and surf_rows() == rows and
+          len(ns["sc_parts"](new)) == len(ns["sc_parts"](root)), panel.status.text())
+    cmds.undo()
+    pump()
+    check("one Ctrl+Z takes the duplicate away", not cmds.objExists(new) and cmds.objExists(root),
+          cmds.undoInfo(q=True, undoName=True))
+    back_to_root()
     panel.surf_list.item(1).setSelected(True)
     panel.add_surfaces()
     pump()
