@@ -1534,6 +1534,14 @@
       per scene (aiStandardSurface networks `_ml_arnold_look` with MtoA,
       plain standardSurface without), on the Moss layers' bed, strands,
       shoot shapes and capsules. Noise sizes in metres (`_ml_noise`).
+    - **Instancer first** (`_sc_shoots_order`): Maya crashed (fatal) freeing
+      an undone shoots node whose particle shape came before its
+      instancer; the instancer is reordered to the front when made and
+      when an older node is rewritten. `test_moss_instances` checks it.
+    - **Bed budget** (`_MossBed`): `MOSS_MAX_CELLS` / the estimate use the
+      area of the faces the layer may grow on (`_moss_area(nodes, faces)`),
+      not the whole meshes: a rock plus a ring of a huge floor got a capped,
+      coarse bed.
   - **Detail** (`MOSS_DETAIL`: cell x R, detail on, rate, kind, capsule
     sides, hanging segments): Proxy = bed only at 1 R cells; Normal 0.3 R,
     tufts (5-point leaf stars on the bed); High 0.2 R, shoots (2-segment
