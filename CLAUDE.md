@@ -1012,7 +1012,17 @@
     > 0, best first; radius / height from the margin (pr) and shelter;
     spacing grid (cell 4 R), cushions never overlap; each is a dome
     (`MOSS_CLUMP_GRID` rings x segments by Detail) plus up to two
-    satellites, laid by closest point. `_fit` tests rim points (x1.1) at
+    satellites, each spoke walked over the surface (`_spoke`, the user,
+    2026-11-05: spots "able to grow around corners ... instead of just
+    ending harshly": a flat disc laid by closest point squashed the part
+    past a convex edge onto the edge, a flat wall at the edge): a step
+    whose end is off the surface sideways (in the plane it walked; a
+    curve's sag is along the normal; into the surface = a wall's foot, left
+    alone) folds its overshoot down the far side once, the heading
+    unfolding (along the edge it keeps going, across it turns down: no
+    spike), and points past the fold sit along the far face's normal; a
+    fold into something stops the spoke. Same number of closest-point
+    queries plus one per fold. `_fit` tests rim points (x1.1) at
     full, 0.65 and 0.4 radius with `_covered` (a ray out hits within 1 cm,
     or a back face): the first clear size wins, else no cushion (moss went
     under the porch wall). Count = cushions placed. **Grouping** (the
@@ -1083,6 +1093,94 @@
     wall of 60 stones. `_MiSampler` samples area-weighted points from
     `_mi_triangles` (world triangles, cached in `_MI_TRIS` by
     `_mi_mesh_key`: shape, counts, matrix, bbox).
+  - **Rest surface** (the user, 2026-11-05: carpet moss followed the
+    facets of meshes that are smooth at render time, and on corrugated
+    roofs it broke up with gaps; "pre-subdividing for layout is heavy,
+    find a smarter solution"). `moss_build` swaps the surface for
+    `_mi_rest_surface(surf, s)`: each mesh's `_MiRest` (`_mi_rest`, cached
+    in `_MI_REST` by mesh key + smooth + bridge + cap) in its place, or
+    the mesh itself when nothing changes (a plain `_GEP` box builds as
+    before). Its `rest_key` goes into every moss cache key
+    (`_mi_surf_keys`), its `sample` feeds `_MiSampler`, its points /
+    triangles / corners / curves feed `_MossBed` (`_mi_surf_topology`).
+    - **Which meshes are smooth:** the per-layer **Surface** setting
+      (`MOSS_SURFACES` Auto / Faceted / Smooth, `_mi_rest_smooth`); Auto
+      reads the name's last token through `ur_base_suffix_of`:
+      `MI_SMOOTH_SUFFIXES` (_GES, _GED, _GEV) are subdivided at render
+      time, _GEP and anything else stay as modelled (`_mi_subdivided`).
+    - **Smooth, no polySmooth** (`_mi_limit`, `_mi_cc`): one Catmull-Clark
+      step in Python, then the limit masks on that all-quad mesh: exact
+      limit points at every vertex, edge middle and face centre, limit
+      normals from the subdivided quads, open edges as creases (the
+      render's rule). A coarse cage (up to `MI_REST_REFINE` face corners)
+      takes one more step (`_mi_cc_mesh`: 4x the exact points; the
+      interpolation between them sagged 1.6 cm inside on a 1 m cube, now
+      ~5 mm, polySmooth div 3 as the reference); its triangles keep the
+      mesh's face ids (`parent`), so picks and masks still work. Between
+      the exact points each triangle is a curved patch (`_mi_curve_at`:
+      Phong tessellation, alpha `MI_REST_PHONG`, plus edge bumps 4 l_i l_j
+      and a face bump through the exact face-centre / diagonal point), so
+      the patches meet along shared edges (an edge's curve depends on its
+      two ends only). The bed's grid points are mapped onto it
+      (`_record`); `_coverage` tests points on it (`_mi_flat_bary`: flat
+      points inside a curved surface read as buried). The query mesh
+      (`item`, an in-memory MFnMeshData) is the patches tessellated at
+      `ceil(sqrt(dev / MI_REST_TOL))` (<= 8, shared edge points).
+    - **Lifted to the level-2 mesh** (`_mi_render_lift`): the exact limit
+      is inside what a render or smooth preview at 2-3 levels shows on a
+      convex part, and thin moss on it sank under the preview (a 1 m _GES
+      cube: 25% of its top's moss showed at level 3, 3% at level 2). Each
+      exact point moves along its normal to its level-2 point (the step's
+      own V / E / F next to their limits; x 1/4 from level 1 on a big
+      mesh): 99% shows at both levels. The rest sits ~1.5 cm over
+      polySmooth div 3 on that cube (0.5 cm on the 8-sided post), never
+      under it.
+    - **Relief bridging** (`_mi_bridge`, a ball closing): bridge = 3 R x
+      (1 - Surface detail), cap = 0.6 R x (1 - Surface detail)
+      (`_mi_rest_scale`). Vertices of finely made surfaces (shortest edge
+      <= bridge) near a concave spot rise along the broad normal (the
+      faces' within the ball) until a ball resting on any of their faces
+      (`leans`: broad, vertex and face normals) clears the surface
+      (bisection); deeper than 2 cap fades out (a gutter stays a gutter);
+      faces turned down are left; a vertex with its own mesh above it
+      within the lift (a lap) stays. Corrugations fill to the crests,
+      crests stay put. Surface detail 1 = no bridging.
+    - **Panel:** Scatter's Moss layers have a "Surface" section (Surface,
+      Surface detail; `SC_LAYOUT["Moss"]`) before More; both are look
+      keys in `MOSS_DEFAULTS` (Auto / 0.5), so old groups get them when
+      they next grow (a layer read back from its parts stays as it was
+      until then; Faceted + Surface detail 1 reads every mesh as
+      modelled, the seam and lap fixes still apply).
+    - **Seams** (T-junctions, in `_MossBed._mesh`): faces on
+      different planes cut a shared edge at different grid lines, so
+      their points lifted differently and cracks opened along every fold
+      of a corrugation. Each fold edge (both faces have moss, different
+      plane keys) gets every grid crossing of both faces (`seams`), and
+      `_seam_poly` keys points on it ("e", shape, lo, hi, s) / corners
+      ("v", shape, id) and inserts the other side's crossings. Coplanar
+      neighbours share one grid and are left alone (cost).
+    - **Covers and pieces** (the side laps had no moss at all: a
+      candidate on the lower sheet under the lap is pressed under the
+      upper one (obstacle 0.5 mm, margin -1), and the upper sheet's points
+      1.4 mm higher read it): `_moss_obstacle` also stores what covers a
+      candidate (`memo["oc"]`, `_MiSurface.ray(piece=True)` -> the hit's
+      connected piece, `_MiSurface.piece`, labels per vertex in
+      `_MI_PIECE_LABELS`). A block's candidates covered by the piece its
+      face is on are dropped (`_not_under_own`: the sheet lapped over, a
+      rail's top over the board under it), and a point with room above it
+      (its room ray, cast whenever a pressed-under candidate `hid` is in
+      reach) skips pressed-under candidates (the lower sheet up to the
+      lap's edge, the board beside a rail); points under the cover keep
+      reading them.
+    - **Numbers** (`tests/test_moss_surface.py`, same machine, other jobs
+      running): corrugated Clean gaps 15.7% -> 0.9% (rays down over the
+      middle), Makeshift 27.8% -> 0.7%, no cracks on fine lines across
+      the corrugations and laps; build 23 s -> ~27 s Clean, 52 s -> ~63 s
+      Makeshift (more moss, seams, bridging; the rest surface is cached,
+      a Coverage edit ~6-8 s). _GES cages: moss within the bed's thickness
+      of polySmooth (0% of points under it with the level-2 lift), 1.7 s
+      vs 2.5 s for the same cage as _GEP. Clumps on a beam's top drape
+      down its sides (0 before).
   - **Moss spots** (`_moss_spots`, at `_moss_reach(R)` = max(2 R, 10 cm):
     crack probes need room): per spot shelter = hemisphere rays (low first)
     that hit within 2.5 RA; six ways round, probes at 0.2 / 0.45 / 0.9 RA
@@ -1240,7 +1338,9 @@
     are set at Grow), rootlets on the stems, moss on the ivy, caching the
     detail layer (High / Hero edits rebuild it), High / Hero speed on big
     areas.
-  - Tests: `tests/test_moss_ivy.py` (the engine; its old panel's GUI test
+  - Tests: `tests/test_moss_surface.py` (rest surface: suffixes, _GES
+    cages vs polySmooth, corrugated roofs' gaps and cracks),
+    `tests/test_moss_ivy.py` (the engine; its old panel's GUI test
     went with the panel).
 - **Smart UDIM** (UV tab):
   - **Sets:** state lives in plain Maya objectSets (root `*_smartUDIM_SET`,
