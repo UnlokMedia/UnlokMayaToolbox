@@ -550,6 +550,26 @@ def height_fade(ns, panel, window):
         shade_part(node, key.split("/")[1])
     i1 = on_columns(ivy_root, "stems")
 
+    # ivy: Vines are Per mesh, 2 each: every column gets its own
+    fi = panel.f["Ivy"]
+    rows = [k for k in ("vines_by", "vine_spacing", "climb_var") if fi[k].isVisible()]
+    check("the Ivy panel shows Vines are, Spacing and Climb variation", len(rows) == 3, str(rows))
+    fi["vines_by"].buttons["Per mesh"].click()
+    fi["vines"].setValue(2)
+    fi["climb_var"].setValue(0.5)
+    panel._pending.update(("vines_by", "vines", "climb_var"))
+    panel._apply_pending()
+    pump()
+    window.grab().save(os.path.join(OUT, "16_panel_ivy.png"))
+    for key, node in ns["sc_parts"](ivy_root).items():
+        shade_part(node, key.split("/")[1])
+    stems = [n for k, n in ns["sc_parts"](ivy_root).items() if k.endswith("/stems")]
+    import maya.api.OpenMaya as om
+    fn = om.MFnMesh(ns["get_dag_path"](ns["_log_shape"](stems[0])))
+    xs = set(min((-22, -8, 6, 20), key=lambda x: abs(p.x - x)) for p in fn.getPoints(om.MSpace.kWorld)
+             if p.y > 0.6 and abs(p.z) < 10.0 and min(abs(p.x - x) for x in (-22, -8, 6, 20)) < 5.0)
+    check("Vines are Per mesh: ivy on every column", xs == {-22, -8, 6, 20}, str(sorted(xs)))
+
     # moss: the rows follow Height fade and Fade by
     cmds.select(moss_root)
     panel._sync_from_selection()

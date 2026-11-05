@@ -29214,8 +29214,10 @@ MOSS_DEFAULTS = {
     "detail": "Normal", "seed": 1, "udim": 1001, "uv_tile": 0.5, "stacks": 1, "stack_layout": "UDIM tiles",
     "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6,
     "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5}
+IVY_VINES_BY = ("In all", "Per mesh")  # Vines: the total, or on each mesh
+IVY_MAX_AUTO_VINES = 400                # Per mesh over many meshes: fewer each past it
 IVY_DEFAULTS = {
-    "vines": 5, "length": 2.5, "climb": 0.75, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
+    "vines": 5, "vines_by": "In all", "vine_spacing": 0.7, "length": 2.5, "climb": 0.75, "climb_var": 0.0, "wander": 0.4, "branching": 0.5, "gravity": 0.3,
     "stem_width": 0.012, "leaf_size": 0.07, "leaf_var": 0.35, "leaf_density": 0.7,
     "detail": "Normal", "seed": 1, "udim": 1001, "stem_tiles": 1, "stacks": 1, "stack_layout": "UDIM tiles"}
 DEBRIS_DEFAULTS = {
@@ -32668,36 +32670,84 @@ IVY_OUTLINE = ((0.0, 0.5), (0.1, 0.84), (0.25, 0.98), (0.4, 1.0), (0.55, 0.92), 
 IVY_MAX_POINTS = 60000
 
 
-def _ivy_auto_seeds(surf, sampler, count, seed, spacing, paint=None):
-    """count seed points at the bottom of the meshes, spread apart (farthest
-    first among the lowest 12% of random points). paint (influence): fewer
-    start where it's painted out, and where it's painted in comes first."""
+def _ivy_auto_seeds(surf, sampler, count, seed, spacing=0.7, paint=None, per_mesh=False):
+    """Where automatic vines start: low on each mesh, near what it stands on
+    (a ray down meets a surface within 30 cm; a mesh standing on nothing it
+    scatters onto: its lowest 12%), on the sides (not tops or undersides).
+    count in all, or on each mesh (per_mesh; fewer each past
+    IVY_MAX_AUTO_VINES in all). Every mesh has its own low spots, so one
+    standing a little lower doesn't take them all. spacing 0: anywhere among
+    them (some clump together) .. 1: as far apart as they go (farthest
+    first). paint (influence): fewer start where it's painted out; where
+    it's painted in comes first."""
     if not sampler.total or count <= 0:
         return []
-    pool = []
-    rank = {}
-    for i in range(max(60, count * 30)):
-        r = _rand12(seed, i, 41, 9)
-        p, tn = sampler.point(r[0], r[1], r[2])
-        if tn[1] > 0.9 or tn[1] < -0.5:  # tops and undersides: vines start on the sides
-            continue
-        if paint is not None:
-            k = paint.at(p)
-            if k < 0.0 and r[3] >= 1.0 + k:
+    m = scene_m_per_unit()
+    near, eps = 0.3 / m, 0.01 / m
+    far = max(near, surf.hi[1] - surf.lo[1]) * 1.01 + near
+    n_all = max(60, count * 30)
+    pools = []
+    for pi, (base, acc, tris, node) in enumerate(sampler.parts):
+        area = acc[-1]
+        n = max(24, int(round(count * 30 if per_mesh else n_all * area / sampler.total)))
+        grounded, free = [], []
+        for i in range(n):
+            r = _rand12(seed, i, 41 + 7 * pi, 9)
+            p, tn = sampler.pick((base + r[0] * area) / sampler.total, r[1], r[2])[:2]
+            if tn[1] > 0.9 or tn[1] < -0.5:  # tops and undersides: vines start on the sides
                 continue
-            rank[p] = -k if k > 0.05 else 0.0
-        pool.append((p, tn))
-    if not pool:
-        pool = [sampler.point(*_rand12(seed, i, 43, 9)[:3]) for i in range(count * 10)]
-    pool.sort(key=lambda x: (rank.get(x[0], 0.0), x[0][1]))
-    low = pool[:max(count, int(len(pool) * 0.12))]
-    out = [low[0]]
-    while len(out) < count and len(out) < len(low):
-        best = max(low, key=lambda c: min(_rl_len(_rl_sub(c[0], o[0])) for o in out))
-        if min(_rl_len(_rl_sub(best[0], o[0])) for o in out) < 0.2 * spacing:
-            break
-        out.append(best)
-    return [p for p, _ in out]
+            rank = 0.0
+            if paint is not None:
+                k = paint.at(p)
+                if k < 0.0 and r[3] >= 1.0 + k:
+                    continue
+                rank = -k if k > 0.05 else 0.0
+            hit = surf.ray((p[0] + tn[0] * eps, p[1] + tn[1] * eps, p[2] + tn[2] * eps), (0.0, -1.0, 0.0), far)
+            if hit is None:
+                free.append((rank, p[1], p))
+            elif hit[0] <= near and hit[2][1] > 0.3:  # just above a floor, a step, a base (not inside one)
+                grounded.append((rank, p[1], p))
+        free.sort()
+        pool = sorted(grounded) or free[:max(1, int(len(free) * 0.12))]  # standing on nothing: its lowest
+        if pool:
+            pools.append(pool)
+    if not pools:  # nothing low anywhere (all tops?): anywhere
+        pools = [[(0.0, 0.0, sampler.point(*_rand12(seed, i, 43, 9)[:3])[0]) for i in range(count * 10)]]
+    rng = random.Random(int(seed) * 7919 + 17)
+    if not per_mesh:
+        return _ivy_spaced([x for pool in pools for x in pool], count, spacing, rng)
+    each = max(1, min(count, IVY_MAX_AUTO_VINES // max(1, len(pools))))
+    out = []
+    for pool in pools:
+        out.extend(_ivy_spaced(pool, each, spacing, rng))
+    return out
+
+
+def _ivy_spaced(pool, count, spacing, rng):
+    """count points of pool [(rank, height, point)]: each the farthest from
+    those already picked among 1 + 12 x spacing random candidates (spacing 1:
+    among all of them); painted in (rank < 0) first when there are enough."""
+    pref = [x for x in pool if x[0] < 0.0]
+    pool = pref if len(pref) >= count else pool
+    pts = [x[2] for x in pool]
+    dmin = [1e30] * len(pts)
+    left = list(range(len(pts)))
+    k = None if spacing >= 0.999 else 1 + int(max(0.0, spacing) * 12)
+    out = []
+    while len(out) < count and left:
+        if not out:
+            j = left[0] if k is None else left[rng.randrange(len(left))]
+        else:
+            cands = left if k is None else [left[rng.randrange(len(left))] for _ in range(k)]
+            j = max(cands, key=lambda c: dmin[c])
+        out.append(pts[j])
+        left.remove(j)
+        q = pts[j]
+        for c in left:
+            d = _rl_len(_rl_sub(pts[c], q))
+            if d < dmin[c]:
+                dmin[c] = d
+    return out
 
 
 def ivy_walk(surf, seeds, s):
@@ -32716,6 +32766,7 @@ def ivy_walk(surf, seeds, s):
     step = max(leaf * IVY_STEP[detail], length / 600.0)
     r0 = max(1e-6, 0.5 * float(s["stem_width"]) / m)
     climb = clamp(float(s["climb"]), 0.0, 2.0)
+    climb_var = clamp(float(s.get("climb_var", 0.0)), 0.0, 1.0)  # each vine x (1 - var .. 1 + var)
     wander = clamp(float(s["wander"]), 0.0, 2.0)
     branching = clamp(float(s["branching"]), 0.0, 2.0)
     gravity = clamp(float(s["gravity"]), 0.0, 1.0)
@@ -32743,14 +32794,19 @@ def ivy_walk(surf, seeds, s):
             base = _rl_norm(upt, None) if _rl_len(upt) > 0.2 else _mi_frame(sn, r[0] * 6.2832)[0]
             ang = (k - (per_seed - 1) * 0.5) * 0.55 + (r[1] - 0.5) * 0.5
             d = _mi_rotate(base, sn, ang)
-            queue.append((sp, sn, d, length * (0.8 + 0.4 * r[2]), r0, 0, si * 64 + k, 0.0))
+            rc = _rand12(seed, si, k, 56)
+            cf = 1.0 + climb_var * (2.0 * rc[0] - 1.0)
+            if cf < 1.0:  # less Climb: it also starts leaning off up (at none, along the surface)
+                d = _mi_rotate(d, sn, (1.0 - cf) * (1.4 if rc[1] < 0.5 else -1.4))
+            queue.append((sp, sn, d, length * (0.8 + 0.4 * r[2]), r0, 0, si * 64 + k, 0.0, cf))
     vines = []
     total = 0
     qi = 0
     while qi < len(queue) and total < IVY_MAX_POINTS:
         _poll()  # a long build: the Working window, Esc / Cancel
-        p, n, d, vlen, rad0, gen, vkey, a0 = queue[qi]
+        p, n, d, vlen, rad0, gen, vkey, a0, cf = queue[qi]
         qi += 1
+        vclimb = min(2.0, climb * cf)
         pts, nrm, free = [p], [n], [False]
         fl = None if fade is None else [fade.at(p)]
         cut = 0.0 if fade is None else 0.05 + 0.9 * _rand12(seed, vkey, 0, 55)[0]
@@ -32793,7 +32849,7 @@ def ivy_walk(surf, seeds, s):
             if ut > 0.15:
                 aim = _mi_rotate(_rl_mul(upt, 1.0 / ut), n, wander * 1.1 * _th_noise(arc / (leaf * 5.0), vkey * 3.7,
                                                                                    seed))
-                want = _rl_add(d, _rl_mul(aim, climb * 0.6 * min(1.0, 1.5 * ut)))
+                want = _rl_add(d, _rl_mul(aim, vclimb * 0.6 * min(1.0, 1.5 * ut)))
             want = _mi_rotate(want, n, wander * 0.2 * _th_noise(arc / (leaf * 1.5), vkey * 5.3 + 11.0, seed + 5) +
                               (r[0] - 0.5) * wander * 0.12)
             # make room: other stems close by push this one away
@@ -32863,7 +32919,7 @@ def ivy_walk(surf, seeds, s):
                     bd = _mi_rotate(d, n, sgn * (0.55 + 0.5 * rb[3]))
                     blen = (vlen - arc) * (0.35 + 0.45 * rb[4])
                     queue.append((p, n, bd, blen, max(1e-6, rad0 * (1.0 - 0.6 * arc / max(vlen, 1e-9)) * 0.7),
-                                  gen + 1, 100000 + len(queue), 0.0))
+                                  gen + 1, 100000 + len(queue), 0.0, cf))
         for q in own:
             grid.setdefault(cell_of(q), []).append((q, vkey))
         if len(pts) >= 3:
@@ -33136,8 +33192,8 @@ def ivy_build(nodes, s, seeds=None, surf=None, draw=None, paint=None):
         seeds = draw.spread(max(1, int(s["vines"])))
     if not seeds:
         sampler = _MiSampler(surf.nodes)
-        seeds = _ivy_auto_seeds(surf, sampler, max(1, int(s["vines"])), int(s["seed"]),
-                                math.sqrt(sampler.total / max(1, int(s["vines"]))) if sampler.total else 1.0, paint)
+        seeds = _ivy_auto_seeds(surf, sampler, max(1, int(s["vines"])), int(s["seed"]), float(s["vine_spacing"]),
+                                paint, per_mesh=s["vines_by"] == IVY_VINES_BY[1])
         s = dict(s, vines=len(seeds))  # one vine per automatic seed
     vines = ivy_walk(surf, seeds, s)
     if not vines:
@@ -36810,9 +36866,19 @@ SC_FIELDS = {
                     "How torn they are: splits along the veins, missing frond leaflets."),
     # ivy
     "vines": ("Vines", lambda: IntField(1, 64, 1, 20),
-              "How many vines: automatic seeds at the bottom of the meshes, or shared between the picked points."),
+              "How many vines: starting low on the meshes (in all, or on each mesh: Vines are), or shared between "
+              "the picked points / along the drawing."),
+    "vines_by": ("Vines are", lambda: SegmentField(IVY_VINES_BY),
+                 "In all: Vines is the total, spread over all the meshes. Per mesh: every mesh gets that many of its "
+                 "own (a row of columns all get ivy; the floor too, if it's one of the surfaces)."),
+    "vine_spacing": ("Spacing", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                     "How far apart the vines start: 0 = anywhere low (some clump together), 1 = as far apart as "
+                     "they can (evenly over the meshes). In between: mostly apart, now and then a few together."),
     "length": ("Length", _scf(0.05, 40.0, 0.2, 8.0, 2, 0.1), "How far each vine grows, in metres."),
     "climb": ("Climb", _scf(0.0, 2.0, 0.0, 1.5, 2, 0.05), "How strongly vines grow upwards."),
+    "climb_var": ("Climb variation", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                  "How much the vines differ in Climb: 0 = all alike, 1 = from creeping along the bottom to twice "
+                  "Climb (a branch climbs like its vine)."),
     "wander": ("Wander", _scf(0.0, 2.0, 0.0, 1.5, 2, 0.05), "How much the vines meander."),
     "branching": ("Branching", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "How often vines branch."),
     ("Ivy", "leaf_size"): ("Leaf size", _scf(0.005, 1.0, 0.02, 0.25, 3, 0.005),
@@ -36889,7 +36955,8 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
                ("More", False, ["speck_spread", "size_var", "detail"]),
                ("UVs", False, ["stacks", "stack_layout"])],
-    "Ivy": [("", True, ["vines", "length", "climb", "wander", "branching", "leaf_size", "leaf_density"]),
+    "Ivy": [("", True, ["vines", "vines_by", "vine_spacing", "length", "climb", "climb_var", "wander", "branching",
+                        "leaf_size", "leaf_density"]),
             ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
 for _t in SC_LAYOUT:

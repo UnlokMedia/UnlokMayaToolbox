@@ -1417,8 +1417,25 @@
     convex edge (normal = from the surface to the stepped point). Gravity:
     within 5 steps of an edge heading down, or under an overhang, a vine
     may let go and hang (free points, swaying, re-cling on a hit). Branches
-    two levels deep, thinner (0.7) and shorter. Auto seeds: farthest-point
-    pick among the lowest 12% of side-facing samples.
+    two levels deep, thinner (0.7) and shorter. Climb variation
+    (`climb_var`): each main vine's Climb x cf, cf = 1 + var (2 r - 1)
+    (`_rand12(seed, si, k, 56)`), the 9th queue element, inherited by its
+    branches; cf < 1 also turns its start (1 - cf) x 1.4 rad off up (vines
+    start up the surface, so a weaker pull alone changed nothing).
+  - **Ivy auto seeds** (`_ivy_auto_seeds`; the user, 2026-11-05: "it's
+    only scattering them on a few of the columns I've got selected" /
+    "they seem to all clump together on one or two columns"; it used to
+    take the globally lowest 12%, so the lowest-standing columns got them
+    all): per sampler part (mesh), side-facing samples (area-weighted
+    count; Per mesh: count x 30 each), a ray down from each: grounded =
+    an upward-facing hit (n.y > 0.3) within 30 cm (inside or under a slab
+    doesn't count); a mesh with none grounded takes its lowest 12% of
+    those with no hit below; none at all (tops only) = anywhere.
+    `vines_by` (`IVY_VINES_BY`): In all = `_ivy_spaced` over every pool
+    together; Per mesh = Vines each (fewer past `IVY_MAX_AUTO_VINES` in
+    all). `_ivy_spaced`: best candidate, each the farthest from those
+    picked among 1 + 12 x `vine_spacing` random candidates (>= 0.999: all
+    of them, farthest first); painted in (rank < 0) first when enough.
   - **Ivy mesh:** `_ivy_finish` smooths and lifts centres a radius off the
     surface (pushed out when closer). Stems `ivy_stem_mesh`: tapered tubes,
     seam towards the wall, tip cone; UVs via `_ivy_columns` (pieces no

@@ -24,6 +24,10 @@ adds new ones, one Ctrl+Z each, saved while paused. Draw on: Surfaces
 skips scatter, live or baked (even moved out of its group), Selected
 draws only on the picked meshes, Everything on any; a surface group
 never scatters onto baked parts moved into it (unless added by hand).
+Ivy over a row of columns, two sunk into the floor: In all the vine
+starts spread over most columns (low, above the floor), Per mesh every
+column gets its own, Spacing 1 spreads them further than 0; Climb
+variation gives vines different heights.
 Pause: edits are saved and nothing grows; Play grows each changed layer
 once and is one Ctrl+Z. An old scatter opened again: one setting grows
 only its layer; a live edit too big to grow quickly pauses. Draft moss:
@@ -1557,10 +1561,87 @@ def draw_on():
           sorted(["crate", "floor", sn(moved)]))
 
 
+def ivy_columns():
+    """Ivy over a row of 8 columns, two sunk 20 cm into the floor (they used
+    to take every vine start): In all, the starts spread over most columns,
+    low on them and above the floor; Per mesh, every column gets its own;
+    Spacing 1 starts them further apart than 0. Climb variation: vines up a
+    wall reach different heights, some creeping low."""
+    tb = load_toolbox()
+    cmds.file(new=True, force=True)
+    floor = box("floor", (100, 1, 20), (0, -0.5, 0))
+    xs = [-42 + 12 * i for i in range(8)]
+    cols = []
+    for i, x in enumerate(xs):
+        c = cmds.polyCylinder(name="col%d" % i, r=2.0, h=25.0, sx=16, sy=10, sc=1, constructionHistory=False)[0]
+        cmds.move(x, (-2.0 if i in (2, 5) else 0.0) + 12.5, 0, c)
+        cols.append(cmds.ls(c, long=True)[0])
+    surf = tb["_MiSurface"]([floor] + cols)
+    sampler = tb["_MiSampler"](surf.nodes)
+
+    def on(q):
+        for i, x in enumerate(xs):
+            if (q[0] - x) ** 2 + q[2] ** 2 <= 3.0 ** 2:
+                return i
+        return None
+
+    def starts(count, spacing, per_mesh=False, seed=1):
+        return tb["_ivy_auto_seeds"](surf, sampler, count, seed, spacing, None, per_mesh)
+
+    for n in (8, 16):
+        got = starts(n, 0.7)
+        cs = [on(q) for q in got if on(q) is not None]
+        check("In all, %d vines start over most of 8 columns (not crowded onto the two sunk ones)" % n,
+              len(set(cs)) >= (6 if n == 8 else 7) and sum(1 for c in cs if c in (2, 5)) <= max(3, n // 4),
+              "columns %s" % sorted(cs))
+    got = starts(16, 0.7)
+    col_y = [q[1] for q in got if on(q) is not None]
+    check("they start low on the columns, above the floor (not inside it)",
+          col_y and min(col_y) > -0.05 and max(col_y) < 3.5, "y %.2f..%.2f" % (min(col_y), max(col_y)))
+    got = starts(2, 0.7, per_mesh=True)
+    per = [on(q) for q in got]
+    check("Per mesh: every column gets its own vines", all(per.count(i) == 2 for i in range(8)), str(sorted(
+        c for c in per if c is not None)))
+
+    def nearest(pts):
+        return sum(min(tb["_rl_len"](tb["_rl_sub"](a, b)) for b in pts if b is not a) for a in pts) / len(pts)
+
+    tight = sum(nearest(starts(12, 0.0, seed=s)) for s in range(1, 5)) / 4.0
+    apart = sum(nearest(starts(12, 1.0, seed=s)) for s in range(1, 5)) / 4.0
+    check("Spacing 1 starts vines further apart than Spacing 0", apart > 1.3 * tight,
+          "mean nearest %.1f vs %.1f" % (apart, tight))
+    rep = tb["create_scatter_group"](cols, "Ivy", {"vines": 2, "vines_by": "Per mesh", "length": 1.0})
+    stems = [n for k, n in tb["sc_parts"](rep["root"]).items() if k.endswith("/stems")]
+    grown = set(on(q) for n in stems for q in points(tb, n)) - {None}
+    check("a Per mesh ivy layer grows on every column", grown == set(range(8)), str(sorted(grown)))
+
+    # --- Climb variation: each vine its own Climb
+    cmds.file(new=True, force=True)
+    wall = box("ivyWall", (80, 30, 2), (0, 15, 0))
+    surf = tb["_MiSurface"]([wall])
+    seeds = tb["_ivy_auto_seeds"](surf, tb["_MiSampler"](surf.nodes), 14, 3, 1.0)
+
+    def tops(var):
+        s = tb["mi_settings_only"]("Ivy", {"vines": 14, "length": 1.4, "climb": 0.75, "climb_var": var,
+                                           "branching": 0.0, "seed": 3})
+        return [max(q[1] for q in v["pts"]) for v in tb["ivy_walk"](surf, seeds, s) if v["gen"] == 0]
+
+    def spread(v):
+        m = sum(v) / len(v)
+        return math.sqrt(sum((x - m) ** 2 for x in v) / len(v))
+
+    even, varied = tops(0.0), tops(1.0)
+    check("Climb variation: vines reach different heights, some creeping low",
+          spread(varied) > 1.3 * spread(even) and min(varied) < min(even),
+          "height spread %.1f vs %.1f, lowest top %.1f vs %.1f" % (spread(varied), spread(even), min(varied),
+                                                                    min(even)))
+
+
 try:
     run()
     drawing()
     draw_on()
+    ivy_columns()
     jungle()
     moss_and_specks()
     pause()

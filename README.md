@@ -927,8 +927,14 @@ Presets: Jungle roof, Crevices only, Thick carpet, Fruiting cushions,
 Shaggy hanging, Column base.
 
 **Ivy** vines start from the picked points (*Vines* shared between them) or
-from automatic seeds at the bottom of the meshes. Each vine walks the
-surface: pulled up (*Climb*), meandering (*Wander*), kept apart from the
+low on the meshes, near the floor, step or base each stands on (never
+inside it). *Vines are*: *In all* (Vines is the total, spread over every
+mesh, so a row of columns all get some) or *Per mesh* (each mesh gets that
+many; a floor that's one of the surfaces too). *Spacing*: 0 = anywhere low,
+some clumped together; 1 = as far apart as they go; in between mostly
+apart, now and then a few together. Each vine walks the
+surface: pulled up (*Climb*; *Climb variation* gives each vine its own, from
+creeping along the bottom to twice as eager), meandering (*Wander*), kept apart from the
 other vines, climbing onto any wall it runs into and round convex edges
 (over the top of a post onto the beam). Going down over an edge, or under
 an overhang, a vine may let go and hang (*Gravity*). Branches (*Branching*,
@@ -2035,7 +2041,10 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   thinning out going up; two columns in one mesh each on its own; a base,
   shaft and capital as one column; by metres; from the top; the floor as
   it was; leaves off the column tops; ivy vines stopping in the fade at
-  their own heights, leaves thinning out); then dropped leaves on a yard
+  their own heights, leaves thinning out); then ivy over a row of eight
+  columns, two sunk into the floor (In all: starts over most columns, low,
+  above the floor; Per mesh: every column; Spacing 1 further apart than 0;
+  Climb variation: vines reach different heights); then dropped leaves on a yard
   (a tall wall, a window lip, a step, a grating of rails), corrugated
   roofs from the Roof tool (Clean, Makeshift), a glass roof with raised
   mullions and a ball: Leaves and Jungle leaves never into the surface,
@@ -2063,7 +2072,9 @@ Measured on Maya 2024 (`tests/bench_scatter.py`):
   marked (draft), Full detail growing it properly, Draft off growing what's
   left; then Height fade on a colonnade: moss and Column base ivy before,
   the fade's rows following Height fade / Fade by, moss climbing each
-  column's foot and ivy stopping part way up after) and saves pictures to
+  column's foot and ivy stopping part way up after; the Ivy panel's Vines
+  are / Spacing / Climb variation rows, Per mesh putting ivy on every
+  column) and saves pictures to
   `tests/_out/scatter`. Launch it like the smoke test below, with
   `tests/run_gui_scatter.mel`.
 - `tests/test_scatter_paint.py`: headless influence paint tests (a dab's
