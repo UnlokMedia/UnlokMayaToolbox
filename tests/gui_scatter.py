@@ -738,9 +738,27 @@ def drawing(ns, panel, window):
     panel._queue("Leaves", "draw_width")
     panel._apply_pending()
     check("Width is live", ns["sc_settings"](ns["sc_layer"](ns["sc_data"](root), leaves))["draw_width"] == 0.6)
+    # Ctrl+Z straight after, as a user would: the live edits mustn't get in its way. (Checked after the pictures
+    # and Clear below, it failed now and then: in one long scripted call Maya's undo queue isn't dependable once
+    # many steps outside it have run.)
+    pump()
+    cmds.undo()
+    panel._after_undo()
+    n_undo = len(ns["sc_data"](root)["layers"])
+    cmds.redo()
+    panel._after_undo()
+    n_redo = len(ns["sc_data"](root)["layers"])
+    check("one Ctrl+Z takes the drawn leaves layer away (live edits and all), redo puts it back",
+          n_undo == 1 and n_redo == 2 and ns["sc_layer"](ns["sc_data"](root), leaves) is not None,
+          "%d layers after the undo, %d after the redo; %s" % (n_undo, n_redo, panel.status.text()))
+    panel._lid = leaves
+    panel._refresh()
+    panel._queue("Leaves", "leaves")  # the redo is the layer as added: the live edits again, for the pictures
+    panel._queue("Leaves", "draw_width")
+    panel._apply_pending()
     for key, node in ns["sc_parts"](root).items():
         shade_part(node, key.split("/")[1])
-    cmds.undoInfo(stateWithoutFlush=False)  # a deselect mustn't come between the layer and the Ctrl+Z below
+    cmds.undoInfo(stateWithoutFlush=False)
     cmds.select(clear=True)
     cmds.undoInfo(stateWithoutFlush=True)
     window.grab().save(os.path.join(OUT, "06_panel_drawn_layer.png"))
@@ -756,16 +774,8 @@ def drawing(ns, panel, window):
     snap("07_drawing_cleared.png")
     check("Clear removes the strokes and their lines", not panel.drawer.strokes and
           not cmds.ls("scatterDrawing*", type="transform"))
-    pump()  # anything a timer has left to do happens before the Ctrl+Z, not after
-    undo_state = "undo %s, queue %s, length %s, top %r" % (
-        "on" if cmds.undoInfo(q=True, state=True) else "OFF",
-        "EMPTY" if cmds.undoInfo(q=True, undoQueueEmpty=True) else "not empty",
-        "infinite" if cmds.undoInfo(q=True, infinity=True) else cmds.undoInfo(q=True, length=True),
-        cmds.undoInfo(q=True, undoName=True))  # in the detail: what a failure here undid (it fails now and then)
-    cmds.undo()
-    panel._after_undo()
-    check("one Ctrl+Z takes the drawn leaves layer away", len(ns["sc_data"](root)["layers"]) == 1,
-          "%d layers (%s), %s" % (len(ns["sc_data"](root)["layers"]), undo_state, panel.status.text()))
+    check("Clear leaves what the layers were drawn on", len(ns["sc_data"](root)["layers"]) == 2 and
+          ns["sc_area"](ns["sc_layer"](ns["sc_data"](root), leaves))[2] == 3)
 
 
 def jungle_leaves(ns, panel, window):
