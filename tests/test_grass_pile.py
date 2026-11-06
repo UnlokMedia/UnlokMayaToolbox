@@ -157,15 +157,30 @@ def main():
     check("a new Grass layer is a loose pile", new.get("grass_pile", 0.0) > 0.0, str(new))
     check("Pile height is a Grass layer key", "grass_pile" in dict(tb["SC_TYPES"])["Grass"]["keys"])
 
-    if OLD:
+    if OLD:  # a toolbox from before piles (and before bunches inside a box were skipped)
         old = load_toolbox(OLD)
         for name, nodes in scenes.items():
             a = old["debris_build"](nodes, settings(old, None))["grass"]
             b = tb["debris_build"](nodes, settings(tb, 0.0))["grass"]
-            same = len(a[0]) == len(b[0]) and list(a[2]) == list(b[2]) and max(
-                [max(abs(p[i] - q[i]) for i in range(3)) for p, q in zip(a[0], b[0])] or [0.0]) < 1e-7
-            check("%s: Pile height 0 builds what the old toolbox did" % name, same,
-                  "%d vs %d points" % (len(a[0]), len(b[0])))
+            if name == "ramp":
+                same = len(a[0]) == len(b[0]) and list(a[2]) == list(b[2]) and max(
+                    [max(abs(p[i] - q[i]) for i in range(3)) for p, q in zip(a[0], b[0])] or [0.0]) < 1e-7
+                check("ramp: Pile height 0 builds what the old toolbox did", same,
+                      "%d vs %d points" % (len(a[0]), len(b[0])))
+            else:  # away from the wall, step, bricks and plank the same blades; next to them fewer, shorter
+                key = lambda p: tuple(round(v, 5) for v in p)  # noqa: E731
+
+                def clear(p):
+                    return p[2] > -7.0 and not (3.0 < p[0] < 21.0 and 0.5 < p[2] < 11.5) and \
+                        not (-16.0 < p[0] < 0.0 and 2.0 < p[2] < 10.0)
+
+                olds = set(key(p) for p in a[0])
+                news = set(key(p) for p in b[0])
+                moved = sum(1 for p in b[0] if clear(p) and key(p) not in olds)
+                lost = sum(1 for p in a[0] if clear(p) and key(p) not in news)
+                check("%s: flat bunches as before away from things standing on the floor" % name,
+                      0 < len(b[0]) < len(a[0]) and moved == 0 and lost == 0,
+                      "%d -> %d points; away from them %d moved, %d gone" % (len(a[0]), len(b[0]), moved, lost))
 
     Rb = 0.5 * 0.3 / m  # the default bunch's radius
     for name, nodes in scenes.items():
@@ -187,6 +202,8 @@ def main():
                   100 * r["high"], 100 * f["high"]))
         check("%s: no blade point inside a surface" % name, r["inside"] <= r["n"] // 200,
               "%d points over 1 mm in, of %d blades" % (r["inside"], r["n"]))
+        check("%s: flat bunches don't grow inside a box on the floor either" % name, f["inside"] <= f["n"] // 200,
+              "%d points over 1 mm in, of %d blades" % (f["inside"], f["n"]))
         check("%s: no blade through a surface" % name, r["through"] <= max(1, r["n"] // 200),
               "%d of %d blades cross a surface" % (r["through"], r["n"]))
         check("%s: blades lie every which way, not pressed flat" % name,
@@ -194,6 +211,26 @@ def main():
               "%d of %d tilted (flat %d of %d)" % (r["tilted"], r["n"], f["tilted"], f["n"]))
         check("%s: piles cost a few times a flat bunch, not more" % name, t_pile < max(2.0, 8.0 * t_flat),
               "%.2fs vs %.2fs" % (t_pile, t_flat))
+    # a single-sided roof plane overhead (a porch): a ray up hits its back, yet the floor isn't inside it
+    under = []
+    for k, roofed in enumerate((False, True)):
+        x = -100.0 - 40.0 * k
+        g = cmds.group(empty=True, name="porch%d_GRP" % k)
+        box("porchFloor%d" % k, (24, 1, 24), (x, -0.5, 0), g, div=4.0)
+        if roofed:
+            roof = cmds.polyPlane(name="porchRoof", w=16, h=16, sx=4, sy=4, constructionHistory=False)[0]
+            cmds.move(x, 25, 0, roof)
+            cmds.parent(roof, g)
+        nodes = meshes([cmds.ls(g, long=True)[0]])
+        row = []
+        for pile in (0.0, 0.7):
+            got = tb["debris_build"](nodes, settings(tb, pile))["grass"]
+            row.append(sum(1 for p in got[0] if abs(p[0] - x) < 6.0 and abs(p[2]) < 6.0))
+        under.append(row)
+    check("grass still grows under a single-sided roof plane (flat, pile)",
+          all(under[1][j] >= 0.9 * under[0][j] > 0 for j in range(2)),
+          "open %s, roofed %s points under it" % (under[0], under[1]))
+
     s = settings(tb, 0.7, detail="Proxy")
     got = tb["debris_build"](scenes["yard"], s)
     check("Proxy piles build", got["bunches"] > 3 and len(got["grass"][0]) > 0, str(got["bunches"]))

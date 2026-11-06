@@ -34844,6 +34844,8 @@ class _DebrisBuild(object):
         Rb = 0.5 * self._size("bunch_size", r[3])
         Lg = float(self.s["grass_length"]) / self.m
         full = max(0.0, float(self.s["fullness"]))
+        if self._in_solid(c, n, Rb):
+            return
         pile = clamp(float(self.s.get("grass_pile", 0.0)), 0.0, 1.5)
         if pile > 0.0:
             self._grass_pile(c, n, r, ci, Rb, Lg, full, pile)
@@ -34873,6 +34875,25 @@ class _DebrisBuild(object):
                 self._ribbon(spine, nrms, width * (0.7 + 0.6 * rr[8]), (rr[9] - 0.5) * 1.4,
                              min(self.stacks - 1, int(rr[10] * self.stacks)))
 
+    def _in_solid(self, c, n, R):
+        """Is a spot inside something standing on its surface (a box sitting
+        on the floor: the floor under it is sampled like any other)? A ray
+        out along n leaves through a back face, and so do three of four rays
+        sideways (one ray up alone can't tell a box from a single-sided roof
+        plane overhead, whose back it also hits)."""
+        p = _rl_add(c, _rl_mul(n, 2.0 * self.lift))
+        far = 1000.0 * R
+        hit = self.surf.ray(p, n, far)
+        if hit is None or _rl_dot(hit[2], n) <= 0.0:
+            return False
+        t1, t2 = _mi_frame(n)
+        back = 0
+        for d in (t1, t2, _rl_mul(t1, -1.0), _rl_mul(t2, -1.0)):
+            h = self.surf.ray(p, d, far)
+            if h is not None and _rl_dot(h[2], d) > 0.0:
+                back += 1
+        return back >= 3
+
     def _grass_heading(self, n, r, ci):
         """The way a bunch's blades mostly lie (an angle in _mi_frame(n)):
         along a crease it's in, else downhill on a slope, else random."""
@@ -34895,10 +34916,6 @@ class _DebrisBuild(object):
         the ends past the heap splay out and come down to the ground. No
         point goes into a surface: a blade that meets one lies along it."""
         s = self.s
-        hit = self.surf.ray(_rl_add(c, _rl_mul(n, 2.0 * self.lift)), n, 1000.0 * Rb)
-        if hit is not None and _rl_dot(hit[2], n) > 0.0:
-            return  # the spot is inside something standing on the surface (a box on the floor: a ray out
-            # leaves through its top)
         Hp = pile * Rb
         shell = math.pi * (Rb * Rb + Hp * Hp) * self.m * self.m  # the heap's outside, square metres
         count = int(self.fib_rate * full * 1.2 * shell / 0.01 + 0.5)
@@ -34997,6 +35014,21 @@ class _DebrisBuild(object):
             p = q
         return out
 
+    def _blocked(self, a, b, up):
+        """How far along a -> b it meets the front of a face standing up from
+        the surface it lies on (normal within 60 degrees of up's plane: a
+        wall, a box's side, a rail), or None. Faces like the ground (a chord
+        cutting a rounded crest) don't count, nor a hit right at b."""
+        d = _rl_sub(b, a)
+        ln = _rl_len(d)
+        if ln < 1e-12:
+            return None
+        d = _rl_mul(d, 1.0 / ln)
+        hit = self.surf.ray(a, d, ln)
+        if hit is None or hit[0] > ln - 2.0 * self.lift or _rl_dot(hit[2], d) >= 0.0 or _rl_dot(hit[2], up) >= 0.5:
+            return None
+        return hit[0]
+
     def _blade(self, start, n, d, L, segs, c, Rb, Hb, rr, g):
         """A blade's spine: walked over the surface (lifted onto the mound,
         arching a little over the blades under it), hanging once it walks off
@@ -35018,6 +35050,8 @@ class _DebrisBuild(object):
 
         d = _rl_norm(_rl_sub(d, _rl_mul(nrm, _rl_dot(d, nrm))), d)
         spine, nrms = [_rl_add(base, _rl_mul(nrm, lift(base, 0.0)))], [nrm]
+        if self._blocked(_rl_add(c, _rl_mul(n, 2.0 * self.lift)), spine[0], n) is not None:
+            return [], []  # it would start behind something standing on the surface (under a box, in a wall)
         free = False
         for k in range(1, segs + 1):
             t = k / float(segs)
@@ -35030,10 +35064,18 @@ class _DebrisBuild(object):
                     h = _rl_dot(off, hit[2])
                     lat = _rl_len(_rl_sub(off, _rl_mul(hit[2], h)))
                     if lat < 0.35 * step and _rl_dot(hit[2], nrm) > 0.3:
+                        p = _rl_add(hit[1], _rl_mul(hit[2], lift(hit[1], t)))
+                        wall = self._blocked(spine[-1], p, nrm)
+                        if wall is not None:  # walked into something standing on the surface: it ends there
+                            if wall > 0.25 * step:
+                                spine.append(_rl_add(spine[-1], _rl_mul(_rl_norm(_rl_sub(p, spine[-1]), d),
+                                                                        wall - self.lift)))
+                                nrms.append(nrm)
+                            break
                         nd = _rl_sub(hit[1], base)
                         d = _rl_norm(_rl_sub(nd, _rl_mul(hit[2], _rl_dot(nd, hit[2]))), d)
                         base, nrm = hit[1], hit[2]
-                        spine.append(_rl_add(base, _rl_mul(nrm, lift(base, t))))
+                        spine.append(p)
                         nrms.append(nrm)
                         continue
                 free = True  # walked off an edge (or into a wall): level past it first, then it hangs
