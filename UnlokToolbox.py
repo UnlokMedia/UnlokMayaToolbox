@@ -29271,7 +29271,7 @@ MOSS_DEFAULTS = {
     "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6,
     "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5,
     "exposure": 0.0, "feather": 0.0, "strays": 0.0, "ragged": 0.0, "clump_merge": 0.0, "shoot_form": "Star",
-    "spill": 0.0}
+    "spill": 0.0, "render_as": "GED", "disp_height": 0.01, "edge_roll": 0.5, "cage_detail": 0.5}
 # the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
 # Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new")
 MOSS_NEW_LOOK = {"exposure": 0.6, "feather": 0.6, "strays": 0.5, "ragged": 0.6, "clump_merge": 0.6,
@@ -32995,7 +32995,7 @@ def moss_instances_mesh(shoots):
     return out
 
 
-MOSS_STYLES = ("Carpet", "Clumps")
+MOSS_STYLES = ("Carpet", "Clumps", "Mat")
 MOSS_SHOOT_MODES = ("Instances", "Mesh")  # Scatter: shoots as instances of a few shapes, or one mesh
 MOSS_CLUMP_GRID = {"Proxy": (2, 6), "Normal": (3, 8), "High": (5, 12), "Hero": (7, 16)}  # rings, segments
 
@@ -33294,6 +33294,885 @@ class _MossClumps(object):
         return pts, counts, conn, list(self.us), list(self.vs), list(conn)
 
 
+# ------------------------------------------------------------------- moss mat
+# The Mat style (the user, 2026-11-06: the carpet is "quite heavy to load ... the topology is still weird, not
+# very well optimised ... nor does it handle displacement well ... because it's just a thin surface, when
+# displacement is applied, it just lifts from whatever surface it's on. Maybe it needs some edges that curl
+# down a bit?"): a light all-quad cage laid on the surface's own faces, made to be subdivided and displaced at
+# render time, its edge rolled down under the surface so displacement never lifts it off.
+MOSS_RENDER_AS = ("GEP", "GES", "GED")  # Render as: as built / subdivided / subdivided and displaced
+MOSS_MAT_ITERS = {"GEP": 0, "GES": 2, "GED": 3}  # the Arnold Catmull-Clark steps each gets
+MOSS_MAT_CELL = {"GEP": 0.6, "GES": 1.0, "GED": 1.3}  # its cells by Render as (x Clump size x Cage detail)
+MOSS_MAT_MAX_SEGS = 96  # cells along one edge of a surface face at most
+_MI_MAT_BASE = collections.OrderedDict()  # (mesh state, smooth, rest) -> all-quad base mesh
+_MI_MOSS_MATS = collections.OrderedDict()  # mat layout key -> each mesh's grid (points, records, blocks)
+_MAT_TRI2 = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0)  # (a _record context's triangle: unused, every corner one normal)
+
+
+def _mi_mat_split(P, faces):
+    """Every face cut into quads (a corner, its next edge's middle, the face's
+    centre, its last edge's middle), as a Catmull-Clark step cuts it but with
+    nothing moved: (quads, each one's face). P gets the new points."""
+    eid, quads, par = {}, [], []
+    for f, vs in enumerate(faces):
+        cnt = len(vs)
+        if cnt < 3:
+            continue
+        inv = 1.0 / cnt
+        c = len(P)
+        P.append((sum(P[v][0] for v in vs) * inv, sum(P[v][1] for v in vs) * inv, sum(P[v][2] for v in vs) * inv))
+        for i in range(cnt):
+            a, b = vs[i], vs[(i + 1) % cnt]
+            e = (a, b) if a < b else (b, a)
+            if e not in eid:
+                eid[e] = len(P)
+                pa, pb = P[a], P[b]
+                P.append(((pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5))
+        for i in range(cnt):
+            p, v, q = vs[i - 1], vs[i], vs[(i + 1) % cnt]
+            quads.append((v, eid[(v, q) if v < q else (q, v)], c, eid[(p, v) if p < v else (v, p)]))
+            par.append(f)
+    return quads, par
+
+
+def _mi_mat_quad_cost(P, quad):
+    """How far a quad is from a square's corners (0) and from flat: the mean |cos| of its corner angles plus
+    its bend; None when a corner folds over (not convex)."""
+    tot, nrm = 0.0, None
+    for i in range(4):
+        p, v, q = P[quad[i - 1]], P[quad[i]], P[quad[(i + 1) % 4]]
+        a, b = _rl_sub(p, v), _rl_sub(q, v)
+        la, lb = _rl_len(a), _rl_len(b)
+        if la < 1e-12 or lb < 1e-12:
+            return None
+        tot += abs(_rl_dot(a, b)) / (la * lb)
+        c = _rl_cross(b, a)
+        if nrm is None:
+            nrm = c
+        elif _rl_dot(c, nrm) <= 0.0:
+            return None
+    return tot * 0.25
+
+
+def _mi_mat_quadify(P, faces):
+    """A mesh's faces as quads for the mat's grid: (quads, each one's face).
+    All quads: as they are. Triangles and quads: triangles paired across
+    their best shared edges (a triangulated scan keeps its density). Anything
+    left over: every face split (_mi_mat_split)."""
+    if all(len(vs) == 4 for vs in faces):
+        return [tuple(vs) for vs in faces], list(range(len(faces)))
+    if all(len(vs) in (3, 4) for vs in faces):
+        tris = [f for f, vs in enumerate(faces) if len(vs) == 3]
+        eface = {}
+        for f in tris:
+            vs = faces[f]
+            for i in range(3):
+                a, b = vs[i], vs[(i + 1) % 3]
+                eface.setdefault((a, b) if a < b else (b, a), []).append(f)
+        pairs = []
+        for (a, b), fs in eface.items():
+            if len(fs) != 2:
+                continue
+            f, g = fs
+            t1, t2 = faces[f], faces[g]
+            i = next((k for k in range(3) if {t1[k], t1[(k + 1) % 3]} == {a, b}), None)
+            j = next((k for k in range(3) if {t2[k], t2[(k + 1) % 3]} == {a, b}), None)
+            if i is None or j is None:
+                continue
+            u, v, w = t1[i], t1[(i + 1) % 3], t1[(i + 2) % 3]
+            if t2[j] != v:
+                continue  # wound against each other: leave them
+            z = t2[(j + 2) % 3]
+            quad = (u, z, v, w)
+            cost = _mi_mat_quad_cost(P, quad)
+            if cost is not None and cost < 0.6:
+                pairs.append((cost, f, g, quad))
+        pairs.sort(key=lambda x: x[0])
+        used, out, par = set(), [], []
+        for cost, f, g, quad in pairs:
+            if f in used or g in used:
+                continue
+            used.update((f, g))
+            out.append(quad)
+            par.append(f)
+        if len(used) == len(tris):
+            for f, vs in enumerate(faces):
+                if len(vs) == 4:
+                    out.append(tuple(vs))
+                    par.append(f)
+            return out, par
+    return _mi_mat_split(P, faces)
+
+
+def _mi_mat_base(surf, node, smooth):
+    """A mesh's surface as all quads for the mat (cached while it is
+    unchanged): (points, quads wound like the mesh, each quad's face on the
+    mesh). Smooth: the once subdivided mesh with its points on the limit
+    surface (the mat's points are laid onto the rest surface anyway);
+    faceted: the mesh's own faces (on its rest surface when relief is filled)."""
+    rest = getattr(surf, "rests", {}).get(node)
+    mk = _mi_mesh_key(node)
+    key = (mk, bool(smooth), None if rest is None or smooth else rest.spec)
+    hit = _mi_cache_get(_MI_MAT_BASE, key)
+    if hit is not None:
+        return hit
+    if smooth:
+        LV, N, LE, LF, faces, parent = _mi_limit(node, 1)
+        P = list(LV)
+        eid = {}
+        for e in sorted(LE):
+            eid[e] = len(P)
+            P.append(LE[e])
+        f0 = len(P)
+        P.extend(LF)
+        quads, par = [], []
+        for f, vs in enumerate(faces):
+            cnt = len(vs)
+            for i in range(cnt):
+                p, v, q = vs[i - 1], vs[i], vs[(i + 1) % cnt]
+                quads.append((v, eid[(v, q) if v < q else (q, v)], f0 + f, eid[(p, v) if p < v else (v, p)]))
+                par.append(f)
+    else:
+        fn = om.MFnMesh(get_dag_path(mk[0]))
+        if rest is not None:
+            P = list(rest.P)
+        else:
+            P = [(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)]
+        quads, par = _mi_mat_quadify(P, _mi_mesh_faces(fn))
+    out = (P, quads, par)
+    _MI_MAT_BASE[key] = out
+    while len(_MI_MAT_BASE) > 24:
+        _MI_MAT_BASE.popitem(last=False)
+    return out
+
+
+def _mi_mat_rings(P, quads, et):
+    """How many cells each quad gets along its sides, (a-b and d-c, b-c and
+    a-d): the same along each edge ring (opposite sides of every quad in a
+    strip), so the cells of neighbouring faces meet point for point (no
+    T-junctions), about et long."""
+    ek, qe = {}, []
+    for quad in quads:
+        ids = []
+        for i in range(4):
+            x, y = quad[i], quad[(i + 1) % 4]
+            k = (x, y) if x < y else (y, x)
+            e = ek.get(k)
+            if e is None:
+                e = ek[k] = len(ek)
+            ids.append(e)
+        qe.append(ids)
+    uf = list(range(len(ek)))
+
+    def find(i):
+        while uf[i] != i:
+            uf[i] = uf[uf[i]]
+            i = uf[i]
+        return i
+
+    for e0, e1, e2, e3 in qe:
+        for x, y in ((e0, e2), (e1, e3)):
+            rx, ry = find(x), find(y)
+            if rx != ry:
+                uf[rx] = ry
+    tot, top, cnt = {}, {}, {}
+    for (a, b), e in ek.items():
+        ln = _rl_len(_rl_sub(P[a], P[b]))
+        r = find(e)
+        tot[r] = tot.get(r, 0.0) + ln
+        cnt[r] = cnt.get(r, 0) + 1
+        if ln > top.get(r, 0.0):
+            top[r] = ln
+    segs = {}
+    for r in tot:
+        ln = 0.5 * tot[r] / cnt[r] + 0.5 * top[r]
+        segs[r] = max(1, min(MOSS_MAT_MAX_SEGS, int(round(ln / et))))
+    return [(segs[find(e0)], segs[find(e1)]) for e0, e1, e2, e3 in qe]
+
+
+def _mi_mat_uvs(P, quads, tile):
+    """The mat's UVs at one world-scale density (1 = tile), unfolded quad by
+    quad across shared edges, so they run on unbroken over folds, rolled edges
+    and round a rock: a chart grows until the next quad would land off where
+    it sits already (a seam round a branch), over another quad, or past most
+    of a tile; scraps left between charts then join a neighbour (up to a whole
+    tile); each chart moves into 0..1 (by whole tiles when it fits, so a
+    tiling texture runs on across the cut). Returns (us, vs, uv ids per
+    face corner)."""
+    nq = len(quads)
+    owner = {}
+    for q, vs in enumerate(quads):
+        for i in range(4):
+            owner[(vs[i], vs[(i + 1) % 4])] = q
+    chart = [-1] * nq
+    inv = 1.0 / max(1e-12, tile)
+    sqrt = math.sqrt
+    charts = []
+
+    def inside(poly, c):
+        for i in range(4):
+            a, b = poly[i], poly[(i + 1) % 4]
+            if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) <= 0.0:
+                return False
+        return True
+
+    class Chart(object):
+        __slots__ = ("cid", "uv", "box", "h", "cells", "members")
+
+        def span(self, poly):
+            h = self.h
+            return (int(math.floor(min(c[0] for c in poly) / h)), int(math.floor(max(c[0] for c in poly) / h)),
+                    int(math.floor(min(c[1] for c in poly) / h)), int(math.floor(max(c[1] for c in poly) / h)))
+
+        def place(self, q, poly, new):
+            self.uv.update(new)
+            b = self.box
+            self.box = [min(b[0], min(c[0] for c in poly)), max(b[1], max(c[0] for c in poly)),
+                        min(b[2], min(c[1] for c in poly)), max(b[3], max(c[1] for c in poly))]
+            cen = (sum(c[0] for c in poly) * 0.25, sum(c[1] for c in poly) * 0.25)
+            i0, i1, j0, j1 = self.span(poly)
+            for i in range(i0, min(i1, i0 + 7) + 1):
+                for j in range(j0, min(j1, j0 + 7) + 1):
+                    self.cells.setdefault((i, j), []).append((poly, cen))
+            chart[q] = self.cid
+            self.members.append(q)
+
+        def attempt(self, q, x, y, lim):
+            """Unfold quad q (which holds the edge x -> y, both placed) onto
+            the chart; False when it won't fit."""
+            uv = self.uv
+            qv = quads[q]
+            px, py = P[x], P[y]
+            ex, ey, ez = py[0] - px[0], py[1] - px[1], py[2] - px[2]
+            le2 = ex * ex + ey * ey + ez * ez
+            if le2 < 1e-24:
+                return False
+            le = sqrt(le2)
+            ux, vx = uv[x]
+            Eu, Ev = uv[y][0] - ux, uv[y][1] - vx
+            tol = 0.2025 * (Eu * Eu + Ev * Ev) + 1e-18  # (0.45 of the edge)^2: a bumpy top still unfolds
+            new = {}
+            for r in qv:
+                if r == x or r == y:
+                    continue
+                pr = P[r]
+                rx, ry, rz = pr[0] - px[0], pr[1] - px[1], pr[2] - px[2]
+                al = (rx * ex + ry * ey + rz * ez) / le2
+                qx, qy, qz = rx - al * ex, ry - al * ey, rz - al * ez
+                pl = sqrt(qx * qx + qy * qy + qz * qz) / le
+                pu, pv = ux + al * Eu - pl * Ev, vx + al * Ev + pl * Eu  # the quad lies left of x -> y
+                old = uv.get(r)
+                if old is not None:
+                    if (old[0] - pu) ** 2 + (old[1] - pv) ** 2 > tol:
+                        return False  # it closes round onto itself here (a seam)
+                else:
+                    new[r] = (pu, pv)
+            poly = [new.get(v) or uv[v] for v in qv]
+            b = self.box
+            if max(b[1], max(c[0] for c in poly)) - min(b[0], min(c[0] for c in poly)) > lim or \
+                    max(b[3], max(c[1] for c in poly)) - min(b[2], min(c[1] for c in poly)) > lim:
+                return False
+            cen = (sum(c[0] for c in poly) * 0.25, sum(c[1] for c in poly) * 0.25)
+            i0, i1, j0, j1 = self.span(poly)
+            for i in range(i0 - 1, min(i1, i0 + 7) + 2):  # over another quad (a fold laid onto the top)
+                for j in range(j0 - 1, min(j1, j0 + 7) + 2):
+                    for op, oc in self.cells.get((i, j), ()):
+                        if inside(op, cen) or inside(poly, oc):
+                            return False
+            self.place(q, poly, new)
+            return True
+
+    def grow(c, dq, lim):
+        tries = {}
+        while dq:
+            q, x, y = dq.popleft()
+            if chart[q] >= 0:
+                continue
+            t = tries.get(q, 0)
+            if t >= 6:
+                continue
+            tries[q] = t + 1
+            if c.attempt(q, x, y, lim):
+                qv = quads[q]
+                for i in range(4):
+                    a, b = qv[i], qv[(i + 1) % 4]
+                    nb = owner.get((b, a))
+                    if nb is not None and chart[nb] < 0:
+                        dq.append((nb, b, a))
+
+    for s0 in range(nq):
+        if chart[s0] >= 0:
+            continue
+        quad = quads[s0]
+        pa, pb, pc, pd = (P[v] for v in quad)
+        n = _rl_norm(_rl_cross(_rl_sub(pc, pa), _rl_sub(pd, pb)))
+        t1, t2 = _moss_axes(n)
+        c = Chart()
+        c.cid = len(charts)
+        charts.append(c)
+        c.uv, c.cells, c.members = {}, {}, []
+        poly = []
+        for v in quad:
+            d = _rl_sub(P[v], pa)
+            poly.append((_rl_dot(d, t1) * inv, _rl_dot(d, t2) * inv))
+        c.h = max(1e-9, sqrt((poly[1][0] - poly[0][0]) ** 2 + (poly[1][1] - poly[0][1]) ** 2))
+        c.box = [poly[0][0], poly[0][0], poly[0][1], poly[0][1]]
+        c.place(s0, poly, dict(zip(quad, poly)))
+        dq = collections.deque()
+        for i in range(4):
+            x, y = quad[i], quad[(i + 1) % 4]
+            nb = owner.get((y, x))
+            if nb is not None and chart[nb] < 0:
+                dq.append((nb, y, x))
+        grow(c, dq, 0.9)  # room left for the scraps
+    for c in charts:  # scraps: into a neighbouring chart if they fit (a whole tile now)
+        if not c.members or len(c.members) > 4:
+            continue
+        for q in list(c.members):
+            qv = quads[q]
+            for i in range(4):
+                a, b = qv[i], qv[(i + 1) % 4]
+                nb = owner.get((b, a))
+                if nb is None or chart[nb] == c.cid or len(charts[chart[nb]].members) <= 4:
+                    continue
+                o = charts[chart[nb]]
+                chart[q] = -1
+                if o.attempt(q, a, b, 1.0 - 1e-4):
+                    c.members.remove(q)
+                    break
+                chart[q] = c.cid
+    us, vs_out, uvi = [], [], [None] * nq
+    for c in charts:
+        if not c.members:
+            continue
+        lo_u, hi_u, lo_v, hi_v = c.box
+        fu, fv = math.floor(lo_u), math.floor(lo_v)
+        su = -fu if hi_u - fu <= 1.0 else -lo_u
+        sv = -fv if hi_v - fv <= 1.0 else -lo_v
+        ids, uv = {}, c.uv
+        for q in c.members:
+            row = []
+            for v in quads[q]:
+                k = ids.get(v)
+                if k is None:
+                    k = ids[v] = len(us)
+                    us.append(clamp(uv[v][0] + su, 0.0, 1.0))
+                    vs_out.append(clamp(uv[v][1] + sv, 0.0, 1.0))
+                row.append(k)
+            uvi[q] = row
+    return us, vs_out, uvi
+
+
+class _MossMat(_MossBed):
+    """The Mat style: the moss as a light all-quad cage for render-time
+    subdivision and displacement (Render as: _GEP / _GES / _GED).
+
+    The grid is the surface's own faces cut into cells (_mi_mat_base,
+    _mi_mat_rings: every edge ring the same count, so faces meet point for
+    point), laid onto the rest surface, only where the field can show moss.
+    Each point reads the carpet's coverage field (_MossBed._record / _value);
+    a cell is kept where the field says moss, notches filled and spikes
+    pruned, and the outline's points slide onto where the field crosses zero
+    and are relaxed along it (a smooth, organic edge, not stair steps).
+    Thickness lifts it (low cushions only: the fine detail is the
+    displacement's), at least the rim height everywhere; the edge then rolls
+    down in two rows of quads (a skirt): out and down to the surface, then in
+    under it deeper than the displacement can lift, so displaced moss always
+    meets what it grows on. No underside. UVs: _mi_mat_uvs. Shading data
+    (mossData) as the carpet's: B (0 at the edge) fades displacement out at
+    the rim (Moss Look)."""
+
+    def __init__(self, surf, s, cands, rows, faces=None, draft=False):
+        _MossBed.__init__(self, surf, dict(s, detail="Proxy"), cands, rows, faces, draft=False)
+        m = scene_m_per_unit()
+        detail = s["detail"] if s["detail"] in MOSS_DETAIL else "Normal"
+        self.s = s
+        self.draft = draft
+        self.lump = 0.0  # (_value's own lumps are finer than the cage: low cushions are put on here)
+        self.mlump = 0.0 if (draft or detail == "Proxy") else clamp(float(s.get("lumps", 0.6)), 0.0, 1.0)
+        self.render = s.get("render_as") if s.get("render_as") in MOSS_RENDER_AS else "GED"
+        self.D = max(0.0, float(s.get("disp_height", 0.01))) / m if self.render == "GED" else 0.0
+        roll = clamp(float(s.get("edge_roll", 0.5)), 0.0, 1.0)
+        cd = clamp(float(s.get("cage_detail", 0.5)), 0.0, 1.0)
+        et = self.R * (1.0 - 0.75 * cd) * MOSS_MAT_CELL[self.render] * (2.0 if draft else 1.0)
+        area = _moss_area(surf.nodes, faces)
+        if area / (et * et) > MOSS_MAX_CELLS:
+            et = math.sqrt(area / MOSS_MAX_CELLS)
+            self.capped = True
+        self.est = area / (et * et) * len(self.hot) / float(max(1, len(self.buckets)))
+        if _MI_BUDGET["on"] and self.est > MOSS_WARN_CELLS:
+            raise ScatterTooBig("about %s moss mat cells" % format(int(self.est), ","))
+        self.et = et
+        self.rim = roll * (0.35 * self.H + 0.5 * self.D)  # the edge's thickness before it rolls under
+        self.wroll = max(0.5 * et, 1.5 * self.rim)  # how far out it rolls
+        self.depth = 1.25 * self.D + 0.003 / m  # how far under the surface it tucks
+        self.cs = 1.0 / max(0.7 * self.R, 2.5 * et)  # the cushions' noise scale: no finer than the cage
+        key = ("mat", _mi_surf_keys(surf), self.seed, round(self.R, 9), round(et, 9), len(cands),
+               id(getattr(cands, "base", cands)), tuple(_mi_rest_smooth(n, s) for n in surf.nodes),
+               None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
+        cache = _MI_MOSS_MATS.get(key)
+        if cache is None:
+            cache = _MI_MOSS_MATS[key] = ({}, getattr(cands, "base", cands))
+            while len(_MI_MOSS_MATS) > 4:
+                _MI_MOSS_MATS.popitem(last=False)
+        else:
+            _MI_MOSS_MATS.move_to_end(key)
+        self.grids = cache[0]
+        self.active = []  # (grid, cells) the field can show moss in this time
+        self.out_pts, self.out_quads, self.out_col = [], [], []
+
+    # ----------------------------------------------------------------- grid
+    def build(self):
+        faces = self.faces
+        for k, node in enumerate(self.surf.nodes):
+            mask = faces.get(node) if faces is not None else None
+            if faces is not None and not mask:
+                continue
+            self._grid(k, node, None if mask is None else set(mask))
+        self._finish()
+        return self
+
+    def _grid(self, k, node, mask):
+        P, quads, par = _mi_mat_base(self.surf, node, _mi_rest_smooth(node, self.s))
+        shape = _mi_mesh_key(node)[0]
+        g = self.grids.get(shape)
+        if g is None:
+            g = self.grids[shape] = {"rings": _mi_mat_rings(P, quads, self.et), "vid": {}, "G": [], "N": [],
+                                     "rec": [], "blocks": {}, "cov": {}, "k": k}
+        rings, blocks = g["rings"], g["blocks"]
+        query = self.surf.items[k][0]
+        B = max(2, int(round(1.2 * self.rk / self.et)))
+        for q, quad in enumerate(quads):
+            if mask is not None and par[q] not in mask:
+                continue
+            pa, pb, pc, pd = P[quad[0]], P[quad[1]], P[quad[2]], P[quad[3]]
+            qn = _rl_norm(_rl_cross(_rl_sub(pc, pa), _rl_sub(pd, pb)))
+            if qn[1] < -0.35:
+                continue  # facing down: no moss (as the carpet)
+            n1, n2 = rings[q]
+            for bi in range(0, n1, B):
+                i1 = min(n1, bi + B)
+                for bj in range(0, n2, B):
+                    j1 = min(n2, bj + B)
+                    bkey = (q, bi, bj)
+                    cells = blocks.get(bkey)
+                    if cells == ():
+                        continue
+                    cs = [self._bilin(pa, pb, pc, pd, i / float(n1), j / float(n2))
+                          for i, j in ((bi, bj), (i1, bj), (i1, j1), (bi, j1))]
+                    cen = (sum(c[0] for c in cs) * 0.25, sum(c[1] for c in cs) * 0.25, sum(c[2] for c in cs) * 0.25)
+                    rad = max(_rl_len(_rl_sub(c, cen)) for c in cs) + 0.25 * self.et
+                    hot, local = self._local(cen, rad, cells is None, ("mat", round(self.et, 9), shape) + bkey)
+                    if not hot:
+                        continue
+                    if cells is None:
+                        cov = g["cov"].get(q)
+                        if cov is None:
+                            cov = g["cov"][q] = self._quad_cover(query, (pa, pb, pc, pd), qn)
+                        if cov[0]:
+                            blocks[bkey] = ()
+                            continue
+                        _poll()  # a long build: the Working window, Esc / Cancel
+                        self._piece = self.surf.piece(k, quad[0]) if quad[0] < len(P) else None
+                        if local:
+                            local = self._not_under_own(local)
+                        cells = blocks[bkey] = self._cells(g, query, q, quad, (pa, pb, pc, pd), qn, n1, n2,
+                                                           bi, i1, bj, j1, local, cov[1])
+                    if cells:
+                        self.active.append((g, cells))
+
+    @staticmethod
+    def _bilin(pa, pb, pc, pd, s, t):
+        a, b, c, d = (1.0 - s) * (1.0 - t), s * (1.0 - t), s * t, (1.0 - s) * t
+        return (pa[0] * a + pb[0] * b + pc[0] * c + pd[0] * d, pa[1] * a + pb[1] * b + pc[1] * c + pd[1] * d,
+                pa[2] * a + pb[2] * b + pc[2] * c + pd[2] * d)
+
+    def _quad_cover(self, query, ps, qn):
+        """(buried, partly covered) of a surface quad: its middle and near
+        each corner pressed against something (_MossBed._covered)."""
+        m = tuple(sum(p[i] for p in ps) * 0.25 for i in range(3))
+        pts = [m] + [tuple(0.88 * p[i] + 0.12 * m[i] for i in range(3)) for p in ps]
+        got = []
+        for p in pts:
+            r = query.closest(om.MPoint(p[0], p[1], p[2]))
+            if r is not None:
+                p, n = (r[1].x, r[1].y, r[1].z), (r[2].x, r[2].y, r[2].z)
+            else:
+                n = qn
+            got.append(self._covered(p, n))
+        return all(got), any(got)
+
+    def _cells(self, g, query, q, quad, ps, qn, n1, n2, i0, i1, j0, j1, local, check):
+        """A block's cells, each (four grid point ids, stable key); new grid
+        points laid onto the surface and given their field record."""
+        a, b, c, d = quad
+        pa, pb, pc, pd = ps
+        vid, G, N, recs = g["vid"], g["G"], g["N"], g["rec"]
+        k = g["k"]
+
+        def ekey(x, y, t, n):
+            return ("e", x, y, t) if x < y else ("e", y, x, n - t)
+
+        ids = {}
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                if i == 0 and j == 0:
+                    key = ("v", a)
+                elif i == n1 and j == 0:
+                    key = ("v", b)
+                elif i == n1 and j == n2:
+                    key = ("v", c)
+                elif i == 0 and j == n2:
+                    key = ("v", d)
+                elif j == 0:
+                    key = ekey(a, b, i, n1)
+                elif i == n1:
+                    key = ekey(b, c, j, n2)
+                elif j == n2:
+                    key = ekey(d, c, i, n1)
+                elif i == 0:
+                    key = ekey(a, d, j, n2)
+                else:
+                    key = ("f", q, i, j)
+                v = vid.get(key)
+                if v is None:
+                    p = self._bilin(pa, pb, pc, pd, i / float(n1), j / float(n2))
+                    r = query.closest(om.MPoint(p[0], p[1], p[2]))
+                    if r is not None:
+                        p, n = (r[1].x, r[1].y, r[1].z), (r[2].x, r[2].y, r[2].z)
+                        if _rl_dot(n, qn) < 0.0:
+                            n = qn
+                    else:
+                        n = qn
+                    t1, t2 = _moss_axes(n)
+                    ctx = (t1, t2, n, _rl_dot(p, n), _MAT_TRI2, (n, n, n), (), check, None)
+                    v = vid[key] = len(G)
+                    G.append(p)
+                    N.append(n)
+                    recs.append(self._record(_rl_dot(p, t1), _rl_dot(p, t2), ctx, local))
+                ids[(i, j)] = v
+        out = []
+        for i in range(i0, i1):
+            for j in range(j0, j1):
+                out.append((ids[(i, j)], ids[(i + 1, j)], ids[(i + 1, j + 1)], ids[(i, j + 1)],
+                            hash((k, q, i, j)) & 0x7FFFFFFF))
+        return tuple(out)
+
+    # ----------------------------------------------------------------- look
+    def _look(self, rec):
+        """A grid point now: (lift, core, coverage: > 0 inside the moss's
+        edge, room: the most it may lift)."""
+        pos, d, hf, c = self._value(rec)
+        idx, ws = rec[7], rec[8]
+        mg = sum(map(_MUL, ws, map(self.mg.__getitem__, idx)), -0.015) / sum(ws, 0.03)
+        if mg > -0.03 - self.rn:  # the ragged edge, as _value adds it (it has filled rec[9] by now)
+            mg += self.rn * rec[9]
+        if rec[12] is not None and rec[12] < self.near:
+            mg = -1.0  # pressed under something (the floor under a box): no mat there
+        if hf > 0.0 and self.mlump:  # low cushions (the creases between them are the displacement's)
+            s = self.cs
+            b = abs(_moss_noise3(rec[0] * s, rec[1] * s, rec[2] * s, self.seed + 21))
+            hf = (hf + self.tuck) * (1.0 - self.mlump + self.mlump * min(1.25, b / 0.3) ** 0.7) - self.tuck
+        room = 1e30 if rec[12] is None else rec[12]
+        if idx:
+            room = min(room, min(map(self.ob2.__getitem__, idx)))
+        return hf, c, mg + 0.03, room
+
+    def _finish(self):
+        """Keep the cells inside the moss, round its outline, lift it, roll
+        its edge under and lay out its UVs."""
+        # every active cell's points, numbered over all the meshes
+        BP, BN, HF, C, F, RM, VQ = [], [], [], [], [], [], []
+        quads, fkeys = [], []
+        seen = {}
+        for g, cells in self.active:
+            gid = id(g)
+            G, N, recs = g["G"], g["N"], g["rec"]
+            query = self.surf.items[g["k"]][0]
+            for cell in cells:
+                row = []
+                for v in cell[:4]:
+                    key = (gid, v)
+                    o = seen.get(key)
+                    if o is None:
+                        o = seen[key] = len(BP)
+                        hf, c, f, room = self._look(recs[v])
+                        BP.append(G[v])
+                        BN.append(N[v])
+                        HF.append(hf)
+                        C.append(c)
+                        F.append(f)
+                        RM.append(room)
+                        VQ.append(query)
+                    row.append(o)
+                quads.append(row)
+                fkeys.append(cell[4])
+        nq = len(quads)
+        if not nq:
+            return
+        # edges -> cells (each edge twice at most on a manifold surface)
+        emap = {}
+        for q, vs in enumerate(quads):
+            for i in range(4):
+                a, b = vs[i], vs[(i + 1) % 4]
+                emap.setdefault((a, b) if a < b else (b, a), []).append(q)
+        nbrs = [[] for _ in range(nq)]
+        for qs in emap.values():
+            if len(qs) == 2:
+                nbrs[qs[0]].append(qs[1])
+                nbrs[qs[1]].append(qs[0])
+        keep = [F[vs[0]] + F[vs[1]] + F[vs[2]] + F[vs[3]] > 0.0 for vs in quads]
+        for _ in range(2):  # fill notches and pinholes, then prune spikes: an outline the skirt can follow
+            for q in range(nq):
+                if not keep[q] and sum(1 for o in nbrs[q] if keep[o]) >= 3:
+                    keep[q] = True
+        for _ in range(2):
+            for q in range(nq):
+                if keep[q] and sum(1 for o in nbrs[q] if keep[o]) <= 1:
+                    keep[q] = False
+        hole = [False] * nq  # pinholes (a dozen cells, moss all round): filled, not a pit with a skirt down it
+        for q0 in range(nq):
+            if keep[q0] or hole[q0]:
+                continue
+            comp, stack, shut = [q0], [q0], True
+            hole[q0] = True
+            while stack:
+                q = stack.pop()
+                if len(nbrs[q]) < 4:
+                    shut = False  # reaches where the grid ends (cold cells, an open edge): not a hole
+                for o in nbrs[q]:
+                    if not keep[o] and not hole[o]:
+                        hole[o] = True
+                        comp.append(o)
+                        stack.append(o)
+            if shut and len(comp) <= 12:
+                for q in comp:
+                    keep[q] = True
+        vq = [[] for _ in range(len(BP))]
+        for q, vs in enumerate(quads):
+            for v in vs:
+                vq[v].append(q)
+        for rnd in range(4):  # one fan of cells round every outline point (no bow ties)
+            bad = self._pinched(quads, keep, vq)
+            if not bad:
+                break
+            for v in bad:
+                for q in vq[v]:
+                    keep[q] = rnd < 2  # first close the fan; where it can't close (an open edge), open it
+        # small bits on their own go
+        lab = list(range(nq))
+
+        def find(i):
+            while lab[i] != i:
+                lab[i] = lab[lab[i]]
+                i = lab[i]
+            return i
+
+        for q in range(nq):
+            if keep[q]:
+                for o in nbrs[q]:
+                    if keep[o]:
+                        a, b = find(q), find(o)
+                        if a != b:
+                            lab[a] = b
+        size = collections.Counter(find(q) for q in range(nq) if keep[q])
+        for q in range(nq):
+            if keep[q] and size[find(q)] < 3:
+                keep[q] = False
+        kq = [q for q in range(nq) if keep[q]]
+        if not kq:
+            return
+        # the outline: directed boundary edges (the kept cell on their left)
+        inner = set()
+        for q in kq:
+            vs = quads[q]
+            for i in range(4):
+                inner.add((vs[i], vs[(i + 1) % 4]))
+        nxt = {}
+        for a, b in inner:
+            if (b, a) not in inner:
+                nxt.setdefault(a, b)
+        loops, done = [], set()
+        for s0 in nxt:
+            if s0 in done:
+                continue
+            loop, v = [], s0
+            while v not in done and v in nxt and len(loop) <= len(nxt):
+                done.add(v)
+                loop.append(v)
+                v = nxt[v]
+            if len(loop) >= 3 and v == s0:
+                loops.append(loop)
+        bset = set(v for lp in loops for v in lp)
+        # slide the outline's points onto where the coverage crosses zero, then relax them along it
+        adj = {}
+        for (a, b) in emap:
+            if a in bset:
+                adj.setdefault(a, []).append(b)
+            if b in bset:
+                adj.setdefault(b, []).append(a)
+        moved = {}
+        for v in bset:
+            fv, pv = F[v], BP[v]
+            sx = sy = sz = 0.0
+            cnt = 0
+            for w in adj.get(v, ()):
+                fw = F[w]
+                if (fv > 0.0) == (fw > 0.0):
+                    continue
+                t = min(0.7, fv / (fv - fw))
+                pw = BP[w]
+                sx += pv[0] + (pw[0] - pv[0]) * t
+                sy += pv[1] + (pw[1] - pv[1]) * t
+                sz += pv[2] + (pw[2] - pv[2]) * t
+                cnt += 1
+            if cnt:
+                moved[v] = (sx / cnt, sy / cnt, sz / cnt)
+        for v, p in moved.items():
+            BP[v] = p
+        for _ in range(3):
+            new = {}
+            for lp in loops:
+                cnt = len(lp)
+                for i, v in enumerate(lp):
+                    p, a, b = BP[v], BP[lp[i - 1]], BP[lp[(i + 1) % cnt]]
+                    new[v] = tuple(0.5 * p[j] + 0.25 * (a[j] + b[j]) for j in range(3))
+            for v, p in new.items():
+                r = VQ[v].closest(om.MPoint(p[0], p[1], p[2]))
+                BP[v] = (r[1].x, r[1].y, r[1].z) if r is not None else p
+        # lift normals: the kept cells' own, area weighted (smooth over folds and round edges)
+        NV = [None] * len(BP)
+        acc = {}
+        for q in kq:
+            vs = quads[q]
+            pa, pb, pc, pd = (BP[v] for v in vs)
+            n = _rl_cross(_rl_sub(pc, pa), _rl_sub(pd, pb))
+            for v in vs:
+                s = acc.get(v)
+                acc[v] = n if s is None else (s[0] + n[0], s[1] + n[1], s[2] + n[2])
+        for v, s in acc.items():
+            NV[v] = _rl_norm(s, BN[v])
+        # heights: the field's (low cushions), never under the rim, the outline at the rim, smoothed a little
+        rim = self.rim
+        hm = {}
+        for v in acc:
+            if v in bset:
+                hm[v] = rim
+            else:
+                h = HF[v] if HF[v] > rim else rim
+                hm[v] = min(h, 0.6 * RM[v]) if RM[v] < 1e29 else h
+        vn = {}
+        for q in kq:
+            vs = quads[q]
+            for i in range(4):
+                a, b = vs[i], vs[(i + 1) % 4]
+                vn.setdefault(a, set()).add(b)
+                vn.setdefault(b, set()).add(a)
+        for _ in range(2):
+            nh = {}
+            for v, ns in vn.items():
+                if v in bset:
+                    continue
+                nh[v] = 0.5 * hm[v] + 0.5 * sum(hm[w] for w in ns) / len(ns)
+            hm.update(nh)
+        # the mat's points: the top, then each outline point's two skirt rows
+        out, col, top_dirs, top_hf, top_core, det = [], [], [], [], [], []
+        remap = {}
+        ih, pz, sd = 1.0 / self.H, 6.0 * self.R, self.seed + 71
+        lift = 0.5 * self.D
+
+        def noise(q):
+            return 0.5 + 0.5 * _th_noise((q[0] + q[1] * 0.71) / pz, (q[2] - q[1] * 0.53) / pz, sd)
+
+        for v in sorted(acc):
+            n, h = NV[v], hm[v]
+            p = BP[v]
+            t = (p[0] + n[0] * h, p[1] + n[1] * h, p[2] + n[2] * h)
+            remap[v] = len(out)
+            out.append(t)
+            c = 0.0 if v in bset else C[v]
+            col.append((noise(t), max(0.0, min(1.0, h * ih)), c))
+            top_dirs.append(n)
+            top_hf.append(h)
+            top_core.append(c)
+            dl = lift * c  # strands stand on the displaced moss, not under it
+            det.append((t[0] + n[0] * dl, t[1] + n[1] * dl, t[2] + n[2] * dl))
+        oq = [[remap[v] for v in quads[q]] for q in kq]
+        okeys = [fkeys[q] for q in kq]
+        ntop = len(oq)
+        w1, w2, h1, dep = 0.8 * self.wroll, 0.35 * self.wroll, 0.45 * rim, self.depth
+        for lp in loops:
+            cnt = len(lp)
+            outs = []
+            for i in range(cnt):
+                a, b = lp[i], lp[(i + 1) % cnt]
+                e = _rl_sub(BP[b], BP[a])
+                n = _rl_norm(_rl_add(NV[a], NV[b]), NV[a])
+                outs.append(_rl_cross(e, n))  # out of the mat: the kept cell is on the edge's left
+            r1, r2 = [], []
+            for i, v in enumerate(lp):
+                n, p = NV[v], BP[v]
+                o = _rl_add(outs[i - 1], outs[i])
+                o = _rl_sub(o, _rl_mul(n, _rl_dot(o, n)))
+                o = _rl_norm(o, _rl_norm(outs[i], n))
+                q1 = (p[0] + o[0] * w1 + n[0] * h1, p[1] + o[1] * w1 + n[1] * h1, p[2] + o[2] * w1 + n[2] * h1)
+                q2 = (p[0] + o[0] * w2 - n[0] * dep, p[1] + o[1] * w2 - n[1] * dep, p[2] + o[2] * w2 - n[2] * dep)
+                for qq in (q1, q2):
+                    out.append(qq)
+                    col.append((noise(qq), 0.0, 0.0))
+                    det.append(qq)
+                    top_dirs.append(o)
+                    top_hf.append(0.0)
+                    top_core.append(0.0)
+                r1.append(len(out) - 2)
+                r2.append(len(out) - 1)
+            for i in range(cnt):
+                j = (i + 1) % cnt
+                ta, tb = remap[lp[i]], remap[lp[j]]
+                oq.append([tb, ta, r1[i], r1[j]])
+                oq.append([r1[j], r1[i], r2[i], r2[j]])
+        us, vs, uvi = _mi_mat_uvs(out, oq, self.tile)
+        self.out_pts, self.out_quads, self.out_col = out, oq, col
+        self.out_us, self.out_vs, self.out_uvi = us, vs, uvi
+        # what _MossDetail reads: the top's points (lifted by half the displacement), its cells
+        self.pts, self.dirs, self.hf, self.core = det, top_dirs, top_hf, top_core
+        self.us, self.vs = us, vs
+        self.faces_out = [(oq[q], uvi[q], okeys[q]) for q in range(ntop)]
+        self.ntop = ntop
+
+    @staticmethod
+    def _pinched(quads, keep, vq):
+        """Outline points where kept cells meet only at a corner (more than
+        two outline edges)."""
+        bad = []
+        for v, qs in enumerate(vq):
+            if len(qs) < 2:
+                continue
+            ks = [q for q in qs if keep[q]]
+            if not ks or len(ks) == len(qs) and len(qs) >= 4:
+                continue
+            edges = collections.Counter()
+            for q in ks:
+                vs = quads[q]
+                i = vs.index(v)
+                for w in (vs[i - 1], vs[(i + 1) % 4]):
+                    edges[w] += 1
+            if sum(1 for c in edges.values() if c == 1) > 2:
+                bad.append(v)
+        return bad
+
+    def mesh(self):
+        """The mat as (points, counts, connects, us, vs, uv ids), the points
+        carrying shading data (_MiPts .col)."""
+        pts = _MiPts(self.out_pts)
+        pts.col = list(self.out_col)
+        conn, uvi = [], []
+        for vs, uv in zip(self.out_quads, self.out_uvi):
+            conn.extend(vs)
+            uvi.extend(uv)
+        return pts, [4] * len(self.out_quads), conn, list(self.out_us), list(self.out_vs), uvi
+
+
 MOSS_DETAIL_ONLY = ("strands", "strand_length", "droop", "capsules", "stacks", "stack_layout", "udim",
                     "shoot_instances", "strays", "shoot_form")
 MOSS_INST_KINDS = ("tuft", "shoot", "leafy")  # what can grow as instances (Scatter's Shoots: Instances)
@@ -33325,6 +34204,7 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=Fal
     if not sampler.total:
         return empty
     clumps = s.get("style") == MOSS_STYLES[1]
+    mat = s.get("style") == MOSS_STYLES[2]
     key = None
     if draw is None:  # (a drawing's strokes have no cheap key: built each time)
         key = (_mi_surf_keys(surf),
@@ -33335,6 +34215,7 @@ def moss_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, draft=Fal
     if got is None:
         spots, cands, rows = _moss_margins(surf, sampler, s, seeds, faces, draw)
         bed = (_MossClumps(surf, s, cands, rows, faces) if clumps else
+               _MossMat(surf, s, cands, rows, faces, draft=draft) if mat else
                _MossBed(surf, s, cands, rows, faces, draft=draft)).build()
         got = (bed, bed.count if clumps else sum(1 for row in rows if row is not None and row[0] > 0.0))
         if key is not None:
@@ -36131,7 +37012,8 @@ MI_PRESETS = {
         ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.3, "strand_length": 0.02, "droop": 1.4,
                             "edges": 0.2, "capsules": 0.1}),
         ("Column base", {"coverage": 0.8, "crevices": 0.8, "patchiness": 0.45, "fade": "From base",
-                         "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7})]),
+                         "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7}),
+        ("Displaced mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5})]),
     "Ivy": collections.OrderedDict([
         ("Climbing ivy", {}),
         ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
@@ -37664,7 +38546,7 @@ def _sc_write(root, data, placed, meshes):
             if node is None:
                 node = _sc_make_part(root, layer, part, material)
             if part == "moss" and sc_type(layer.get("type")) == "Moss":
-                node = parts[key] = _sc_bed_suffix(node, sc_settings(layer).get("detail") in MOSS_BED_SMOOTH)
+                node = parts[key] = _sc_bed_suffix(node, sc_settings(layer))
             sig = (id(mesh[0]), mesh[3][0] if mesh[3] else 0.0, mesh[4][0] if mesh[4] else 0.0, len(mesh[1]))
             shape = _log_shape(node)
             if _SC_WROTE.get((root, key)) != sig or cmds.getAttr(shape + "." + MI_VERTS) != len(mesh[0]):
@@ -37792,6 +38674,29 @@ def _ml_arnold_look():
     return {"mossGreen": bed, "mossStrand": st, "mossSpore": cap}
 
 
+def _ml_disp_look(shader):
+    """MOSS_DISP_SG: the bed's shader (mossGreen_MAT) with a displacement:
+    world-space cushions with fibres over them, fading to nothing at the
+    patches' edges (mossData B), so a Mat's rim stays down where it rolls
+    under; how high is each bed's own aiDispHeight (Displacement)."""
+    data = _ml_data("mossDispData_UDC")
+    cush = _ml_noise("mossDispCushion_NOI", 0.025, (0, 0, 0), (1, 1, 1), octaves=2)
+    fib = _ml_noise("mossDispFibre_NOI", 0.005, (0, 0, 0), (1, 1, 1), octaves=2, distortion=1.5)
+    mix = _ml_node("aiLayerRgba", "mossDisp_LAY", enable1=1, enable2=1, mix2=0.35)
+    cmds.connectAttr(cush + ".outColor", mix + ".input1", force=True)
+    cmds.connectAttr(fib + ".outColor", mix + ".input2", force=True)
+    edge = _ml_range("mossDispEdge_RNG", data + ".outColorB", 0.0, 0.25)
+    mul = _ml_node("aiMultiply", "mossDispEdge_MUL")
+    cmds.connectAttr(mix + ".outColor", mul + ".input1", force=True)
+    cmds.connectAttr(edge + ".outColor", mul + ".input2", force=True)
+    dsp = cmds.shadingNode("displacementShader", asShader=True, name="mossDisp_DSP", skipSelect=True)
+    cmds.connectAttr(mul + ".outColorR", dsp + ".displacement", force=True)
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=MOSS_DISP_SG)
+    cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+    cmds.connectAttr(dsp + ".displacement", sg + ".displacementShader", force=True)
+    return sg
+
+
 def _ml_plain_look():
     """Without Arnold: flat standardSurface colours."""
     out = {}
@@ -37808,7 +38713,9 @@ def sc_moss_look(roots):
     mossSpore_MAT (aiStandardSurface networks with MtoA loaded, plain
     standardSurface without), made once per scene and assigned to the
     Moss layers' bed, strands, instanced shoots and capsules in roots.
-    Returns {"materials": [...], "parts": n, "arnold": bool}."""
+    A Mat rendered as _GED gets MOSS_DISP_SG (the bed shader with a
+    displacement) on its bed. Returns {"materials": [...], "parts": n,
+    "arnold": bool}."""
     arnold = bool(cmds.pluginInfo("mtoa", query=True, loaded=True))
     with UndoChunk("Moss Look"):
         mats = {}
@@ -37824,6 +38731,16 @@ def sc_moss_look(roots):
                 sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=name + "_SG")
                 cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
                 mats[name] = sg
+        disp = None  # a Mat rendered as _GED: the bed shader with its displacement
+        if arnold:
+            if cmds.objExists(MOSS_DISP_SG) and cmds.nodeType(MOSS_DISP_SG) == "shadingEngine":
+                disp = MOSS_DISP_SG
+            elif any(sc_type(layer.get("type")) == "Moss" and _sc_bed_render(sc_settings(layer))[0] == "GED"
+                     for root in roots for layer in sc_data(root).get("layers", [])):
+                green = cmds.listConnections(mats["mossGreen"] + ".surfaceShader", source=True,
+                                             destination=False) or []
+                if green:
+                    disp = _ml_disp_look(green[0])
         n = 0
         for root in roots:
             data = sc_data(root)
@@ -37831,10 +38748,11 @@ def sc_moss_look(roots):
             for layer in data.get("layers", []):
                 if sc_type(layer.get("type")) != "Moss":
                     continue
+                ged = disp is not None and _sc_bed_render(sc_settings(layer))[0] == "GED"
                 for part, mat in MOSS_LOOK_PARTS.items():
                     node = parts.get(layer["id"] + "/" + part)
                     if node:
-                        cmds.sets(node, edit=True, forceElement=mats[mat])
+                        cmds.sets(node, edit=True, forceElement=disp if (ged and part == "moss") else mats[mat])
                         shape = _log_shape(node)
                         if arnold and shape and cmds.attributeQuery("aiExportColors", node=shape, exists=True):
                             cmds.setAttr(shape + ".aiExportColors", True)  # the shading data to Arnold
@@ -37844,24 +38762,64 @@ def sc_moss_look(roots):
                 if protos:
                     cmds.sets(protos, edit=True, forceElement=mats["mossStrand"])
                     n += 1
-    return {"materials": sorted(mats), "parts": n, "arnold": arnold}
+    return {"materials": sorted(mats) + ([disp[:-3]] if disp else []), "parts": n, "arnold": arnold}
 
 
-def _sc_bed_suffix(node, smooth):
-    """A moss bed named for how it renders: _GES (subdivided at render
-    time: its cells are coarse) or _GEP; with MtoA loaded, Arnold's
-    subdivision (Catmull-Clark, 1 step) set to match. Returns the node."""
+MOSS_DISP_SG = "mossGreenDisp_SG"  # Moss Look's bed shader with its displacement (Mat beds rendered as _GED)
+
+
+def _sc_bed_render(s):
+    """(suffix, Arnold subdivision steps, displacement height in scene
+    units or None) for a Moss layer's bed: Carpet _GES (1 step) from Normal
+    up, else _GEP; Mat by its Render as."""
+    if s.get("style") == MOSS_STYLES[2]:
+        want = s.get("render_as") if s.get("render_as") in MOSS_RENDER_AS else "GED"
+        disp = max(0.0, float(s.get("disp_height", 0.01))) / scene_m_per_unit() if want == "GED" else None
+        return want, MOSS_MAT_ITERS[want], disp
+    return ("GES", 1, None) if s.get("detail") in MOSS_BED_SMOOTH else ("GEP", 0, None)
+
+
+def _sc_bed_suffix(node, s):
+    """A moss bed named for how it renders (_sc_bed_render): _GES / _GED
+    (subdivided at render time: its cells are coarse) or _GEP; with MtoA
+    loaded, Arnold's subdivision (Catmull-Clark) set to match when the
+    suffix changes (a step count set by hand stays), and a _GED's
+    displacement height and bounds padding kept at Displacement. Moss
+    Look's bed shaders follow it (_sc_bed_look). Returns the node."""
+    want, steps, disp = _sc_bed_render(s)
     name = short_name(node)
-    want = "GES" if smooth else "GEP"
     stem, _, suf = name.rpartition("_")
-    if stem and suf in ("GEP", "GES") and suf != want:
+    renamed = False
+    if stem and suf in MOSS_RENDER_AS and suf != want:
         node = long_name(cmds.rename(node, stem + "_" + want))
+        renamed = True
     shape = _log_shape(node)
     if shape and cmds.attributeQuery("aiSubdivType", node=shape, exists=True):
-        if cmds.getAttr(shape + ".aiSubdivType") != (1 if smooth else 0):
-            cmds.setAttr(shape + ".aiSubdivType", 1 if smooth else 0)
-            cmds.setAttr(shape + ".aiSubdivIterations", 1 if smooth else 0)
+        if cmds.getAttr(shape + ".aiSubdivType") != (1 if steps else 0) or (
+                renamed and s.get("style") == MOSS_STYLES[2]):
+            cmds.setAttr(shape + ".aiSubdivType", 1 if steps else 0)
+            cmds.setAttr(shape + ".aiSubdivIterations", steps)
+        if disp is not None:
+            for attr, v in (("aiDispHeight", disp), ("aiDispPadding", disp)):
+                if cmds.attributeQuery(attr, node=shape, exists=True) and \
+                        abs(cmds.getAttr(shape + "." + attr) - v) > 1e-9:
+                    cmds.setAttr(shape + "." + attr, v)
+            if renamed:
+                for attr, v in (("aiDispZeroValue", 0.0), ("aiDispAutobump", True)):
+                    if cmds.attributeQuery(attr, node=shape, exists=True):
+                        cmds.setAttr(shape + "." + attr, v)
+    if shape:
+        _sc_bed_look(shape, want == "GED")
     return node
+
+
+def _sc_bed_look(shape, ged):
+    """A bed with Moss Look's shader: the one with the displacement on a
+    _GED, the plain one otherwise (when both are in the scene)."""
+    sgs = cmds.listConnections(shape, type="shadingEngine") or []
+    have, want = ("mossGreen_SG", MOSS_DISP_SG) if ged else (MOSS_DISP_SG, "mossGreen_SG")
+    if have in sgs and cmds.objExists(want) and cmds.nodeType(want) == "shadingEngine":
+        cmds.sets(shape, edit=True, forceElement=want)
 
 
 def _sc_write_layer_shoots(root, layer, placed, shoots, parts):
@@ -38589,7 +39547,23 @@ SC_FIELDS = {
                "geometry."),
     "style": ("Style", lambda: SegmentField(MOSS_STYLES),
               "Carpet: one continuous bed of moss over the surface. Clumps: separate moss cushions scattered where "
-              "it grows (lighter; bigger and taller deeper in a patch). Shoots, strands and capsules grow on both."),
+              "it grows (lighter; bigger and taller deeper in a patch). Mat: a light all-quad sheet made for "
+              "render-time subdivision and displacement (_GED), its edges rolled down under the surface so "
+              "displacement never lifts them off. Shoots, strands and capsules grow on all three."),
+    "render_as": ("Render as", lambda: SegmentField(MOSS_RENDER_AS),
+                  "Mat: how the render treats it (its name's suffix; Arnold set to match when MtoA is loaded).\n"
+                  "GEP: as built (finest cells, no subdivision). GES: subdivided (2 steps). GED: subdivided "
+                  "(3 steps) and displaced by Displacement (Moss Look adds a displacement that fades out at "
+                  "the edges)."),
+    "disp_height": ("Displacement", _scf(0.0, 0.2, 0.0, 0.05, 3, 0.001),
+                    "Mat as GED: how high the render's displacement goes, in metres (Arnold's height and bounds "
+                    "padding). The edge tucks deeper than this under the surface, so it never lifts off."),
+    "edge_roll": ("Edge roll", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                  "Mat: how thick the edge stays before it rolls down under the surface (0 = it thins right "
+                  "down to the surface; 1 = a thick, rounded rim)."),
+    "cage_detail": ("Cage detail", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Mat: how fine its cells are (0 = coarsest, lightest; 1 = about 4x the faces). Fine detail "
+                    "is the displacement's, so keep it low for GED."),
     "clump_group": ("Grouping", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                     "Clumps: how much the cushions gather into groups, with bare gaps between the groups "
                     "(0 = evenly spaced)."),
@@ -38756,6 +39730,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                          "capsules"]),
              ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_merge", "clump_hvar",
                                "clump_mounds", "clump_ghvar"]),
+             ("Mat", True, ["render_as", "disp_height", "edge_roll", "cage_detail"]),
              ("Where it grows", True, _SC_WHERE + ["exposure", "spill"]),
              ("Edges", False, ["feather", "ragged", "strays"]),
              ("Surface", False, ["surface", "surface_detail"]),
@@ -39424,6 +40399,7 @@ class ScatterPanel(QtWidgets.QWidget):
                                       on_stroke=lambda paint: self._paint_stroke(paint), get_brush=lambda: self._brush())
         self.draw_sec = {}
         self.clump_sec = {}
+        self.mat_sec = {}
         self.fade_sec = {}
         self.row_lbl = {}
         self._build()
@@ -39690,7 +40666,7 @@ class ScatterPanel(QtWidgets.QWidget):
             for key, widget in self.f[typ].items():
                 widget.setValue(sc_defaults(typ)[key])
                 widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
-            for key in ("style", "fade", "fade_by"):
+            for key in ("style", "render_as", "fade", "fade_by"):
                 if key in self.f[typ]:
                     self.f[typ][key].changed.connect(lambda t=typ: self._style_rows(t))
         col.addWidget(card)
@@ -39739,6 +40715,8 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.draw_sec[typ] = sec
             if title == "Clumps":
                 self.clump_sec[typ] = sec
+            if title == "Mat":
+                self.mat_sec[typ] = sec
             if title == _SC_FADE[0]:
                 self.fade_sec[typ] = sec
             for key in keys:
@@ -39926,6 +40904,11 @@ class ScatterPanel(QtWidgets.QWidget):
         sec = self.clump_sec.get(typ)
         if sec is not None:
             sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[1])
+        sec = self.mat_sec.get(typ)
+        if sec is not None:
+            sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[2])
+            self.f[typ]["disp_height"].setVisible(self.f[typ]["render_as"].value() == "GED")
+            self.row_lbl[(typ, "disp_height")].setVisible(self.f[typ]["render_as"].value() == "GED")
         if "fade" in self.f[typ]:
             on = self.f[typ]["fade"].value() != MI_FADES[0]
             metres = self.f[typ]["fade_by"].value() == MI_FADE_BY[1]

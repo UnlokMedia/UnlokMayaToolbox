@@ -1247,6 +1247,73 @@
     > 0: h x 1 + ghvar (1.1 noise + 0.6 Grouping (gg - 0.5))). Their
     randoms are their own `_rand12(seed, i, 7, 97)`, so changing them never
     moves the layout; the obstacle cap (0.6 x the room above) still wins.
+  - **Mat style** (the user, 2026-11-06: the carpet is "quite heavy to load
+    ... the topology is still weird ... nor does it handle displacement
+    well ... when displacement is applied, it just lifts from whatever
+    surface it's on. Maybe it needs some edges that curl down a bit?";
+    wanted "quick to use and play around with, that is optimised, can have
+    _GED suffix and will work well with displacement, good UVs"):
+    `MOSS_STYLES[2]` "Mat", `_MossMat(_MossBed)` (same interface for
+    `_MossDetail`). Keys `render_as` (`MOSS_RENDER_AS` GEP / GES / GED,
+    default GED), `disp_height` (m, 0.01), `edge_roll` (0.5),
+    `cage_detail` (0.5); panel section "Mat" (`mat_sec`, Displacement only
+    for GED); preset "Displaced mat". Pipeline:
+    - **Grid:** `_mi_mat_base` = the surface's faces as quads (smooth
+      rest: the once subdivided mesh on its limit points; faceted: the
+      faces, triangles paired, else every face split), `_mi_mat_rings`
+      gives every edge ring one cell count (cell = R (1 - 0.75 Cage
+      detail) x `MOSS_MAT_CELL` by Render as, x2 for a draft), so faces
+      meet point for point. Cells only in blocks the field can reach
+      (`_local`, block keys carry the cell size: without it another Cage
+      detail's lookups were read back), points laid on the rest surface
+      by its own query (closest), each with a `_MossBed._record` (a
+      context whose three corner normals are the point's normal). Per
+      layout cache `_MI_MOSS_MATS`; per base quad buried / partly covered
+      (`_quad_cover`).
+    - **Outline:** a cell is kept where its corners' mean coverage
+      (margin + ragged + 0.03, `_look`) > 0; points pressed under
+      something (room < 1 cm) are -1 (no mat under a box). Notches (3
+      kept neighbours) filled, spikes pruned, pinholes of <= 12 cells
+      with moss all round filled, bow ties fixed (`_pinched`), bits < 3
+      cells dropped. Outline points slide to the coverage's zero crossing
+      along their edges (<= 0.7 of an edge), then 3 relax passes along
+      the loop, snapped back to the surface.
+    - **Heights:** `_value` with its own lumps off, then low cushions
+      (one noise octave at max(0.7 R, 2.5 cells)); at least the rim
+      height (`edge_roll x (0.35 H + 0.5 D)`), the outline at the rim, 2
+      smoothing passes; lift along the kept cells' area-weighted normals.
+    - **Rolled edge:** two quad rows per outline edge: out 0.8 w and up
+      0.45 rim, then back in to 0.35 w and down 1.25 D + 3 mm under the
+      surface (w = max(0.5 cell, 1.5 rim)). No underside. Its open edges
+      are the only ones; B (core) is 0 there.
+    - **UVs:** `_mi_mat_uvs` unfolds quad by quad across shared edges at
+      Tile size scale (a chart stops where a quad lands off its own
+      points by > 0.45 of an edge, over another quad (point-in-quad), or
+      past 0.9 of a tile; scraps of <= 4 quads then join a neighbour up to
+      a whole tile), each chart moved into 0..1 (by whole tiles when it
+      fits). Overlapping 0..1 like the carpet's tiles.
+    - **Detail:** `faces_out` is the top only; its points are lifted by
+      half the displacement x core, so shoots stand on the displaced moss.
+    - **Scene:** `_sc_bed_render(s)` -> (suffix, Arnold steps, height):
+      Carpet as before (GES 1 from Normal up, else GEP); Mat GEP 0 / GES
+      2 / GED 3 (`MOSS_MAT_ITERS`). `_sc_bed_suffix(node, s)` renames, sets
+      Arnold's type and steps when the suffix changes (a hand-set step
+      count stays), keeps a _GED's aiDispHeight / aiDispPadding at
+      Displacement (zero value 0, autobump on when it becomes _GED).
+      `_sc_bed_look` swaps a bed between `mossGreen_SG` and
+      `MOSS_DISP_SG` ("mossGreenDisp_SG": the same mossGreen_MAT with
+      `_ml_disp_look`: world aiNoise cushions 2.5 cm + fibres 5 mm x
+      aiRange of mossData B 0..0.25) when both exist; Moss Look makes it
+      when a layer is _GED and MtoA is loaded.
+    - **Numbers** (rock _GES + box + floor, Normal): 5.2k quads vs the
+      carpet's 34.5k, 1.1 s vs 4.6 s (a look edit 0.2 s); ~110 UV shells
+      for ~45 tiles of area; UV scale median 1.00 (p5 0.97, p95 1.02).
+      Cage detail 1 ~6x the faces; GEP ~4x.
+    - Carpet / Clumps unchanged: equal to the previous toolbox exactly on
+      faceted surfaces; on a smooth rest surface Maya's queries differ in
+      the last bits by call order (~1e-7 dm), whichever toolbox runs first.
+    - A dense triangulated scan whose triangles don't all pair is split
+      whole (4x its faces): the mat then follows that density.
   - **Specks** (the user, same day: "tiny bits of moss that I could toggle
     on and off ... panels of glass ... bits of dirt or tiny bits of moss
     that have fallen down and stuck to a window"): layer type "Specks",
@@ -1264,7 +1331,12 @@
     user's own meshes as a layer type) (4), group presets (5); converting
     an old mossPatch / ivy / debris group into a scatter group.
   - Tests: `tests/test_scatter.py`, `tests/gui_scatter.py` (pictures in
-    `tests/_out/scatter`).
+    `tests/_out/scatter`). Mat: `tests/test_moss_mat.py` (quads, rolled
+    edge under the surface before and after a full displacement, cost vs
+    the carpet, UVs, naming, Arnold when MtoA loads, Carpet / Clumps vs
+    UNLOK_OLD_TOOLBOX), `tests/gui_moss_mat_pics.py` +
+    `run_gui_moss_mat_pics.mel` (pictures in `tests/_out/moss_mat_pics`:
+    cage wire, smooth preview, a Python-displaced copy).
 - **Moss and Ivy** (Modeling tab; the user, 2026-11-03: "nice clumps of
   jungle moss ... on top of rooftops, or growing up in little crevices
   interacting with geo, or ivy growing up columns of shacks"; then "bunches
