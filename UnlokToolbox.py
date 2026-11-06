@@ -29286,7 +29286,7 @@ IVY_DEFAULTS = {
 DEBRIS_DEFAULTS = {
     "coverage": 0.5, "spread": 0.4, "slope": 45.0, "crevices": 0.8, "edges": 0.3, "patchiness": 0.7,
     "patch_size": 0.8, "creases": 0.7, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
-    "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
+    "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "grass_pile": 0.0, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
@@ -34844,6 +34844,10 @@ class _DebrisBuild(object):
         Rb = 0.5 * self._size("bunch_size", r[3])
         Lg = float(self.s["grass_length"]) / self.m
         full = max(0.0, float(self.s["fullness"]))
+        pile = clamp(float(self.s.get("grass_pile", 0.0)), 0.0, 1.5)
+        if pile > 0.0:
+            self._grass_pile(c, n, r, ci, Rb, Lg, full, pile)
+            return
         Hb = 0.2 * Rb * (0.5 + 0.5 * full)
         count = int(self.fib_rate * full * math.pi * (Rb * self.m) ** 2 / 0.01 + 0.5)
         segs = self.segs
@@ -34853,13 +34857,7 @@ class _DebrisBuild(object):
         comb = clamp(float(self.s["comb"]), 0.0, 1.0)
         width = 0.5 * float(self.s["blade_width"]) / self.m * self.fib_wide
         g = 0.3 + 0.7 * clamp(float(self.s["droop"]), 0.0, 2.0)
-        main = r[4] * 6.2832
-        f1, f2 = _mi_frame(n)
-        a = self._along(n, self._gather(ci) if ci >= 0 else None, r[6], 2.0)
-        if a is None and n[1] < 0.985 and r[6] < 0.75:  # on a slope: washed / blown downhill
-            a = _rl_norm((n[0] * n[1], n[1] * n[1] - 1.0, n[2] * n[1]), None)
-        if a is not None:
-            main = math.atan2(_rl_dot(a, f2), _rl_dot(a, f1)) + (r[4] - 0.5) * 0.9
+        main = self._grass_heading(n, r, ci)
         for k in range(count):
             rr = _rand12(self.seed, int(r[5] * 1e6) + k, 5, 71)
             ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
@@ -34874,6 +34872,130 @@ class _DebrisBuild(object):
             if len(spine) > 1:
                 self._ribbon(spine, nrms, width * (0.7 + 0.6 * rr[8]), (rr[9] - 0.5) * 1.4,
                              min(self.stacks - 1, int(rr[10] * self.stacks)))
+
+    def _grass_heading(self, n, r, ci):
+        """The way a bunch's blades mostly lie (an angle in _mi_frame(n)):
+        along a crease it's in, else downhill on a slope, else random."""
+        main = r[4] * 6.2832
+        f1, f2 = _mi_frame(n)
+        a = self._along(n, self._gather(ci) if ci >= 0 else None, r[6], 2.0)
+        if a is None and n[1] < 0.985 and r[6] < 0.75:  # on a slope: washed / blown downhill
+            a = _rl_norm((n[0] * n[1], n[1] * n[1] - 1.0, n[2] * n[1]), None)
+        if a is not None:
+            main = math.atan2(_rl_dot(a, f2), _rl_dot(a, f1)) + (r[4] - 0.5) * 0.9
+        return main
+
+    def _grass_pile(self, c, n, r, ci, Rb, Lg, full, pile):
+        """A loose pile of dry grass (Pile height > 0; the user, 2026-11-06:
+        "trying to scatter some loose piles of dry grass but its just flat
+        clumps"): a lumpy dome Pile height x its radius high, blades all
+        through it (most near its top, where they show), each lying about
+        along the dome where it is, tipped up or down (more with Messiness),
+        held from its middle and sagging under its own weight (Droop), so
+        the ends past the heap splay out and come down to the ground. No
+        point goes into a surface: a blade that meets one lies along it."""
+        s = self.s
+        hit = self.surf.ray(_rl_add(c, _rl_mul(n, 2.0 * self.lift)), n, 1000.0 * Rb)
+        if hit is not None and _rl_dot(hit[2], n) > 0.0:
+            return  # the spot is inside something standing on the surface (a box on the floor: a ray out
+            # leaves through its top)
+        Hp = pile * Rb
+        shell = math.pi * (Rb * Rb + Hp * Hp) * self.m * self.m  # the heap's outside, square metres
+        count = int(self.fib_rate * full * 1.2 * shell / 0.01 + 0.5)
+        segs = self.segs
+        if not count or self._full(self.G, count * 2 * (segs + 1)):
+            return
+        self.counts["bunches"] += 1
+        comb = clamp(float(s["comb"]), 0.0, 1.0)
+        width = 0.5 * float(s["blade_width"]) / self.m * self.fib_wide
+        main = self._grass_heading(n, r, ci)
+        sag = 0.04 + 0.1 * clamp(float(s["droop"]), 0.0, 2.0)  # radians a step towards down: stiff, dry
+        loose = 0.2 + 0.3 * self.mess  # how far a blade tips off the heap's surface
+        lump = 0.12 + 0.12 * min(1.0, self.mess)
+        p1, p2, p3 = r[7] * 6.2832, r[8] * 6.2832, r[9] * 6.2832
+        t1, t2 = _mi_frame(n)
+        lift = self.lift
+        base = _rl_add(c, _rl_mul(n, 2.0 * lift))  # blade middles are found by a ray out from here
+        for k in range(count):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + k, 5, 71)
+            rq = _rand12(self.seed, int(r[5] * 1e6) + k, 8, 79)
+            a = rr[3] * 6.2832
+            sc = 1.0 + lump * (0.6 * math.sin(2.0 * a + p1) + 0.4 * math.sin(3.0 * a + p2))  # a lumpy outline
+            rho = 0.97 * math.sqrt(rr[2])
+            R = Rb * sc
+            hs = Hp * sc * (1.0 + 0.5 * lump * math.sin(5.0 * a + p3))
+            q = max(1e-3, 1.0 - rho * rho)
+            frac = 1.0 - 0.85 * rq[0] * rq[0]  # most blades near the top, where they show
+            radial = _rl_add(_rl_mul(t1, math.cos(a)), _rl_mul(t2, math.sin(a)))
+            want = _rl_add(_rl_add(c, _rl_mul(radial, R * rho)), _rl_mul(n, hs * q ** 0.6 * frac + lift))
+            to = _rl_sub(want, base)
+            dist = _rl_len(to)
+            mid = want
+            if dist > 1e-9:
+                hit = self.surf.ray(base, _rl_mul(to, 1.0 / dist), dist + lift)
+                if hit is not None:  # the heap runs into something (a wall): it banks up against it
+                    mid = _rl_add(base, _rl_mul(to, max(0.0, hit[0] - lift) / dist))
+            mid, _ = self._grass_out(mid)
+            slope = hs * 1.2 * rho * q ** -0.4 / R * frac  # the dome's slope there (dh / dr)
+            nd = _rl_norm(_rl_sub(n, _rl_mul(radial, slope)), n)
+            ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
+            d = _rl_add(_rl_mul(t1, math.cos(ang)), _rl_mul(t2, math.sin(ang)))
+            d = _rl_norm(_rl_sub(d, _rl_mul(nd, _rl_dot(d, nd))), d)
+            d = _mi_rotate(d, _rl_norm(_rl_cross(nd, d), t1), (rq[1] - 0.5) * 2.0 * loose)
+            L = Lg * (0.6 + 0.8 * rr[1])
+            step = L / segs
+            curl = (rr[6] - 0.5) * 0.5 * (0.4 + self.mess)
+            half = segs // 2  # steps back to the blade's base; the rest on to its tip
+            back = self._grass_walk(mid, _rl_mul(d, -1.0), nd, half, step, sag, -curl)
+            fwd = self._grass_walk(mid, d, nd, segs - half, step, sag, curl)
+            pts = back[::-1] + [(mid, nd)] + fwd
+            if len(pts) > 1:
+                self._ribbon([p for p, _ in pts], [m for _, m in pts], width * (0.7 + 0.6 * rr[8]),
+                             (rr[9] - 0.5) * 1.4, min(self.stacks - 1, int(rr[10] * self.stacks)))
+
+    def _grass_out(self, p):
+        """p kept out of the surface ((point, the surface's normal when it
+        touches it, else None)): a point under it goes to just over it."""
+        hit = self.surf.closest(p)
+        if hit is None:
+            return p, None
+        off = _rl_dot(_rl_sub(p, hit[1]), hit[2])
+        if off < self.lift:
+            return _rl_add(hit[1], _rl_mul(hit[2], self.lift)), hit[2]
+        return p, (hit[2] if off < 2.0 * self.lift else None)
+
+    def _grass_walk(self, p, d, nd, steps, step, sag, curl):
+        """A pile blade's half from its middle p the way d goes: [(point,
+        normal)]. In the air it curls and sags; meeting a surface (a ray each
+        step) it lies along it from there, and off its edge it sags again."""
+        out = []
+        ground = None
+        for _ in range(steps):
+            if ground is None:
+                d = _mi_rotate(d, nd, curl)
+                d = _rl_norm((d[0], d[1] - sag, d[2]), d)
+            else:
+                d = _rl_norm(_rl_sub(d, _rl_mul(ground, _rl_dot(d, ground))), d)
+            hit = self.surf.ray(p, d, step + self.lift)
+            if hit is not None:
+                q = _rl_add(p, _rl_mul(d, max(0.0, hit[0] - self.lift)))
+                along = _rl_norm(_rl_sub(d, _rl_mul(hit[2], _rl_dot(d, hit[2]))), None)
+                if along is None:  # head on: it ends there
+                    if hit[0] > 0.25 * step:
+                        out.append((q, hit[2]))
+                    break
+                d = along
+                rest = max(0.0, step - hit[0])
+                more = self.surf.ray(q, d, rest + self.lift) if rest > 0.0 else None  # sliding into a corner
+                q = _rl_add(q, _rl_mul(d, rest if more is None else max(0.0, more[0] - self.lift)))
+            else:
+                q = _rl_add(p, _rl_mul(d, step))
+            q, ground = self._grass_out(q)
+            if hit is not None and ground is None:
+                ground = hit[2]
+            out.append((q, ground or nd))
+            p = q
+        return out
 
     def _blade(self, start, n, d, L, segs, c, Rb, Hb, rr, g):
         """A blade's spine: walked over the surface (lifted onto the mound,
@@ -36045,8 +36167,8 @@ SC_TYPES = collections.OrderedDict([
               "new": MOSS_NEW_LOOK}),
     ("Grass", {"parts": (("grass", "grassDry"),),
                "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
-                                           "blade_width"),
-               "over": {"slope": 40.0, "grass": 1.5}}),
+                                           "blade_width", "grass_pile"),
+               "over": {"slope": 40.0, "grass": 1.5}, "new": {"grass_pile": 0.6}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
                 "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "on_moss"),
                 "over": {"slope": 35.0, "leaves": 8.0}, "new": {"on_moss": True}}),
@@ -38308,9 +38430,11 @@ SC_PRESETS = {
     "Moss": MI_PRESETS["Moss"],
     "Ivy": MI_PRESETS["Ivy"],
     "Grass": collections.OrderedDict([
-        ("Dry grass", {}),
+        ("Dry grass", {"grass_pile": 0.6}),  # what a new Grass layer gets
+        ("Loose piles", {"grass": 1.2, "bunch_size": 0.4, "grass_length": 0.3, "fullness": 1.2, "comb": 0.15,
+                         "grass_pile": 0.9, "mess": 1.0}),
         ("Grass mat", {"coverage": 0.9, "grass": 6.0, "bunch_size": 0.5, "grass_length": 0.35, "fullness": 1.4,
-                       "comb": 0.3, "droop": 1.0, "patchiness": 0.3}),
+                       "comb": 0.3, "droop": 1.0, "patchiness": 0.3, "grass_pile": 0.0}),
         ("Sparse tufts", {"coverage": 0.6, "grass": 0.6, "bunch_size": 0.2, "fullness": 0.7})]),
     "Leaves": collections.OrderedDict([
         ("Dead leaves", {}),
@@ -38488,6 +38612,9 @@ SC_FIELDS = {
     "grass_length": ("Grass length", _scf(0.01, 2.0, 0.05, 0.6, 3, 0.01),
                      "How long the blades are, in metres (they hang over edges)."),
     "fullness": ("Fullness", _scf(0.1, 4.0, 0.2, 3.0, 2, 0.05), "How many blades a bunch has, and how high they pile."),
+    "grass_pile": ("Pile height", _scf(0.0, 1.5, 0.0, 1.2, 2, 0.05),
+                   "How high a bunch heaps up, as a share of its radius: 0 = a flat mat of blades on the surface, "
+                   "higher = a loose pile with blades all through it, ends splaying out and drooping."),
     "comb": ("Combed", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
              "How much a bunch's blades lie one way (along a crease, else downhill; 0 = a tangle)."),
     "droop": ("Droop", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "How steeply blades hang once they're over an edge."),
@@ -38592,7 +38719,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
              ("Surface", False, ["surface", "surface_detail"]),
              ("More", False, ["size_var", "strand_length", "droop", "detail", "shoots", "shoot_form"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
-    "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness"]),
+    "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness", "grass_pile"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),
               ("More", False, ["comb", "droop", "blade_width", "size_var", "detail"]),
               ("UVs", False, ["stacks", "stack_layout"])],

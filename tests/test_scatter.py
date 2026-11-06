@@ -267,7 +267,10 @@ def run():
         inside, len(with_c[::5])))
 
     # --- grass on a steep surface: none past the slope limit
-    rep, gl = tb["sc_add_layer"](root, "Grass", {"grass": 3.0, "coverage": 0.9, "slope": 30.0})
+    rep, gl = tb["sc_add_layer"](root, "Grass", {"grass": 3.0, "coverage": 0.9, "slope": 30.0,
+                                                 "grass_pile": 0.0})  # flat bunches: the left-out beam check
+    # below counts points over the beam, and a pile's blades on the floor beside it reach up there
+    # (piles: test_grass_pile.py)
     gpts = points(tb, tb["sc_parts"](root)[gl + "/grass"])
     high = sum(1 for p in gpts if -13.2 < p[2] < -12.0 and 3.0 < p[1] < 14.0)
     check("no grass up the wall", high <= 0.01 * len(gpts), "%d of %d" % (high, len(gpts)))

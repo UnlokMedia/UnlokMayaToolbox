@@ -1664,6 +1664,33 @@
       or a face turned away) it steps level past it, then droops; every
       free step casts a ray and the blade ends against what it hits (they
       cut through the wall's corner before). Ribbons narrow to the tip.
+    - **Loose piles** (`grass_pile`, Pile height; the user, 2026-11-06:
+      "trying to scatter some loose piles of dry grass but its just flat
+      clumps"; the flat mound above tops out at 0.3 x the radius):
+      `_grass_pile` when > 0. A lumpy dome (2nd / 3rd harmonics on outline
+      and height, by Messiness) Pile height x radius high; blades =
+      Detail's rate x Fullness x 1.2 over the dome's outside area; each
+      blade's middle at a random point in it (height fraction 1 - 0.85 r^2:
+      most near the top), found by a ray out from the bunch's centre (a
+      wall in the way: the heap banks up against it), heading as the flat
+      bunch's (`_grass_heading`: crease / downhill / Combed), laid along
+      the dome there and tipped by +-(0.2 + 0.3 Messiness) rad; then
+      `_grass_walk` both ways from the middle: curl and sag
+      (0.04 + 0.1 Droop rad a step) in the air, a ray per step (and per
+      slide), meeting a surface it lies along it, `_grass_out` keeps every
+      point over the surface (closest point). A spot inside a solid (a
+      ray out along the normal leaves through a back face: a box sitting
+      on the floor) grows no pile. 0 = the flat bunch exactly
+      (`DEBRIS_DEFAULTS` 0, so old groups and Moss & Ivy Debris build as
+      before); a NEW Grass layer gets 0.6 (`SC_TYPES` "new"), presets Dry
+      grass 0.6, Loose piles 0.9, Grass mat 0. Cost about 2x the flat
+      bunches (yard: 1.9 vs 0.9 s). Not fixed: the FLAT bunch still grows
+      inside a box standing on the floor (its spot is under the box's
+      bottom face; test_grass_pile's yard: ~2k points inside the step).
+      Like every debris kind, piles only see the group's surfaces: a mesh
+      left out of them (or not added) is passed through, and a tall pile
+      beside it shows that more than a flat bunch did (test_scatter's
+      left-out beam check uses Pile height 0 for that reason).
     - Leaves `_leaf`: rows x columns over a cut outline: a stalk row
       (`DEBRIS_STALK`), then an ovate blade (half width 0.19 - 0.31 x
       length; the first version, near round and cupped, read as crisps),
@@ -2727,6 +2754,10 @@ pictures read the viewport back instead of playblasting, which empties the undo 
 Dropped leaves touching what they lie on: `tests/test_leaf_contact.py` (`--measure` prints the gaps per scene
 and layer); low close-up pictures from GUI `tests/run_gui_leaf_pics.mel` (`UNLOK_TOOLBOX` an older copy for
 "before", `UNLOK_PIC_TAG` a file name prefix; `tests/_out/leaf_pics`).
+Loose grass piles: `tests/test_grass_pile.py` (`UNLOK_OLD_TOOLBOX` an older copy: Pile height 0 must build
+exactly what it built), pictures from GUI `tests/run_gui_grass_pics.mel` (flat / new layer / Loose piles,
+`tests/_out/grass_pics`). Both GUI picture scripts sometimes leave Maya open after `cmds.quit` once the
+pictures are written: check the command line before stopping it.
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
 (and `python tools/embed_reframe.py --check`). Launch time and every tool
