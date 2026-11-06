@@ -1256,13 +1256,15 @@
     `MOSS_STYLES[2]` "Mat", `_MossMat(_MossBed)` (same interface for
     `_MossDetail`). Keys `render_as` (`MOSS_RENDER_AS` GEP / GES / GED,
     default GED), `disp_height` (m, 0.01), `edge_roll` (0.5),
-    `cage_detail` (0.5); panel section "Mat" (`mat_sec`, Displacement only
-    for GED); preset "Displaced mat". Pipeline:
+    `cage_detail` (0.5), `bumps` (0.5), `growths` (0.35); panel section
+    "Mat" (`mat_sec`, Displacement only for GED); presets "Displaced mat",
+    "Simple mat" (Bumps / Growths 0), "Lumpy mat" (0.85 / 0.7). Pipeline:
     - **Grid:** `_mi_mat_base` = the surface's faces as quads (smooth
       rest: the once subdivided mesh on its limit points; faceted: the
       faces, triangles paired, else every face split), `_mi_mat_rings`
       gives every edge ring one cell count (cell = R (1 - 0.75 Cage
-      detail) x `MOSS_MAT_CELL` by Render as, x2 for a draft), so faces
+      detail) x `MOSS_MAT_CELL` by Render as x (1 - 0.25 max(Bumps,
+      Growths)), x2 for a draft), so faces
       meet point for point. Cells only in blocks the field can reach
       (`_local`, block keys carry the cell size: without it another Cage
       detail's lookups were read back), points laid on the rest surface
@@ -1281,7 +1283,29 @@
     - **Heights:** `_value` with its own lumps off, then low cushions
       (one noise octave at max(0.7 R, 2.5 cells)); at least the rim
       height (`edge_roll x (0.35 H + 0.5 D)`), the outline at the rim, 2
-      smoothing passes; lift along the kept cells' area-weighted normals.
+      smoothing passes; then the shape (`_shape`, after the smoothing so
+      it stays crisp). Both are round domes from world grids (`_dome`,
+      `_domes`, `_rand12`, one per cell at most, centre snapped onto the
+      surface and kept only if that lies in its own cell), profile
+      (1 - x^4)^2 (full top, steep flanks, soft foot), outline radius
+      x (1 + 0.25 noise). Bumps: every cell of max(0.7 R, 4 cells),
+      radius 0.62..0.92 of that, height Bumps x 1.6 H x 0.55..1, the
+      highest wins (creases where they meet: cushions). Growths: cells of
+      2.5 x their size (size = max(4.5 cells, 1.2 R), radius 1..1.5 x),
+      chance 0.9 x Growths, height H (2..4.5) x (0.6 + 0.4 Growths) but
+      <= 0.75 radius, top + 0.25 x the others. Faded in from the outline
+      by distance along the cage (Dijkstra over max(4 cells, R),
+      smoothstep). Where 0.6 x room caps it, the cap spreads one ring and
+      blends. Dead ends, each a spike or pit in the pictures: billowed
+      noise (halves the feature size below 2 cells), a 2-cell octave, 3D
+      dome centres off the surface (cut into narrow caps), fading by core
+      (B jumps 0.1-0.5 between neighbours), a rim with infinite slope
+      (sqrt / ^0.55 profiles: a one-cell cliff). The user (2026-11-06)
+      asked for "more mossy bumpy noise, some more realistic bulging
+      bits/ inflated growths", with control from "super simple like
+      this" up, "while keeping this nice new topo". Bumps 0 + Growths 0
+      is the earlier Mat (points; UVs changed, see UVs).
+      Lift along the kept cells' area-weighted normals.
     - **Rolled edge:** two quad rows per outline edge: out 0.8 w and up
       0.45 rim, then back in to 0.35 w and down 1.25 D + 3 mm under the
       surface (w = max(0.5 cell, 1.5 rim)). No underside. Its open edges
@@ -1291,7 +1315,13 @@
       points by > 0.45 of an edge, over another quad (point-in-quad), or
       past 0.9 of a tile; scraps of <= 4 quads then join a neighbour up to
       a whole tile), each chart moved into 0..1 (by whole tiles when it
-      fits). Overlapping 0..1 like the carpet's tiles.
+      fits). Overlapping 0..1 like the carpet's tiles. Each quad unfolds
+      at its hinge's true 3D length (direction from the UVs; a hinge
+      already off by > 1.5x is a seam): scaling by the UV hinge let a
+      bumpy surface's errors compound until charts shrank to nothing
+      (they always passed the size test), packing the clash grid (17 s
+      for 8k quads; now 0.4 s). Clash grid cell = the median quad's
+      longest edge, not the first quad's.
     - **Detail:** `faces_out` is the top only; its points are lifted by
       half the displacement x core, so shoots stand on the displaced moss.
     - **Scene:** `_sc_bed_render(s)` -> (suffix, Arnold steps, height):
@@ -1305,10 +1335,12 @@
       `_ml_disp_look`: world aiNoise cushions 2.5 cm + fibres 5 mm x
       aiRange of mossData B 0..0.25) when both exist; Moss Look makes it
       when a layer is _GED and MtoA is loaded.
-    - **Numbers** (rock _GES + box + floor, Normal): 5.2k quads vs the
-      carpet's 34.5k, 1.1 s vs 4.6 s (a look edit 0.2 s); ~110 UV shells
-      for ~45 tiles of area; UV scale median 1.00 (p5 0.97, p95 1.02).
-      Cage detail 1 ~6x the faces; GEP ~4x.
+    - **Numbers** (rock _GES + box + floor, Normal): simple 5.2k quads,
+      default 7.3k, lumpy 8.6k vs the carpet's 34.5k; 1.8 s / 2.4 s vs
+      4.2 s; ~140 UV shells for ~46 tiles of area; UV scale median 1.00
+      (p5 0.97, lumpy 0.90). Height spread simple 0.03 dm, default 0.16,
+      lumpy 0.24; lumpy's tallest 1.3 dm (H 0.25). Cage detail 1 ~5x the
+      faces; GEP ~4x.
     - Carpet / Clumps unchanged: equal to the previous toolbox exactly on
       faceted surfaces; on a smooth rest surface Maya's queries differ in
       the last bits by call order (~1e-7 dm), whichever toolbox runs first.

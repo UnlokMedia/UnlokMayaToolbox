@@ -125,8 +125,9 @@ def main():
                      cameras=False, wireframeOnShaded=False, twoSidedLighting=True, shadows=False)
     cmds.setAttr("persp.focalLength", 40)
     base = {"coverage": 0.6, "seed": 2, "detail": "Normal", "strands": 0.0, "capsules": 0.0}
-    looks = (("carpet", dict(base, style="Carpet")), ("mat", dict(base, style="Mat")),
-             ("mat_roll1", dict(base, style="Mat", edge_roll=1.0)))
+    looks = (("carpet", dict(base, style="Carpet")), ("mat_simple", dict(base, style="Mat", bumps=0.0, growths=0.0)),
+             ("mat", dict(base, style="Mat")),
+             ("mat_lumpy", dict(base, style="Mat", bumps=0.85, growths=0.7, lumps=0.7, thickness=0.03)))
     beds = {}
     for k, (name, s) in enumerate(looks):
         x = k * 60.0
@@ -141,7 +142,7 @@ def main():
         for key, node in ns["sc_shoots"](root).items():
             cmds.setAttr(node + ".visibility", False)
     cmds.select(clear=True)
-    for name in ("carpet", "mat", "mat_roll1"):
+    for name in [n for n, _ in looks]:
         x = [n for n, _ in looks].index(name) * 60.0
         cmds.modelEditor(persp, e=True, wireframeOnShaded=True)
         look((x + 3, 0.5, 0.0), (x + 9.0, 14.0, 16.0))
@@ -154,12 +155,14 @@ def main():
         look((x + 2.5, 0.6, 1.0), (x + 6.0, 2.0, 7.0))
         snap("%s_low.png" % name)
     cmds.modelEditor(persp, e=True, wireframeOnShaded=True)
-    cmds.displaySmoothness(beds["mat"], polygonObject=1)
-    look((2.5, 0.6, 1.0), (6.0, 2.0, 7.0))
-    snap("mat_low_wire.png")
+    for name in ("mat", "mat_lumpy"):
+        x = [n for n, _ in looks].index(name) * 60.0
+        cmds.displaySmoothness(beds[name], polygonObject=1)
+        look((x + 2.5, 0.6, 1.0), (x + 6.0, 2.0, 7.0))
+        snap("%s_low_wire.png" % name)
     cmds.modelEditor(persp, e=True, wireframeOnShaded=False)
     # displaced in place of the mat (2 cm, twice Displacement: the edge must still stay down)
-    for name in ("mat", "mat_roll1"):
+    for name in ("mat", "mat_lumpy"):
         x = [n for n, _ in looks].index(name) * 60.0
         disp = displaced(ns, beds[name], 0.02 / ns["scene_m_per_unit"]())
         shade(disp, "pic_moss", (0.30, 0.45, 0.12))

@@ -116,8 +116,11 @@ def run():
     check("Mat is a third style; old layers stay Carpet", tb["MOSS_STYLES"][2] == "Mat" and md["style"] == "Carpet")
     laid = set(k for _, _, keys in tb["SC_LAYOUT"]["Moss"] for k in keys)
     check("its settings have fields in the panel",
-          all(k in laid and k in tb["SC_FIELDS"] for k in ("render_as", "disp_height", "edge_roll", "cage_detail")))
-    check("a Displaced mat preset", tb["MI_PRESETS"]["Moss"].get("Displaced mat", {}).get("style") == "Mat")
+          all(k in laid and k in tb["SC_FIELDS"] for k in ("render_as", "disp_height", "edge_roll", "cage_detail",
+                                                            "bumps", "growths")))
+    pre = tb["MI_PRESETS"]["Moss"]
+    check("Displaced, Simple and Lumpy mat presets",
+          all(pre.get(n, {}).get("style") == "Mat" for n in ("Displaced mat", "Simple mat", "Lumpy mat")))
 
     s = dict(md, style="Mat", coverage=0.6, detail="Normal", seed=1)
     sc = dict(md, style="Carpet", coverage=0.6, detail="Normal", seed=1)
@@ -209,8 +212,8 @@ def run():
     check("Cage detail 1 makes it finer", len(fine[1]) > 2 * nf, "%d vs %d" % (len(fine[1]), nf))
     gep = tb["moss_build"](nodes, dict(s, render_as="GEP"))["moss"]
     check("as GEP (not subdivided) its cells are finer than GED's", len(gep[1]) > 2 * nf, "%d" % len(gep[1]))
-    flat = tb["moss_build"](nodes, dict(s, edge_roll=0.0))["moss"]
-    thick = tb["moss_build"](nodes, dict(s, edge_roll=1.0))["moss"]
+    flat = tb["moss_build"](nodes, dict(s, edge_roll=0.0, bumps=0.0, growths=0.0))["moss"]  # (the edge alone)
+    thick = tb["moss_build"](nodes, dict(s, edge_roll=1.0, bumps=0.0, growths=0.0))["moss"]
 
     def rim_h(m):
         c = m[0].col
@@ -226,6 +229,50 @@ def run():
     check("a draft is a coarser mat", 0 < len(dr[1]) < nf, "%d faces" % len(dr[1]))
     again = tb["moss_build"](nodes, dict(s))["moss"]
     check("the same settings grow the same mat", again[0] == mat[0] and again[2] == mat[2])
+
+    # shape: Bumps and Growths (0 and 0: the simplest mat)
+    H = float(s["thickness"]) / M
+
+    def heights(m):
+        c = m[0].col
+        top = [i for i in range(len(m[0])) if c[i][2] > 0.5][::4]
+        return sorted(own_offsets(tb, surf, nodes, m, top))
+
+    def spread(h):
+        mu = sum(h) / len(h)
+        return math.sqrt(sum((x - mu) ** 2 for x in h) / len(h))
+
+    simple = tb["moss_build"](nodes, dict(s, bumps=0.0, growths=0.0))["moss"]
+    t0 = time.time()
+    lumpy = tb["moss_build"](nodes, dict(s, bumps=0.85, growths=0.7))["moss"]
+    tl = time.time() - t0
+    hs, hd, hl = heights(simple), heights(mat), heights(lumpy)
+    check("Bumps 0, Growths 0: the simplest mat, fewest cells", len(simple[1]) < nf <= len(lumpy[1]),
+          "%d / %d / %d faces" % (len(simple[1]), nf, len(lumpy[1])))
+    check("more Bumps and Growths: more relief", spread(hs) < spread(hd) < spread(hl),
+          "height spread %.3f / %.3f / %.3f (H %.3f)" % (spread(hs), spread(hd), spread(hl), H))
+    check("growths rise well above the mat", hl[-1] > 2.0 * H and hl[-1] > hs[-1] + H,
+          "tallest %.3f vs simple %.3f (H %.3f)" % (hl[-1], hs[-1], H))
+    sl = edges(lumpy)
+    check("lumpy: still all quads, manifold, a third of the carpet's faces or less",
+          all(c == 4 for c in lumpy[1]) and not any(v > 2 for v in sl.values()) and len(lumpy[1]) * 3 <= nfc,
+          "%d faces" % len(lumpy[1]))
+    check("lumpy: still quicker than the carpet", tl < tc, "%.2f s vs %.2f s" % (tl, tc))
+    ol = own_offsets(tb, surf, nodes, lumpy, sorted(set(i for e, v in sl.items() if v == 1 for i in e)))
+    check("lumpy: the edge still tucks under deeper than Displacement", max(ol) < -D, "shallowest %.4f" % max(ol))
+    rl = []
+    for q in range(len(lumpy[1])):
+        for i in range(4):
+            a, b = q * 4 + i, q * 4 + (i + 1) % 4
+            pa, pb = lumpy[0][lumpy[2][a]], lumpy[0][lumpy[2][b]]
+            l3 = math.sqrt(sum((pa[j] - pb[j]) ** 2 for j in range(3)))
+            l2 = math.hypot(lumpy[3][lumpy[5][a]] - lumpy[3][lumpy[5][b]], lumpy[4][lumpy[5][a]] - lumpy[4][lumpy[5][b]])
+            if l3 > 1e-6:
+                rl.append(l2 * tile / l3)
+    rl.sort()
+    check("lumpy: UVs keep the world scale over the growths",
+          abs(rl[len(rl) // 2] - 1.0) < 0.03 and rl[len(rl) // 20] > 0.8 and rl[-len(rl) // 20] < 1.2,
+          "p5 %.3f med %.3f p95 %.3f" % (rl[len(rl) // 20], rl[len(rl) // 2], rl[-len(rl) // 20]))
 
     # Scatter: named by Render as, Arnold set to match
     cmds.select(clear=True)
@@ -288,6 +335,16 @@ def run():
                     same = same and (gap == 0.0 if surface == "Faceted" else gap < 1e-6)
                     check("%s %s moss (%s) is the same as before" % (style, detail, surface), same,
                           "%d / %d pts, off by %.2g" % (len(a["moss"][0]), len(b["moss"][0]), gap))
+        if "Mat" in tbo["MOSS_STYLES"]:  # Bumps 0 and Growths 0 lay the mat the earlier Mat laid (UVs aside)
+            s2 = dict(md, style="Mat", coverage=0.6, detail="Normal", seed=2, bumps=0.0, growths=0.0)
+            so = {k: v for k, v in s2.items() if k in tbo["MOSS_DEFAULTS"]}
+            a = tb["moss_build"](nodes, s2)["moss"]
+            b = tbo["moss_build"](nodes, so)["moss"]
+            gap = max([abs(p[j] - q[j]) for p, q in zip(a[0], b[0]) for j in range(3)] +
+                      [abs(p[j] - q[j]) for p, q in zip(a[0].col, b[0].col) for j in range(3)])
+            check("Mat with Bumps 0 and Growths 0 is the earlier Mat (smooth rock: closely)",
+                  len(a[0]) == len(b[0]) and a[2] == b[2] and gap < 1e-6,
+                  "%d / %d pts, off by %.2g" % (len(a[0]), len(b[0]), gap))
         del tbo
     else:
         print("SKIP  old toolbox comparison (set UNLOK_OLD_TOOLBOX)")

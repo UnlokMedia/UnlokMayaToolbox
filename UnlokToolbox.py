@@ -29271,7 +29271,8 @@ MOSS_DEFAULTS = {
     "style": "Carpet", "clump_group": 0.6, "clump_group_size": 0.3, "clump_pack": 0.6,
     "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5,
     "exposure": 0.0, "feather": 0.0, "strays": 0.0, "ragged": 0.0, "clump_merge": 0.0, "shoot_form": "Star",
-    "spill": 0.0, "render_as": "GED", "disp_height": 0.01, "edge_roll": 0.5, "cage_detail": 0.5}
+    "spill": 0.0, "render_as": "GED", "disp_height": 0.01, "edge_roll": 0.5, "cage_detail": 0.5,
+    "bumps": 0.5, "growths": 0.35}
 # the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
 # Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new")
 MOSS_NEW_LOOK = {"exposure": 0.6, "feather": 0.6, "strays": 0.5, "ragged": 0.6, "clump_merge": 0.6,
@@ -33508,6 +33509,14 @@ def _mi_mat_uvs(P, quads, tile):
     inv = 1.0 / max(1e-12, tile)
     sqrt = math.sqrt
     charts = []
+    # the clash grid's cell: a typical quad's longest edge (one quad then
+    # spans a cell or two; a small or thin first quad made it so fine that
+    # every check ran through thousands of entries)
+    lens = []
+    for vs in quads[::max(1, nq // 400)]:
+        lens.append(max(_rl_len(_rl_sub(P[vs[i]], P[vs[(i + 1) % 4]])) for i in range(4)))
+    lens.sort()
+    hq = max(1e-9, lens[len(lens) // 2] * inv) if lens else 1.0
 
     def inside(poly, c):
         for i in range(4):
@@ -33550,6 +33559,13 @@ def _mi_mat_uvs(P, quads, tile):
             le = sqrt(le2)
             ux, vx = uv[x]
             Eu, Ev = uv[y][0] - ux, uv[y][1] - vx
+            en = sqrt(Eu * Eu + Ev * Ev)
+            if en < 1e-15:
+                return False
+            k = le * inv / en  # the hinge's true length over its UV length
+            if k > 1.5 or k < 0.67:
+                return False  # already stretched here: a seam (else the error compounds and charts shrink away)
+            Eu, Ev = Eu * k, Ev * k  # unfold at true scale along the hinge's direction
             tol = 0.2025 * (Eu * Eu + Ev * Ev) + 1e-18  # (0.45 of the edge)^2: a bumpy top still unfolds
             new = {}
             for r in qv:
@@ -33574,9 +33590,13 @@ def _mi_mat_uvs(P, quads, tile):
                 return False
             cen = (sum(c[0] for c in poly) * 0.25, sum(c[1] for c in poly) * 0.25)
             i0, i1, j0, j1 = self.span(poly)
+            seen = set()
             for i in range(i0 - 1, min(i1, i0 + 7) + 2):  # over another quad (a fold laid onto the top)
                 for j in range(j0 - 1, min(j1, j0 + 7) + 2):
                     for op, oc in self.cells.get((i, j), ()):
+                        if id(op) in seen:
+                            continue
+                        seen.add(id(op))
                         if inside(op, cen) or inside(poly, oc):
                             return False
             self.place(q, poly, new)
@@ -33615,7 +33635,7 @@ def _mi_mat_uvs(P, quads, tile):
         for v in quad:
             d = _rl_sub(P[v], pa)
             poly.append((_rl_dot(d, t1) * inv, _rl_dot(d, t2) * inv))
-        c.h = max(1e-9, sqrt((poly[1][0] - poly[0][0]) ** 2 + (poly[1][1] - poly[0][1]) ** 2))
+        c.h = hq
         c.box = [poly[0][0], poly[0][0], poly[0][1], poly[0][1]]
         c.place(s0, poly, dict(zip(quad, poly)))
         dq = collections.deque()
@@ -33674,8 +33694,10 @@ class _MossMat(_MossBed):
     a cell is kept where the field says moss, notches filled and spikes
     pruned, and the outline's points slide onto where the field crosses zero
     and are relaxed along it (a smooth, organic edge, not stair steps).
-    Thickness lifts it (low cushions only: the fine detail is the
-    displacement's), at least the rim height everywhere; the edge then rolls
+    Thickness lifts it (low cushions: the fine detail is the
+    displacement's), at least the rim height everywhere, then Bumps (billowed
+    noise as fine as the cage holds) and Growths (inflated, steep-sided
+    bulges) go on top (_shape: 0 and 0 = the simplest mat); the edge then rolls
     down in two rows of quads (a skirt): out and down to the surface, then in
     under it deeper than the displacement can lift, so displaced moss always
     meets what it grows on. No underside. UVs: _mi_mat_uvs. Shading data
@@ -33694,7 +33716,10 @@ class _MossMat(_MossBed):
         self.D = max(0.0, float(s.get("disp_height", 0.01))) / m if self.render == "GED" else 0.0
         roll = clamp(float(s.get("edge_roll", 0.5)), 0.0, 1.0)
         cd = clamp(float(s.get("cage_detail", 0.5)), 0.0, 1.0)
+        self.bumps = clamp(float(s.get("bumps", 0.5)), 0.0, 1.0)
+        self.growths = clamp(float(s.get("growths", 0.35)), 0.0, 1.0)
         et = self.R * (1.0 - 0.75 * cd) * MOSS_MAT_CELL[self.render] * (2.0 if draft else 1.0)
+        et *= 1.0 - 0.25 * max(self.bumps, self.growths)  # shapes want a few more cells (none: as simple)
         area = _moss_area(surf.nodes, faces)
         if area / (et * et) > MOSS_MAX_CELLS:
             et = math.sqrt(area / MOSS_MAX_CELLS)
@@ -33707,6 +33732,12 @@ class _MossMat(_MossBed):
         self.wroll = max(0.5 * et, 1.5 * self.rim)  # how far out it rolls
         self.depth = 1.25 * self.D + 0.003 / m  # how far under the surface it tucks
         self.cs = 1.0 / max(0.7 * self.R, 2.5 * et)  # the cushions' noise scale: no finer than the cage
+        # the shape's dome grids: bumps (a dome >= 2.5 cells across its radius: finer ones are spikes
+        # on the cage) and growths (>= 4.5 cells across their radius, else a tent once subdivided;
+        # spaced by their size, so each stands on its own: finer Cage detail, smaller growths)
+        self.gmin = max(4.5 * et, 1.2 * self.R)
+        self.gs = (max(0.7 * self.R, 4.0 * et), 2.5 * self.gmin)
+        self.gcache = ({}, {})
         key = ("mat", _mi_surf_keys(surf), self.seed, round(self.R, 9), round(et, 9), len(cands),
                id(getattr(cands, "base", cands)), tuple(_mi_rest_smooth(n, s) for n in surf.nodes),
                None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
@@ -33877,6 +33908,89 @@ class _MossMat(_MossBed):
         if idx:
             room = min(room, min(map(self.ob2.__getitem__, idx)))
         return hf, c, mg + 0.03, room
+
+    def _dome(self, layer, i, j, k):
+        """The dome in grid cell (i, j, k) of a layer (0: bumps, 1: growths):
+        (centre, radius, height, outline seed) or None."""
+        cache = self.gcache[layer]
+        key = (i, j, k)
+        g = cache.get(key, 0)
+        if g != 0:
+            return g
+        r = _rand12(self.seed + 41 + 7 * layer, i, j, k)
+        g = None
+        gs = self.gs[layer]
+        if layer == 0:  # bumps: packed, every cell, run together into cushions with creases between
+            rad = gs * (0.62 + 0.3 * r[4])
+            hgt = self.bumps * 1.6 * self.H * (0.55 + 0.45 * r[5])
+        elif r[0] < 0.9 * self.growths:  # growths: here and there, puffed up well above the mat
+            rad = self.gmin * (1.0 + 0.5 * r[4] ** 1.5)
+            hgt = min(self.H * (2.0 + 2.5 * r[5] ** 1.3) * (0.6 + 0.4 * self.growths), 0.75 * rad)
+        else:
+            cache[key] = None
+            return None
+        # its centre on the surface (a centre off it would cut the surface in a narrow cap: a spike),
+        # kept only if that lies in its own cell (cells above and below would stack more)
+        c = om.MPoint((i + 0.15 + 0.7 * r[1]) * gs, (j + 0.15 + 0.7 * r[2]) * gs, (k + 0.15 + 0.7 * r[3]) * gs)
+        best, bd = None, 1e30
+        for item in self.surf.items:
+            hit = item[0].closest(c)
+            if hit is not None:
+                d = hit[1].distanceTo(c)
+                if d < bd:
+                    best, bd = hit[1], d
+        if best is None or (int(math.floor(best.x / gs)), int(math.floor(best.y / gs)),
+                            int(math.floor(best.z / gs))) != key:
+            cache[key] = None
+            return None
+        g = ((best.x, best.y, best.z), rad, hgt, int(r[6] * 1000))
+        cache[key] = g
+        return g
+
+    def _domes(self, layer, p):
+        """The domes of a layer over p: (highest, sum of the others)."""
+        gs = self.gs[layer]
+        ci, cj, ck = int(math.floor(p[0] / gs)), int(math.floor(p[1] / gs)), int(math.floor(p[2] / gs))
+        top = rest = 0.0
+        for i in (ci - 1, ci, ci + 1):
+            for j in (cj - 1, cj, cj + 1):
+                for k in (ck - 1, ck, ck + 1):
+                    g = self._dome(layer, i, j, k)
+                    if g is None:
+                        continue
+                    (gx, gy, gz), rad, hgt, rs = g
+                    dx, dy, dz = p[0] - gx, p[1] - gy, p[2] - gz
+                    d2 = dx * dx + dy * dy + dz * dz
+                    if d2 >= 1.69 * rad * rad:
+                        continue
+                    s = 1.3 / rad  # a lumpy outline, not a circle
+                    rr = rad * (1.0 + 0.25 * _moss_noise3(p[0] * s, p[1] * s, p[2] * s, self.seed + 43 + rs))
+                    x2 = d2 / (rr * rr)
+                    if x2 < 1.0:  # a full, round top, steep flanks and a soft foot (inflated, not a cone,
+                        v = 1.0 - x2 * x2  # and no cliff at the rim: one cell across, that was a spike)
+                        v = hgt * v * v
+                        if v > top:
+                            top, rest = v, rest + top
+                        else:
+                            rest += v
+        return top, rest
+
+    def _shape(self, p, f):
+        """Bumps and inflated growths over the mat at p: the extra lift (x f,
+        0 at the outline: _finish's smooth fade, not the core, which jumps
+        from point to point and made spikes). Both are round domes from a
+        world grid (one per cell at most): bumps packed into cushions (the
+        highest wins: creases where they meet), growths sparse and taller
+        (overlapping ones run together), the bumps riding on them."""
+        if f <= 0.0:
+            return 0.0
+        h = 0.0
+        if self.bumps:
+            h += self._domes(0, p)[0]
+        if self.growths:
+            top, rest = self._domes(1, p)
+            h += top + 0.25 * rest
+        return h * f
 
     def _finish(self):
         """Keep the cells inside the moss, round its outline, lift it, roll
@@ -34075,6 +34189,38 @@ class _MossMat(_MossBed):
                     continue
                 nh[v] = 0.5 * hm[v] + 0.5 * sum(hm[w] for w in ns) / len(ns)
             hm.update(nh)
+        if self.bumps or self.growths:  # shape on top (after the smoothing, so it stays crisp)
+            # faded in from the outline over a few cells, by distance along the cage (smooth)
+            dist = dict.fromkeys(bset & set(hm), 0.0)
+            heap = [(0.0, v) for v in dist]
+            heapq.heapify(heap)
+            fw = max(4.0 * self.et, self.R)
+            while heap:
+                d, v = heapq.heappop(heap)
+                if d > dist.get(v, 1e30) or d >= fw:
+                    continue
+                for w in vn.get(v, ()):
+                    nd = d + _rl_len(_rl_sub(BP[v], BP[w]))
+                    if nd < dist.get(w, 1e30):
+                        dist[w] = nd
+                        heapq.heappush(heap, (nd, w))
+            ext, keep = {}, {}
+            for v in hm:
+                if v in bset:
+                    continue
+                f = min(1.0, dist.get(v, fw) / fw)
+                e = self._shape(BP[v], f * f * (3.0 - 2.0 * f))
+                if e > 0.0:
+                    ext[v] = e
+                    room = 0.6 * RM[v] - hm[v] if RM[v] < 1e29 else e
+                    keep[v] = max(0.0, min(1.0, room / e))
+            # where the room caps it, the cap spreads a ring and blends (a cap on one point alone,
+            # under an overhang or by a wall, left a spike or a pit)
+            ero = {v: min([k] + [keep.get(w, 1.0) for w in vn.get(v, ())]) for v, k in keep.items()}
+            for v, e in ext.items():
+                ns = [ero.get(w, 1.0) for w in vn.get(v, ())]
+                k = 0.5 * ero[v] + 0.5 * sum(ns) / len(ns) if ns else ero[v]
+                hm[v] += e * min(k, keep[v])
         # the mat's points: the top, then each outline point's two skirt rows
         out, col, top_dirs, top_hf, top_core, det = [], [], [], [], [], []
         remap = {}
@@ -37013,7 +37159,11 @@ MI_PRESETS = {
                             "edges": 0.2, "capsules": 0.1}),
         ("Column base", {"coverage": 0.8, "crevices": 0.8, "patchiness": 0.45, "fade": "From base",
                          "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7}),
-        ("Displaced mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5})]),
+        ("Displaced mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5}),
+        ("Simple mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.3, "bumps": 0.0,
+                        "growths": 0.0}),
+        ("Lumpy mat", {"style": "Mat", "coverage": 0.7, "render_as": "GED", "lumps": 0.7, "bumps": 0.85,
+                       "growths": 0.7, "thickness": 0.03})]),
     "Ivy": collections.OrderedDict([
         ("Climbing ivy", {}),
         ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
@@ -39564,6 +39714,13 @@ SC_FIELDS = {
     "cage_detail": ("Cage detail", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                     "Mat: how fine its cells are (0 = coarsest, lightest; 1 = about 4x the faces). Fine detail "
                     "is the displacement's, so keep it low for GED."),
+    "bumps": ("Bumps", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+              "Mat: packed rounded bumps with creases between them, as fine as the cage holds (0 = smooth). "
+              "Bumps or Growths above 0 make the cells up to a quarter smaller."),
+    "growths": ("Growths", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "Mat: inflated, steep-sided bulges rising out of the mat, running together where they meet "
+                "(0 = none; 1 = many, taller). A finer Cage detail makes them smaller. Bumps 0 and Growths 0: "
+                "the simplest mat."),
     "clump_group": ("Grouping", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                     "Clumps: how much the cushions gather into groups, with bare gaps between the groups "
                     "(0 = evenly spaced)."),
@@ -39730,7 +39887,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                          "capsules"]),
              ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_merge", "clump_hvar",
                                "clump_mounds", "clump_ghvar"]),
-             ("Mat", True, ["render_as", "disp_height", "edge_roll", "cage_detail"]),
+             ("Mat", True, ["render_as", "disp_height", "edge_roll", "cage_detail", "bumps", "growths"]),
              ("Where it grows", True, _SC_WHERE + ["exposure", "spill"]),
              ("Edges", False, ["feather", "ragged", "strays"]),
              ("Surface", False, ["surface", "surface_detail"]),
