@@ -20186,7 +20186,7 @@ THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_FRAME_MATERIAL = "woodFrame"
 THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"),
                          ("sticks", "woodStick"))  # sticks: palm fronds' laths, rachis (and poles without a frame)
-THATCH_VERSION = 8  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
+THATCH_VERSION = 9  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
 THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it, or cut flush (against a wall)
@@ -22086,19 +22086,24 @@ def _th_fronds_mesh(F, G, s):
 
     def saddle(lo, hi):
         """The ridge's cap (the user 2026-11-09: the ridge got really ugly, a sawtooth of folded leaf
-        ends under a pole floating off them). Every leaf is draped right over the crest, its tip down one
-        side and its cut base end down the other, bent round in one smooth saddle (a Bezier between the
-        two slopes, lifted onto the leaf's height at the crest), and flat across where it bends, as a
-        leaf bent over a ridge lies (arched again down the slopes). Laid in handfuls along the ridge,
-        each leaf on the one before; at the crest they're bunched down (only a third of that lift), the
-        pole pressing them. Jittered along the ridge, turned, which side the tip goes random, both ends'
-        lengths varied (more with Messiness), so neither side's edge is a ruled line. A broken leaf is
-        short, a stray lies over the lot. Returns the crest height of each leaf [(x, height off the
-        roof)] for the pole to rest on."""
+        ends under a pole floating off them; then, poles off: too straight, a row of identical staples).
+        Every leaf is draped right over the crest, its tip down one side and its cut end (tapered, as a
+        leaf's base is) down the other, bent round in one smooth curve: a cubic between points down
+        each slope, tangent to both, its reach solved so it crosses the crest at the leaf's height.
+        Each leaf's bend is its own: tighter or looser, and further down one side than the other, so it
+        folds a little off the crest. The crest's height wanders along the ridge in clumps (Messiness;
+        the pole follows it), and each leaf rides a little higher or lower, so the ridge
+        line isn't ruled straight. Laid in handfuls along the ridge, each leaf on the one before (at
+        the crest bunched down, a third of that lift). Jittered along the ridge, turned, rolled a little
+        over the bend, which side the tip goes random, both ends' lengths varied (more with Messiness),
+        so neither side's edge is a ruled line. A broken leaf is short, a stray lies over the lot.
+        Returns the crest height of each leaf [(x, height off the roof)] for the pole to rest on."""
         top = 2.0 * rs + 1.15 * rise
         zc = G["cell"]  # just off the crest, so the walk knows which side is down
         n = max(2, int(math.ceil((hi - lo) / cap_gap)))
-        jit = 0.3 + 0.5 * min(1.0, mess)
+        jit = 0.4 + 0.6 * min(1.0, mess)
+        heave = rise * (0.15 + 0.45 * min(1.5, mess))  # clumps along the crest (the same with or without a pole)
+        lam = 0.09 * span
         rest = []
         hand, k_in = 0, 0
         for i in range(n):
@@ -22118,7 +22123,11 @@ def _th_fronds_mesh(F, G, s):
             if cell is None:
                 continue
             pos_c, n_c = _th_sample(G, *cell)[:2]
-            a = (r[1] - 0.5) * math.radians(6.0 + 10.0 * mess + (30.0 if stray else 0.0))
+            # how high this leaf rides at the crest: the clump it's in, and its own lie
+            hv = heave * max(0.0, 0.55 + 0.45 * (0.75 * _th_noise(x / lam, 7.3, seed + 8851, 0) +
+                                                 0.25 * _th_noise(3.0 * x / lam, 2.9, seed + 8852, 0)) +
+                             0.2 * (r2[3] - 0.5))
+            a = (r[1] - 0.5) * math.radians(8.0 + 12.0 * mess + (30.0 if stray else 0.0))
             side = 1.0 if r[5] < 0.5 else -1.0  # the side its tip goes down
             hd = (math.sin(a), side * math.cos(a))
             Lt = Lc * (0.85 + 0.3 * r[0] + (r[10] - 0.5) * 0.45 * mess)
@@ -22126,77 +22135,91 @@ def _th_fronds_mesh(F, G, s):
                 Lt *= 0.5 + 0.3 * r[2]
             Lb = Lc * (0.4 + 0.35 * r2[1]) * (1.0 + (r2[2] - 0.5) * 0.5 * mess)
             lift, fall = top + extra, 0.15 * rise + 0.5 * extra
-            near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, lambda d: lift - fall * d / Lt,
+
+            def layer_of(L_):  # off the roof down a side: the clump's lift fades over half the leaf
+                return lambda d: lift + hv * max(0.0, 1.0 - 2.0 * d / L_) - fall * d / L_
+            near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, layer_of(Lt),
                              droop * (0.06 + 0.08 * mess) * Lt * m_top * r[7], True, hd)
             if near is None:
                 continue
-            far = leaf_line(((xc, -side * zc), ox, 0.0), Lb, 0.0, lambda d: lift - fall * d / Lb, 0.0, True,
-                            (-hd[0], -hd[1]))
+            far = leaf_line(((xc, -side * zc), ox, 0.0), Lb, 0.0, layer_of(Lb), 0.0, True, (-hd[0], -hd[1]))
             Qn, Nn_ = near
             Qf, Nf = far if far else ([], [])
-            rf = clamp(1.6 * lift, 0.05 * Lc, 0.2 * Lc)  # how far down each side the bend starts
+            # how far down each side the bend reaches: its own, and more on one side (folded off the crest)
+            rf = clamp(1.6 * lift, 0.05 * Lc, 0.2 * Lc) * (0.75 + 0.6 * r2[4])
+            lop = (r2[5] - 0.5) * 0.7 * min(1.0, 0.3 + mess)
 
-            def cut(Q):  # the first point at least rf down from the crest
+            def cut(Q, reach):  # the first point at least reach down from the crest
                 acc = 0.0
                 for k in range(1, len(Q)):
                     acc += _rl_len(_rl_sub(Q[k], Q[k - 1]))
-                    if acc >= rf:
+                    if acc >= reach:
                         return k
                 return len(Q) - 1
-            ka = cut(Qn)
+            ka = cut(Qn, rf * (1.0 + lop))
             mid, mid_n, apex = [], [], None
+            C = (pos_c[0] + ox, pos_c[1], pos_c[2])
             if len(Qf) > 1:
-                kb = cut(Qf)
+                kb = cut(Qf, rf * (1.0 - lop))
                 A, B = Qn[ka], Qf[kb]
                 ta = _rl_norm(_rl_sub(Qn[ka - 1], A), n_c)  # up each slope, towards the crest
                 tb = _rl_norm(_rl_sub(Qf[kb - 1], B), n_c)
-                # the corner the two slopes' lines make over the crest (closest approach)
-                w0 = _rl_sub(A, B)
-                bb, dd, ee = _rl_dot(ta, tb), _rl_dot(ta, w0), _rl_dot(tb, w0)
-                den = 1.0 - bb * bb
-                if den > 1e-4:
-                    sa, sb = (bb * ee - dd) / den, (ee - bb * dd) / den
-                    if 0.0 < sa < 4.0 * rf and 0.0 < sb < 4.0 * rf:
-                        P = _rl_lerp(_rl_add(A, _rl_mul(ta, sa)), _rl_add(B, _rl_mul(tb, sb)), 0.5)
-                    else:
-                        P = _rl_lerp(A, B, 0.5)
-                else:
-                    P = _rl_lerp(A, B, 0.5)
-                C = (pos_c[0] + ox, pos_c[1], pos_c[2])
+                # a cubic from B up over the crest to A, tangent to both slopes; its reach k along them
+                # solved so its middle is at the leaf's height over the crest (bunched down: a third of
+                # its handful lift)
+                want = _rl_dot(_rl_sub(C, _rl_lerp(A, B, 0.5)), n_c) + top + 0.35 * extra + hv
+                rise_k = 0.375 * _rl_dot(_rl_add(ta, tb), n_c)
+                span_ab = _rl_len(_rl_sub(A, B))
+                k_ = clamp(want / rise_k if rise_k > 1e-6 else 0.4 * span_ab, 0.15 * span_ab, 0.9 * span_ab)
+                C1, C2 = _rl_add(B, _rl_mul(tb, k_)), _rl_add(A, _rl_mul(ta, k_))
 
                 def bez(t):
-                    return _rl_add(_rl_add(_rl_mul(B, (1.0 - t) ** 2), _rl_mul(P, 2.0 * t * (1.0 - t))),
-                                   _rl_mul(A, t * t))
-                # onto its height at the crest: bunched down there (a third of its handful lift)
-                need = _rl_dot(_rl_sub(_rl_add(C, _rl_mul(n_c, top + 0.35 * extra)), bez(0.5)), n_c)
-                m_b = 6
+                    u_ = 1.0 - t
+                    return _rl_add(_rl_add(_rl_mul(B, u_ ** 3), _rl_mul(C1, 3.0 * u_ * u_ * t)),
+                                   _rl_add(_rl_mul(C2, 3.0 * u_ * t * t), _rl_mul(A, t ** 3)))
+                # rows every ~0.6 pole radius over the bend (a smooth crest, and one right under the pole)
+                arc_l = 0.5 * (k_ + _rl_len(_rl_sub(C2, C1)) + k_ + span_ab)
+                m_b = int(clamp(math.ceil(arc_l / (0.6 * rp)), 8, 24))
                 for j in range(1, m_b):
                     t = j / float(m_b)
-                    q = _rl_add(bez(t), _rl_mul(n_c, need * math.sin(math.pi * t) ** 2))
+                    q = bez(t)
                     mid.append(_th_push(F, q, F.block_gap)[0] if F.blockers else q)
                     mid_n.append(_rl_norm(_rl_lerp(Nf[kb], Nn_[ka], t), n_c))
-                apex = _rl_dot(_rl_sub(mid[(m_b - 1) // 2], C), n_c)
+                # its height right over the crest line, where the pole lies (a lop-sided bend's top is off
+                # to one side: resting the pole on that left it bridging the leaf under it)
+                arc = [B] + mid + [A]
+                hs = [_rl_dot(_rl_sub(q, C), n_c) for q in arc]
+                apex = max(hs)
+                for j in range(1, len(arc)):
+                    z0, z1 = arc[j - 1][2] - C[2], arc[j][2] - C[2]
+                    if (z0 <= 0.0) != (z1 <= 0.0):
+                        apex = hs[j - 1] + (hs[j] - hs[j - 1]) * z0 / (z0 - z1)
+                        break
                 Q = list(reversed(Qf[kb:])) + mid + Qn[ka:]
                 Nn = list(reversed(Nf[kb:])) + mid_n + Nn_[ka:]
                 n_back = len(Qf) - kb + len(mid)  # rows before the near side's
             else:  # no far side (off the roof): it ends on the crest
                 Q, Nn, n_back = Qn, Nn_, 0
-                apex = _rl_dot(_rl_sub(Qn[0], (pos_c[0] + ox, pos_c[1], pos_c[2])), n_c)
+                apex = _rl_dot(_rl_sub(Qn[0], C), n_c)
             rest.append((xc, apex))
             cum = [0.0]
             for k in range(1, len(Q)):
                 cum.append(cum[-1] + _rl_len(_rl_sub(Q[k], Q[k - 1])))
             total = max(cum[-1], 1e-9)
             s_apex = cum[max(0, n_back - len(mid) + (len(mid) - 1) // 2)] if mid else 0.0
-            ws = 0.5 * lw * (1.0 - (0.1 + 0.08 * mess) * r[2])
+            ws = 0.5 * lw * (1.0 - (0.1 + 0.08 * mess) * r[2]) * (1.0 - 0.15 * min(1.0, mess) * r2[6])  # narrower only: the UVs fill the leaf's width
             half, twist, flat = [], [], []
             tw = (r[3] - 0.5) * (0.2 + 0.3 * mess)
+            roll = (r2[7] - 0.5) * (0.15 + 0.25 * mess)  # lies a little skew over the bend
+            base_l = 0.07 * total * (0.6 + 0.8 * r2[8])  # the cut end narrows (a leaf's base)
             for k, c_ in enumerate(cum):
                 v = c_ / total  # from the cut base end (0) to the tip (1)
-                half.append(ws * ((0.82 + 0.18 * min(1.0, v / 0.08)) if v <= 0.6 else ((1.0 - v) / 0.4) ** 1.1))
+                w = 0.3 + 0.7 * _rl_smooth01(c_ / base_l) if c_ < base_l else 1.0
+                half.append(ws * (w if v <= 0.6 else ((1.0 - v) / 0.4) ** 1.1))
                 dn = max(0.0, c_ - s_apex)  # down the tip's side
-                twist.append(tw * min(1.0, dn / Lt) ** 1.5 if k >= n_back else 0.0)
-                flat.append(0.15 + 0.85 * _rl_smooth01(abs(c_ - s_apex) / (1.5 * rf)))
+                near_bend = 1.0 - _rl_smooth01(abs(c_ - s_apex) / (2.0 * rf))
+                twist.append(roll * near_bend + (tw * min(1.0, dn / Lt) ** 1.5 if k >= n_back else 0.0))
+                flat.append(0.5 + 0.5 * (1.0 - near_bend))  # flatter across over the bend, never flat
             dc = 0.35 * _th_leaf_dry(s, r[8]) if dried else 0.0
             emit(Q, Nn, half, twist, uk_tile, min(stacks - 1, int(r[4] * stacks)), mirror and r[5] < 0.5,
                  0.25 if three else 0.0, (dc, _rand12(seed, 8803, i, 0), False) if dc else None,

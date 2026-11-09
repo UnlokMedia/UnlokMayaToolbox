@@ -409,15 +409,35 @@
       the mesher's crook took it sideways off the crest, over the lower
       slope. Now each ridge leaf is one leaf draped over: `leaf_line` down
       the tip's side (Lt) and down the far side (Lb, the cut base end,
-      shorter), joined by a quadratic Bezier between the points `rf` down
-      each slope (control: where the two slopes' tangent lines meet),
-      lifted with sin^2 onto `top + 0.35 * extra` at the crest (the
-      handful lift bunched down, the pole pressing them; ordering kept).
-      `emit(flat=)` scales each row's curl: 0.15 over the bend (a leaf
-      bent over a ridge lies flat across), back to full 1.5 `rf` away:
-      no scalloped silhouette. Which side the tip goes, x jitter, turn and
-      both lengths are random (Messiness), so neither edge is a ruled
-      line; one set of leaves, no lap or interleave, so nothing clips.
+      shorter), joined over the crest. Second round, same day (poles and
+      frame off: "along the tops of ridges ... it becomes like too
+      straight. And like, you start to see jankiness": a ruler-straight
+      crest of identical staple-shaped bends; the first join was a
+      quadratic lifted with sin^2, which kinked into a corner each side):
+      now a cubic from B (far side) to A (tip side), tangent to both
+      slopes, its reach k along them solved so its middle sits at
+      `top + 0.35 * extra + hv` over the crest (clamped 0.15..0.9 of
+      |AB|). Each leaf's bend reach `rf` varies (0.75..1.35x) and is lop-
+      sided (`lop`, up to +-0.35 with Messiness: folded off the crest).
+      The crest height wanders: `hv` = heave (rise x (0.15 + 0.45 mess))
+      x two octaves of `_th_noise` along x at 0.09 span (clumps) + 0.2
+      per leaf, faded out over half of each side (`layer_of`). More heave
+      (0.25 + 0.75) arched leaves up with holes under them. Not scaled by
+      `ridge_poles`: the leaves must be identical with poles on or off
+      (the 2026-11-02 rule, tested), so the pole follows the crest. Each
+      leaf's `rest` height is the bend's height where it crosses the
+      crest line (a lop-sided bend's top is off to one side), and the
+      bend has a row every ~0.6 rp (8..24 rows): with a fixed 8, no row
+      landed under the pole and it read as bridging up to 0.9 rp. The cut base end tapers
+      (0.3 -> 1 width over ~7% of the leaf), width down to -15% x mess
+      (never wider: `uk_tile` maps the full width to u 0..0.85, and wider
+      leaves spilled into a 4th stack tile), a small
+      roll over the bend. `emit(flat=)` scales each row's curl: 0.5 over
+      the bend (0.15, the first round, read as flat staples), back to
+      full 2 `rf` away. Which side the tip goes, x jitter, turn (8 + 12
+      mess degrees) and both lengths are random (Messiness), so neither
+      edge is a ruled line; one set of leaves, no lap or interleave, so
+      nothing clips. `THATCH_VERSION` 9 for this round.
       V by arc length (`vrow`, kept through a dried leaf's crumple:
       `_th_dry_leaf(coil=False)` used to reset it). Returns each leaf's
       crest height; `pole(path, rest)` lies on them (Gaussian mean pulled

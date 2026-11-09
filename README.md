@@ -508,10 +508,13 @@ detail (just its shell, instant), get the shape right, then raise
        over the rest and packs them closer so the cap stays covered. Each
        cap leaf is arched (edges curled down). On a ridge each leaf is
        draped right over the crest, its tip down one side and its cut end
-       down the other, in one smooth bend that lies flat across the top, so
-       the ridge is a clean, continuous line with no leaf ends sticking up;
-       which side the tip goes and how far each end reaches vary, so the
-       cap's edges are ragged. The ridge pole lies on the leaves, pressed in
+       down the other, in one smooth rounded bend, with no leaf ends
+       sticking up. Each bend is its own (tighter or looser, a little off
+       the crest), the cut ends taper, and with *Messiness* the ridge line
+       rises and dips in clumps along its length (the ridge pole follows
+       it), so it never reads as a ruled line; which
+       side the tip goes and how far each end reaches vary, so the cap's
+       edges are ragged. The ridge pole lies on the leaves, pressed in
        a little, lashed down every so often with a few tight turns of vine.
        Courses wrap continuously round hipped ends.
      - **Form:** **Cards** (one card per tile / frond for an alpha-mapped
