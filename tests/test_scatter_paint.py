@@ -187,7 +187,8 @@ def run():
     check("Clear: nothing painted", fl.dump() == {})
 
     # --- layers: baseline, then paint set straight on the layer
-    rep = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.55, "detail": "Proxy", "patchiness": 0.3},
+    rep = tb["create_scatter_group"]([grp], "Moss", {"style": "Carpet", "coverage": 0.55, "detail": "Proxy",
+                                                       "patchiness": 0.3},
                                      select=False)
     root = rep["root"]
     data = tb["sc_data"](root)

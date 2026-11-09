@@ -1557,11 +1557,14 @@ class _SurfaceQuery(object):
         self.inter = om.MMeshIntersector()
         self.inter.create(dag.node(), self.matrix)
 
-    def closest(self, point):
-        """(distance, world point, world unit normal) or None."""
+    def closest(self, point, far=None):
+        """(distance, world point, world unit normal) or None (none within
+        far, when given: a bounded search is quicker)."""
         try:
-            pom = self.inter.getClosestPoint(point)
+            pom = self.inter.getClosestPoint(point) if far is None else self.inter.getClosestPoint(point, far)
         except RuntimeError:
+            return None
+        if pom is None:  # nothing within far
             return None
         p = om.MPoint(pom.point) * self.matrix
         n = om.MVector(pom.normal) * self.normal_matrix
@@ -29450,9 +29453,11 @@ MOSS_DEFAULTS = {
     "spill": 0.0, "render_as": "GED", "disp_height": 0.01, "edge_roll": 0.5, "cage_detail": 0.5,
     "bumps": 0.5, "growths": 0.35}
 # the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
-# Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new")
+# Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new"). Since 2026-11-09 that is the Mat (the user: make the
+# "more optimized ones with better geo" the default); MOSS_DEFAULTS keeps Carpet so older layers that never
+# stored a style still grow as they did. The panel starts on sc_start_settings (defaults + this).
 MOSS_NEW_LOOK = {"exposure": 0.6, "feather": 0.6, "strays": 0.5, "ragged": 0.6, "clump_merge": 0.6,
-                 "shoot_form": "Leafy"}
+                 "shoot_form": "Leafy", "style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5}
 MOSS_SHOOT_FORMS = ("Star", "Leafy")  # High / Hero instanced shoots: a leaf star at the tip, or leaves up the stem
 IVY_VINES_BY = ("In all", "Per mesh")  # Vines: the total, or on each mesh
 IVY_MAX_AUTO_VINES = 400                # Per mesh over many meshes: fewer each past it
@@ -30565,10 +30570,12 @@ class _MiRestQuery(object):
         self.inter = om.MMeshIntersector()
         self.inter.create(data, om.MMatrix())
 
-    def closest(self, point):
+    def closest(self, point, far=None):
         try:
-            pom = self.inter.getClosestPoint(point)
+            pom = self.inter.getClosestPoint(point) if far is None else self.inter.getClosestPoint(point, far)
         except RuntimeError:
+            return None
+        if pom is None:  # nothing within far
             return None
         p = om.MPoint(pom.point)
         n = om.MVector(pom.normal)
@@ -33701,24 +33708,39 @@ def _mi_mat_uvs(P, quads, tile):
                 return False
         return True
 
+    floor = math.floor
+
+    def bounds(poly):
+        (a0, a1), (b0, b1), (c0, c1), (d0, d1) = poly
+        return min(a0, b0, c0, d0), max(a0, b0, c0, d0), min(a1, b1, c1, d1), max(a1, b1, c1, d1)
+
     class Chart(object):
         __slots__ = ("cid", "uv", "box", "h", "cells", "members")
 
-        def span(self, poly):
-            h = self.h
-            return (int(math.floor(min(c[0] for c in poly) / h)), int(math.floor(max(c[0] for c in poly) / h)),
-                    int(math.floor(min(c[1] for c in poly) / h)), int(math.floor(max(c[1] for c in poly) / h)))
-
-        def place(self, q, poly, new):
+        def place(self, q, poly, new, bb=None):
             self.uv.update(new)
+            lu, hu, lv, hv = bb or bounds(poly)
             b = self.box
-            self.box = [min(b[0], min(c[0] for c in poly)), max(b[1], max(c[0] for c in poly)),
-                        min(b[2], min(c[1] for c in poly)), max(b[3], max(c[1] for c in poly))]
-            cen = (sum(c[0] for c in poly) * 0.25, sum(c[1] for c in poly) * 0.25)
-            i0, i1, j0, j1 = self.span(poly)
+            if lu < b[0]:
+                b[0] = lu
+            if hu > b[1]:
+                b[1] = hu
+            if lv < b[2]:
+                b[2] = lv
+            if hv > b[3]:
+                b[3] = hv
+            cen = ((poly[0][0] + poly[1][0] + poly[2][0] + poly[3][0]) * 0.25,
+                   (poly[0][1] + poly[1][1] + poly[2][1] + poly[3][1]) * 0.25)
+            h = self.h
+            i0, i1, j0, j1 = int(floor(lu / h)), int(floor(hu / h)), int(floor(lv / h)), int(floor(hv / h))
+            cells, it = self.cells, (poly, cen)
             for i in range(i0, min(i1, i0 + 7) + 1):
                 for j in range(j0, min(j1, j0 + 7) + 1):
-                    self.cells.setdefault((i, j), []).append((poly, cen))
+                    got = cells.get((i, j))
+                    if got is None:
+                        cells[(i, j)] = [it]
+                    else:
+                        got.append(it)
             chart[q] = self.cid
             self.members.append(q)
 
@@ -33760,22 +33782,27 @@ def _mi_mat_uvs(P, quads, tile):
                 else:
                     new[r] = (pu, pv)
             poly = [new.get(v) or uv[v] for v in qv]
+            bb = lu, hu, lv, hv = bounds(poly)
             b = self.box
-            if max(b[1], max(c[0] for c in poly)) - min(b[0], min(c[0] for c in poly)) > lim or \
-                    max(b[3], max(c[1] for c in poly)) - min(b[2], min(c[1] for c in poly)) > lim:
+            if (hu if hu > b[1] else b[1]) - (lu if lu < b[0] else b[0]) > lim or \
+                    (hv if hv > b[3] else b[3]) - (lv if lv < b[2] else b[2]) > lim:
                 return False
-            cen = (sum(c[0] for c in poly) * 0.25, sum(c[1] for c in poly) * 0.25)
-            i0, i1, j0, j1 = self.span(poly)
+            cen = ((poly[0][0] + poly[1][0] + poly[2][0] + poly[3][0]) * 0.25,
+                   (poly[0][1] + poly[1][1] + poly[2][1] + poly[3][1]) * 0.25)
+            h = self.h
+            i0, i1, j0, j1 = int(floor(lu / h)), int(floor(hu / h)), int(floor(lv / h)), int(floor(hv / h))
             seen = set()
-            for i in range(i0 - 1, min(i1, i0 + 7) + 2):  # over another quad (a fold laid onto the top)
-                for j in range(j0 - 1, min(j1, j0 + 7) + 2):
+            # over another quad (a fold laid onto the top): a quad holding this one's centre, or one whose
+            # centre is in this one, is filed in a cell this one spans (a ring of cells round it doubled the work)
+            for i in range(i0, min(i1, i0 + 7) + 1):
+                for j in range(j0, min(j1, j0 + 7) + 1):
                     for op, oc in self.cells.get((i, j), ()):
                         if id(op) in seen:
                             continue
                         seen.add(id(op))
                         if inside(op, cen) or inside(poly, oc):
                             return False
-            self.place(q, poly, new)
+            self.place(q, poly, new, bb)
             return True
 
     def grow(c, dq, lim):
@@ -33895,7 +33922,10 @@ class _MossMat(_MossBed):
         self.bumps = clamp(float(s.get("bumps", 0.5)), 0.0, 1.0)
         self.growths = clamp(float(s.get("growths", 0.35)), 0.0, 1.0)
         et = self.R * (1.0 - 0.75 * cd) * MOSS_MAT_CELL[self.render] * (2.0 if draft else 1.0)
-        et *= 1.0 - 0.25 * max(self.bumps, self.growths)  # shapes want a few more cells (none: as simple)
+        # shapes want a few more cells (none: as simple); in steps, so a Bumps / Growths edit keeps the cached
+        # layout (a factor that followed the sliders laid the whole cage out again on every change)
+        sm = max(self.bumps, self.growths)
+        et *= 1.0 if sm <= 0.0 else (0.875 if sm <= 0.5 else 0.75)
         area = _moss_area(surf.nodes, faces)
         if area / (et * et) > MOSS_MAX_CELLS:
             et = math.sqrt(area / MOSS_MAX_CELLS)
@@ -33914,6 +33944,7 @@ class _MossMat(_MossBed):
         self.gmin = max(4.5 * et, 1.2 * self.R)
         self.gs = (max(0.7 * self.R, 4.0 * et), 2.5 * self.gmin)
         self.gcache = ({}, {})
+        self.gnear = ({}, {})  # per grid cell: the domes of it and its 26 neighbours (_near_domes)
         key = ("mat", _mi_surf_keys(surf), self.seed, round(self.R, 9), round(et, 9), len(cands),
                id(getattr(cands, "base", cands)), tuple(_mi_rest_smooth(n, s) for n in surf.nodes),
                None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
@@ -33927,6 +33958,7 @@ class _MossMat(_MossBed):
         self.grids = cache[0]
         self.active = []  # (grid, cells) the field can show moss in this time
         self.out_pts, self.out_quads, self.out_col = [], [], []
+        self.out_us, self.out_vs, self.out_uvi = [], [], []  # no moss at all: an empty mat, not a crash
 
     # ----------------------------------------------------------------- grid
     def build(self):
@@ -34109,8 +34141,9 @@ class _MossMat(_MossBed):
         # kept only if that lies in its own cell (cells above and below would stack more)
         c = om.MPoint((i + 0.15 + 0.7 * r[1]) * gs, (j + 0.15 + 0.7 * r[2]) * gs, (k + 0.15 + 0.7 * r[3]) * gs)
         best, bd = None, 1e30
+        far = 1.75 * gs  # a hit further off can't be in this cell (searches far from a mesh were slow)
         for item in self.surf.items:
-            hit = item[0].closest(c)
+            hit = item[0].closest(c, far)
             if hit is not None:
                 d = hit[1].distanceTo(c)
                 if d < bd:
@@ -34123,32 +34156,45 @@ class _MossMat(_MossBed):
         cache[key] = g
         return g
 
+    def _near_domes(self, layer, ci, cj, ck):
+        """The domes in grid cell (ci, cj, ck) and its 26 neighbours, each
+        (x, y, z, cut^2, noise scale, radius, height, noise seed), cached:
+        a cell's points all read the same list."""
+        key = (ci, cj, ck)
+        got = self.gnear[layer].get(key)
+        if got is None:
+            got = []
+            sd = self.seed + 43
+            for i in (ci - 1, ci, ci + 1):
+                for j in (cj - 1, cj, cj + 1):
+                    for k in (ck - 1, ck, ck + 1):
+                        g = self._dome(layer, i, j, k)
+                        if g is not None:
+                            (gx, gy, gz), rad, hgt, rs = g
+                            got.append((gx, gy, gz, 1.69 * rad * rad, 1.3 / rad, rad, hgt, sd + rs))
+            got = self.gnear[layer][key] = tuple(got)
+        return got
+
     def _domes(self, layer, p):
         """The domes of a layer over p: (highest, sum of the others)."""
         gs = self.gs[layer]
-        ci, cj, ck = int(math.floor(p[0] / gs)), int(math.floor(p[1] / gs)), int(math.floor(p[2] / gs))
+        px, py, pz = p
         top = rest = 0.0
-        for i in (ci - 1, ci, ci + 1):
-            for j in (cj - 1, cj, cj + 1):
-                for k in (ck - 1, ck, ck + 1):
-                    g = self._dome(layer, i, j, k)
-                    if g is None:
-                        continue
-                    (gx, gy, gz), rad, hgt, rs = g
-                    dx, dy, dz = p[0] - gx, p[1] - gy, p[2] - gz
-                    d2 = dx * dx + dy * dy + dz * dz
-                    if d2 >= 1.69 * rad * rad:
-                        continue
-                    s = 1.3 / rad  # a lumpy outline, not a circle
-                    rr = rad * (1.0 + 0.25 * _moss_noise3(p[0] * s, p[1] * s, p[2] * s, self.seed + 43 + rs))
-                    x2 = d2 / (rr * rr)
-                    if x2 < 1.0:  # a full, round top, steep flanks and a soft foot (inflated, not a cone,
-                        v = 1.0 - x2 * x2  # and no cliff at the rim: one cell across, that was a spike)
-                        v = hgt * v * v
-                        if v > top:
-                            top, rest = v, rest + top
-                        else:
-                            rest += v
+        for gx, gy, gz, cut2, s, rad, hgt, sd in self._near_domes(
+                layer, int(math.floor(px / gs)), int(math.floor(py / gs)), int(math.floor(pz / gs))):
+            dx, dy, dz = px - gx, py - gy, pz - gz
+            d2 = dx * dx + dy * dy + dz * dz
+            if d2 >= cut2:
+                continue
+            rr = rad * (1.0 + 0.25 * _moss_noise3(px * s, py * s, pz * s, sd))  # a lumpy outline, not a circle
+            x2 = d2 / (rr * rr)
+            if x2 < 1.0:  # a full, round top, steep flanks and a soft foot (inflated, not a cone,
+                v = 1.0 - x2 * x2  # and no cliff at the rim: one cell across, that was a spike)
+                v = hgt * v * v
+                if v > top:
+                    top, rest = v, rest + top
+                else:
+                    rest += v
         return top, rest
 
     def _shape(self, p, f):
@@ -37324,6 +37370,11 @@ def mi_delete_preset(kind, name):
 
 MI_PRESETS = {
     "Moss": collections.OrderedDict([
+        ("Moss mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5}),  # = a new layer
+        ("Simple mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.3, "bumps": 0.0,
+                        "growths": 0.0}),
+        ("Lumpy mat", {"style": "Mat", "coverage": 0.7, "render_as": "GED", "lumps": 0.7, "bumps": 0.85,
+                       "growths": 0.7, "thickness": 0.03}),
         ("Jungle roof", {}),
         ("Crevices only", {"coverage": 0.35, "crevices": 1.0, "patchiness": 0.3, "clump_size": 0.035,
                            "thickness": 0.015, "edges": 0.8, "lumps": 0.5}),
@@ -37334,12 +37385,7 @@ MI_PRESETS = {
         ("Shaggy hanging", {"coverage": 0.6, "mess": 1.2, "strands": 1.3, "strand_length": 0.02, "droop": 1.4,
                             "edges": 0.2, "capsules": 0.1}),
         ("Column base", {"coverage": 0.8, "crevices": 0.8, "patchiness": 0.45, "fade": "From base",
-                         "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7}),
-        ("Displaced mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5}),
-        ("Simple mat", {"style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.3, "bumps": 0.0,
-                        "growths": 0.0}),
-        ("Lumpy mat", {"style": "Mat", "coverage": 0.7, "render_as": "GED", "lumps": 0.7, "bumps": 0.85,
-                       "growths": 0.7, "thickness": 0.03})]),
+                         "fade_by": "Object height", "fade_part": 0.4, "fade_soft": 0.7})]),
     "Ivy": collections.OrderedDict([
         ("Climbing ivy", {}),
         ("Young shoots", {"vines": 3, "length": 1.2, "branching": 0.2, "leaf_size": 0.05, "leaf_density": 0.5,
@@ -37479,6 +37525,13 @@ def sc_defaults(typ):
     return out
 
 
+def sc_start_settings(typ):
+    """What a new layer of a type starts with: its defaults and its new look."""
+    s = sc_defaults(typ)
+    s.update(SC_TYPES[sc_type(typ)].get("new", {}))
+    return s
+
+
 def sc_settings(layer):
     """A layer's settings: its type's defaults under what it stores."""
     s = sc_defaults(layer.get("type"))
@@ -37498,8 +37551,7 @@ def _sc_new_layer(data, typ, settings=None, name=None):
     while tag in used:
         k += 1
         tag = str(k)
-    s = sc_defaults(typ)
-    s.update(SC_TYPES[typ].get("new", {}))  # a new layer's look (older layers lack these keys: they keep theirs)
+    s = sc_start_settings(typ)  # a new layer's look (older layers lack these keys: they keep theirs)
     s.update({k2: v for k2, v in (settings or {}).items() if k2 in s})
     return {"id": "L%d" % n, "type": typ, "tag": tag, "on": True, "s": s,
             "name": name or (typ + (" " + tag if tag else "")), "seeds": [], "faces": {}, "draw": {}}
@@ -40997,7 +41049,7 @@ class ScatterPanel(QtWidgets.QWidget):
             self.box[typ] = self._type_box(typ)
             card.add(self.box[typ])
             for key, widget in self.f[typ].items():
-                widget.setValue(sc_defaults(typ)[key])
+                widget.setValue(sc_start_settings(typ)[key])
                 widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
             for key in ("style", "render_as", "fade", "fade_by"):
                 if key in self.f[typ]:

@@ -1301,14 +1301,24 @@
     `_MossDetail`). Keys `render_as` (`MOSS_RENDER_AS` GEP / GES / GED,
     default GED), `disp_height` (m, 0.01), `edge_roll` (0.5),
     `cage_detail` (0.5), `bumps` (0.5), `growths` (0.35); panel section
-    "Mat" (`mat_sec`, Displacement only for GED); presets "Displaced mat",
-    "Simple mat" (Bumps / Growths 0), "Lumpy mat" (0.85 / 0.7). Pipeline:
+    "Mat" (`mat_sec`, Displacement only for GED); presets "Moss mat",
+    "Simple mat" (Bumps / Growths 0), "Lumpy mat" (0.85 / 0.7), first in
+    the list. **The default since 2026-11-09** (the user: make "the more
+    optimized ones with better geo" the default preset): `MOSS_NEW_LOOK`
+    adds style Mat, coverage 0.65, render_as GED, lumps 0.5 (= "Moss
+    mat"), so a new layer and the panel's starting values
+    (`sc_start_settings` = `sc_defaults` + the type's "new"; the panel used
+    to start on `sc_defaults`, so its first layer missed the new look) are
+    the Mat. `MOSS_DEFAULTS` stays Carpet: an old layer that never stored
+    a style grows as before. Pipeline:
     - **Grid:** `_mi_mat_base` = the surface's faces as quads (smooth
       rest: the once subdivided mesh on its limit points; faceted: the
       faces, triangles paired, else every face split), `_mi_mat_rings`
       gives every edge ring one cell count (cell = R (1 - 0.75 Cage
-      detail) x `MOSS_MAT_CELL` by Render as x (1 - 0.25 max(Bumps,
-      Growths)), x2 for a draft), so faces
+      detail) x `MOSS_MAT_CELL` by Render as x 1 / 0.875 / 0.75 for
+      max(Bumps, Growths) 0 / <= 0.5 / more (steps: a factor following
+      the sliders changed the layout key, so every Bumps / Growths edit
+      laid the cage out again), x2 for a draft), so faces
       meet point for point. Cells only in blocks the field can reach
       (`_local`, block keys carry the cell size: without it another Cage
       detail's lookups were read back), points laid on the rest surface
@@ -1385,6 +1395,19 @@
       (p5 0.97, lumpy 0.90). Height spread simple 0.03 dm, default 0.16,
       lumpy 0.24; lumpy's tallest 1.3 dm (H 0.25). Cage detail 1 ~5x the
       faces; GEP ~4x.
+    - **Speed pass (2026-11-09, "faster, snappier"):** a live edit
+      (Coverage, Thickness, Lumps, Edge roll, Growths) ~0.85-1 s, was
+      ~1.4-1.8 s (Bumps / Growths a full relayout, see Grid). `_domes`
+      reads `_near_domes` (per grid cell, the domes of it and its 26
+      neighbours, cached: 27 lookups a point before); `_dome` snaps with
+      `closest(c, far)` (1.75 cells: `_SurfaceQuery` / `_MiRestQuery`
+      take a reach, a far-off search was ~0.2 ms); `_mi_mat_uvs` checks
+      clashes only in the cells the new quad spans (exact: a quad holding
+      its centre, or a centre inside it, is filed there) with the bounds
+      worked out once (0.9 -> 0.5 s on 12k quads). Same mesh, points and
+      UVs as before, bit for bit. Left: the cold first build (~4 s, the
+      field and rest surface shared with the carpet), Seed and Cage
+      detail edits (a new layout, ~1.7-2.2 s).
     - Carpet / Clumps unchanged: equal to the previous toolbox exactly on
       faceted surfaces; on a smooth rest surface Maya's queries differ in
       the last bits by call order (~1e-7 dm), whichever toolbox runs first.
@@ -1676,7 +1699,7 @@
     regrow exactly as before (`test_moss_realism` compares against an
     older toolbox with `UNLOK_OLD_TOOLBOX`). A NEW Scatter Moss layer gets
     `MOSS_NEW_LOOK` through `SC_TYPES[...]["new"]` (applied by
-    `_sc_new_layer` only); Leaves / Leaf piles / Jungle leaves get
+    `sc_start_settings`: new layers and the panel's start values); Leaves / Leaf piles / Jungle leaves get
     `on_moss` True the same way (`DEBRIS_DEFAULTS` False). Panel: Bare
     ridges + Floor spill in "Where it grows", an "Edges" section (Soft
     edges, Ragged outline, Stray tufts), Merge in Clumps, Shoot shape in

@@ -119,8 +119,21 @@ def run():
           all(k in laid and k in tb["SC_FIELDS"] for k in ("render_as", "disp_height", "edge_roll", "cage_detail",
                                                             "bumps", "growths")))
     pre = tb["MI_PRESETS"]["Moss"]
-    check("Displaced, Simple and Lumpy mat presets",
-          all(pre.get(n, {}).get("style") == "Mat" for n in ("Displaced mat", "Simple mat", "Lumpy mat")))
+    check("Moss, Simple and Lumpy mat presets, first in the list",
+          list(pre)[:3] == ["Moss mat", "Simple mat", "Lumpy mat"] and
+          all(pre[n].get("style") == "Mat" for n in list(pre)[:3]), str(list(pre)[:4]))
+    start = tb["sc_start_settings"]("Moss")
+    lay = tb["_sc_new_layer"]({"layers": []}, "Moss")
+    check("a new moss layer (and the panel) starts as the Moss mat preset",
+          start["style"] == "Mat" and lay["s"]["style"] == "Mat" and
+          all(start[k] == v for k, v in pre["Moss mat"].items()))
+    check("... while a layer that never stored a style stays Carpet",
+          tb["sc_settings"]({"type": "Moss", "s": {"coverage": 0.5}})["style"] == "Carpet")
+    try:  # no moss anywhere (Coverage 0): an empty mat, not a crash (mesh() read UVs _finish never made)
+        empty = tb["moss_build"](nodes, dict(md, style="Mat", coverage=0.0, detail="Normal", seed=1))["moss"]
+        check("Coverage 0: an empty mat, no crash", len(empty[1]) == 0, "%d faces" % len(empty[1]))
+    except Exception as exc:
+        check("Coverage 0: an empty mat, no crash", False, repr(exc))
 
     s = dict(md, style="Mat", coverage=0.6, detail="Normal", seed=1)
     sc = dict(md, style="Carpet", coverage=0.6, detail="Normal", seed=1)

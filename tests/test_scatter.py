@@ -160,11 +160,12 @@ def run():
 
     # --- moss layer: only parts with something in them
     before = cmds.undoInfo(q=True, undoName=True)
-    rep, moss = tb["sc_add_layer"](root, "Moss", {"strands": 0.0, "capsules": 0.0, "coverage": 0.6})
+    rep, moss = tb["sc_add_layer"](root, "Moss", {"style": "Carpet", "strands": 0.0, "capsules": 0.0, "coverage": 0.6})
     names = sorted(sn(n) for k, n in tb["sc_parts"](root).items() if k.startswith(moss + "/"))
     check("a moss layer makes only parts that hold something", names == ["mossGreen_C_scatteredObjects0001_GES"],
           str(names))
-    rep, moss2 = tb["sc_add_layer"](root, "Moss", {"strands": 1.0, "capsules": 0.5, "coverage": 0.3, "slope": 20.0})
+    rep, moss2 = tb["sc_add_layer"](root, "Moss", {"style": "Carpet", "strands": 1.0, "capsules": 0.5, "coverage": 0.3,
+                                                  "slope": 20.0})
     names2 = sorted(sn(n) for k, n in tb["sc_parts"](root).items() if k.startswith(moss2 + "/"))
     check("a second moss layer gets its own parts", names2 and all("2_C_scatteredObjects0001_GE" in n
                                                                    for n in names2), str(names2))
@@ -473,7 +474,7 @@ def drawing():
           sorted(sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))) == ["bigWall", "ground"])
     high = [p for p in leaf_points(root, wl) if p[1] > 2.0]
     check("leaves don't climb a wall drawn on (Slope limit)", not high, "%d up the wall" % len(high))
-    rep, ml = tb["sc_add_layer"](root, "Moss", {"coverage": 0.8, "draw_follow": 0.0, "strands": 0.0,
+    rep, ml = tb["sc_add_layer"](root, "Moss", {"style": "Carpet", "coverage": 0.8, "draw_follow": 0.0, "strands": 0.0,
                                                 "capsules": 0.0}, drawing=[up])
     mpts = leaf_points(root, ml, "moss")
     check("moss grows up the wall along the stroke", mpts and max(p[1] for p in mpts) > 9.0 and
@@ -711,7 +712,7 @@ def moss_and_specks():
     cmds.file(new=True, force=True)
     grp, nodes = yard()
     R = 0.6  # Clump size 0.06 m in decimetres
-    base = {"coverage": 0.6, "slope": 35.0, "detail": "Normal"}
+    base = {"style": "Carpet", "coverage": 0.6, "slope": 35.0, "detail": "Normal"}
     rep = tb["create_scatter_group"]([grp], "Moss", dict(base))
     root = rep["root"]
     carpet_lid = tb["sc_data"](root)["layers"][0]["id"]
@@ -878,7 +879,7 @@ def pause():
     rep = tb["create_scatter_group"]([grp], "Leaves", {"leaves": 12.0, "coverage": 0.7})
     root = rep["root"]
     leaves = tb["sc_data"](root)["layers"][0]["id"]
-    _, moss = tb["sc_add_layer"](root, "Moss", {"coverage": 0.4, "strands": 0.0, "capsules": 0.0})
+    _, moss = tb["sc_add_layer"](root, "Moss", {"style": "Carpet", "coverage": 0.4, "strands": 0.0, "capsules": 0.0})
     _, grass = tb["sc_add_layer"](root, "Grass", {"grass": 0.6, "coverage": 0.4})
     built = []
     real = tb["_sc_build_layer"]
@@ -973,7 +974,7 @@ def old_scatter():
     cmds.undoInfo(state=True, infinity=True)
     cmds.file(new=True, force=True)
     grp, nodes = yard()
-    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.5})["root"]
+    root = tb["create_scatter_group"]([grp], "Moss", {"style": "Carpet", "coverage": 0.5})["root"]
     moss = tb["sc_data"](root)["layers"][0]["id"]
     _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0})
     _, grass = tb["sc_add_layer"](root, "Grass", {"grass": 0.6})
@@ -1068,7 +1069,7 @@ def draft():
     cmds.undoInfo(state=True, infinity=True)
     cmds.file(new=True, force=True)
     grp, nodes = yard()
-    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.5})["root"]
+    root = tb["create_scatter_group"]([grp], "Moss", {"style": "Carpet", "coverage": 0.5})["root"]
     moss = tb["sc_data"](root)["layers"][0]["id"]
     _, leaves = tb["sc_add_layer"](root, "Leaves", {"leaves": 12.0, "on_moss": False})  # (not resting on it)
     keys = [moss + "/moss", moss + "/strands", leaves + "/litter"]
@@ -1198,7 +1199,7 @@ def height_fade():
     tb = load_toolbox()
     cmds.file(new=True, force=True)
     grp, nodes = colonnade()
-    root = tb["create_scatter_group"]([grp], "Moss", {"coverage": 0.6})["root"]
+    root = tb["create_scatter_group"]([grp], "Moss", {"style": "Carpet", "coverage": 0.6})["root"]
     moss = tb["sc_data"](root)["layers"][0]["id"]
 
     def spread(part):
