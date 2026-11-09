@@ -421,6 +421,19 @@ detail (just its shell, instant), get the shape right, then raise
      top if you want it.
    - **Thickness, Softness** (how round the ridge and hips are),
      **Sag** (old thatch dips; below 0 it bellies out) and **Lumps**.
+   - **Volume** (0.25-4, 1 as before): how much thatch is piled on, to puff
+     a flimsy roof out or thin it down. The thickness, how far each course
+     or palm layer stands off the one under it, and the butts' lift all
+     scale with it; the density (more layers through the thickness) and
+     the wood (rafters, battens, sticks, rachis, ridge poles) by its square
+     root, so a heavier roof sits on heavier timber. The frame is pushed
+     down under the thicker thatch.
+   - **Wood and thatch** sit together without clipping: top fronds lie on
+     the rachis laid under them and their rachis on the leaves under that,
+     leaves flatten where they cross a stick, sticks don't run on into the
+     next tile, and the frame stays under the underlay (no battens over the
+     rounded crest, the ridge beam under the rafters' tops, crooked rafters
+     sag down rather than bowing up into the thatch).
    - **Makeshift** (for shacks rather than clean cottages): **Warp**
      (crooked rafters, a wavy eave line), **Ridge sag** (the ridge pole dips
      in the middle and drags the slopes down), **Ragged eaves** (an uneven,

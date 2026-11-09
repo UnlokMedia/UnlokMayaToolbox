@@ -581,6 +581,65 @@ def run():
     check("the top layer sticks out further at the eaves than the hanging under layer",
           max(abs(p[2]) for p in tips["straw"][0]) > max(abs(p[2]) for p in limp["straw"][0]) + 0.05)
 
+    # wood in the thatch (the user, 2026-11-09: "more accurate interaction with ... all the wood poles and
+    # things ... Less clipping, more logic to it"): each top frond lies on the rachis laid under it and its
+    # rachis on the leaflets under that; the frame stays under an underlay (none over the crest). Measured as
+    # the share of the wood's mesh edges that pass through the leaves / underlay.
+    def through(leaves, wood):
+        data = om.MFnMeshData().create()
+        fn = om.MFnMesh()
+        fn.create([om.MPoint(*p) for p in leaves[0]], list(leaves[1]), list(leaves[2]), parent=data)
+        acc = fn.autoUniformGridParams()
+        edges, i = set(), 0
+        for c in wood[1]:
+            f = wood[2][i:i + c]
+            i += c
+            for k in range(c):
+                a, b_ = f[k], f[(k + 1) % c]
+                edges.add((a, b_) if a < b_ else (b_, a))
+        hits = 0
+        for a, b_ in edges:
+            A, B = wood[0][a], wood[0][b_]
+            d = [B[j] - A[j] for j in range(3)]
+            ln = math.sqrt(sum(c * c for c in d))
+            if ln < 1e-9:
+                continue
+            r = fn.anyIntersection(om.MFloatPoint(*A), om.MFloatVector(*[c / ln for c in d]), om.MSpace.kObject,
+                                   ln, False, accelParams=acc)
+            hits += bool(r and r[0] is not None and 1e-6 < r[1] < ln - 1e-6)
+        return hits / float(max(1, len(edges)))
+    pal = build(**dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), frame=True, detail="Medium"))
+    sticks_in = through(pal["straw"], pal["sticks"])
+    check("beach shack: fewer stick / rachis edges pass through the leaves (18% before 2026-11-09)",
+          sticks_in < 0.14, "%.1f%%" % (sticks_in * 100))
+    straw_kw = dict(tb["thatch_preset"]("Cambodian shack (straw)"), frame=True, detail="Medium", resolution=80)
+    v1, v2 = build(**straw_kw), build(**dict(straw_kw, volume=2.0))
+    in1, in2 = through(v1["underlay"], v1["frame"]), through(v2["underlay"], v2["frame"])
+    check("straw over an underlay: the frame stays under it, at Volume 1 and 2 (1.4% before 2026-11-09)",
+          in1 < 0.01 and in2 < 0.01, "%.2f%% / %.2f%%" % (in1 * 100, in2 * 100))
+
+    # Volume (the user, 2026-11-09: "puff them out a little bit and have it still look realistic with an
+    # accurate layering"): thicker thatch, more layers, heavier wood, the frame pushed down under it
+    s1 = dict(tb["THATCH_DEFAULTS"], style="Planes")
+    s2 = tb["_th_volume"](dict(s1, volume=2.0))
+    check("Volume 2: twice the thickness and lift, sqrt(2) the density and timber; 1 changes nothing",
+          tb["_th_volume"](dict(s1)) == s1 and abs(s2["thickness"] - 2.0 * s1["thickness"]) < 1e-9 and
+          abs(s2["lift"] - 2.0 * s1["lift"]) < 1e-9 and abs(s2["density"] - math.sqrt(2.0) * s1["density"]) < 1e-9
+          and abs(s2["rafter_size"] - math.sqrt(2.0) * s1["rafter_size"]) < 1e-9 and "volume" in
+          tb["THATCH_LOOK_KEYS"])
+    top = lambda o, part: max(p[1] for p in o[part][0])  # noqa: E731
+    low = lambda o, part: min(p[1] for p in o[part][0] if abs(p[0]) < 1.0 and abs(p[2]) < 0.6)  # noqa: E731
+    check("Volume 2 (straw): the thatch stands higher, the frame sits lower under the thicker underlay",
+          top(v2, "straw") > top(v1, "straw") + 0.05 and low(v2, "frame") < low(v1, "frame") - 0.05,
+          "thatch top %.2f -> %.2f, frame %.2f -> %.2f" % (top(v1, "straw"), top(v2, "straw"), low(v1, "frame"),
+                                                            low(v2, "frame")))
+    p1, p2 = build(volume=1.0), build(volume=2.0)
+    r1 = max(m["r0"] for m in p1["field"].stick_members)
+    r2 = max(m["r0"] for m in p2["field"].stick_members)
+    check("Volume 2 (palm): the fronds stand off further, the sticks are thicker",
+          top(p2, "straw") > top(p1, "straw") + 0.03 and 1.3 < r2 / r1 < 1.5,
+          "top %.2f -> %.2f, stick radius x%.2f" % (top(p1, "straw"), top(p2, "straw"), r2 / r1))
+
     # detail levels: Proxy is the shell only and quick; the rest keep the layout and add detail
     t0 = time.time()
     px = build(detail="Proxy")

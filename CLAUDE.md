@@ -449,6 +449,48 @@
       frame's mesh, else sticks), so Ridge and hip poles off still leaves
       the sticks mesh exactly as it was. Members of kind "tie" get a ring
       at every path point and no run-on ends. `THATCH_VERSION` 8.
+    - **Volume** (`_th_volume(s)`, after `_th_detail` in `thatch_build`;
+      the user 2026-11-09: roofs look flimsy, "puff them out ... with an
+      accurate layering", the wood too). `volume` 0.25..4 (a look key):
+      thickness x v, `lift` x v (not palm: `_th_frond_rise` follows the
+      thickness already), density, `rafter_size`, `batten_size` x sqrt(v),
+      and `s["_wood"]` = sqrt(v) scales the fronds' stick radius `rs` and
+      pole radius `rp`. The frame hangs at `1.02 F.T` under a shell, so
+      it moves down with the thickness. `THATCH_VERSION` 10.
+    - **Wood vs thatch** (same day: "Less clipping, more logic to it";
+      `probe_wood`-style metric: share of wood mesh edges crossing the
+      leaves, beach shack 18% -> ~12.7%, straw underlay 1.4% -> 0.5%):
+      the top layer is laid eaves up, so `rach_lay` notes each rachis on a
+      plan grid (written into the 3x3 neighbours, read as one cell) and
+      later leaflets get `leaf_line(floor=rach_floor)`; `leaf_lay` notes
+      each frond's leaflets (after its own rachis) and the next rachis
+      lies on them (`along(extra=bed)`, bed capped at 2 rr0 and smoothed:
+      uncapped it climbed frond on frond and kinked), its leaflets lifted
+      with it near their roots. Leaflets over sticks: `emit(flat=)` takes
+      `over_wood` (less curl near the root). Sticks have no run-on ends
+      (they poked into the next tile); sticks, rachis, poles and ties no up
+      crook, rafters/poles only sag (`0.5 (w2 - env)`, never up). Frame:
+      `d_batten = depth + 1.1 rb`, `d_rafter = depth + 2.2 rb + 1.1 rr`
+      (room for +-10% member radius), no batten points where the base
+      normal's y > `0.5 (1 + 1/hypot(1, ms))` (the rounded crest; contour
+      scraps of the top course lay over the rafters' tops, through the
+      underlay; not for metal `_purlins`), and the underlay's batten ribs
+      off when there is a real frame. Common rafters drop their top points
+      over the rounded crest and past the ridge line (`zs * z < 0`: walked
+      down from the crest at depth, the two sides' rafters crossed in an X
+      and their tops came out through the far slope's underlay, worse at
+      Volume 2); the ridge beam goes 1.1 (rr + rbeam) under the lowest
+      rafter top within a rafter gap (`tops`). The shell's underside
+      (`_th_shell_mesh` inner) turns more straight down over a rounded
+      crest (`up` 1 -> 5 as the normal stands up past the slope's): halfway
+      it folded in under the crest. Rachis radius `rr0` scales with
+      `_wood` too. A slanted / bowed rachis was tried and dropped (the
+      user: looked odd; keep straight sticks).
+    - **Ridge slits** (dense sky-ray check, beach shack: 19 rays saw the
+      sky across the crest at 121x121): cap leaves' x jitter is capped so
+      two never sit more than ~0.6 lw apart (`jit`), and each handful of
+      cap leaves turns one way together (`lean`, 0.7 of the turn; strays
+      their own way): turned apart, neighbours opened slits. Now 1.
     - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
       sticks, rachis and (without a frame) poles are the roof's `sticks`
       part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from
