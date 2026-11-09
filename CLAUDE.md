@@ -491,6 +491,23 @@
       two never sit more than ~0.6 lw apart (`jit`), and each handful of
       cap leaves turns one way together (`lean`, 0.7 of the turn; strays
       their own way): turned apart, neighbours opened slits. Now 1.
+    - **Bundles** (the user, 2026-11-09: jungle roofs use "one stick per
+      level ... bunched bits of fronds"): `frond_layout` Shingles / Bundles
+      (`THATCH_FROND_LAYOUTS`), `bundle_width` (x span), preset "Palm:
+      jungle hut (tied bundles)". Courses 0.42 ll apart (Shingles 0.25);
+      `_th_frame_courses` returns [] (no battens), `_th_frame_members`
+      drops the batten depth from `d_rafter`. In `_th_fronds_mesh`:
+      `bundle_at` (a tuft: roots over 0.4 w, fanning only 0.3 w, middle
+      leaves longest; stacked `neck` deep through the tie; each leaf's butt
+      folded back up the slope over the pole, `layer_b`), `course_pole`
+      (a pole at rb_ along the course, split at > 25 deg turns, at most
+      0.06 ll past a gable verge, `run` False so the mesher doesn't run it
+      on), `tie_round` (3-4 vine turns round pole + neck, kind "tie", in
+      `poles`). Bundle spacing `w (0.85 - 0.45 overlap)`: wider (1.0 -)
+      let 8-10 of 961 sky rays through. No rachis over bundles.
+    - **Shingles' stems:** only top fronds with `r[9] < 0.33` get a rachis
+      (and `sticks` for their leaflets' bed); one on every course read as
+      a ladder (the user asked if real roofs have that many sticks).
     - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
       sticks, rachis and (without a frame) poles are the roof's `sticks`
       part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from

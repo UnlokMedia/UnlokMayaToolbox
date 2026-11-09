@@ -408,6 +408,9 @@ detail (just its shell, instant), get the shape right, then raise
        hanging off the gable ends.
      - **Palm: Pacific fale (rounded):** very round hips, a thick, tidy roof
        with a light top layer.
+     - **Palm: jungle hut (tied bundles):** gabled, shaggy: handfuls of long
+       leaves tied over one pole per course (*Laid as: Bundles*), on a
+       pole frame.
    - **Ridge** (two slopes), **Lean-to** (one slope, high along the box's -
      side) or **Cone** (round, elliptical in a long box: use a square box
      over a round wall).
@@ -503,7 +506,17 @@ detail (just its shell, instant), get the shape right, then raise
      - **Top layer, messy:** loose half fronds between the courses, with
        thinner leaflets (*Top leaf width*) on a rachis, turned, lifted,
        twisted, curling, some broken or missing (*Top layer*, *Slant*,
-       *Messiness*, *Droop*).
+       *Messiness*, *Droop*). Only about one in three shows its rachis; the
+       rest lie with the stem tucked under the course above, so the roof
+       doesn't read as a ladder of sticks.
+     - **Laid as:** **Shingles** (the courses above) or **Bundles**: a bush
+       hut's way, one pole per course (fewer, wider-spaced courses) and
+       handfuls of leaves (*Bundle width*) laid over it side by side, the
+       cut ends folded back up the slope and each handful lashed to the pole
+       with a few turns of vine. Each bundle is a tuft, its middle leaves
+       longest; the courses lap so no sky shows through. The poles and ties
+       are part of the frame (they end just past a gable verge); the frame
+       has no battens of its own here. The loose top layer has no rachis.
      - **Edges, two layers:** the under layer is limp, so past the eaves
        and gable verges its leaves hang down (*Edge hang*); the top layer
        is stiff and sticks out further (*Reach at ends*). A slanted leaf

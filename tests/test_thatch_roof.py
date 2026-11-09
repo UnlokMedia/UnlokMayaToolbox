@@ -419,7 +419,7 @@ def run():
     b = box("palm")
     frame = tb["thatch_frame"](b)
     palms = [k for k in tb["THATCH_PRESETS"] if k.startswith("Palm")]
-    check("four palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 4 and all(
+    check("five palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 5 and all(
         tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
         "stacks" not in tb["thatch_preset"](k) for k in palms))
     def sky_from_inside(straw, n=30):
@@ -639,6 +639,38 @@ def run():
     check("Volume 2 (palm): the fronds stand off further, the sticks are thicker",
           top(p2, "straw") > top(p1, "straw") + 0.03 and 1.3 < r2 / r1 < 1.5,
           "top %.2f -> %.2f, stick radius x%.2f" % (top(p1, "straw"), top(p2, "straw"), r2 / r1))
+
+    # tied bundles (the user, 2026-11-09: "one stick per level ... they wrap in and out of that and they're
+    # sort of just like bunched bits of fronds"): a pole per course, handfuls tied over it, no battens
+    def sky_mesh(m, n=30):
+        data = om.MFnMeshData().create()
+        fn = om.MFnMesh()
+        fn.create([om.MPoint(*p) for p in m[0]], list(m[1]), list(m[2]), parent=data)
+        acc = fn.autoUniformGridParams()
+        return sum(1 for i in range(n + 1) for j in range(n + 1) if not fn.closestIntersection(
+            om.MFloatPoint(-2.8 + 5.6 * i / float(n), 2.4, -1.85 + 3.7 * j / float(n)),
+            om.MFloatVector(0.0, 1.0, 0.0), om.MSpace.kObject, 100.0, False, accelParams=acc))
+    jk = dict(tb["thatch_preset"]("Palm: jungle hut (tied bundles)"), frame=True, detail="Medium", stacks=3)
+    jg = build(**jk)
+    kinds = [m["kind"] for m in jg["field"].frame_extra]
+    n_pole, n_tie = kinds.count("pole"), kinds.count("tie")
+    check("Bundles: a pole along every course, the bundles lashed to it, no loose rachis over them",
+          n_pole >= 8 and n_tie > 2 * n_pole and not any(m["kind"] == "rachis" for m in jg["field"].stick_members) and
+          tb["THATCH_FROND_LAYOUTS"] == ("Shingles", "Bundles") and "frond_layout" in tb["THATCH_LOOK_KEYS"],
+          "%d poles, %d tie turns" % (n_pole, n_tie))
+    xmax = max(p[0] for p in jg["straw"][0])
+    check("Bundles: the poles end just past the gable verge (not long stubs)",
+          max(q[0] for m in jg["field"].frame_extra for q in m["path"]) < xmax + 0.05,
+          "pole end %.2f, leaves %.2f" % (max(q[0] for m in jg["field"].frame_extra for q in m["path"]), xmax))
+    jh, jc = build(**dict(jk, end_a="Hip", end_b="Hip")), build(**dict(jk, frond_form="Cards"))
+    gaps = (sky_mesh(jg["straw"]), sky_mesh(jh["straw"]), sky_mesh(jc["straw"]))
+    check("Bundles on hips and as cards: they build and close the roof", jh["pieces"] > 100 and jc["pieces"] > 100
+          and gaps[1] == 0 and gaps[2] == 0, "rays through: gable %d, hips %d, cards %d" % gaps)
+    # Shingles: only about one top frond in three shows its rachis (a stick on every course read as a ladder)
+    sh = build(**dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), detail="Medium"))
+    n_r = sum(1 for m in sh["field"].stick_members if m["kind"] == "rachis")
+    check("Shingles: most top fronds lie with their rachis tucked away, some show it",
+          5 < n_r < 0.25 * sh["pieces"], "%d rachis, %d pieces" % (n_r, sh["pieces"]))
 
     # detail levels: Proxy is the shell only and quick; the rest keep the layout and add detail
     t0 = time.time()
