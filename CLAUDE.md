@@ -950,6 +950,27 @@
     box made with it if there is one, else a new `unlokScatterBoxAuto`
     box (`sc_sync` deletes those whose group is gone: an undone Ctrl+D).
     No box: grows fine; `sc_remake_boxes` (panel Make Box, one Ctrl+Z).
+  - **Control group** (the user, 2026-11-09: hidden geo turned up in
+    publish folders after a rebuild; "As long as it's normal geo, it can go
+    in the publish group ... instance setup ... should go in the control
+    group"): the scatter group holds only plain visible meshes, so it can
+    be dragged into a publish hierarchy as it is. The box and any
+    instanced-shoots rig live in `scatterControl####_GRP` (`SC_CTL` =
+    group uuid on it, `SC_CTL_ID` = its uuid on the group; `sc_control`,
+    `_sc_ctl_of`), made by `_sc_new_root` / `_sc_make_control` under the
+    box's parent (world for a new group; never inside another group's
+    control group: a box copied in one gets a control group beside it).
+    `sc_fix_box` checks `_sc_control_ok` and runs `_sc_fix_control` when
+    not: adopts a copied control (Ctrl+D on group + control), else makes
+    one (`SC_CTL_AUTO` for a copy's, deleted with orphan boxes), parents
+    the box in (only then: a box the user moves out later stays), moves an old
+    layout's shoots node out of the group (renamed), deletes hidden tool
+    parts and hidden shoots, leaves geometry where it is. So old scenes
+    upgrade on regrow / panel show. Empty parts are deleted (not hidden;
+    a layer turned off too, its parts come back when it's turned on);
+    an empty shoots rig too. Bake deletes a control group left with only
+    shoots. `sc_owner` / `sc_selection` resolve a control group and
+    anything in it to the group. `tests/test_scatter_control.py`.
     `_sc_scatter_mesh` / `_sc_box_mesh` keep Draw on off boxes;
     `sc_surfaces` skips a box moved into a surface group. The panel
     follows its group by uuid when it's reparented. Parts
@@ -979,7 +1000,7 @@
   - **Undo model:** structure (layers, surfaces, areas, toggles) is an
     UndoChunk on the JSON (`_sc_change`; Delete deletes the layer's parts
     inside it). Geometry and part creation are NoUndo (tool-managed,
-    `_sc_write`: a part is made the first time it has faces, hidden when
+    `_sc_write`: a part is made the first time it has faces, deleted when
     it empties, rewritten only when its mesh or UV shift changed:
     `_SC_WROTE`). After each build the group's `unlokScatterStamp` gets a
     random token (NoUndo) and `_SC_LAST[root]` = (JSON, token);
@@ -1711,21 +1732,29 @@
     - **Speed pass 2 (instanced shoots, coarser bed, drag draft):**
       - **Shoots as instances** (setting `shoots`, `MOSS_SHOOT_MODES`
         Instances / Mesh; the Moss type's "over" sets Instances, an old
-        layer without the key grows instances too). `_MossDetail(inst=)`
+        layer without the key grows instances too; since 2026-11-09 a NEW
+        layer gets Mesh via `MOSS_NEW_LOOK`, so its shoots are publishable
+        geometry, and `sc_preset` keeps it). `_MossDetail(inst=)`
         for `MOSS_INST_KINDS` (tuft / shoot / leafy) records each shoot
         (root, axes x = the turned perpendicular, y = up the shoot, z,
         length, index = stack x `MOSS_INST_TURNS` + turn bucket) in
         `self.I` instead of meshing it; `shapes()` builds the unit-length
-        protos (8 turns of the bend per stack). Scene: a
-        `...Shoots_C_<group>_GRP` transform (`SC_SHOOTS`, key
-        "<layer>/shoots", `sc_shoots`, `_sc_shoot_nodes`) holding a hidden
-        `...Shapes_GRP` of `...Shape##_GEP` protos (`SC_SHOOT_SHAPE`
+        protos (8 turns of the bend per stack). Scene (in the control
+        group, `_sc_shoot_names`): a `<mat><tag>Shoots####_GRP` transform
+        (`SC_SHOOTS`, key "<layer>/shoots", `sc_shoots`, `_sc_shoot_nodes`)
+        holding a hidden `...ShootsShapes####_GRP` of
+        `<mat>_C_shoot<A..>####_GEP` protos (`SC_SHOOT_SHAPE`
         order, strands UVs: they share the strands part's tiles, or take
         its key when there's no strands part), a hidden particle shape
         (API1 `MFnParticleSystem.emit`, rotationPP / scalePP / indexPP and
         their "0" copies, `saveInitialState`, not dynamic: the data is
-        saved with the scene and survives frame changes) and a
-        `particleInstancer` renamed `..._INS`. Rotation: XYZ Euler from
+        saved with the scene and survives frame changes;
+        `...ShootsPoints####Shape`, made as `unlokShootPointsTmp#` and
+        renamed after the emit and instancer: `MFnParticleSystem.emit` goes
+        by name, and a Ctrl+D copy's rig has the original's names, so its
+        instances went into the original's; new nodes' paths come from
+        `_sc_under`, not `long_name`) and a `particleInstancer`
+        `...Shoots####_INS` (first child: the crash fix). Rotation: XYZ Euler from
         the axes (`_mi_euler_xyz` / `_mi_axes_xyz`, row-vector: matrix
         rows = axes). Read back by `_sc_read_shoots` (the freeze fix's
         readback, `_sc_shoots_sig` in `_SC_WROTE`). `sc_owner` walks up

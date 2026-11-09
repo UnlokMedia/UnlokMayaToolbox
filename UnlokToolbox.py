@@ -29792,9 +29792,11 @@ MOSS_DEFAULTS = {
 # the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
 # Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new"). Since 2026-11-09 that is the Mat (the user: make the
 # "more optimized ones with better geo" the default); MOSS_DEFAULTS keeps Carpet so older layers that never
-# stored a style still grow as they did. The panel starts on sc_start_settings (defaults + this).
+# stored a style still grow as they did. The panel starts on sc_start_settings (defaults + this). Shoots
+# Mesh (same day: only plain geometry goes in what gets published; an instancer lives in the control group).
 MOSS_NEW_LOOK = {"exposure": 0.6, "feather": 0.6, "strays": 0.5, "ragged": 0.6, "clump_merge": 0.6,
-                 "shoot_form": "Leafy", "style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5}
+                 "shoot_form": "Leafy", "style": "Mat", "coverage": 0.65, "render_as": "GED", "lumps": 0.5,
+                 "shoots": "Mesh"}
 MOSS_SHOOT_FORMS = ("Star", "Leafy")  # High / Hero instanced shoots: a leaf star at the tip, or leaves up the stem
 IVY_VINES_BY = ("In all", "Per mesh")  # Vines: the total, or on each mesh
 IVY_MAX_AUTO_VINES = 400                # Per mesh over many meshes: fewer each past it
@@ -37790,6 +37792,12 @@ SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
 SC_BOX_OF = "unlokScatterBoxOf"    # string on the box: its group's uuid
 SC_BOX_ID = "unlokScatterBoxId"    # string on the group: its box's uuid
 SC_BOX_AUTO = "unlokScatterBoxAuto"  # bool on a box made outside the undo queue (a Ctrl+D copy's)
+# the control group (the user, 2026-11-09: only normal geometry in what gets published; the box, instancers,
+# particles and hidden shapes in a group of their own, next to the box): scatterControl####_GRP
+SC_CTL = "unlokScatterControl"     # string on a control group: its scatter group's uuid
+SC_CTL_ID = "unlokScatterControlId"  # string on the scatter group: its control group's uuid
+SC_CTL_AUTO = "unlokScatterControlAuto"  # bool on a control group made for a Ctrl+D copy (outside the undo queue)
+SC_CTL_STEM = "scatterControl"
 SC_STEM = "scatteredObjects"
 SC_VERSION = 1
 SC_PLACE = ("coverage", "spread", "slope", "crevices", "creases", "edges", "patchiness", "patch_size", "mess")
@@ -38038,7 +38046,8 @@ def _sc_scatter_mesh(dag):
     (Bake keeps its unlokScatterPart tag; an older one by its name), or a
     group's box."""
     try:
-        if om.MFnDependencyNode(dag.node()).hasAttribute(SC_PART):
+        fn0 = om.MFnDependencyNode(dag.node())
+        if fn0.hasAttribute(SC_PART) or fn0.hasAttribute(SC_SHOOT_SHAPE):
             return True
         parent = om.MDagPath(dag)
         parent.pop()
@@ -38621,6 +38630,9 @@ def _sc_read_layer(root, layer, counts):
             return None
         out["shoots"] = got
         wrote[(root, layer["id"] + "/shoots")] = _sc_shoots_sig(got)
+    elif node is None and sc_type(layer.get("type")) == "Moss" and sc_settings(layer).get("shoots") == "Instances" \
+            and "strands" in out:
+        return None  # instanced shoots it should have aren't there (a Ctrl+D copy: they're in the control group)
     _SC_WROTE.update(wrote)
     c = dict(counts or {})
     c["read"] = True
@@ -38779,13 +38791,55 @@ def sc_parts(root):
 
 
 def sc_shoots(root):
-    """{"<layer id>/shoots": transform} under a scatter group: a Moss
-    layer's instanced shoots (particles, the instancer, its shoot shapes)."""
+    """{"<layer id>/shoots": transform}: a Moss layer's instanced shoots
+    (particles, the instancer, its shoot shapes), in the group's control
+    group (an older one still under the group itself)."""
     out = {}
-    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
-        if cmds.attributeQuery(SC_SHOOTS, node=child, exists=True):
-            out[cmds.getAttr(child + "." + SC_SHOOTS)] = child
+    ctl = sc_control(root)
+    for parent in ([ctl] if ctl else []) + [root]:
+        for child in cmds.listRelatives(parent, children=True, type="transform", fullPath=True) or []:
+            if cmds.attributeQuery(SC_SHOOTS, node=child, exists=True):
+                key = cmds.getAttr(child + "." + SC_SHOOTS)
+                if key not in out:
+                    out[key] = child
     return out
+
+
+def _sc_letters(i):
+    """0 -> A, 25 -> Z, 26 -> AA ..."""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _sc_shoot_names(node):
+    """Names for what's under a shoots node <material><tag>Shoots####_GRP:
+    (shapes group, shape name for index i, particle shape, instancer)."""
+    m = re.match(r"^(.*?)(\d{4})_GRP$", short_name(node))
+    base, num = (m.group(1), m.group(2)) if m else (short_name(node).replace("_GRP", ""), "")
+    mat = base[:-len("Shoots")] if base.endswith("Shoots") else base
+    return (base + "Shapes" + num + "_GRP", lambda i: "%s_C_shoot%s%s_GEP" % (mat, _sc_letters(i), num),
+            base + "Points" + num + "Shape", base + num + "_INS")
+
+
+def _sc_rename_shoots(node):
+    """Give an older shoots node's insides the names _sc_shoot_names says."""
+    grp_name, shape_name, ps_name, inst_name = _sc_shoot_names(node)
+    ps, inst, shapes = _sc_shoot_nodes(node)
+    for i, xf in enumerate(shapes):
+        if short_name(xf) != shape_name(i):
+            cmds.rename(xf, shape_name(i))
+    for child in cmds.listRelatives(node, children=True, fullPath=True) or []:
+        if cmds.nodeType(child) == "transform" and short_name(child) != grp_name:
+            cmds.rename(child, grp_name)
+    ps, inst, _ = _sc_shoot_nodes(node)
+    if ps and short_name(ps) != ps_name:
+        cmds.rename(ps, ps_name)
+    if inst and short_name(inst) != inst_name:
+        cmds.rename(inst, inst_name)
 
 
 def _sc_shoot_nodes(node):
@@ -38794,6 +38848,8 @@ def _sc_shoot_nodes(node):
     inst = (cmds.listRelatives(node, children=True, type="instancer", fullPath=True) or [None])[0]
     shapes = []
     for grp in cmds.listRelatives(node, children=True, type="transform", fullPath=True) or []:
+        if cmds.nodeType(grp) != "transform":
+            continue  # (the instancer)
         for child in cmds.listRelatives(grp, children=True, type="transform", fullPath=True) or []:
             sh = _log_shape(child)
             if sh and cmds.attributeQuery(SC_SHOOT_SHAPE, node=sh, exists=True):
@@ -38811,13 +38867,22 @@ def _sc_sg(node):
     return sgs[0] if sgs else None
 
 
+def _sc_under(parent, name):
+    """The full path of a node just made / parented under parent (full
+    path, or None: world) by the name Maya returned. Not long_name: a Ctrl+D
+    copy's rig has the same names as the original's, and looking one up by
+    name can find the original's (the copy's instances went into it)."""
+    return (parent or "") + "|" + short_name(name)
+
+
 def _sc_make_shoots(root, layer, material):
-    """A Moss layer's instanced shoots node (outside the undo queue):
-    <material><tag>Shoots_C_scatteredObjects####_GRP, tagged."""
+    """A Moss layer's instanced shoots node (outside the undo queue), in
+    the group's control group (not published: an instancer isn't plain
+    geometry): <material><tag>Shoots####_GRP, tagged."""
     num = short_name(root)[len(SC_STEM):len(SC_STEM) + 4]
-    node = cmds.createNode("transform", name="%s%sShoots_C_%s%s_GRP" % (material, layer.get("tag", ""), SC_STEM, num),
-                           parent=root, skipSelect=True)
-    node = long_name(node)
+    parent = sc_control(root) or root
+    node = _sc_under(parent, cmds.createNode("transform", name="%s%sShoots%s_GRP" % (
+        material, layer.get("tag", ""), num), parent=parent, skipSelect=True))
     cmds.addAttr(node, longName=SC_SHOOTS, dataType="string")
     cmds.setAttr(node + "." + SC_SHOOTS, layer["id"] + "/shoots", type="string")
     return node
@@ -38836,9 +38901,8 @@ def _sc_fill_shoots(node, mesh, sg=None):
     kids = cmds.listRelatives(node, children=True, fullPath=True) or []
     if kids:
         cmds.delete(kids)
-    short = short_name(node)
-    stem = short[:-4] if short.endswith("_GRP") else short
-    grp = long_name(cmds.createNode("transform", name=stem + "Shapes_GRP", parent=node, skipSelect=True))
+    grp_name, shape_name, ps_name, inst_name = _sc_shoot_names(node)
+    grp = _sc_under(node, cmds.createNode("transform", name=grp_name, parent=node, skipSelect=True))
     cmds.setAttr(grp + ".visibility", False)
     shapes = []
     n0 = f0 = k0 = 0
@@ -38847,8 +38911,8 @@ def _sc_fill_shoots(node, mesh, sg=None):
                [c - n0 for c in uvi[k0:k0 + k]])
         n0, f0, k0 = n0 + n, f0 + f, k0 + k
         xf = long_name(cmds.polyPlane(width=1, height=1, subdivisionsX=1, subdivisionsY=1,
-                                      constructionHistory=False, name="%sShape%02d_GEP" % (stem, i + 1))[0])
-        xf = long_name(cmds.parent(xf, grp)[0])
+                                      constructionHistory=False, name=shape_name(i))[0])
+        xf = _sc_under(grp, cmds.parent(xf, grp)[0])
         sh = _log_shape(xf)
         cmds.addAttr(sh, longName=SC_SHOOT_SHAPE, attributeType="long", defaultValue=i)
         cmds.addAttr(sh, longName=UV_READY_ATTR, attributeType="bool", defaultValue=True)
@@ -38857,7 +38921,9 @@ def _sc_fill_shoots(node, mesh, sg=None):
         if sg and cmds.objExists(sg):
             cmds.sets(sh, edit=True, forceElement=sg)
         shapes.append(xf)
-    ps = cmds.createNode("particle", name=stem + "ParticleShape", parent=node, skipSelect=True)
+    # a name no other node has until it's filled and instanced: MFnParticleSystem.emit and the instancer go
+    # by name, and a Ctrl+D copy's rig has the original's names (its instances went into the original's)
+    ps = _sc_under(node, cmds.createNode("particle", name="unlokShootPointsTmp#", parent=node, skipSelect=True))
     for ln, typ in (("rotationPP", "vectorArray"), ("scalePP", "vectorArray"), ("indexPP", "doubleArray")):
         cmds.addAttr(ps, longName=ln, dataType=typ)
         cmds.addAttr(ps, longName=ln + "0", dataType=typ)
@@ -38886,7 +38952,8 @@ def _sc_fill_shoots(node, mesh, sg=None):
     inst = cmds.particleInstancer(ps, addObject=True, object=shapes, cycle="None", rotation="rotationPP",
                                   scale="scalePP", objectIndex="indexPP", rotationUnits="Degrees")
     inst = cmds.parent(inst, node)[0]
-    inst = cmds.rename(node + "|" + inst, stem + "_INS")
+    inst = cmds.rename(_sc_under(node, inst), inst_name)
+    cmds.rename(ps, ps_name)
     _sc_shoots_order(node)
     per = [f for _, f, _ in split]
     return sum(per[i] for i in data["index"])
@@ -38955,6 +39022,94 @@ def sc_box(root):
         if cmds.attributeQuery(SC_BOX_ATTR, node=child, exists=True):
             return child
     return None
+
+
+def sc_control(root):
+    """A group's control group (scatterControl####_GRP: its box, instanced
+    shoots, anything that isn't plain geometry to publish), linked both
+    ways by uuid; None when there's none yet (sc_fix_box makes it) or the
+    link is a Ctrl+D copy's to the original's."""
+    if root and cmds.attributeQuery(SC_CTL_ID, node=root, exists=True):
+        uid = cmds.getAttr(root + "." + SC_CTL_ID)
+        found = cmds.ls(uid, long=True) if uid else None
+        if found and _sc_ctl_of(found[0]) == cmds.ls(root, uuid=True)[0]:
+            return found[0]
+    return None
+
+
+def _sc_ctl_of(node):
+    """The uuid of the group a control group belongs to, or ""."""
+    if cmds.attributeQuery(SC_CTL, node=node, exists=True):
+        return cmds.getAttr(node + "." + SC_CTL) or ""
+    return ""
+
+
+def _sc_link_control(root, ctl):
+    for node, attr, other in ((root, SC_CTL_ID, ctl), (ctl, SC_CTL, root)):
+        if not cmds.attributeQuery(attr, node=node, exists=True):
+            cmds.addAttr(node, longName=attr, dataType="string")
+        cmds.setAttr(node + "." + attr, cmds.ls(other, uuid=True)[0], type="string")
+
+
+def _sc_make_control(root, box=None, auto=False):
+    """A control group for a group, beside its box (under the box's parent;
+    at world level without one; beside another group's control group when
+    the box is a copy made in that one), linked to it."""
+    m = re.match(SC_STEM + r"(\d{4})", short_name(root))
+    num = int(m.group(1)) if m else _th_free_number(SC_CTL_STEM + "%04d_GRP")
+    parent = (cmds.listRelatives(box, parent=True, fullPath=True) or [None])[0] if box else None
+    while parent and cmds.attributeQuery(SC_CTL, node=parent, exists=True):  # never one inside another
+        parent = (cmds.listRelatives(parent, parent=True, fullPath=True) or [None])[0]
+    kw = {"parent": parent} if parent else {}
+    ctl = _sc_under(parent, cmds.createNode("transform", name="%s%04d_GRP" % (SC_CTL_STEM, num), skipSelect=True,
+                                            **kw))
+    if auto:
+        cmds.addAttr(ctl, longName=SC_CTL_AUTO, attributeType="bool", defaultValue=True)
+    _sc_link_control(root, ctl)
+    return ctl
+
+
+def _sc_fix_control(root, box):
+    """Bring a group's control setup up to date (inside sc_fix_box's
+    NoUndo): its control group (adopting a Ctrl+D copy's copy, else a new
+    one beside the box), the box in it, older instanced shoots moved out
+    of the group into it (renamed), and hidden parts (emptied, from before
+    empty parts were deleted) deleted. The group's geometry stays where it
+    is. Returns the control group."""
+    ctl = sc_control(root)
+    fresh = ctl is None  # the box goes in when its control group is made / adopted (moved out later: left)
+    if ctl is None:
+        par = (cmds.listRelatives(box, parent=True, fullPath=True) or [None])[0] if box else None
+        if par and cmds.attributeQuery(SC_CTL, node=par, exists=True):
+            other = cmds.ls(_sc_ctl_of(par) or "-", long=True)
+            if not other or other[0] == root or sc_control(other[0]) != par:  # a copy made with it: its own
+                ctl = par
+                _sc_link_control(root, ctl)
+        if ctl is None:
+            copy = cmds.attributeQuery(SC_CTL_ID, node=root, exists=True)
+            ctl = _sc_make_control(root, box, auto=bool(copy))
+    if fresh and box and (cmds.listRelatives(box, parent=True, fullPath=True) or [None])[0] != ctl:
+        box = long_name(cmds.parent(box, ctl)[0])
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        if cmds.attributeQuery(SC_SHOOTS, node=child, exists=True):  # older shoots: into the control group
+            if not cmds.getAttr(child + ".visibility"):
+                cmds.delete(child)
+                continue
+            name = short_name(child).replace("_C_" + SC_STEM, "")
+            child = long_name(cmds.parent(child, ctl)[0])
+            if short_name(child) != name:
+                child = long_name(cmds.rename(child, name))
+            _sc_rename_shoots(child)
+            continue
+        shape = _log_shape(child)
+        if shape and cmds.attributeQuery(SC_PART, node=shape, exists=True) and \
+                not cmds.getAttr(child + ".visibility"):  # an emptied part, hidden by an older toolbox
+            _SC_WROTE.pop((root, cmds.getAttr(shape + "." + SC_PART)), None)
+            cmds.delete(child)
+    for key, node in sc_shoots(root).items():
+        if not cmds.getAttr(node + ".visibility"):
+            cmds.delete(node)
+    return ctl
 
 
 def _sc_box_of(box):
@@ -39029,7 +39184,23 @@ def sc_fix_box(root):
                     box = _sc_make_box(root, auto=True)
                     _sc_fit_box(root, box, sc_surfaces(sc_data(root)))
                 _sc_reselect(sel, box)
+        if not _sc_control_ok(root, box):
+            sel = cmds.ls(selection=True, long=True) or []
+            _sc_fix_control(root, box)
+            box = sc_box(root)
+            _sc_reselect([s for s in sel if cmds.objExists(s)], box)
     return box
+
+
+def _sc_control_ok(root, box):
+    """The group's control setup is as _sc_fix_control leaves it (a quick
+    check, so picking a group doesn't walk it every time)."""
+    if sc_control(root) is None:
+        return False
+    for child in cmds.listRelatives(root, children=True, type="transform", fullPath=True) or []:
+        if cmds.attributeQuery(SC_SHOOTS, node=child, exists=True) or not cmds.getAttr(child + ".visibility"):
+            return False
+    return True
 
 
 def _sc_reselect(sel, box):
@@ -39054,6 +39225,9 @@ def _sc_drop_orphan_boxes():
     Ctrl+D copy they were made for was undone). Returns how many."""
     gone = [b for b in _sc_boxes() if cmds.attributeQuery(SC_BOX_AUTO, node=b, exists=True) and
             not cmds.ls(_sc_box_of(b) or "-")]
+    ctls = [n for n in cmds.ls(["*." + SC_CTL_AUTO, "*:*." + SC_CTL_AUTO], objectsOnly=True, long=True) or []
+            if not cmds.ls(_sc_ctl_of(n) or "-")]
+    gone = [b for b in gone if not _under_any(b, ctls)] + ctls
     if gone:
         with NoUndo():
             cmds.delete(gone)
@@ -39071,6 +39245,9 @@ def sc_remake_boxes(roots):
     with UndoChunk("Scatter box"):
         for root in roots:
             box = _sc_make_box(root)
+            ctl = sc_control(root)
+            if ctl:
+                box = long_name(cmds.parent(box, ctl)[0])
             _sc_fit_box(root, box, sc_surfaces(sc_data(root)))
             made.append((root, box))
         cmds.select([b for _, b in made], replace=True)
@@ -39090,12 +39267,20 @@ def sc_owner(node):
     if _sc_box_of(node):  # a box beside its group
         found = cmds.ls(_sc_box_of(node), long=True)
         return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
+    if _sc_ctl_of(node):  # a control group
+        found = cmds.ls(_sc_ctl_of(node), long=True)
+        return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
     up = node
     for _ in range(3):  # instanced shoots: the instancer, the shapes' group, a shape under their node
         if cmds.attributeQuery(SC_SHOOTS, node=up, exists=True):
             parent = cmds.listRelatives(up, parent=True, fullPath=True)
+            lid = cmds.getAttr(up + "." + SC_SHOOTS).split("/")[0]
             if parent and _sc_attr(parent[0]):
-                return parent[0], cmds.getAttr(up + "." + SC_SHOOTS).split("/")[0]
+                return parent[0], lid
+            if parent and _sc_ctl_of(parent[0]):  # in a control group
+                found = cmds.ls(_sc_ctl_of(parent[0]), long=True)
+                if found and _sc_attr(found[0]):
+                    return found[0], lid
             break
         nxt = cmds.listRelatives(up, parent=True, fullPath=True)
         if not nxt:
@@ -39243,8 +39428,10 @@ def _sc_fit_box(root, box, meshes):
 
 def _sc_write(root, data, placed, meshes):
     """Put built parts in the group's meshes (outside the undo queue):
-    makes a part the first time it has something, hides one that's empty
-    now, rewrites only what changed. Returns the face count."""
+    makes a part the first time it has something, deletes one that's
+    empty now (hidden leftovers went wherever the group was dragged, into
+    publishes: the user, 2026-11-09), rewrites only what changed. Returns
+    the face count."""
     parts = sc_parts(root)
     shoots = sc_shoots(root)
     faces = 0
@@ -39255,8 +39442,9 @@ def _sc_write(root, data, placed, meshes):
             mesh = placed.get(key)
             node = parts.get(key)
             if not mesh:
-                if node and cmds.getAttr(node + ".visibility"):
-                    cmds.setAttr(node + ".visibility", False)
+                if node:
+                    cmds.delete(node)
+                    _SC_WROTE.pop((root, key), None)
                 continue
             if node is None:
                 node = _sc_make_part(root, layer, part, material)
@@ -39275,8 +39463,9 @@ def _sc_write(root, data, placed, meshes):
             faces += _sc_write_layer_shoots(root, layer, placed, shoots, parts)
     known = set(l["id"] for l in data.get("layers", []))
     for key, node in list(parts.items()) + list(shoots.items()):  # a layer that's gone (a safety net)
-        if key.split("/")[0] not in known and cmds.getAttr(node + ".visibility"):
-            cmds.setAttr(node + ".visibility", False)
+        if key.split("/")[0] not in known and cmds.objExists(node):
+            cmds.delete(node)
+            _SC_WROTE.pop((root, key), None)
     _sc_fit_box(root, sc_box(root), meshes)
     now = cmds.ls(selection=True, long=True) or []
     if now != sel:  # polyPlane / parent / particleInstancer select what they make: keep what was selected
@@ -39539,14 +39728,15 @@ def _sc_bed_look(shape, ged):
 
 def _sc_write_layer_shoots(root, layer, placed, shoots, parts):
     """A Moss layer's instanced shoots into its shoots node (made the first
-    time, hidden when there are none, refilled only when they changed).
-    Returns the faces the instances make."""
+    time, in the control group; deleted when there are none, refilled only
+    when they changed). Returns the faces the instances make."""
     key = layer["id"] + "/shoots"
     mesh = placed.get(key)
     node = shoots.get(key)
     if not mesh:
-        if node and cmds.getAttr(node + ".visibility"):
-            cmds.setAttr(node + ".visibility", False)
+        if node:
+            cmds.delete(node)
+            _SC_WROTE.pop((root, key), None)
         return 0
     if node is None:
         node = shoots[key] = _sc_make_shoots(root, layer, "mossStrand")
@@ -39814,7 +40004,8 @@ def _sc_new_root(data, select=True):
     _sc_set(root, data)
     # move / rotate / scale stay free: dragged under a moved group, Maya keeps it in place (parts are written
     # through the group's matrix, so they sit on the surfaces wherever it is)
-    _sc_make_box(root)  # beside the group, so it can go into a publish group without its box
+    box = _sc_make_box(root)  # beside the group, so it can go into a publish group without its box
+    cmds.parent(box, _sc_make_control(root, box))  # in its control group (instanced shoots go there too)
     if select:
         cmds.select(root, replace=True)
     return root
@@ -40067,6 +40258,10 @@ def bake_scatter(roots):
             box = sc_box(root)
             if box:
                 cmds.delete(box)
+            ctl = sc_control(root)
+            if ctl and not [k for k in cmds.listRelatives(ctl, children=True, fullPath=True) or []
+                            if not cmds.attributeQuery(SC_SHOOTS, node=k, exists=True)]:
+                cmds.delete(ctl)  # (only the tool's things were in it)
             if cmds.attributeQuery(SC_BAKED, node=root, exists=True):
                 cmds.deleteAttr(root + "." + SC_BAKED)
             cmds.renameAttr(root + "." + SC_ATTR, SC_BAKED)
@@ -40122,7 +40317,7 @@ def sc_selection():
     out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}}
     # Groups are found once; a node is only asked about if it's under one (a
     # 200-mesh pick asked every mesh, on every click, with the toolbox open).
-    sc_roots = _tagged_roots((SC_ATTR, SC_BAKED, SC_BOX_ATTR))  # boxes sit beside their groups
+    sc_roots = _tagged_roots((SC_ATTR, SC_BAKED, SC_BOX_ATTR, SC_CTL))  # boxes / control groups sit beside groups
     mi_roots = _tagged_roots((MI_SETTINGS, MI_BAKED))
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
         if _under_any(node, sc_roots):
@@ -40214,6 +40409,8 @@ def sc_preset(typ, name):
     if over is None:
         return None
     s = sc_defaults(typ)
+    if "shoots" in s:  # presets don't name Shoots: what a new layer gets (plain geometry)
+        s["shoots"] = SC_TYPES[typ].get("new", {}).get("shoots", s["shoots"])
     s.update({k: v for k, v in over.items() if k in s})
     return s
 

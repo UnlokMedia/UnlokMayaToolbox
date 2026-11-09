@@ -75,6 +75,11 @@ def load_toolbox():
     return ns
 
 
+def parent_of(n):
+    p = cmds.listRelatives(n, parent=True, fullPath=True)
+    return p[0] if p else None
+
+
 def box(name, size, at, parent=None, div=2.0):
     node = cmds.polyCube(w=size[0], h=size[1], d=size[2], sx=max(1, int(size[0] / div)), sy=max(1, int(size[1] / div)),
                          sz=max(1, int(size[2] / div)), name=name, constructionHistory=False)[0]
@@ -192,11 +197,12 @@ def run():
 
     # --- toggles, undo / redo
     tb["sc_set_layer"](root, moss, on=False)
-    mnode = tb["sc_parts"](root)[moss + "/moss"]
-    check("a layer turned off hides its parts", not cmds.getAttr(mnode + ".visibility"))
+    check("a layer turned off takes its parts away (nothing hidden left in the group to publish)",
+          not any(k.startswith(moss + "/") for k in tb["sc_parts"](root)))
     cmds.undo()
     tb["sc_sync"]()
-    check("one Ctrl+Z turns it back on", cmds.getAttr(mnode + ".visibility") and
+    mnode = tb["sc_parts"](root).get(moss + "/moss")
+    check("one Ctrl+Z turns it back on", mnode and cmds.getAttr(mnode + ".visibility") and
           tb["sc_layer"](tb["sc_data"](root), moss)["on"])
     tb["sc_remove_layer"](root, moss2)
     check("Delete removes the layer and its parts", not any(k.startswith(moss2 + "/") for k in tb["sc_parts"](root)))
@@ -395,10 +401,10 @@ def run():
     # --- bake
     tb["sc_update"](root, dup, {"coverage": 0.0})
     hidden = [n for n in tb["sc_parts"](root).values() if not cmds.getAttr(n + ".visibility")]
+    check("emptied parts are deleted, not hidden", not hidden and
+          not any(k.startswith(dup + "/") for k in tb["sc_parts"](root)), "%d hidden" % len(hidden))
     tb["bake_scatter"]([root])
-    check("Bake drops the box and the empty parts", not tb["sc_box"](root) and not any(cmds.objExists(n)
-                                                                                     for n in hidden) and
-          not tb["is_scatter"](root) and hidden, "%d hidden" % len(hidden))
+    check("Bake drops the box", not tb["sc_box"](root) and not tb["is_scatter"](root))
     cmds.undo()
     check("one Ctrl+Z undoes the bake", tb["is_scatter"](root) and tb["sc_box"](root))
     check("nothing left at the origin", all(len(points(tb, n)) > 4 for n in tb["sc_parts"](root).values()
@@ -1667,9 +1673,16 @@ def box_outside():
     box("crate", (6, 6, 6), (6, 3, 2), grp)
     root = tb["create_scatter_group"]([grp], "Leaf piles", {"coverage": 0.8})["root"]
     bx = tb["sc_box"](root)
+    ctl = tb["sc_control"](root)
+
+    def in_control(b, r):
+        """b is in r's control group, which is at world level."""
+        c = tb["sc_control"](r)
+        return b and c and parent_of(b) == c and not cmds.listRelatives(c, parent=True)
+
     locked = [a for a in ("tx", "ry", "sz") if cmds.getAttr(root + "." + a, lock=True)]
-    check("the box is beside the group, not in it, linked both ways",
-          bx and not cmds.listRelatives(bx, parent=True) and
+    check("the box is beside the group (in its control group), not in it, linked both ways",
+          in_control(bx, root) and
           bx not in (cmds.listRelatives(root, children=True, fullPath=True) or []) and
           tb["sc_owner"](bx) == (root, None), "%s | %s" % (bx, tb["sc_owner"](bx)))
     check("the group's move / rotate / scale aren't locked", not locked, str(locked))
@@ -1714,7 +1727,10 @@ def box_outside():
     old = tb["create_scatter_group"]([grp], "Leaf piles", {"coverage": 0.5})["root"]
     obox = tb["sc_box"](old)
     cmds.xform(obox, translation=(1, 2, 3))
+    octl = tb["sc_control"](old)
     obox = cmds.ls(cmds.parent(obox, old)[0], long=True)[0]
+    cmds.delete(octl)  # from before control groups
+    cmds.deleteAttr(old + "." + tb["SC_CTL_ID"])
     for node, attr in ((old, tb["SC_BOX_ID"]), (obox, tb["SC_BOX_OF"])):
         cmds.deleteAttr(node + "." + attr)
     for a in ("translate", "rotate", "scale"):
@@ -1725,11 +1741,11 @@ def box_outside():
     tb["sc_regrow"](old)
     nb = tb["sc_box"](old)
     check("an old group's box moves out beside it the first time it regrows, linked, not on the undo queue",
-          nb and not cmds.listRelatives(nb, parent=True) and sn(nb) == sn(obox) and
+          in_control(nb, old) and sn(nb) == sn(obox) and
           tb["sc_owner"](nb) == (old, None) and cmds.undoInfo(q=True, undoName=True) == q0,
           "%s | %s" % (nb, cmds.undoInfo(q=True, undoName=True)))
     check("... and the group is unlocked", not any(cmds.getAttr(old + "." + a, lock=True) for a in ("tx", "ry", "sz")))
-    cmds.delete(old, nb)
+    cmds.delete(old, tb["sc_control"](old))
 
     # --- Ctrl+D copies
     cmds.select(root)
@@ -1745,12 +1761,25 @@ def box_outside():
     tb["sc_sync"]()
     check("undoing the Ctrl+D takes the box made for it away too", not cmds.objExists(copy) and
           not cmds.ls(cb) and tb["sc_box"](root) == bx)
+    uuid = lambda n: cmds.ls(n, uuid=True)[0]  # noqa: E731
     two = cmds.duplicate([root, bx], returnRootsOnly=True)
     copy2, box2 = [cmds.ls(n, long=True)[0] for n in two]
+    u2 = uuid(box2)
     got = tb["sc_fix_box"](copy2)
-    check("the group and its box copied together: that copy is its box", got == box2 and
-          tb["sc_owner"](box2) == (copy2, None) and tb["sc_owner"](bx) == (root, None), "%s vs %s" % (got, box2))
-    cmds.delete(copy2, box2)
+    c2 = tb["sc_control"](copy2)
+    check("the group and its box copied together: that copy is its box, in a control group beside the first",
+          got and uuid(got) == u2 and in_control(got, copy2) and c2 != ctl and
+          tb["sc_owner"](got) == (copy2, None) and tb["sc_owner"](bx) == (root, None) and
+          tb["sc_control"](root) == ctl and parent_of(bx) == ctl, "%s in %s" % (got, c2))
+    cmds.delete(copy2, c2)
+    two = cmds.duplicate([root, ctl], returnRootsOnly=True)
+    copy3, ctl3 = [cmds.ls(n, long=True)[0] for n in two]
+    got = tb["sc_fix_box"](copy3)
+    check("the group and its control group copied together: that copy is its control group, with its box",
+          tb["sc_control"](copy3) == ctl3 and got and parent_of(got) == ctl3 and
+          tb["sc_owner"](got) == (copy3, None) and tb["sc_control"](root) == ctl and tb["sc_box"](root) == bx,
+          "%s %s" % (tb["sc_control"](copy3), got))
+    cmds.delete(copy3, ctl3)
 
     # --- a deleted box
     cmds.delete(bx)
@@ -1758,8 +1787,8 @@ def box_outside():
     check("a group whose box is deleted still grows", rep.get("faces") and tb["sc_box"](root) is None)
     made = tb["sc_remake_boxes"]([root])
     nb = tb["sc_box"](root)
-    check("Make Box: one round it again, beside it, linked, one Ctrl+Z", made and nb and
-          not cmds.listRelatives(nb, parent=True) and tb["sc_owner"](nb) == (root, None) and
+    check("Make Box: one round it again, beside it, linked, one Ctrl+Z", made and
+          in_control(nb, root) and tb["sc_owner"](nb) == (root, None) and
           cmds.undoInfo(q=True, undoName=True) == "Scatter box", cmds.undoInfo(q=True, undoName=True))
     cmds.undo()
     check("... Ctrl+Z takes it away", tb["sc_box"](root) is None)
@@ -1771,7 +1800,7 @@ def box_outside():
         new = tb["sc_new_group_from"](root, layers=layers)["root"]
         b = tb["sc_box"](new)
         check("%s: its box beside it, linked" % ("Duplicate Group" if layers else "New Group from This"),
-              b and b != bx and not cmds.listRelatives(b, parent=True) and tb["sc_owner"](b) == (new, None))
+              b and b != bx and in_control(b, new) and tb["sc_owner"](b) == (new, None))
 
     # --- never drawn on, never scattered onto
     drawer = tb["ScatterDrawer"]()
@@ -1784,6 +1813,8 @@ def box_outside():
     check("a box moved into a surface group isn't scattered onto",
           sorted(sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))) == ["crate", "floor"] and
           tb["sc_box"](root) == bx, str([sn(n) for n in tb["sc_surfaces"](tb["sc_data"](root))]))
+    tb["sc_regrow"](root)
+    check("... and stays where it was moved when the group regrows", tb["sc_box"](root) == bx)
     tb["bake_scatter"]([root])
     check("Bake still drops the box", not cmds.ls(bx))
 

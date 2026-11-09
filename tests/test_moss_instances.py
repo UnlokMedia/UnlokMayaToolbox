@@ -2,9 +2,10 @@
 
     mayapy tests/test_moss_instances.py
 
-Scatter moss at High grows its shoots as instances (a particle shape and an
-instancer of a few shoot shapes) by default; Shoots Mesh puts them back in
-the strands mesh. The instancer puts every shoot where the engine says
+Scatter moss at High with Shoots Instances grows its shoots as instances (a
+particle shape and an instancer of a few shoot shapes, in the group's control
+group; a new layer starts on Mesh); Shoots Mesh puts them back in the strands
+mesh and deletes the rig. The instancer puts every shoot where the engine says
 (its axes and length: the rotation convention), the shapes share the
 strands part's UDIM tiles, the instances survive a save and reopen (and an
 edit after it regrows from what was read back), Bake turns them into real
@@ -95,7 +96,8 @@ def run():
           "round trip %.1e, Maya %.1e" % (worst, mw))
 
     stone = rock()
-    s = {"detail": "High", "coverage": 0.8, "strands": 1.2, "strand_length": 0.012, "droop": 0.6, "seed": 2}
+    s = {"detail": "High", "coverage": 0.8, "strands": 1.2, "strand_length": 0.012, "droop": 0.6, "seed": 2,
+         "shoots": "Instances"}
     rep = tb["create_scatter_group"]([stone], "Moss", s, select=False)
     root = rep["root"]
     lid = tb["sc_data"](root)["layers"][0]["id"]
@@ -138,16 +140,19 @@ def run():
     tb["sc_update"](root, lid, {"shoots": "Mesh"})
     parts = tb["sc_parts"](root)
     mesh_faces = int(cmds.polyEvaluate(parts[lid + "/strands"], face=True))
-    hidden = not cmds.getAttr(node + ".visibility")
-    check("Shoots Mesh: the shoots are real geometry in the strands mesh again, the instancer hides",
-          hidden and abs(mesh_faces - (st_faces + len(real[1]))) < 0.15 * mesh_faces,
+    gone = not cmds.objExists(node) and not tb["sc_shoots"](root) and not cmds.ls(type=("particle", "instancer"))
+    check("Shoots Mesh: the shoots are real geometry in the strands mesh again, the rig is deleted",
+          gone and abs(mesh_faces - (st_faces + len(real[1]))) < 0.15 * mesh_faces,
           "mesh %d vs strands %d + instanced %d" % (mesh_faces, st_faces, len(real[1])))
     tmp = tempfile.mkdtemp()
     mesh_mb = os.path.join(tmp, "mesh.mb")
     cmds.file(rename=mesh_mb)
     cmds.file(save=True, type="mayaBinary", force=True)
     tb["sc_update"](root, lid, {"shoots": "Instances"})
-    check("back to Instances: the instancer shows again", cmds.getAttr(node + ".visibility"))
+    node = tb["sc_shoots"](root).get(lid + "/shoots")
+    check("back to Instances: a rig again, in the control group",
+          node and cmds.getAttr(node + ".visibility") and
+          cmds.listRelatives(node, parent=True, fullPath=True)[0] == tb["sc_control"](root))
 
     # save, reopen, an edit grows from what was read back
     path = os.path.join(tmp, "inst.mb")
