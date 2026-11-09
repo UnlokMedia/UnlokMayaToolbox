@@ -514,6 +514,27 @@ def run():
           len(o1["straw"][0]) > len(o0["straw"][0]), "%d -> %d fronds" % (o0["pieces"], o1["pieces"]))
     c0, c1 = build(ridge_fronds=False), build(ridge_fronds=True)
     check("a cap of fronds over the ridge", max(p[1] for p in c1["straw"][0]) > max(p[1] for p in c0["straw"][0]))
+    # the user, 2026-11-09: the messy ridge was a sawtooth of folded leaf ends under a pole floating off them.
+    # Each ridge leaf drapes over the crest now, and the pole lies on the leaves (pressed in a little), tied down.
+    shack = dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), resolution=80, frame=True)
+    sh = build(**shack)
+    members = sh["field"].frame_extra
+    rpole = max((m for m in members if m["kind"] == "pole"), key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
+    ties = [m for m in members if m["kind"] == "tie"]
+    rp = rpole["r0"]
+    centres = tb["_th_to_world"](frame, (rpole["path"],))[0]
+    straw = sh["straw"][0]
+    gaps, above = [], 0
+    for P in centres[len(centres) // 8: -len(centres) // 8]:
+        under = [p[1] for p in straw if abs(p[0] - P[0]) < rp and abs(p[2] - P[2]) < 0.7 * rp]
+        if under:
+            gaps.append((P[1] - rp) - max(under))
+            above += max(under) > P[1] + rp
+    gaps.sort()
+    check("ridge: the pole lies on the cap leaves (no gap under it), none stick up past it, tied down",
+          gaps and gaps[len(gaps) // 2] < 0.15 * rp and gaps[-1] < 0.6 * rp and not above and len(ties) >= 6,
+          "gap under the pole: median %.2f, worst %.2f pole radii (%d points), %d leaves above it, %d tie turns" % (
+              gaps[len(gaps) // 2] / rp if gaps else -1, gaps[-1] / rp if gaps else -1, len(gaps), above, len(ties)))
 
     # the ends: leaves hang off the gable verges; a hipped end has no fringe
     edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
@@ -628,8 +649,14 @@ def run():
             elif style != "Sawn":
                 check("%s: light (6 sides), every member closed" % label, boundary_edges(fn) == 0 and
                       sizes <= {4, 6} and fn.numVertices < 60000, "%d verts, %s" % (fn.numVertices, sorted(sizes)))
-            else:
-                check("%s: hard-edged quads" % label, sizes == {4})
+            else:  # the ridge pole's ties are round vine: their two end caps the only non-quads
+                ties = 2 * sum(1 for m in tb["thatch_build"](tb["thatch_data"](root)["box_frame"],
+                                                             tb["thatch_data"](root))["field"].frame_extra
+                               if m["kind"] == "tie")
+                hexes = sum(1 for c in fn.getVertices()[0] if c == 6)
+                check("%s: hard-edged quads (and the round ties' end caps)" % label,
+                      sizes <= {4, 6} and hexes == ties, "faces %s, %d six-sided (%d tie caps)" % (
+                          sorted(sizes), hexes, ties))
     tb["update_thatch_roofs"]({root: {"frame_subd": True}})
     fr = tb["thatch_parts"](root)["frame"]
     check("Sub-D on: the frame mesh is named _GES", fr.endswith("_GES"), fr)

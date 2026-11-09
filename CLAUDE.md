@@ -376,19 +376,18 @@
       and `_th_flush_cut` moves every straw / sticks / underlay / frame
       point past the verge back onto its plane (all thatch styles).
       Overhang sets where the cut is. Metal ignores it.
-    - **Cap leaves** (`crest()`, the user 2026-11-04: on a messy roof the
-      caps stayed neat and clumped, leaves clipping through each other).
-      Laid in handfuls (2 to `cap_hand`, more when messy) along the crest:
-      each leaf `cap_step` above the one before (a hip's fan of headings
-      in fractions of a step), so neighbours always differ in height; a
-      reset at each new handful. The ridge's second side (`over=True`)
-      laps over the first near the crest (fades by a quarter of the leaf).
-      A leaf's top point moved onto the crest uses its own lift (with one
-      shared `top` they all met there). The tips come down half their
-      extra. Messiness: turn, length, twist, droop, width, broken leaves,
-      strays laid over a handful's top; spacing `cap_gap` (closer with
-      mess) keeps turned leaves covering. `pole()` sits at the cap's mean
-      height (plus the lap on the ridge), a little bedded in.
+    - **Cap leaves** (`crest()` on hips and the apex, `saddle()` on the
+      ridge; the user 2026-11-04: on a messy roof the caps stayed neat and
+      clumped, leaves clipping through each other). Laid in handfuls (2 to
+      `cap_hand`, more when messy) along the crest: each leaf `cap_step`
+      above the one before (a hip's fan of headings in fractions of a
+      step), so neighbours always differ in height; a reset at each new
+      handful. A leaf's top point moved onto the crest uses its own lift
+      (with one shared `top` they all met there). The tips come down half
+      their extra. Messiness: turn, length, twist, droop, width, broken
+      leaves, strays laid over a handful's top; spacing `cap_gap` (closer
+      with mess) keeps turned leaves covering. A hip's `pole()` sits at
+      the cap's mean height, a little bedded in.
     - **Ridge poles** (`ridge_poles`, the user 2026-11-02: the poles looked
       like they floated on the cap, and turning the cap off to lose them
       opened the ridge): `pole()` checks `ridge_poles`, not `sticks` or the
@@ -397,14 +396,39 @@
       `sticks`, which used to switch them.
       `THATCH_VERSION` 6 (both changes): older roofs show Upgrade, which
       rebuilds them with the new cap and the poles following their Sticks.
-    - **Cap fold** (the user 2026-11-05: the backs of the ridge cap leaves
+    - **Cap arch** (the user 2026-11-05: the backs of the ridge cap leaves
       clipped through each other; curl them down a lot). `emit(arch=)`
-      adds curl (edges down) to every cap leaf, `crest(fold=True)` (the
-      ridge) prepends three rows mirrored over the crest that sink towards
-      the far roof (`vrow`: V by arc length), so each top end tucks under
-      the far side's cap leaves. Arched leaves are narrower over the roof:
-      `cap_gap` is 0.85 of the old spacing. Less twist on cap leaves.
-      `THATCH_VERSION` 7 (with the verge droop).
+      adds curl (edges down) to every cap leaf. Arched leaves are narrower
+      over the roof: `cap_gap` is 0.85 of the old spacing. Less twist on
+      cap leaves. `THATCH_VERSION` 7 (with the verge droop).
+    - **Ridge saddle** (`saddle()`, the user 2026-11-09: the messy ridge
+      got really ugly). The 2026-11-05 fold (each side's leaves ending in
+      three stiff rows mirrored over the crest, the other side's tucked
+      under them) made a sawtooth of little tents along the crest, its
+      leaves had to pass through the far side's cap, and the pole floated:
+      the mesher's crook took it sideways off the crest, over the lower
+      slope. Now each ridge leaf is one leaf draped over: `leaf_line` down
+      the tip's side (Lt) and down the far side (Lb, the cut base end,
+      shorter), joined by a quadratic Bezier between the points `rf` down
+      each slope (control: where the two slopes' tangent lines meet),
+      lifted with sin^2 onto `top + 0.35 * extra` at the crest (the
+      handful lift bunched down, the pole pressing them; ordering kept).
+      `emit(flat=)` scales each row's curl: 0.15 over the bend (a leaf
+      bent over a ridge lies flat across), back to full 1.5 `rf` away:
+      no scalloped silhouette. Which side the tip goes, x jitter, turn and
+      both lengths are random (Messiness), so neither edge is a ruled
+      line; one set of leaves, no lap or interleave, so nothing clips.
+      V by arc length (`vrow`, kept through a dried leaf's crumple:
+      `_th_dry_leaf(coil=False)` used to reset it). Returns each leaf's
+      crest height; `pole(path, rest)` lies on them (Gaussian mean pulled
+      0.4 towards the local max, + 0.6 rp: pressed in a little), straight
+      in the mesher (`wob` 0, true radius `rs` 1.0) with its own gentle
+      crook (`frame_at`) so ties every ~0.18 span (4-6 turns of 0.12 rp,
+      at 0.92 rp + rt: tight on the six-sided pole's faces, ends on down
+      into the cap) stay tight. Ties go with the poles (`poles`: the
+      frame's mesh, else sticks), so Ridge and hip poles off still leaves
+      the sticks mesh exactly as it was. Members of kind "tie" get a ring
+      at every path point and no run-on ends. `THATCH_VERSION` 8.
     - **Sticks mesh** (the user: the horizontal tubes are wood, not leaf):
       sticks, rachis and (without a frame) poles are the roof's `sticks`
       part (`woodStick`, `THATCH_VERSION` 5), `F.stick_mesh` from

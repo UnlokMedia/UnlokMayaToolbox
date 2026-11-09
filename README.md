@@ -503,14 +503,17 @@ detail (just its shell, instant), get the shape right, then raise
        pole along the ridge and each hip (*Ridge and hip poles*, a switch of
        its own: off, the poles go and the cap leaves stay just as they
        were). The cap leaves are laid in handfuls, each leaf resting on the
-       one before and one side lapping over the other at the ridge, so they
-       never cut through each other; *Messiness* turns, lengthens, twists,
-       droops and breaks them, lays the odd stray leaf over the rest and
-       packs them closer so the cap stays covered. Each cap leaf is arched
-       (edges curled down), and on a ridge its top end folds over the crest
-       and curls down the far side, tucked under that side's leaves, so no
-       leaf ends stick up or show their backs along the ridge. The poles
-       rest in the top of the cap. Courses wrap continuously round hipped ends.
+       one before, so they never cut through each other; *Messiness* turns,
+       lengthens, twists, droops and breaks them, lays the odd stray leaf
+       over the rest and packs them closer so the cap stays covered. Each
+       cap leaf is arched (edges curled down). On a ridge each leaf is
+       draped right over the crest, its tip down one side and its cut end
+       down the other, in one smooth bend that lies flat across the top, so
+       the ridge is a clean, continuous line with no leaf ends sticking up;
+       which side the tip goes and how far each end reaches vary, so the
+       cap's edges are ragged. The ridge pole lies on the leaves, pressed in
+       a little, lashed down every so often with a few tight turns of vine.
+       Courses wrap continuously round hipped ends.
      - **Form:** **Cards** (one card per tile / frond for an alpha-mapped
        texture; each fills 0..1; caps stay leaflets), **Leaflets** (each
        leaflet a flat tapered strip) or **3D Leaflets** (creased down the

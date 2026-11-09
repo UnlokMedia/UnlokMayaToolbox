@@ -20186,7 +20186,7 @@ THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_FRAME_MATERIAL = "woodFrame"
 THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"),
                          ("sticks", "woodStick"))  # sticks: palm fronds' laths, rachis (and poles without a frame)
-THATCH_VERSION = 7  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
+THATCH_VERSION = 8  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
 THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it, or cut flush (against a wall)
@@ -21667,16 +21667,19 @@ def _th_fronds_mesh(F, G, s):
             state["capped"] = True
         return not state["capped"]
 
-    def emit(Q, Nn, half, twist, uk, stack, flip, crease, dry=None, vrow=None, arch=0.0):
+    def emit(Q, Nn, half, twist, uk, stack, flip, crease, dry=None, vrow=None, arch=0.0, flat=None):
         """One leaflet down centreline Q (normals Nn), its last row one tip point. Faces point along the normals.
         3D Leaflets with a thickness: a closed, thin solid (an underside mirrored on the same UVs, edges and the
         tip on a sliver of the strip at u 0.86..0.87). dry: (dryness, randoms, coil) for a dried leaflet.
-        vrow: V per row when Q isn't the usual seg + 1 rows; arch: extra curl, the edges down (cap leaves)."""
+        vrow: V per row when Q isn't the usual seg + 1 rows; arch: extra curl, the edges down (cap leaves);
+        flat: per row, how much of its curl it keeps (a leaf bent over the ridge lies flat across there)."""
         q0 = Q[0]
         c = _th_leaf_curl(s, (math.sin(q0[0] * 12.9898 + q0[1] * 78.233 + q0[2] * 37.719) * 43758.5453) % 1.0) + arch
         vv, roll, wr = vrow or vv_leaf, None, None
         if dry:
             Q, Nn, half, twist, vv, roll, wr = _th_dry_leaf(F, Q, Nn, half, twist, dry[0], dry[1], cross, dry[2])
+            if vrow and not dry[2]:  # no coil: the same rows, keep their V
+                vv = vrow
         n = len(Q)
         rows = n - 1
         wide = cross if c or roll or wr else (3 if crease else 2)  # a curled / dried leaf needs columns across it
@@ -21698,7 +21701,8 @@ def _th_fronds_mesh(F, G, s):
             du = h * uk * (-1.0 if flip else 1.0)
             vk = 1.0 - vv[k]
             kx = kink * vk * math.sin(6.2832 * (2.2 * vk + wr[3])) if wr else 0.0  # a crumpled midrib
-            for x, side, up in _th_curl_points(c + roll[k] if roll else c, h, wide):
+            ck = c * flat[k] if flat else c
+            for x, side, up in _th_curl_points(ck + roll[k] if roll else ck, h, wide):
                 up -= crease * h * (1.0 - abs(x))  # 3D: folded down the midrib
                 if wr:  # crumpled: the blade wavy, most at the edges
                     up += wr[0] * h * (0.35 + 0.65 * abs(x)) * (0.6 * math.sin(6.2832 * (2.3 * vk + wr[1]) + 2.1 * x) +
@@ -21760,15 +21764,18 @@ def _th_fronds_mesh(F, G, s):
                 wall((base + j, bb + j, bb + j + 1, base + j + 1), ((0.86, 0.99), (0.87, 0.99), (0.87, 1.0), (0.86, 1.0)))
         return True
 
-    def tube(Q, Nn, radius, stack, kind="stick"):
-        """A stick (a tile's spine), rachis or pole: handed to the member mesher at the end (caps, Sub-D,
-        a little natural variation, cut by blockers). Sticks and rachis stay in the stacked UVs' strip;
-        ridge / hip poles go to the frame's mesh when there is one."""
+    def tube(Q, Nn, radius, stack, kind="stick", wob=None):
+        """A stick (a tile's spine), rachis, pole or a tie round the ridge pole: handed to the member
+        mesher at the end (caps, Sub-D, a little natural variation, cut by blockers). Sticks and rachis
+        stay in the stacked UVs' strip; ridge / hip poles and their ties go to the frame's mesh when
+        there is one."""
         if len(Q) < 2:
             return False
+        if wob is None:
+            wob = 0.25 if kind != "pole" else 1.0
         m = {"path": list(Q), "nrm": list(Nn), "r0": radius[0], "r1": radius[-1], "kind": kind, "stack": stack,
-             "style": "Poles" if kind != "pole" else None, "wob": 0.25 if kind != "pole" else 1.0}
-        (poles if kind == "pole" else sticks_out).append(m)
+             "style": "Poles" if kind != "pole" else None, "wob": wob}
+        (poles if kind in ("pole", "tie") else sticks_out).append(m)
         return True
 
     def verge(q, n, d, ex0, limp):
@@ -22028,17 +22035,15 @@ def _th_fronds_mesh(F, G, s):
     # they are arched (narrower over the roof)
     cap_hand = 3 + int(round(1.5 * mess))  # most leaves in a handful
 
-    def crest(points, heads, L, key0, over=False, fold=False):
-        """Cap leaves from a crest (ridge, hip, apex) down both sides: points [(((x, z), ox, oz), crest
+    def crest(points, heads, L, key0):
+        """Cap leaves from a crest (a hip, the apex) down both sides: points [(((x, z), ox, oz), crest
         (x, z) or None)], each sending leaves along the plan headings heads (or its own: a callable);
         a leaf's top moves onto the crest itself, so the two sides meet. They start above the courses
         and come down towards their height, so they blend in. Laid in handfuls along the crest, each
         leaf on the one before (the fan of headings at a point too), so neighbours lap and never cut
-        through each other; over: this side laps over the other one at the crest. Messiness turns,
-        lengthens, twists, droops and breaks them, and lays the odd stray leaf over the rest. Every cap
-        leaf is arched (edges curled down, so they lie close instead of standing up and showing their
-        backs); fold (the ridge): its top end is folded over the crest and curls down the far side,
-        tucked under that side's own cap leaves, instead of ending in the air at the crest."""
+        through each other. Messiness turns, lengthens, twists, droops and breaks them, and lays the odd
+        stray leaf over the rest. Every cap leaf is arched (edges curled down, so they lie close instead
+        of standing up and showing their backs). The ridge has its own: saddle."""
         top = 2.0 * rs + 1.15 * rise
         hand, k_in = 0, 0
         for i, (base, on) in enumerate(points):
@@ -22059,11 +22064,9 @@ def _th_fronds_mesh(F, G, s):
                 # lifted by its place in the handful (and the fan), a stray over the lot
                 extra = cap_step * ((cap_hand + 0.5 + r[6]) if stray else (k_in + j / float(len(hds)) +
                                                                              0.25 * r[6]))
-                lap = cap_step * (cap_hand + 0.5) if over else 0.0
 
-                def layer(d, lift=top + extra, Lr=Lr, extra=extra, lap=lap):
-                    f = d / Lr
-                    return lift - (0.15 * rise + 0.5 * extra) * f + lap * max(0.0, 1.0 - 4.0 * f)
+                def layer(d, lift=top + extra, Lr=Lr, extra=extra):
+                    return lift - (0.15 * rise + 0.5 * extra) * d / Lr
                 line = leaf_line(base, Lr, 0.0, layer, droop * (0.06 + 0.08 * mess) * Lr * m_top * r[7], True, hd)
                 if line is None:
                     continue
@@ -22074,49 +22077,204 @@ def _th_fronds_mesh(F, G, s):
                     up = layer(0.0)
                     line[0][0] = _th_push(F, (pos[0] + nrm[0] * up + ox, pos[1] + nrm[1] * up,
                                               pos[2] + nrm[2] * up + oz), F.block_gap)[0]
-                Q, Nn = list(line[0]), list(line[1])
-                half = [p * 0.5 * lw * (1.0 - (0.1 + 0.08 * mess) * r[2]) for p in prof_tile]
                 dc = 0.5 * _th_leaf_dry(s, r[8]) if dried else 0.0
-                twist = [(r[3] - 0.5) * (0.2 + 0.3 * mess + dc) * v ** 1.5 for v in k_seg]
-                vrow = None
-                if fold and cell is not None:  # over the crest and down the far side: a few rows in front
-                    q0, n0 = Q[0], Nn[0]
-                    t0 = _rl_norm(_rl_sub(Q[1], q0))
-                    tl, nf = (-t0[0], t0[1], -t0[2]), (-n0[0], n0[1], -n0[2])  # mirrored over the crest
-                    lp, h0 = (0.12 + 0.05 * mess) * Lr * (0.8 + 0.4 * r[6]), layer(0.0)
-                    lip_q, lip_n = [], []
-                    for f in (1.0, 0.7, 0.4):  # its end first (the leaf runs from there over the top)
-                        q = _rl_sub(_rl_add(q0, _rl_mul(tl, lp * f)), _rl_mul(nf, 0.9 * h0 * f ** 1.4))
-                        lip_q.append(_th_push(F, q, F.block_gap)[0] if F.blockers else q)
-                        lip_n.append(_rl_norm(_rl_add(_rl_mul(nf, f), _rl_mul(n0, 1.0 - f)), n0))
-                    Q, Nn = lip_q + Q, lip_n + Nn
-                    half = [half[0] * w for w in (0.7, 0.8, 0.9)] + half
-                    twist = [0.0, 0.0, 0.0] + twist
-                    cum = [0.0]
-                    for k in range(1, len(Q)):
-                        cum.append(cum[-1] + _rl_len(_rl_sub(Q[k], Q[k - 1])))
-                    vrow = [1.0 - c_ / max(cum[-1], 1e-9) for c_ in cum]
-                emit(Q, Nn, half, twist, uk_tile, min(stacks - 1, int(r[4] * stacks)), mirror and r[5] < 0.5,
-                     0.25 if three else 0.0, (dc, _rand12(seed, key0 + 1, i, j), False) if dc else None,
-                     vrow, 0.3 + 0.1 * mess)
+                emit(line[0], line[1], [p * 0.5 * lw * (1.0 - (0.1 + 0.08 * mess) * r[2]) for p in prof_tile],
+                     [(r[3] - 0.5) * (0.2 + 0.3 * mess + dc) * v ** 1.5 for v in k_seg], uk_tile,
+                     min(stacks - 1, int(r[4] * stacks)), mirror and r[5] < 0.5, 0.25 if three else 0.0,
+                     (dc, _rand12(seed, key0 + 1, i, j), False) if dc else None, None, 0.3 + 0.1 * mess)
             k_in += 1
 
-    def pole(path, lap=False):
-        """A pole along a crest, bedded into the top of the cap leaves (lap: the ridge, where one side's
-        leaves lap over the other's): path [(x, z)]."""
-        if not ridge_poles or len(path) < 2:
-            return
-        Q, Nn = [], []
-        for x, z in path:
-            cell = _th_cell(G, F, x, z)
+    def saddle(lo, hi):
+        """The ridge's cap (the user 2026-11-09: the ridge got really ugly, a sawtooth of folded leaf
+        ends under a pole floating off them). Every leaf is draped right over the crest, its tip down one
+        side and its cut base end down the other, bent round in one smooth saddle (a Bezier between the
+        two slopes, lifted onto the leaf's height at the crest), and flat across where it bends, as a
+        leaf bent over a ridge lies (arched again down the slopes). Laid in handfuls along the ridge,
+        each leaf on the one before; at the crest they're bunched down (only a third of that lift), the
+        pole pressing them. Jittered along the ridge, turned, which side the tip goes random, both ends'
+        lengths varied (more with Messiness), so neither side's edge is a ruled line. A broken leaf is
+        short, a stray lies over the lot. Returns the crest height of each leaf [(x, height off the
+        roof)] for the pole to rest on."""
+        top = 2.0 * rs + 1.15 * rise
+        zc = G["cell"]  # just off the crest, so the walk knows which side is down
+        n = max(2, int(math.ceil((hi - lo) / cap_gap)))
+        jit = 0.3 + 0.5 * min(1.0, mess)
+        rest = []
+        hand, k_in = 0, 0
+        for i in range(n):
+            if state["capped"]:
+                break
+            if k_in >= hand:  # a new handful: 2 or more leaves, more when messy
+                hand, k_in = min(cap_hand, 2 + int(_rand12(seed, 8850, i, 0)[0] * (2.0 + 1.5 * mess))), 0
+            r = _rand12(seed, 8801, i, 0)
+            r2 = _rand12(seed, 8802, i, 0)
+            stray = r[9] < 0.1 * mess
+            extra = cap_step * ((cap_hand + 0.5 + r[6]) if stray else (k_in + 0.25 * r[6]))
+            k_in += 1
+            x = lo + (hi - lo) * (i + 0.5 + (r2[0] - 0.5) * jit) / n
+            xc = min(max(x, F.x0 + 1e-6), F.x1 - 1e-6)
+            ox = x - xc  # past a gable verge: carried out over the edge
+            cell = _th_cell(G, F, xc, 0.0)
             if cell is None:
                 continue
+            pos_c, n_c = _th_sample(G, *cell)[:2]
+            a = (r[1] - 0.5) * math.radians(6.0 + 10.0 * mess + (30.0 if stray else 0.0))
+            side = 1.0 if r[5] < 0.5 else -1.0  # the side its tip goes down
+            hd = (math.sin(a), side * math.cos(a))
+            Lt = Lc * (0.85 + 0.3 * r[0] + (r[10] - 0.5) * 0.45 * mess)
+            if r[11] < 0.05 * mess + 0.08 * dried:  # broken off
+                Lt *= 0.5 + 0.3 * r[2]
+            Lb = Lc * (0.4 + 0.35 * r2[1]) * (1.0 + (r2[2] - 0.5) * 0.5 * mess)
+            lift, fall = top + extra, 0.15 * rise + 0.5 * extra
+            near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, lambda d: lift - fall * d / Lt,
+                             droop * (0.06 + 0.08 * mess) * Lt * m_top * r[7], True, hd)
+            if near is None:
+                continue
+            far = leaf_line(((xc, -side * zc), ox, 0.0), Lb, 0.0, lambda d: lift - fall * d / Lb, 0.0, True,
+                            (-hd[0], -hd[1]))
+            Qn, Nn_ = near
+            Qf, Nf = far if far else ([], [])
+            rf = clamp(1.6 * lift, 0.05 * Lc, 0.2 * Lc)  # how far down each side the bend starts
+
+            def cut(Q):  # the first point at least rf down from the crest
+                acc = 0.0
+                for k in range(1, len(Q)):
+                    acc += _rl_len(_rl_sub(Q[k], Q[k - 1]))
+                    if acc >= rf:
+                        return k
+                return len(Q) - 1
+            ka = cut(Qn)
+            mid, mid_n, apex = [], [], None
+            if len(Qf) > 1:
+                kb = cut(Qf)
+                A, B = Qn[ka], Qf[kb]
+                ta = _rl_norm(_rl_sub(Qn[ka - 1], A), n_c)  # up each slope, towards the crest
+                tb = _rl_norm(_rl_sub(Qf[kb - 1], B), n_c)
+                # the corner the two slopes' lines make over the crest (closest approach)
+                w0 = _rl_sub(A, B)
+                bb, dd, ee = _rl_dot(ta, tb), _rl_dot(ta, w0), _rl_dot(tb, w0)
+                den = 1.0 - bb * bb
+                if den > 1e-4:
+                    sa, sb = (bb * ee - dd) / den, (ee - bb * dd) / den
+                    if 0.0 < sa < 4.0 * rf and 0.0 < sb < 4.0 * rf:
+                        P = _rl_lerp(_rl_add(A, _rl_mul(ta, sa)), _rl_add(B, _rl_mul(tb, sb)), 0.5)
+                    else:
+                        P = _rl_lerp(A, B, 0.5)
+                else:
+                    P = _rl_lerp(A, B, 0.5)
+                C = (pos_c[0] + ox, pos_c[1], pos_c[2])
+
+                def bez(t):
+                    return _rl_add(_rl_add(_rl_mul(B, (1.0 - t) ** 2), _rl_mul(P, 2.0 * t * (1.0 - t))),
+                                   _rl_mul(A, t * t))
+                # onto its height at the crest: bunched down there (a third of its handful lift)
+                need = _rl_dot(_rl_sub(_rl_add(C, _rl_mul(n_c, top + 0.35 * extra)), bez(0.5)), n_c)
+                m_b = 6
+                for j in range(1, m_b):
+                    t = j / float(m_b)
+                    q = _rl_add(bez(t), _rl_mul(n_c, need * math.sin(math.pi * t) ** 2))
+                    mid.append(_th_push(F, q, F.block_gap)[0] if F.blockers else q)
+                    mid_n.append(_rl_norm(_rl_lerp(Nf[kb], Nn_[ka], t), n_c))
+                apex = _rl_dot(_rl_sub(mid[(m_b - 1) // 2], C), n_c)
+                Q = list(reversed(Qf[kb:])) + mid + Qn[ka:]
+                Nn = list(reversed(Nf[kb:])) + mid_n + Nn_[ka:]
+                n_back = len(Qf) - kb + len(mid)  # rows before the near side's
+            else:  # no far side (off the roof): it ends on the crest
+                Q, Nn, n_back = Qn, Nn_, 0
+                apex = _rl_dot(_rl_sub(Qn[0], (pos_c[0] + ox, pos_c[1], pos_c[2])), n_c)
+            rest.append((xc, apex))
+            cum = [0.0]
+            for k in range(1, len(Q)):
+                cum.append(cum[-1] + _rl_len(_rl_sub(Q[k], Q[k - 1])))
+            total = max(cum[-1], 1e-9)
+            s_apex = cum[max(0, n_back - len(mid) + (len(mid) - 1) // 2)] if mid else 0.0
+            ws = 0.5 * lw * (1.0 - (0.1 + 0.08 * mess) * r[2])
+            half, twist, flat = [], [], []
+            tw = (r[3] - 0.5) * (0.2 + 0.3 * mess)
+            for k, c_ in enumerate(cum):
+                v = c_ / total  # from the cut base end (0) to the tip (1)
+                half.append(ws * ((0.82 + 0.18 * min(1.0, v / 0.08)) if v <= 0.6 else ((1.0 - v) / 0.4) ** 1.1))
+                dn = max(0.0, c_ - s_apex)  # down the tip's side
+                twist.append(tw * min(1.0, dn / Lt) ** 1.5 if k >= n_back else 0.0)
+                flat.append(0.15 + 0.85 * _rl_smooth01(abs(c_ - s_apex) / (1.5 * rf)))
+            dc = 0.35 * _th_leaf_dry(s, r[8]) if dried else 0.0
+            emit(Q, Nn, half, twist, uk_tile, min(stacks - 1, int(r[4] * stacks)), mirror and r[5] < 0.5,
+                 0.25 if three else 0.0, (dc, _rand12(seed, 8803, i, 0), False) if dc else None,
+                 [1.0 - c_ / total for c_ in cum], 0.3 + 0.1 * mess, flat)
+        return rest
+
+    def pole(path, rest=None):
+        """A pole along a crest, bedded into the top of the cap leaves: path [(x, z)]. rest (the ridge):
+        the leaves' crest heights [(x, height)] it lies on, a little pressed in, with a tie (two turns of
+        vine) round it every so often, down into the leaves either side; elsewhere (hips) it sits at the
+        leaves' mean height."""
+        if not ridge_poles or len(path) < 2:
+            return
+        sig = 1.5 * cap_gap
+
+        def level(x):  # the leaves under it: their mean, pulled up towards the highest
+            ws = [(math.exp(-((x - x_) / sig) ** 2), h_) for x_, h_ in rest if abs(x - x_) < 3.0 * sig]
+            if not ws:
+                return None
+            tot = sum(w for w, _ in ws)
+            mean = sum(w * h_ for w, h_ in ws) / tot
+            return mean + 0.4 * (max(h_ for _, h_ in ws) - mean)
+        def frame_at(x, z, lv):  # (centre, normal, across) of the pole over (x, z)
+            cell = _th_cell(G, F, x, z)
+            if cell is None:
+                return None
             pos, nrm = _th_sample(G, *cell)[:2]
-            off = (2.0 * rs + 1.15 * rise + 0.7 * rp +
-                   cap_step * (0.5 * (cap_hand - 1) + (cap_hand + 0.5 if lap else 0.0)))
-            Q.append((pos[0] + nrm[0] * off, pos[1] + nrm[1] * off, pos[2] + nrm[2] * off))
-            Nn.append(nrm)
-        tube(Q, Nn, [rp] * len(Q), 0, "pole")
+            ac = _rl_norm(_rl_cross(nrm, _rl_norm(_rl_perp(nrm, (1.0, 0.0, 0.0)), (1.0, 0.0, 0.0))), (0.0, 0.0, 1.0))
+            if lv is None:  # a hip's: at the leaves' mean height
+                off = 2.0 * rs + 1.15 * rise + 0.7 * rp + cap_step * 0.5 * (cap_hand - 1)
+                return _rl_add(pos, _rl_mul(nrm, off)), nrm, ac
+            # the ridge's: on its leaves, a little pressed in, a gentle crook sideways (here, not the mesher's
+            # wobble, so its ties stay tight round it)
+            crook = 0.3 * rp * _th_noise(x / (0.22 * span), 3.1, seed + 8870, 0)
+            return _rl_add(_rl_add(pos, _rl_mul(nrm, lv + 0.6 * rp)), _rl_mul(ac, crook)), nrm, ac
+        Q, Nn = [], []
+        for x, z in path:
+            fr = frame_at(x, z, level(x) if rest else None)
+            if fr is not None:
+                Q.append(fr[0])
+                Nn.append(fr[1])
+        if tube(Q, Nn, [rp] * len(Q), 0, "pole", 0.0 if rest else None) and rest:
+            poles[-1]["rs"] = 1.0  # its true radius: the ties are wound tight round it
+        if not rest or len(Q) < 2:
+            return
+        rt = 0.12 * rp  # ties round it: a band of tight turns of vine / rattan, down into the cap either side
+        x_lo, x_hi = Q[0][0], Q[-1][0]
+        d, it = x_lo + 0.12 * span * (0.5 + 0.5 * _rand12(seed, 8860, 0, 0)[0]), 0
+        while d < x_hi - 0.06 * span and not state["capped"]:
+            r = _rand12(seed, 8861, it, 0)
+            it += 1
+            lv = level(d)
+            fr = frame_at(d, 0.0, lv) if lv is not None else None
+            if fr is not None:
+                c, nrm, ac = fr
+                t_ = _rl_norm(_rl_cross(ac, nrm), (1.0, 0.0, 0.0))  # along the ridge
+                rl = 0.92 * rp + rt  # tight on its (six-sided) faces, biting in at its edges
+                turns = 4 + int(r[0] * 3.0)
+                for turn in range(turns):
+                    sh = (turn - 0.5 * (turns - 1)) * 2.05 * rt
+                    lean = (0.5 + 0.5 * r[2]) * rt  # each turn runs on a little along the ridge
+                    Qt, Nt = [], []
+                    for j in range(13):
+                        th = math.radians(-130.0 + 260.0 * j / 12.0)
+                        q = _rl_add(c, _rl_add(_rl_mul(nrm, rl * math.cos(th)), _rl_mul(ac, rl * math.sin(th))))
+                        Qt.append(_rl_add(q, _rl_mul(t_, sh + lean * math.sin(th))))
+                        Nt.append(_rl_norm(_rl_sub(Qt[-1], c), nrm))
+                    for end in (0, 1):  # each end on down into the leaves, hugging the pole's sides
+                        q = Qt[-1] if end else Qt[0]
+                        q2 = _rl_add(_rl_sub(q, _rl_mul(nrm, 1.1 * rp)), _rl_mul(ac, (-0.15 if end else 0.15) * rp))
+                        if end:
+                            Qt.append(q2)
+                            Nt.append(Nt[-1])
+                        else:
+                            Qt.insert(0, q2)
+                            Nt.insert(0, Nt[0])
+                    tube(Qt, Nt, [rt] * len(Qt), min(stacks - 1, int(r[3] * stacks)), "tie", 0.0)
+            d += 0.18 * span * (0.75 + 0.5 * r[4])
 
     # ---- the under layer: tiles in even courses from the eaves up (restarting at each level), every other
     # course shifted half a tile
@@ -22153,18 +22311,10 @@ def _th_fronds_mesh(F, G, s):
             hi = F.ends[0][3] if F.ends[0] else F.x1 + (0.0 if F.flush[0] else (0.05 + 0.15 * hang) * tile)
             n = max(2, int(math.ceil((hi - lo) / cap_gap)))
             xs = [lo + (hi - lo) * (i + 0.5) / n for i in range(n)]
-
-            zc = G["cell"]  # just off the crest, so the walk knows which side is down
             state["anchors"] = [q for q in (on_roof(min(F.x1, F.x0 + 0.3 * tile), 0.0),
                                             on_roof(max(F.x0, F.x1 - 0.3 * tile), 0.0)) if q]
-
-            def on_ridge(x, side):  # each side's leaves start a little over the crest: the two overlap
-                xc = min(max(x, F.x0 + 1e-6), F.x1 - 1e-6)
-                return ((xc, side * zc), x - xc, 0.0), (xc, -side * zc)
-            if F.shape == "Ridge":
-                crest([on_ridge(x, 1.0) for x in xs], [(0.0, 1.0)], Lc, 8801, fold=True)
-                crest([on_ridge(x, -1.0) for x in xs], [(0.0, -1.0)], Lc, 8802, over=True, fold=True)
-            pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [lo] + xs + [hi]], F.shape == "Ridge")
+            rest = saddle(lo, hi) if F.shape == "Ridge" else None
+            pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [lo] + xs + [hi]], rest)
             if F.shape == "Ridge":
                 for e, end in enumerate(F.ends):
                     if end is None or state["capped"]:
@@ -22594,7 +22744,8 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
         closed = len(path) > 3 and _rl_len(_rl_sub(path[-1], path[0])) < 1e-6
         if not closed:  # ends run on past their last support by a random amount (rafters only at the eave:
             back = min(len(path) - 1, 3)  # their tops meet the ridge beam, run on they came up through the cap)
-            for end in ((1,) if m["kind"] in ("rafter", "jack", "hip") else (() if m["kind"] in ("rachis", "fascia") else (0, 1))):
+            for end in ((1,) if m["kind"] in ("rafter", "jack", "hip") else
+                        (() if m["kind"] in ("rachis", "fascia", "tie") else (0, 1))):
                 a, b = (path[back], path[0]) if end == 0 else (path[-1 - back], path[-1])
                 run = (0.01 + (0.015 + 0.03 * wob) * r[end]) * span * (0.5 if m["kind"] == "batten" else 1.0)
                 q = _rl_add(b, _rl_mul(_rl_norm(_rl_sub(b, a)), run))
@@ -22611,6 +22762,8 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
             continue
         n_st = max(1, int(math.ceil(length / max(4.0 * m["r0"], 0.06 * span))))
         stations = [length * i / float(n_st) for i in range(n_st + 1)]
+        if m["kind"] == "tie":  # a tight loop round a pole: a ring at every point of it
+            stations = list(acc)
         nodes = []
         if style == "Bamboo":
             d = node_len * (0.3 + 0.7 * r[2])
@@ -22626,7 +22779,7 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
         stations = sorted(set(round(v, 7) for v in stations if 0.0 <= v <= length))
         prof = profile(m["kind"], style)
         k = len(prof)
-        rs = 1.0 + (r[3] - 0.5) * 0.2  # each member a little thicker or thinner
+        rs = m.get("rs") or 1.0 + (r[3] - 0.5) * 0.2  # each member a little thicker or thinner (a tied pole: as given)
         oval = (r[6] - 0.5) * 0.12 if style == "Poles" else 0.0
         rings = []  # per station: points round it, centre, axes, radius
         for sv in stations:
