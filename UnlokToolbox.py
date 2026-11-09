@@ -22112,7 +22112,9 @@ def _th_fronds_mesh(F, G, s):
                 poles[-1]["run"] = False  # ends where the bundles end (it ran on into the next face's leaves)
 
     def tie_round(base, r):
-        """A lashing (3-4 turns of vine) round a pole and the neck of the bundle on it."""
+        """A lashing (2-3 turns of vine) round a pole and the neck of the bundle on it. Light (9 points a
+        turn, 4 sides; 6 smoothed): one per bundle, thousands on a roof, most under the next course (3-4
+        turns of 15 points, 6-8 sides was more frame than the whole roof's leaves, 1.5 s of a 3.3 s build)."""
         (x, z), ox, oz = base
         cell = _th_cell(G, F, x, z)
         if cell is None:
@@ -22125,16 +22127,17 @@ def _th_fronds_mesh(F, G, s):
         rt = 0.13 * rb_
         rn, ra = 1.06 * rb_ + 0.5 * neck + rt, 1.06 * rb_ + rt
         cc = _rl_add(c, _rl_mul(nrm, 0.5 * neck))
-        turns = 3 + int(r[6] * 2.0)
+        turns = 2 + int(r[6] * 2.0)
         for turn in range(turns):
             sh = (turn - 0.5 * (turns - 1)) * 2.1 * rt
             Qt, Nt = [], []
-            for j in range(15):
-                th = math.radians(-160.0 + 320.0 * j / 14.0)
+            for j in range(9):
+                th = math.radians(-160.0 + 320.0 * j / 8.0)
                 q = _rl_add(cc, _rl_add(_rl_mul(nrm, rn * math.cos(th)), _rl_mul(ac, ra * math.sin(th))))
                 Qt.append(_rl_add(q, _rl_mul(t_, sh + 0.6 * rt * math.sin(0.5 * th))))
                 Nt.append(_rl_norm(_rl_sub(Qt[-1], cc), nrm))
             tube(Qt, Nt, [rt] * len(Qt), min(stacks - 1, int(r[7] * stacks)), "tie", 0.0)
+            poles[-1]["sides"] = 4
 
     def frond_at(point_at, start, width, key, lscale):
         """One loose half frond of the top layer: a rachis along the course, thin leaflets leaning off it."""
@@ -23028,10 +23031,10 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
     pts, counts, conn, us, vs, uvi, shells = [], [], [], [], [], [], []
     node_len = 0.35 * span / 4.0  # bamboo's nodes: ~35 cm on a 4 m span
 
-    def profile(kind, style):
+    def profile(kind, style, sides=None):
         """The section as a closed loop of (across, up) offsets, counter-clockwise, its seam at the top."""
-        if style != "Sawn":
-            k = 8 if subd else 6
+        if style != "Sawn" or sides:
+            k = (sides + 2 if subd else sides) if sides else (8 if subd else 6)
             return [(math.cos(math.pi / 2.0 + 2.0 * math.pi * j / k), math.sin(math.pi / 2.0 + 2.0 * math.pi * j / k))
                     for j in range(k)]
         wk, hk = (1.5, 0.75) if kind == "batten" else ((0.12, 1.0) if kind == "fascia" else (0.85, 1.3))
@@ -23099,7 +23102,7 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
             hold = min(0.2 * length, 0.25 * m["r0"])
             stations += [hold, length - hold]
         stations = sorted(set(round(v, 7) for v in stations if 0.0 <= v <= length))
-        prof = profile(m["kind"], style)
+        prof = profile(m["kind"], style, m.get("sides"))
         k = len(prof)
         rs = m.get("rs") or 1.0 + (r[3] - 0.5) * 0.2  # each member a little thicker or thinner (a tied pole: as given)
         oval = (r[6] - 0.5) * 0.12 if style == "Poles" else 0.0
@@ -29973,8 +29976,7 @@ class _MiSurface(object):
         labels = _mi_cache_get(_MI_PIECE_LABELS, key)
         if labels is None:
             labels = _MI_PIECE_LABELS[key] = _mi_piece_labels(self.items[k][1])
-            while len(_MI_PIECE_LABELS) > 8:
-                _MI_PIECE_LABELS.popitem(last=False)
+            _mi_trim(_MI_PIECE_LABELS, 8)
         return (k, labels[vertex]) if vertex < len(labels) else None
 
     def ray(self, p, d, far, piece=False):
@@ -30058,6 +30060,63 @@ def _mi_cache_get(cache, key):
     return hit
 
 
+_MI_ROOM = {"cap": 0, "groups": {}}  # how many per-mesh entries the caches keep: see _mi_room
+
+
+def _mi_room(root, count):
+    """Note that a scatter group grows on count meshes, so the per-mesh
+    caches (triangles, rest surfaces, topology...) hold all of them. They
+    used to keep 24: a group on more meshes than that (a roof of 44 planks,
+    any shack) pushed its own entries out as it went round them, and every
+    edit rebuilt every mesh's data. Three per mesh: rest surfaces differ
+    by layer settings. Groups that are gone stop counting."""
+    groups = _MI_ROOM["groups"]
+    groups[root] = int(count)
+    for r in [r for r in groups if r != root and not cmds.objExists(r)]:
+        del groups[r]
+    _MI_ROOM["cap"] = min(4096, 3 * sum(groups.values()) + 8)
+
+
+def _mi_trim(cache, least=24):
+    """Drop a per-mesh cache's least recently used entries beyond its room."""
+    cap = max(least, _MI_ROOM["cap"])
+    while len(cache) > cap:
+        cache.popitem(last=False)
+
+
+_MI_SURFS = collections.OrderedDict()  # mesh states -> (_MiSurface, its meshes' handles)
+
+
+def _mi_surface(nodes):
+    """A _MiSurface of the meshes, the one made last time while they're all
+    unchanged: making one builds an intersector per mesh, and every slider
+    tick asked for it again. The handles tell a mesh that's gone (a new
+    scene with the same names) from the one the queries were made on."""
+    try:
+        key = tuple(_mi_mesh_key(n) for n in nodes)
+    except Exception:  # a node with no mesh: _MiSurface skips those itself
+        return _MiSurface(nodes)
+    hit = _mi_cache_get(_MI_SURFS, key)
+    if hit is not None and all(h.isValid() and h.isAlive() for h in hit[1]):
+        return hit[0]
+    surf = _MiSurface(nodes)
+    _MI_SURFS[key] = (surf, [om.MObjectHandle(it[1].object()) for it in surf.items])
+    _MI_SURFS.move_to_end(key)
+    while len(_MI_SURFS) > 4:
+        _MI_SURFS.popitem(last=False)
+    return surf
+
+
+def mi_clear_caches():
+    """Forget everything the moss / scatter builds keep between edits, so
+    the next build reads every mesh again (Regrow: a mesh reshaped without
+    its vertex count or bounding box changing looks unchanged to them)."""
+    for name, cache in list(globals().items()):
+        if (name.startswith("_MI_") or name in ("_SC_BUILT", "_SC_PAINT_TRIS")) and \
+                isinstance(cache, collections.OrderedDict):
+            cache.clear()
+
+
 def _mi_mesh_key(node):
     shape = _log_shape(node)
     dag = get_dag_path(shape)
@@ -30089,8 +30148,7 @@ def _mi_triangles(node):
         acc.append(total)
         tris.append((a, b, c, _rl_norm(cr), face_of[k // 3]))
     _MI_TRIS[key] = (acc, tris)
-    while len(_MI_TRIS) > 24:
-        _MI_TRIS.popitem(last=False)
+    _mi_trim(_MI_TRIS)
     return acc, tris
 
 
@@ -30179,8 +30237,7 @@ def _mi_pieces(node):
             b[5] = z
     out = [tuple(b) for b in boxes.values()]
     _MI_PIECES[key] = out
-    while len(_MI_PIECES) > 24:
-        _MI_PIECES.popitem(last=False)
+    _mi_trim(_MI_PIECES)
     return out
 
 
@@ -30658,8 +30715,7 @@ def _mi_limit(node, levels=1):
     LV, LE, LF = _mi_render_lift(LV, N, LE, LF, V, E, F, faces, 1.0 if levels > 1 else 0.25)
     out = (LV, N, LE, LF, faces, parent)
     _MI_LIMIT[key] = out
-    while len(_MI_LIMIT) > 24:
-        _MI_LIMIT.popitem(last=False)
+    _mi_trim(_MI_LIMIT)
     return out
 
 
@@ -31116,8 +31172,7 @@ def _mi_rest(node, smooth, bridge, cap):
             tris = _mi_rest_tris(P, faces, per, tids)
     if not tris or (not smooth and not lifted):
         _MI_REST[key] = None
-        while len(_MI_REST) > 24:
-            _MI_REST.popitem(last=False)
+        _mi_trim(_MI_REST)
         return None
     # corner normals: smooth = the limit's (re-measured where relief was filled); faceted = _moss_topology's rule
     at_vert, edges = {}, {}
@@ -31279,8 +31334,7 @@ def _mi_rest(node, smooth, bridge, cap):
     spec = ("smooth" if smooth else "faceted", key[2], key[3], len(lifted))
     rest = _MiRest(P, tris, corners, nbrs, curves, item, (acc, wt), spec)
     _MI_REST[key] = rest
-    while len(_MI_REST) > 24:
-        _MI_REST.popitem(last=False)
+    _mi_trim(_MI_REST)
     return rest
 
 
@@ -32043,8 +32097,7 @@ def _moss_topology(node):
         nbrs.append(nb)
     out = (P, tris, corners, nbrs)
     _MI_MOSS_TOPO[key] = out
-    while len(_MI_MOSS_TOPO) > 24:
-        _MI_MOSS_TOPO.popitem(last=False)
+    _mi_trim(_MI_MOSS_TOPO)
     return out
 
 
@@ -33964,8 +34017,7 @@ def _mi_mat_base(surf, node, smooth):
         quads, par = _mi_mat_quadify(P, _mi_mesh_faces(fn))
     out = (P, quads, par)
     _MI_MAT_BASE[key] = out
-    while len(_MI_MAT_BASE) > 24:
-        _MI_MAT_BASE.popitem(last=False)
+    _mi_trim(_MI_MAT_BASE)
     return out
 
 
@@ -38147,8 +38199,7 @@ def _sc_paint_tris(node):
                     grid.setdefault((i, j, k), []).append(ti)
     hit = (cell, grid, big, tris)
     _SC_PAINT_TRIS[key] = hit
-    while len(_SC_PAINT_TRIS) > 24:
-        _SC_PAINT_TRIS.popitem(last=False)
+    _mi_trim(_SC_PAINT_TRIS)
     return hit
 
 
@@ -38657,7 +38708,8 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     combined, order = {}, []
     if not meshes:
         return combined, report, meshes
-    surf = surf or _MiSurface(meshes)
+    surf = surf or _mi_surface(meshes)
+    _mi_room(root, len(surf.nodes))
     skey = tuple(_mi_mesh_key(x) for x in surf.nodes)
     report["skey"] = skey
     grown = _sc_grown_layers(root, data, skey) if readback else {}
@@ -38676,7 +38728,8 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
         if not layer.get("on", True):
             continue
         on_moss = typ in SC_DEBRIS_ITEMS and bool(sc_settings(layer).get("on_moss")) and bool(rest)
-        key = (root, lid, json.dumps(layer, sort_keys=True), skey)
+        # (not its name: renaming a layer grew it again)
+        key = (root, lid, json.dumps(dict((k, v) for k, v in layer.items() if k != "name"), sort_keys=True), skey)
         if on_moss:  # leaves that rest on the moss before them rebuild when it changes
             key = key + (tuple((len(m[0]), len(m[1]), tuple(m[0][len(m[0]) // 2]) if m[0] else (), lift)
                                for m, lift in rest),)
@@ -42452,6 +42505,7 @@ class ScatterPanel(QtWidgets.QWidget):
             return
         t0 = time.time()
         rep = None
+        mi_clear_caches()  # read every surface again: one reshaped inside its old bounding box looked unchanged
         for root in roots:
             rep = sc_regrow(root, readback=False, budget=False)
             if rep.get("stopped"):

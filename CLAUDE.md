@@ -502,8 +502,10 @@
       folded back up the slope over the pole, `layer_b`), `course_pole`
       (a pole at rb_ along the course, split at > 25 deg turns, at most
       0.06 ll past a gable verge, `run` False so the mesher doesn't run it
-      on), `tie_round` (3-4 vine turns round pole + neck, kind "tie", in
-      `poles`). Bundle spacing `w (0.85 - 0.45 overlap)`: wider (1.0 -)
+      on), `tie_round` (2-3 vine turns round pole + neck, kind "tie", in
+      `poles`; light: 9 points a turn, `sides` 4 -> `profile`: thousands
+      of them, and 3-4 turns of 15 points, 6-8 sides made 246k frame verts
+      and 1.5 s of a 3.3 s build, now 77k and 2.5 s). Bundle spacing `w (0.85 - 0.45 overlap)`: wider (1.0 -)
       let 8-10 of 961 sky rays through. No rachis over bundles.
     - **Shingles' stems:** only top fronds with `r[9] < 0.33` get a rachis
       (and `sticks` for their leaflets' bed); one on every course read as
