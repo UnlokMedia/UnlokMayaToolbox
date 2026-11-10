@@ -20189,7 +20189,7 @@ THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_FRAME_MATERIAL = "woodFrame"
 THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"),
                          ("sticks", "woodStick"))  # sticks: palm fronds' laths, rachis (and poles without a frame)
-THATCH_VERSION = 10  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
+THATCH_VERSION = 11  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
 THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it, or cut flush (against a wall)
@@ -20272,6 +20272,7 @@ THATCH_DEFAULTS = {
     "frond_form": "Leaflets", "frond_layout": "Shingles", "bundle_width": 0.06, "frond_width": 0.25, "leaf_length": 0.16, "leaf_width": 0.022, "slant": 0.35,
     "droop": 0.5, "neat": 0.8, "top_layer": 0.4, "end_reach": 0.3, "end_fronds": 0.5, "ridge_fronds": True,
     "top_leaf_width": 0.011, "overlap": 0.35, "edge_hang": 1.0, "sticks": True, "ridge_poles": True,
+    "hip_poles": False, "lashings": False,
     "leaf_thickness": 0.0006,
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
@@ -20287,7 +20288,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "ridge_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "ridge_poles", "hip_poles", "lashings", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
@@ -20351,17 +20352,19 @@ THATCH_PRESETS = {
     "Palm: nipa shingles (neat)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.15, "sag": 0.1,
         "lumps": 0.2, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
-        "frond_form": "Leaflets", "density": 1.2, "leaf_length": 0.14, "leaf_width": 0.02, "top_leaf_width": 0.01,
+        "frond_form": "Leaflets", "density": 1.4, "leaf_length": 0.14, "leaf_width": 0.02, "top_leaf_width": 0.01,
         "overlap": 0.35, "frond_width": 0.22, "slant": 0.15, "droop": 0.3, "neat": 0.95, "top_layer": 0.15,
         "mess": 0.3, "lift": 0.4, "bend": 0.2, "edge_hang": 1.0, "end_reach": 0.15, "end_fronds": 0.3,
-        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.25, "underlay": False},
+        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.25, "underlay": False,
+        "battens": "Every course", "rafter_spacing": 0.11},
     "Palm: palapa (hipped, messy top)": {
         "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "thickness": 0.04, "softness": 0.45, "sag": 0.15,
         "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
-        "frond_form": "Leaflets", "density": 1.0, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
+        "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
         "overlap": 0.3, "frond_width": 0.25, "slant": 0.4, "droop": 0.7, "neat": 0.75, "top_layer": 0.8,
         "mess": 0.9, "lift": 0.5, "bend": 0.3, "edge_hang": 1.2, "end_reach": 0.4, "end_fronds": 0.5,
-        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.4, "dried": 0.35, "underlay": False},
+        "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.4, "dried": 0.35, "underlay": False,
+        "battens": "Every course", "rafter_spacing": 0.12},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
         "lumps": 0.6, "warp": 0.5, "ridge_sag": 0.5, "ragged": 0.4, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -20369,7 +20372,8 @@ THATCH_PRESETS = {
         "leaf_length": 0.18, "leaf_width": 0.024, "top_leaf_width": 0.012, "overlap": 0.25, "frond_width": 0.25,
         "slant": 0.45, "droop": 1.0, "neat": 0.5, "top_layer": 1.0, "mess": 1.3, "lift": 0.6, "bend": 0.4,
         "edge_hang": 1.4, "end_reach": 0.5, "end_fronds": 1.2, "ridge_fronds": True, "sticks": True,
-        "segments": 6, "curl": 0.5, "dried": 0.8, "underlay": False},
+        "segments": 6, "curl": 0.5, "dried": 0.8, "underlay": False, "frame_style": "Poles",
+        "battens": "Every course", "rafter_spacing": 0.13},
     "Palm: jungle hut (tied bundles)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.25,
         "lumps": 0.5, "warp": 0.3, "ridge_sag": 0.3, "ragged": 0.3, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -20378,14 +20382,15 @@ THATCH_PRESETS = {
         "overlap": 0.3, "frond_width": 0.25, "slant": 0.4, "droop": 0.8, "neat": 0.55, "top_layer": 0.25,
         "mess": 0.9, "lift": 0.5, "bend": 0.3, "edge_hang": 1.3, "end_reach": 0.3, "end_fronds": 0.8,
         "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.45, "dried": 0.4, "underlay": False,
-        "frame_style": "Poles", "battens": "Every course"},
+        "frame_style": "Poles", "battens": "Every course", "rafter_spacing": 0.13},
     "Palm: Pacific fale (rounded)": {
         "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "overhang": 0.0, "thickness": 0.05, "softness": 0.9,
         "sag": 0.05, "lumps": 0.25, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
-        "resolution": 150, "frond_form": "Leaflets", "density": 1.2, "leaf_length": 0.15, "leaf_width": 0.022,
+        "resolution": 150, "frond_form": "Leaflets", "density": 1.4, "leaf_length": 0.15, "leaf_width": 0.022,
         "top_leaf_width": 0.011, "overlap": 0.35, "frond_width": 0.25, "slant": 0.25, "droop": 0.4, "neat": 0.9,
         "top_layer": 0.3, "mess": 0.4, "lift": 0.5, "bend": 0.25, "edge_hang": 0.9, "end_reach": 0.2,
-        "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.3, "underlay": False},
+        "end_fronds": 0.0, "ridge_fronds": True, "sticks": True, "segments": 6, "curl": 0.3, "underlay": False,
+        "battens": "Every course", "rafter_spacing": 0.11},
 }
 THATCH_PRESET_VAR = "unlokThatchPresets"  # optionVar (Maya's own prefs): the user's presets as JSON
 THATCH_PRESET_SKIP = ("seed", "ridge", "detail", "udim")  # each roof's own: a saved preset leaves them out
@@ -21326,6 +21331,162 @@ def _th_line(line):
     return total, point_at
 
 
+def _th_plane_height(F, t):
+    """The height on the roof's planes (before sag) whose sagged height is t x H: sag only depends on
+    the height, so a course on the planes at it is where the real roof's courses run."""
+    y = t * F.H
+    if not F.sag:
+        return y
+    lo, hi = y - abs(F.sag) - 1e-6, y + abs(F.sag) + 1e-6
+    for _ in range(40):  # h - sag sin(pi h / H) is monotonic for any sag the panel allows
+        m = 0.5 * (lo + hi)
+        if m - F.sag * math.sin(math.pi * clamp(m / F.H, 0.0, 1.0)) < y:
+            lo = m
+        else:
+            hi = m
+    return 0.5 * (lo + hi)
+
+
+def _th_course_lines(F, G, ts):
+    """Course lines as built: straight along each roof plane, turning only where two planes meet at a
+    hip (the user 2026-11-10: sticks and battens came out bendy, wandering with every lump of the
+    roof; real ones are straight and are laid straight). Same form as _th_contours (per t, a list of
+    plan polylines [(x, z)]: a hipped roof's loop starts mid +z side and closes on itself, a gable's
+    lines end at the verge); only their corners are vertices. The roof's lumps, warp and ridge sag
+    then only move them up and down, as on a real roof whose rafters sag. A cone keeps the
+    contours (its rings)."""
+    if F.cone:
+        return _th_contours(F, G, ts)
+    out = []
+    eps = 1e-6
+    for t in ts:
+        hp = _th_plane_height(F, t)
+        q = (F.H - hp) / F.ms  # how far down the slope (in plan) from the ridge, or from the lean-to's top
+        if q <= eps:
+            out.append([])
+            continue
+        xs, shut = [], []
+        for e, (sign, edge) in enumerate(((1.0, F.x1), (-1.0, -F.x0))):
+            end = F.ends[e]
+            x = edge
+            if end is not None and hp > end[2]:
+                x = min(edge, F.L - (hp - end[2]) / end[1])
+            xs.append(sign * x)
+            shut.append(end is not None and hp > end[2] and x < edge - eps)
+        xa, xb = xs
+        if xa - xb <= eps:
+            out.append([])
+            continue
+        if F.shape == "Lean-to":
+            zq = min(F.z1 - eps, F.z0 + q)
+            line = ([(xb, F.z0 + eps)] if shut[1] else []) + [(xb, zq), (xa, zq)] + \
+                   ([(xa, F.z0 + eps)] if shut[0] else [])
+            out.append([line])
+            continue
+        q = min(q, F.z1 - eps)
+        mid = (0.5 * (xa + xb), q)
+        if shut[0] and shut[1]:
+            lines = [[mid, (xa, q), (xa, -q), (xb, -q), (xb, q), mid]]
+        elif shut[0]:
+            lines = [[(xb, q), (xa, q), (xa, -q), (xb, -q)]]
+        elif shut[1]:
+            lines = [[(xa, -q), (xb, -q), (xb, q), (xa, q)]]
+        else:
+            lines = [[(xb, q), (xa, q)], [(xa, -q), (xb, -q)]]
+        out.append(lines)
+    return out
+
+
+def _th_line_corners(line, turn=10.0):
+    """Distances along a course line to its corners (where it turns more than turn degrees: a hip)."""
+    acc, out = 0.0, []
+    lim = math.cos(math.radians(turn))
+    for k in range(1, len(line) - 1):
+        a, b, c = line[k - 1], line[k], line[k + 1]
+        acc += math.hypot(b[0] - a[0], b[1] - a[1])
+        u, v = (b[0] - a[0], b[1] - a[1]), (c[0] - b[0], c[1] - b[1])
+        lu, lv = math.hypot(*u), math.hypot(*v)
+        if lu > 1e-12 and lv > 1e-12 and (u[0] * v[0] + u[1] * v[1]) / (lu * lv) < lim:
+            out.append(acc)
+    return out
+
+
+def _th_split_at(cuts, a0, a1, trim):
+    """[a0, a1] split at the cuts inside it, each piece kept trim clear of a cut (two sticks meeting at
+    a hip end short of each other instead of running into one another)."""
+    bounds = [a0] + [c for c in cuts if a0 < c < a1] + [a1]
+    out = []
+    for i in range(len(bounds) - 1):
+        lo = bounds[i] + (trim if i > 0 else 0.0)
+        hi = bounds[i + 1] - (trim if i + 2 < len(bounds) else 0.0)
+        if hi - lo > 2.0 * trim:
+            out.append((lo, hi))
+    return out
+
+
+def _th_stiff(ss, pts, keep=None, rise=0.7, bend=0.0):
+    """A pole laid on what's under it, stiff: the centres pts (at plan distances ss) fitted by one gentle
+    curve (a quadratic: it can sag, it can't follow every lump), plus, with bend (a plan distance), what's
+    left over smoothed that wide (a long pole's slow give, still not each clump), then lifted until it
+    rests on the highest of them (rise x the 90th percentile of what pokes above the fit). keep: the
+    indices to fit on (the rest only follow the curve)."""
+    idx = [i for i in (keep if keep is not None else range(len(pts)))]
+    if len(idx) < 3:
+        return list(pts)
+    n = float(len(idx))
+    m = [sum(ss[i] ** k for i in idx) / n for k in range(5)]
+    s0 = m[1]
+    sc = max(1e-9, max(abs(ss[i] - s0) for i in idx))  # centred and scaled: a well-conditioned 3x3
+
+    def basis(s):
+        u = (s - s0) / sc
+        return (1.0, u, u * u)
+    A = [[0.0] * 3 for _ in range(3)]
+    for i in idx:
+        b = basis(ss[i])
+        for r_ in range(3):
+            for c_ in range(3):
+                A[r_][c_] += b[r_] * b[c_]
+    coef = []
+    for ax in range(3):
+        rhs = [0.0, 0.0, 0.0]
+        for i in idx:
+            b = basis(ss[i])
+            for r_ in range(3):
+                rhs[r_] += b[r_] * pts[i][ax]
+        coef.append(_th_solve3(A, rhs))
+    fit = [tuple(sum(c * b for c, b in zip(coef[ax], basis(s))) for ax in range(3)) for s in ss]
+    if bend > 0.0:  # its slow give: the leftover heights smoothed over bend (gaussian), only up and down
+        left = [(ss[i], pts[i][1] - fit[i][1]) for i in idx]
+        out = []
+        for s, f in zip(ss, fit):
+            w = [(math.exp(-((s - s_) / bend) ** 2), d) for s_, d in left if abs(s - s_) < 3.0 * bend]
+            tot = sum(a for a, _ in w)
+            out.append((f[0], f[1] + (sum(a * d for a, d in w) / tot if tot > 1e-12 else 0.0), f[2]))
+        fit = out
+    # straight up (along a hip's slanted normals it moved the pole sideways, off the ridge pole it butts on)
+    res = sorted(pts[i][1] - fit[i][1] for i in idx)
+    lift = max(0.0, rise * res[int(0.9 * (len(res) - 1))])
+    return [(f[0], f[1] + lift, f[2]) for f in fit]
+
+
+def _th_solve3(A, b):
+    """A 3x3 linear system (Cramer); a singular one gives the mean (b[0] / A[0][0]) and no slope."""
+    def det(M):
+        return (M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+                + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]))
+    d = det(A)
+    if abs(d) < 1e-12:
+        return [b[0] / max(1e-12, A[0][0]), 0.0, 0.0]
+    out = []
+    for k in range(3):
+        M = [row[:] for row in A]
+        for r_ in range(3):
+            M[r_][k] = b[r_]
+        out.append(det(M) / d)
+    return out
+
+
 def _th_panels_mesh(F, G, s):
     """Leaf panels (folded palm-leaf / attap panels, the way South-East Asian
     shacks are roofed): courses of wide panels tied along the contours from
@@ -21641,6 +21802,13 @@ def _th_fronds_mesh(F, G, s):
     overlap = clamp(float(s["overlap"]), 0.0, 0.8)
     sticks = bool(s["sticks"])
     ridge_poles = bool(s.get("ridge_poles", sticks))  # its own switch: off keeps the cap leaves
+    # vine ties round the poles and bundles: an option, off by default (the user, 2026-11-10: clutter and
+    # polygons; what matters is the poles' shape and place)
+    lashings = bool(s.get("lashings", False))
+    # hip poles: their own switch, off by default (2026-11-10: real hips are mostly closed with leaves; a
+    # pole down every hip is the less usual build). Older roofs and presets without the key follow the
+    # ridge pole's, as they did (thatch_data / the preset loader fill it in)
+    hip_poles = bool(s.get("hip_poles", False))
     stacks = max(1, int(s["stacks"]))
     columns = s["stack_layout"] == "Atlas columns"
     mirror = bool(s["mirror"])
@@ -21684,7 +21852,7 @@ def _th_fronds_mesh(F, G, s):
     vv_leaf = [1.0 - v for v in k_seg]
     pts, counts, conn, us, vs, uvi = [], [], [], [], [], []
     sticks_out, poles = [], []  # members for the mesher (see tube)
-    state = {"capped": False, "pieces": 0, "anchors": []}  # anchors: points well inside the roof by a line's ends
+    state = {"capped": False, "pieces": 0, "anchors": [], "corners": [], "closed": False}  # anchors: points well inside the roof by a line's ends
 
     def u_of(u, stack):
         return (u + stack) / stacks if columns else u + stack
@@ -21895,7 +22063,9 @@ def _th_fronds_mesh(F, G, s):
                 return None, None
             pos, nrm = _th_sample(G, *cell)[:2]
             o_ = off + (extra[k] if extra else 0.0)
-            Q.append((pos[0] + nrm[0] * o_ + ox, pos[1] + nrm[1] * o_, pos[2] + nrm[2] * o_ + oz))
+            # straight up by as much as puts it o_ off the roof's plane there: along the normal, a stick
+            # by a hip swung sideways with it (bent in plan)
+            Q.append((pos[0] + ox, pos[1] + o_ / max(0.3, nrm[1]), pos[2] + oz))
             Nn.append(nrm)
         return Q, Nn
 
@@ -21990,12 +22160,13 @@ def _th_fronds_mesh(F, G, s):
 
         def layer(d):
             return base_off + rise * d / ll
-        if sticks:  # rigid: cut at a gable verge (the leaves past it hang down from its end)
-            Q, Nn = along(point_at, start - 0.02 * width, start + 1.02 * width, rs,
-                          max(3, int(math.ceil(width / (0.15 * ll)))) + 1)
-            if Q:
-                keep = [i for i, q in enumerate(Q) if past_verge(q[0]) < 0.02 * ll and past_flush(q[0]) < -rs]
-                tube([Q[i] for i in keep], [Nn[i] for i in keep], [rs] * len(keep), stack)
+        if sticks:  # rigid: cut at a gable verge (the leaves past it hang down from its end); straight,
+            # so one that reaches round a hip is two, each stopping short of the hip (2026-11-10)
+            for s0, s1 in _th_split_at(state["corners"], start - 0.02 * width, start + 1.02 * width, 1.5 * rs):
+                Q, Nn = along(point_at, s0, s1, rs, max(2, int(math.ceil((s1 - s0) / (0.15 * ll)))) + 1)
+                if Q:
+                    keep = [i for i, q in enumerate(Q) if past_verge(q[0]) < 0.02 * ll and past_flush(q[0]) < -rs]
+                    tube([Q[i] for i in keep], [Nn[i] for i in keep], [rs] * len(keep), stack)
         if form == "Cards":
             return card(point_at, start, width, yaw, layer, L0, key, stack, flip, True)
         n_leaf = max(2, int(math.ceil(width / gap)))
@@ -22083,26 +22254,28 @@ def _th_fronds_mesh(F, G, s):
     def course_pole(point_at, lo, hi, total, key):
         """Bundles: the course's pole, along its whole line (just past a gable verge, short of a flush
         one), split where the line turns sharply (round a hip: a pole each side). Then the ties."""
-        n = max(2, int(math.ceil((hi - lo) / (0.1 * ll))))
-        runs, Q, Nn, prev = [], [], [], None
-        for k in range(n + 1):
-            (x, z), ox, oz = point_at(lo + (hi - lo) * k / float(n))
-            cell = _th_cell(G, F, x, z)
-            if cell is None:
-                continue
-            pos, nrm = _th_sample(G, *cell)[:2]
-            q = (pos[0] + nrm[0] * rb_ + ox, pos[1] + nrm[1] * rb_, pos[2] + nrm[2] * rb_ + oz)
-            if past_verge(q[0]) > 0.06 * ll or past_flush(q[0]) > -rb_:
-                continue
-            if len(Q) > 1:
-                t0, t1 = _rl_norm(_rl_sub(Q[-1], Q[-2])), _rl_norm(_rl_sub(q, Q[-1]))
-                if _rl_dot(t0, t1) < math.cos(math.radians(25.0)):  # a sharp turn: this pole ends, the next
-                    runs.append((Q, Nn))                            # starts a little on
-                    Q, Nn = [], []
+        runs = []
+        # one straight pole per face, stopping short of the hip (tied to the hip rafter there, under the hip's
+        # cap leaves: run up to the corner, their ends came out through the thatch beside the hip)
+        pieces = _th_split_at(state["corners"], lo, hi, 0.12 * ll)
+        if state["closed"] and len(pieces) > 1 and state["corners"]:  # a loop starts mid side: one pole there
+            pieces = [(pieces[-1][0], total + pieces[0][1])] + pieces[1:-1]
+        for p0, p1 in pieces:
+            n = max(2, int(math.ceil((p1 - p0) / (0.1 * ll))))
+            Q, Nn = [], []
+            for k in range(n + 1):
+                a = p0 + (p1 - p0) * k / float(n)
+                (x, z), ox, oz = point_at(a - total if a > total and state["closed"] else a)
+                cell = _th_cell(G, F, x, z)
+                if cell is None:
                     continue
-            Q.append(q)
-            Nn.append(nrm)
-        runs.append((Q, Nn))
+                pos, nrm = _th_sample(G, *cell)[:2]
+                q = (pos[0] + ox, pos[1] + rb_ / max(0.3, nrm[1]), pos[2] + oz)  # up: straight in plan
+                if past_verge(q[0]) > 0.06 * ll or past_flush(q[0]) > -rb_:
+                    continue
+                Q.append(q)
+                Nn.append(nrm)
+            runs.append((Q, Nn))
         r = _rand12(seed, key, 7, 4401)
         for Q, Nn in runs:
             if len(Q) > 1:
@@ -22222,6 +22395,16 @@ def _th_fronds_mesh(F, G, s):
                     Q = None
                 else:
                     Q, Nn, n_pts = [Q[k] for k in keep], [Nn[k] for k in keep], len(keep)
+            cut = [c for c in state["corners"] if min(a0, a1) < c < max(a0, a1)]
+            if Q and cut:  # a straight stem can't bend round a hip: only its longest straight part shows
+                pa = [a0 + (a1 - a0) * k / float(n_pts - 1) for k in range(n_pts)]
+                lo_, hi_ = max(_th_split_at(cut, min(a0, a1), max(a0, a1), 1.5 * rr0) or [(0.0, -1.0)],
+                               key=lambda p: p[1] - p[0])
+                keep = [k for k in range(n_pts) if lo_ <= pa[k] <= hi_]
+                if len(keep) < 2:
+                    Q = None
+                else:
+                    Q, Nn, n_pts = [Q[k] for k in keep], [Nn[k] for k in keep], len(keep)
             if Q and flushes:  # cut short of a flush verge
                 keep = [k for k, q in enumerate(Q) if past_flush(q[0]) < -0.3 * tlw]
                 Q, Nn = ([Q[k] for k in keep], [Nn[k] for k in keep]) if len(keep) > 1 else (None, None)
@@ -22248,6 +22431,8 @@ def _th_fronds_mesh(F, G, s):
             # a hip's courses meet) just enough to close up: further, they stood up in the air
             closed = _th_closed(line, G)
             state["total"] = total
+            state["corners"] = [] if F.cone else _th_line_corners(line)
+            state["closed"] = closed
             state["anchors"] = [q for q in (on_roof(*point_at(min(total, 0.3 * tile))[0]),
                                             on_roof(*point_at(max(0.0, total - 0.3 * tile))[0])) if q]
             reach_lo, reach_hi = [extra if closed or any(abs(sign * p[0] - edge) < 3.0 * G["cell"]
@@ -22486,13 +22671,18 @@ def _th_fronds_mesh(F, G, s):
                  [1.0 - c_ / total for c_ in cum], 0.3 + 0.1 * mess, flat)
         return rest
 
-    def pole(path, rest=None, ties=True):
-        """A pole along a crest, bedded into the top of the cap leaves: path [(x, z)]. rest (the ridge):
-        the leaves' crest heights [(x, height)] it lies on, a little pressed in, with a tie (two turns of
-        vine) round it every so often, down into the leaves either side (ties=False on the hips, which
-        lie on their own cap the same way); without rest it sits at the leaves' mean height."""
-        if not ridge_poles or len(path) < 2:
-            return
+    def pole(path, rest=None, ties=True, butt=None, on=None):
+        """A pole along a crest, bedded into the top of the cap leaves: path [(x, z)]. rest: the leaves'
+        crest heights [(x, height)] it lies on, a little pressed in; without it, the leaves' mean height.
+        Stiff (2026-11-10, the user: poles came out bendy and weird): one gentle curve fitted through
+        what's under it (_th_stiff: it can sag, it can't follow every leaf), resting on the highest of
+        it. butt: the ridge pole's (S, Q) a hip pole starts against: its top end is brought to that
+        pole's height (a hip pole butts against the ridge pole's side; they used to meet in one point
+        and run through each other). Ties (a band of tight turns of vine) every so often, down into
+        the leaves either side. Returns (S, Q, Nn): plan distance, centre and normal along it. on: its
+        switch (the ridge pole's by default; hips pass hip_poles)."""
+        if not (ridge_poles if on is None else on) or len(path) < 2:
+            return None
         sig = 1.5 * cap_gap
 
         def level(x):  # the leaves under it: their mean, pulled up towards the highest
@@ -22502,62 +22692,78 @@ def _th_fronds_mesh(F, G, s):
             tot = sum(w for w, _ in ws)
             mean = sum(w * h_ for w, h_ in ws) / tot
             return mean + 0.4 * (max(h_ for _, h_ in ws) - mean)
-        def frame_at(x, z, lv):  # (centre, normal, across) of the pole over (x, z)
+        mean_off = 2.0 * rs + 1.15 * rise + 0.7 * rp + cap_step * 0.5 * (cap_hand - 1)
+        S, Q, Nn, acc, prev = [], [], [], 0.0, None
+        for x, z in path:
             cell = _th_cell(G, F, x, z)
             if cell is None:
-                return None
+                continue
             pos, nrm = _th_sample(G, *cell)[:2]
-            ac = _rl_norm(_rl_cross(nrm, _rl_norm(_rl_perp(nrm, (1.0, 0.0, 0.0)), (1.0, 0.0, 0.0))), (0.0, 0.0, 1.0))
-            if lv is None:  # a hip's: at the leaves' mean height
-                off = 2.0 * rs + 1.15 * rise + 0.7 * rp + cap_step * 0.5 * (cap_hand - 1)
-                return _rl_add(pos, _rl_mul(nrm, off)), nrm, ac
-            # the ridge's: on its leaves, a little pressed in, a gentle crook sideways (here, not the mesher's
-            # wobble, so its ties stay tight round it)
-            crook = 0.3 * rp * _th_noise(x / (0.22 * span), 3.1, seed + 8870, 0)
-            return _rl_add(_rl_add(pos, _rl_mul(nrm, lv + 0.6 * rp)), _rl_mul(ac, crook)), nrm, ac
-        Q, Nn = [], []
-        for x, z in path:
-            fr = frame_at(x, z, level(x) if rest else None)
-            if fr is not None:
-                Q.append(fr[0])
-                Nn.append(fr[1])
-        if tube(Q, Nn, [rp] * len(Q), 0, "pole", 0.0 if rest else None) and rest:
+            lv = level(x) if rest else None
+            off = lv + 0.6 * rp if lv is not None else mean_off  # on its leaves, a little pressed in
+            if prev is not None:
+                acc += math.hypot(x - prev[0], z - prev[1])
+            prev = (x, z)
+            S.append(acc)
+            Q.append(_rl_add(pos, _rl_mul(nrm, off)))
+            Nn.append(nrm)
+        if len(Q) < 2:
+            return None
+        Q = _th_stiff(S, Q, rise=0.5, bend=0.12 * span)
+        if butt is not None:  # the top end at the ridge pole's height there, eased out to nothing at the foot
+            bS, bQ = butt
+            x0_ = Q[0][0]
+            k = min(range(len(bQ)), key=lambda i: abs(bQ[i][0] - x0_))
+            j = k + 1 if k + 1 < len(bQ) and (bQ[k][0] - x0_) * (bQ[k + 1][0] - x0_) <= 0.0 else max(0, k - 1)
+            f = clamp((x0_ - bQ[k][0]) / (bQ[j][0] - bQ[k][0]), 0.0, 1.0) if abs(bQ[j][0] - bQ[k][0]) > 1e-9 else 0.0
+            dy = bQ[k][1] + (bQ[j][1] - bQ[k][1]) * f - Q[0][1]
+            bz = bQ[k][2] + (bQ[j][2] - bQ[k][2]) * f
+            dz = bz + math.copysign(2.05 * rp, Q[0][2] - bz) - Q[0][2]  # side by side, touching
+            Q = [(q[0], q[1] + dy * (1.0 - s_ / S[-1]), q[2] + dz * (1.0 - s_ / S[-1])) for q, s_ in zip(Q, S)]
+        if tube(Q, Nn, [rp] * len(Q), 0, "pole", 0.0):
             poles[-1]["rs"] = 1.0  # its true radius: the ties are wound tight round it
-        if not rest or not ties or len(Q) < 2:
-            return
-        rt = 0.12 * rp  # ties round it: a band of tight turns of vine / rattan, down into the cap either side
-        x_lo, x_hi = Q[0][0], Q[-1][0]
-        d, it = x_lo + 0.12 * span * (0.5 + 0.5 * _rand12(seed, 8860, 0, 0)[0]), 0
-        while d < x_hi - 0.06 * span and not state["capped"]:
-            r = _rand12(seed, 8861, it, 0)
-            it += 1
-            lv = level(d)
-            fr = frame_at(d, 0.0, lv) if lv is not None else None
-            if fr is not None:
-                c, nrm, ac = fr
-                t_ = _rl_norm(_rl_cross(ac, nrm), (1.0, 0.0, 0.0))  # along the ridge
-                rl = 0.92 * rp + rt  # tight on its (six-sided) faces, biting in at its edges
-                turns = 4 + int(r[0] * 3.0)
-                for turn in range(turns):
-                    sh = (turn - 0.5 * (turns - 1)) * 2.05 * rt
-                    lean = (0.5 + 0.5 * r[2]) * rt  # each turn runs on a little along the ridge
-                    Qt, Nt = [], []
-                    for j in range(13):
-                        th = math.radians(-130.0 + 260.0 * j / 12.0)
-                        q = _rl_add(c, _rl_add(_rl_mul(nrm, rl * math.cos(th)), _rl_mul(ac, rl * math.sin(th))))
-                        Qt.append(_rl_add(q, _rl_mul(t_, sh + lean * math.sin(th))))
-                        Nt.append(_rl_norm(_rl_sub(Qt[-1], c), nrm))
-                    for end in (0, 1):  # each end on down into the leaves, hugging the pole's sides
-                        q = Qt[-1] if end else Qt[0]
-                        q2 = _rl_add(_rl_sub(q, _rl_mul(nrm, 1.1 * rp)), _rl_mul(ac, (-0.15 if end else 0.15) * rp))
-                        if end:
-                            Qt.append(q2)
-                            Nt.append(Nt[-1])
-                        else:
-                            Qt.insert(0, q2)
-                            Nt.insert(0, Nt[0])
-                    tube(Qt, Nt, [rt] * len(Qt), min(stacks - 1, int(r[3] * stacks)), "tie", 0.0)
-            d += 0.18 * span * (0.75 + 0.5 * r[4])
+            if butt is not None:
+                poles[-1]["run"] = False  # it ends against the ridge pole, not past it
+        if ties and lashings and not state["capped"]:
+            d, it =0.12 * span * (0.5 + 0.5 * _rand12(seed, 8860, int(S[-1] * 7.0), 0)[0]), 0
+            while d < S[-1] - 0.06 * span and not state["capped"]:
+                r = _rand12(seed, 8861 + int(Q[0][2] * 13.0), it, 0)
+                it += 1
+                band(S, Q, Nn, d, 4 + int(r[0] * 3.0), r)
+                d += 0.18 * span * (0.75 + 0.5 * r[4])
+        return S, Q, Nn
+
+    def band(S, Q, Nn, d, turns, r, ends=True):
+        """A band of tight turns of vine round a pole (S, Q, Nn) at plan distance d along it, each turn's
+        ends on down into the leaves either side."""
+        i = min(len(S) - 2, max(0, bisect.bisect_right(S, d) - 1))
+        f = clamp((d - S[i]) / max(1e-9, S[i + 1] - S[i]), 0.0, 1.0)
+        c = _rl_lerp(Q[i], Q[i + 1], f)
+        t_ = _rl_norm(_rl_sub(Q[i + 1], Q[i]), (1.0, 0.0, 0.0))  # along the pole
+        nrm = _rl_norm(_rl_perp(_rl_norm(_rl_lerp(Nn[i], Nn[i + 1], f), (0.0, 1.0, 0.0)), t_), (0.0, 1.0, 0.0))
+        ac = _rl_norm(_rl_cross(nrm, t_), (0.0, 0.0, 1.0))
+        rt = 0.12 * rp
+        rl = 0.92 * rp + rt  # tight on its (six-sided) faces, biting in at its edges
+        for turn in range(turns):
+            sh = (turn - 0.5 * (turns - 1)) * 2.05 * rt
+            lean = (0.5 + 0.5 * r[2]) * rt  # each turn runs on a little along the pole
+            Qt, Nt = [], []
+            for j in range(13):
+                th = math.radians(-130.0 + 260.0 * j / 12.0)
+                q = _rl_add(c, _rl_add(_rl_mul(nrm, rl * math.cos(th)), _rl_mul(ac, rl * math.sin(th))))
+                Qt.append(_rl_add(q, _rl_mul(t_, sh + lean * math.sin(th))))
+                Nt.append(_rl_norm(_rl_sub(Qt[-1], c), nrm))
+            if ends:
+                for end in (0, 1):  # each end on down into the leaves, hugging the pole's sides
+                    q = Qt[-1] if end else Qt[0]
+                    q2 = _rl_add(_rl_sub(q, _rl_mul(nrm, 1.1 * rp)), _rl_mul(ac, (-0.15 if end else 0.15) * rp))
+                    if end:
+                        Qt.append(q2)
+                        Nt.append(Nt[-1])
+                    else:
+                        Qt.insert(0, q2)
+                        Nt.insert(0, Nt[0])
+            tube(Qt, Nt, [rt] * len(Qt), min(stacks - 1, int(r[3] * stacks)), "tie", 0.0)
 
     # ---- the under layer: tiles in even courses from the eaves up (restarting at each level), every other
     # course shifted half a tile
@@ -22567,18 +22773,18 @@ def _th_fronds_mesh(F, G, s):
         ts.append(t_hi - 0.08 * dt)  # no cap: a last course right at the top
     t_topmax = t_hi - (0.3 * ll / F.slope if has_cap else 0.2 * dt)  # loose fronds lap onto the cap
     tops = [t + 0.5 * dt for t in ts if t + 0.5 * dt < t_topmax] if top_amt > 0.0 else []
-    found = _th_contours(F, G, ts + tops)
+    found = _th_course_lines(F, G, ts + tops)  # straight along each face (contours wandered with every lump)
     for ci in range(len(ts)):
         if bundles:  # side by side along the pole, a little apart at the neck (overlapping at the tips)
             course_line(found[ci], ci, "bundle", (0.05 + 0.15 * hang) * tile, 1.0,
-                        lambda w, r: w * (0.85 - 0.45 * overlap) * (0.85 + 0.3 * r[1] * (0.3 + m_under)),
+                        lambda w, r: w * (0.8 - 0.45 * overlap) * (0.85 + 0.3 * r[1] * (0.3 + m_under)),
                         0.5 * (ci % 2))
         else:
             course_line(found[ci], ci, "under", (0.05 + 0.15 * hang) * tile, 1.0,
                         lambda w, r: w * (1.0 - 0.02 * r[1] * m_under), 0.5 * (ci % 2))
         if state["capped"]:
             break
-    for base, r in bundle_ties:
+    for base, r in (bundle_ties if lashings else []):
         if state["capped"]:
             break
         tie_round(base, r)
@@ -22606,7 +22812,11 @@ def _th_fronds_mesh(F, G, s):
             state["anchors"] = [q for q in (on_roof(min(F.x1, F.x0 + 0.3 * tile), 0.0),
                                             on_roof(max(F.x0, F.x1 - 0.3 * tile), 0.0)) if q]
             rest = saddle(lo, hi) if F.shape == "Ridge" else None
-            pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [lo] + xs + [hi]], rest)
+            # the ridge pole runs on a little past where the hips meet it (they butt against its sides)
+            # (the hips' butts sit 2.05 rp off its axis, 2.05 rp / pitch ratio along it past the joint)
+            plo = lo - (2.05 * rp / F.ends[1][4] + 2.5 * rp if F.ends[1] and hip_poles else 0.0)
+            phi = hi + (2.05 * rp / F.ends[0][4] + 2.5 * rp if F.ends[0] and hip_poles else 0.0)
+            ridge_pole = pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [plo] + xs + [phi]], rest)
             if F.shape == "Ridge":
                 for e, end in enumerate(F.ends):
                     if end is None or state["capped"]:
@@ -22629,7 +22839,27 @@ def _th_fronds_mesh(F, G, s):
                             h -= step
                         hip_rest = crest([((p, 0.0, 0.0), None) for p in path], fan(zs, (-0.1, 0.25, 0.5, 0.75, 1.1)),
                                          Lc, 8810 + e * 2 + int(zs > 0))
-                        pole(path[::3] + path[-1:], hip_rest or None, ties=False)
+                        # the hip pole starts against the ridge pole's side (not at its axis: the two hip
+                        # poles and the ridge pole met in one point and ran through each other)
+                        zb = 2.05 * rp
+                        hp = [p for p in path[::3] + path[-1:] if abs(p[1]) > zb + 0.5 * rp]
+                        k = next((i for i in range(1, len(path)) if abs(path[i][1]) >= zb), None)
+                        if not hip_poles:
+                            continue
+                        if ridge_pole and k is not None and hp:
+                            a_, b_ = path[k - 1], path[k]
+                            f = (zb - abs(a_[1])) / max(1e-9, abs(b_[1]) - abs(a_[1]))
+                            hp = [(a_[0] + (b_[0] - a_[0]) * f, a_[1] + (b_[1] - a_[1]) * f)] + hp
+                            hip = pole(hp, hip_rest or None, butt=ridge_pole[:2], on=True)
+                            if hip and lashings and not state["capped"]:  # lashed round both at the joint
+                                band(hip[0], hip[1], hip[2], 1.4 * rp, 3, _rand12(seed, 8870, e, int(zs > 0)))
+                        elif not ridge_pole:
+                            pole(path[::3] + path[-1:], hip_rest or None, on=True)
+                    if ridge_pole and hip_poles and lashings and not state["capped"]:  # a band where the hips meet it
+                        rS, rQ, rN = ridge_pole
+                        xj = sign * end[3]
+                        dj = rS[0] + (xj - rQ[0][0]) if rQ[-1][0] > rQ[0][0] else rS[0] - (xj - rQ[0][0])
+                        band(rS, rQ, rN, clamp(dj, rS[0], rS[-1]), 5, _rand12(seed, 8871, e, 0), ends=False)
     # ---- a fringe of leaves tied along each gable verge, hanging down past the end
     if fringe > 0.0 and gables and not state["capped"]:
         for sign, edge in gables:
@@ -22940,34 +23170,51 @@ def _th_frame_members(F, G, s, depth):
             add(path, nrms, rbeam, rbeam * 0.92, "beam")
     # battens: one along every course (round a hipped roof or a cone they follow the courses)
     # none over the rounded crest (the top course's contour wandered along it in scraps, through the underlay)
-    found = _th_contours(F, G, _th_frame_courses(F, G, s))
+    # straight along each face (2026-11-10: on the roof's contours they wandered with its lumps), each face's
+    # batten ending at the hip rafter, short of the next face's
+    found = _th_course_lines(F, G, _th_frame_courses(F, G, s))
     for lines in found:
         for line in lines:
             total, point_at = _th_line(line)
             if total < 4.0 * rb:
                 continue
+            if F.shape == "Ridge" and F.rr and s.get("_purlins") is None and \
+                    max(abs(p[1]) for p in line) < F.rr + d_batten + rb:
+                continue  # on the plane, inside the rounded crest: it came up through the underlay's fold
             closed = _th_closed(line, G)
-            n = max(2, int(math.ceil(total / step)))
-            runs, path, nrms = [], [], []
-            for i in range(n + 1):
-                (x, z), ox, oz = point_at(total * i / float(n))
-                q = at(x, z, d_batten)
-                if q and q[1][1] <= ny_lim:
-                    path.append(q[0])
-                    nrms.append(q[1])
-                    continue
+            corners = [] if F.cone else _th_line_corners(line)
+            pieces = _th_split_at(corners, 0.0, total, 1.2 * rb) if corners else [(0.0, total)]
+            if corners:
                 closed = False
+                if _th_closed(line, G) and len(pieces) > 1 and pieces[0][0] < 1e-9 and pieces[-1][1] > total - 1e-9:
+                    # a loop starts mid side: its first and last pieces are one batten
+                    pieces = [(pieces[-1][0], total + pieces[0][1])] + pieces[1:-1]
+            runs = []
+            for p0, p1 in pieces:
+                n = max(2, int(math.ceil((p1 - p0) / step)))
+                path, nrms = [], []
+                for i in range(n + 1):
+                    a = p0 + (p1 - p0) * i / float(n)
+                    (x, z), ox, oz = point_at(a - total if a > total else a)
+                    q = at(x, z, d_batten)
+                    if q and q[1][1] <= ny_lim:
+                        path.append(q[0])
+                        nrms.append(q[1])
+                        continue
+                    closed = False
+                    if path:
+                        runs.append((path, nrms))
+                        path, nrms = [], []
                 if path:
                     runs.append((path, nrms))
-                    path, nrms = [], []
-            if path:
-                runs.append((path, nrms))
             for path, nrms in runs:
                 if closed and len(path) > 2:
                     path.append(path[0])
                     nrms.append(nrms[0])
                 if sum(_rl_len(_rl_sub(b, a)) for a, b in zip(path, path[1:])) >= 4.0 * rb:
                     add(path, nrms, rb, rb * 0.9, "batten")
+                    if corners:  # ends at a hip: run on straight, they came up out of the far face
+                        members[-1]["run"] = False
     # wall plates on the wall tops (in from the wall line, where the rafters have risen above it), under the
     # rafters: level, at the height of the lowest rafter they carry (a plate centred on the wall line sank into
     # the walls: with no overhang the eave is the wall line)
@@ -23118,8 +23365,10 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
             u = clamp(sv / length, 0.0, 1.0)
             if amp and not closed and m["kind"] != "batten":  # crooked, straighter towards its ends
                 env = max(0.0, math.sin(math.pi * clamp(u, 0.0, 1.0))) ** 0.5
-                w1 = _th_noise(sv / (1.2 + 0.8 * r[4]), mi * 3.7, seed, 0) * env
-                w2 = _th_noise(sv / (1.5 + r[5]), mi * 5.3 + 11.0, seed + 1, 0) * env
+                # a pole bends over metres, not hand spans: the wavelength is a share of the span (it was
+                # 1.2-2 units, kinks at every station in a decimetre scene: zigzag rafters, 2026-11-10)
+                w1 = _th_noise(sv / ((0.3 + 0.2 * r[4]) * span), mi * 3.7, seed, 0) * env
+                w2 = _th_noise(sv / ((0.35 + 0.25 * r[5]) * span), mi * 5.3 + 11.0, seed + 1, 0) * env
                 # sticks and rachis only crook sideways: their leaves lie on them, and bowed up they poked
                 # through. Rafters and poles sag a little between their supports, never up into what's on them
                 up_k = 0.0 if m["kind"] in ("stick", "rachis", "pole", "tie") else 0.3  # a ridge pole follows its bed
@@ -26757,6 +27006,10 @@ def thatch_data(root):
     data.update(stored)
     if "ridge_poles" not in stored:
         data["ridge_poles"] = bool(data.get("sticks", True))
+    if "hip_poles" not in stored and stored:  # a roof from before hip poles had their own switch keeps them
+        data["hip_poles"] = bool(data["ridge_poles"])
+    if "lashings" not in stored and stored:  # and its ties (they came with the poles / bundles then)
+        data["lashings"] = True
     if isinstance(data.get("frame"), dict):
         data.setdefault("box_frame", data["frame"])
         node = thatch_parts(root).get("frame")
@@ -28017,6 +28270,8 @@ def thatch_preset(name):
         s.update((k, v) for k, v in mine.items() if k in s)
         if "ridge_poles" not in mine and "sticks" in mine:  # saved before the poles had their own switch
             s["ridge_poles"] = bool(mine["sticks"])
+        if "hip_poles" not in mine:  # saved before hip poles had their own switch: as the ridge pole was
+            s["hip_poles"] = bool(s["ridge_poles"])
         return s
     s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
     if over.get("covering") == "Corrugated":
@@ -28547,6 +28802,21 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         card.add(prow)
         self._fill_presets()
         self.f["shape"] = SegmentField(THATCH_SHAPES)
+        words = Section("What the words mean", expanded=False)
+        words.add_full(hint_label(
+            "Ridge: the top line where the two slopes meet.\n"
+            "Eaves: the bottom edges of the slopes, over the walls.\n"
+            "Gable: a flat, upright end wall; its sloping roof edge is the verge.\n"
+            "Hip: a sloped end instead of a gable; the hip line is the edge where it meets a side slope.\n"
+            "Course: one row of thatch along the roof; each course laps over the one below.\n"
+            "Rafters: the poles running down the slope from the ridge to the eaves.\n"
+            "Battens (laths): the thinner poles across the rafters that the thatch is tied to.\n"
+            "Purlins: heavier battens (under metal sheets).\n"
+            "Ridge beam: the beam under the rafters' tops. Wall plate: the beam on the wall tops.\n"
+            "Rachis: a palm frond's stem, the stick its leaflets grow from.\n"
+            "Underlay: a layer under the covering (a mat / shell), so no gaps show.\n"
+            "Span: the roof's width across the ridge; most sizes are fractions of it."))
+        card.add(words)
         self.f["shape"].setToolTip("Ridge: two slopes meeting at a ridge.\nLean-to: one slope, high along the "
                                    "box's -side (a shed against a wall).\nCone: a round roof (roundhouse), "
                                    "elliptical in a long box.")
@@ -28566,9 +28836,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(grid, "verge_b", "- gable edge", SegmentField(THATCH_VERGES), verge_tip)
         group[0] = "both"
         row(grid, "hip_pitch", "Hip pitch", FloatField(0.25, 4.0, 0.5, 2.5, decimals=2, step=0.05),
-            "How steep the hipped ends are next to the sides (1 = the same, 2 = twice as steep: a longer ridge).")
+            "Hip ends only (a sloped end instead of a gable): how steep they are next to the side slopes (1 = the "
+            "same, 2 = twice as steep, so the ridge is longer).")
         row(grid, "half_hip", "Half-hip at", FloatField(0.05, 0.95, 0.05, 0.95, decimals=2, step=0.05),
-            "How high up a half-hip starts (fraction of the roof's height).")
+            "Half-hip ends only (a gable below, a small hip at the top): how high up the hip starts (fraction of "
+            "the roof's height).")
         row(grid, "overhang", "Overhang", FloatField(0.0, 0.5, 0.0, 0.25, decimals=3, step=0.005),
             "How far the eaves and verges reach past the box. 0 (the default): the roof stops at the box, so make "
             "the box bigger for eaves; or add a little here (0.08 = 40 cm on a 5 m span).")
@@ -28580,17 +28852,18 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "further off each other, more layers, and heavier rafters, battens, sticks and poles under it; "
             "below 1, a thin, sparse roof. Thatch only.")
         row(grid, "softness", "Softness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How round the ridge and hips are: thatch is never sharp.")
+            "How rounded the ridge and hip edges are (0: sharp creases; thatch is never quite sharp).")
         row(grid, "sag", "Sag", FloatField(-1.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
-            "Old thatch dips between the eaves and the ridge; below 0 it bellies out.")
+            "The slopes dip between the eaves (bottom edge) and the ridge (top), like old thatch; below 0 they "
+            "bulge out instead.")
         row(grid, "lumps", "Lumps", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Slow, uneven swells across the roof.")
+            "Slow, uneven bumps across the whole roof surface (everything on it follows them).")
         card.add(grid)
         sec = self.mk_sec = Section("Makeshift", expanded=False)
         row(sec, "warp", "Warp", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Crooked rafters: the slopes twist and the eave line waves.")
+            "Crooked rafters under it: the slopes twist a little and the bottom edge (eave line) waves.")
         row(sec, "ridge_sag", "Ridge sag", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "The ridge pole sags in the middle and drags the slopes down with it.")
+            "The ridge (top line) sags in the middle, pulling the slopes down with it, as on an old frame.")
         row(sec, "ragged", "Ragged eaves", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "An uneven, hacked-off eave: some of it hangs much lower. Planes / pieces / panels: some hang "
             "further, panels fray more.")
@@ -28767,13 +29040,15 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Gathered to about a third of that where it's tied. Overlap closes them up along the pole.")
         row(sec, "leaf_length", "Leaf length", FloatField(0.02, 0.6, 0.05, 0.3, decimals=3, step=0.005),
             "Length of a leaflet down the slope (fraction of the span: 0.16 = 80 cm on 5 m).")
-        row(sec, "leaf_width", "Under leaf width", FloatField(0.002, 0.08, 0.005, 0.05, decimals=4, step=0.001),
+        row(sec, "leaf_width", "Under-layer leaf width", FloatField(0.002, 0.08, 0.005, 0.05, decimals=4, step=0.001),
             "The under layer's (and caps') leaflets: wide, full width over their top half, then a long tip "
             "(fraction of the span: 0.022 = 11 cm on 5 m).")
-        row(sec, "top_layer", "Top layer", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
-            "How many loose fronds lie on top, between the courses (0: none, 1: about one per frond width).")
+        row(sec, "top_layer", "Loose top fronds", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+            "Loose half fronds thrown over the neat rows, for a messier, lived-in top (0: none, 1: about one per "
+            "frond width along each row).")
         row(sec, "neat", "Neat under layer", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How regular the tiles are (1: even rows, leaflets straight). Messiness applies to the top layer.")
+            "How regular the neat rows underneath are (1: even, leaflets straight). Messiness sets the loose top "
+            "fronds.")
         row(sec, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "How deep the straw grooves running down the slope are.")
         row(sec, "strand_width", "Strand width", FloatField(0.001, 0.05, 0.002, 0.02, decimals=4, step=0.0005),
@@ -28855,16 +29130,17 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "resolution", "Resolution", IntField(16, 600, 30, 300),
             "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
             "while you shape the roof.")
-        row(sec, "overlap", "Overlap", FloatField(0.0, 0.8, 0.0, 0.6, decimals=2, step=0.05),
+        row(sec, "overlap", "Leaf overlap", FloatField(0.0, 0.8, 0.0, 0.6, decimals=2, step=0.05),
             "How much each under-layer leaflet overlaps its neighbour (0.35 = a third of its width). With the "
             "courses a quarter leaf apart this closes every gap, seen from outside or inside.")
-        row(sec, "frond_width", "Tile width", FloatField(0.05, 1.0, 0.1, 0.6, decimals=3, step=0.01),
-            "Width of each shingle / patch along its batten (fraction of the span: 0.25 = 1.25 m on 5 m). Every "
+        row(sec, "frond_width", "Shingle width", FloatField(0.05, 1.0, 0.1, 0.6, decimals=3, step=0.01),
+            "Width of each shingle (one stick with its leaves folded over it) along its row (fraction of the "
+            "span: 0.25 = 1.25 m on 5 m). Every "
             "other course is shifted half a tile. The top layer's fronds are a bit wider.")
-        row(sec, "edge_hang", "Edge hang", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-            "The under layer is limp: past the eaves and the gable verges its leaves hang down (0: they carry "
-            "on in line with the roof, 1: nearly straight down).")
-        row(sec, "top_leaf_width", "Top leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
+        row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
+            "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
+        row(sec, "top_leaf_width", "Top frond leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
             "The top layer's leaflets: thinner, for detail (fraction of the span).")
         row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
             "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
@@ -28875,15 +29151,19 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
             "leaves stand out among fresh ones).")
         row(sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How far the top fronds' leaflets lean along their rachis (0: straight down the slope).")
+            "Loose top fronds: how far their leaflets lean sideways off their stem (rachis); 0: straight down "
+            "the slope.")
         row(sec, "droop", "Droop", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Tips of the top fronds (and a little of the cap) curl up off the roof.")
-        row(sec, "end_reach", "Reach at ends", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
-            "The top layer is stiff: how much further it sticks out at the eaves and past the gable verges.")
+            "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too).")
+        row(sec, "end_reach", "Top fronds past edges", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Loose top fronds are stiff: how far they stick out past the bottom edge (eaves) and past a gable "
+            "end's edge (verge).")
         row(sec, "end_fronds", "Gable fringe", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-            "Extra leaves tied along the gable verges, hanging down past the end (0: none).")
-        row(sec, "lift", "Lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "How far each butt end stands off the roof (the top end is tucked in).")
+            "Gable ends only (flat, upright ends): extra leaves tied along the sloping end edges (verges), "
+            "hanging down over the end wall (0: none).")
+        row(sec, "lift", "Butt lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How far the bottom (butt) end of each piece stands off the roof, so the rows read (the top end is "
+            "tucked in).")
         row(sec, "bend", "Bend", FloatField(-2.0, 3.0, -1.0, 1.5, decimals=2, step=0.05),
             "Bows each piece outwards (below 0: inwards).")
         row(sec, "segments", "Segments", IntField(1, 12, 1, 8),
@@ -28891,21 +29171,32 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "sides", "Sides", IntField(3, 16, 3, 12), "3D pieces: sides round each bundle.")
         row(sec, "flatness", "Flatness", FloatField(0.05, 1.0, 0.05, 1.0, decimals=2, step=0.05),
             "3D pieces: thickness of a bundle across its width (1 = round).")
-        self.f["ridge_fronds"] = CheckField("Cap the ridge, hips and apex")
-        self.f["ridge_fronds"].setToolTip("Leaves laid over the ridge (and down each hip, round a cone's apex) from "
-                                          "the crest down both sides, ending at the courses' height so they blend "
-                                          "in. Without it the ridge is open. The pole over them is "
-                                          "its own switch (Ridge and hip poles).")
+        self.f["ridge_fronds"] = CheckField("Leaf cap over the ridge and hips")
+        self.f["ridge_fronds"].setToolTip("Leaves folded over the top line (ridge), down each hip edge and round a "
+                                          "cone's tip, so rain can't get in where the slopes meet. Off: the "
+                                          "ridge is open. The ridge pole on top of them is its own switch.")
         sec.add_full(self.f["ridge_fronds"])
-        self.f["sticks"] = CheckField("Sticks and rachis")
-        self.f["sticks"].setToolTip("The stick each tile's leaves are folded over (seen from inside) and the top "
-                                    "fronds' rachis. A mesh of their own (woodStick), with stacked UVs: the skin "
-                                    "round 0..0.8, the cut ends at 0.9.")
+        self.f["sticks"] = CheckField("Shingle sticks and frond stems")
+        self.f["sticks"].setToolTip("Thin wood in the thatch: the stick each shingle's leaves are folded over "
+                                    "(seen from inside) and the stems (rachis) of some loose top fronds. A mesh "
+                                    "of its own (woodStick, for a reed / stick material), stacked UVs: skin "
+                                    "0..0.8, ends at 0.9.")
         sec.add_full(self.f["sticks"])
-        self.f["ridge_poles"] = CheckField("Ridge and hip poles")
-        self.f["ridge_poles"].setToolTip("A pole along the ridge and down each hip, over the cap leaves (in the "
-                                         "frame's mesh when Frame is on). Off: the cap leaves stay, the poles go.")
+        self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
+        self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
+                                         "weighing it down, as on many palm roofs (in the frame's mesh when Frame "
+                                         "is on). Off: the cap leaves stay, the pole goes.")
         sec.add_full(self.f["ridge_poles"])
+        self.f["hip_poles"] = CheckField("Hip poles")
+        self.f["hip_poles"].setToolTip("A pole down each hip edge (where a sloped end meets a side slope), "
+                                       "butted against the ridge pole. Off by default: real hips are mostly "
+                                       "closed with leaves alone.")
+        sec.add_full(self.f["hip_poles"])
+        self.f["lashings"] = CheckField("Vine ties (lashings)")
+        self.f["lashings"].setToolTip("Turns of vine tying the poles down (along the ridge and hips, where they "
+                                      "meet, each bundle to its pole). Off by default: small detail, many "
+                                      "polygons.")
+        sec.add_full(self.f["lashings"])
         card.add(sec)
         sec = self.under_sec = Section("Underlay", expanded=False)
         self.f["underlay"] = CheckField("Underlay under the pieces")
@@ -28930,20 +29221,22 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Bamboo: round, a node every ~35 cm.\nPoles: round timber, tapering, a little out of round.\nSawn: "
             "rectangular timber (rafters deeper than wide, battens flat).")
         row(sec, "battens", "Battens", SegmentField(THATCH_BATTENS, columns=2),
-            "Every course: a batten under every course (each tile tied to one).\nEvery 2nd / 3rd: fewer horizontal "
+            "Battens (laths) are the thin poles across the rafters that the thatch is tied to.\nEvery course: one "
+            "under every row of thatch (how palm shingles are tied).\nEvery 2nd / 3rd: fewer horizontal "
             "lines (the tiles in between are tied to the rafters).\nPer level: a purlin where each level starts "
             "(Levels in step 3), the way tiered roofs are built.")
         row(sec, "rafter_spacing", "Rafter spacing", FloatField(0.03, 0.6, 0.05, 0.4, decimals=3, step=0.01),
-            "Distance between rafters (fraction of the span: 0.15 = 75 cm on 5 m).")
+            "Distance between rafters, the poles running down the slope (fraction of the span: 0.12 = 60 cm on "
+            "5 m; thatch rafters are usually 30-60 cm apart).")
         row(sec, "rafter_size", "Rafter size", FloatField(0.004, 0.08, 0.008, 0.05, decimals=4, step=0.001),
             "Rafter diameter (fraction of the span: 0.02 = 10 cm on 5 m). The ridge beam is 1.4x, hips 1.3x.")
         row(sec, "batten_size", "Batten size", FloatField(0.002, 0.04, 0.003, 0.025, decimals=4, step=0.0005),
-            "Batten diameter (one batten under every course).")
+            "Batten diameter (the thin poles across the rafters that the thatch is tied to).")
         row(sec, "frame_wobble", "Crookedness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
             "How crooked the members are (natural poles and bamboo), and how unevenly their ends are cut. 0: "
             "straight and even.")
         self.f["wall_plates"] = CheckField("Wall plates under the rafters")
-        self.f["wall_plates"].setToolTip("A plate along the wall tops (the box's footprint) for the rafters to sit on.")
+        self.f["wall_plates"].setToolTip("A beam along the wall tops (the box's footprint) for the rafters to sit on.")
         self._group["wall_plates"] = "both"
         sec.add_full(self.f["wall_plates"])
         group[0] = "metal"
@@ -29154,7 +29447,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.ttrim_sec.setVisible(tiles)
         for sec in (self.mk_sec, self.levels_sec, self.cap_sec, self.block_sec):
             sec.setVisible(thatch)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
-        for key in ("ridge_fronds", "sticks", "ridge_poles"):
+        for key in ("ridge_fronds", "sticks", "ridge_poles", "hip_poles", "lashings"):
             self.f[key].setVisible(palm and thatch)
 
     def target(self):

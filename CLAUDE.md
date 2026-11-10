@@ -449,6 +449,52 @@
       frame's mesh, else sticks), so Ridge and hip poles off still leaves
       the sticks mesh exactly as it was. Members of kind "tie" get a ring
       at every path point and no run-on ends. `THATCH_VERSION` 8.
+    - **Straight wood** (the user, 2026-11-10: sticks and poles "super
+      bendy and weird", no structure, hip poles clipping through each
+      other at the ridge; then: ropes only as an option, off by default,
+      "more just the shape and position of the poles / frames, avoiding
+      weird bent wood"). Course lines come from `_th_course_lines` (a
+      drop-in for `_th_contours`, cone excepted): each course on the roof's
+      planes at `_th_plane_height` (the height before sag), straight down
+      each face, turning only at the hip (`_th_line_corners`); contours
+      wandered ~4-12 cm in plan with lumps, warp and ridge sag and curved
+      round rounded hips. Used for frond courses and battens (panels still
+      use contours). Tile sticks, course poles and battens are split at the
+      hip corners (`_th_split_at`, trimmed short of each other; a loop's
+      first and last pieces are one member); a rachis over a corner keeps
+      its longer side. Ridge / hip poles (`pole()`) are fitted by
+      `_th_stiff` (a quadratic through what's under them plus a Gaussian-
+      smoothed leftover over `bend` = 0.12 span, lifted straight up by 0.5 x
+      the 90th-percentile residual; no crook). Hip poles start against
+      the ridge pole's side (`butt`: 2.05 rp off its axis, its height
+      there), and the ridge pole runs on 2.05 rp / pitch ratio + 2.5 rp past
+      each hip joint. Mesher crook wavelength is now 0.3-0.6 of the span (it
+      was 1.2-2 scene units: zigzag rafters in decimetre scenes).
+      **Lashings** (`lashings`, default False, a look key; panel checkbox
+      "Vine ties (lashings)"): ridge / hip ties (`band()`), the bands at
+      the hip joints and the bundle ties; off, there are none. Old palm
+      sticks bent up to 0.7 of their length round hips; now under 0.02.
+      **Hip poles** (`hip_poles`, default False, a look key: real palm hips
+      are mostly closed with leaves alone; the ridge pole holding the cap
+      down is the common one): `ridge_poles` is now the ridge pole only.
+      `thatch_data` / an older user preset without the key follow
+      `ridge_poles`; a stored roof without `lashings` gets True, so old roofs
+      keep their look. Palm presets (accurate defaults, the user asked):
+      battens Every course, rafters 0.11-0.13 span (thatch rafters are
+      30-60 cm apart), denser leaves (nipa / fale 1.4, palapa 1.3), beach
+      shack Poles frame (its density stays 0.9: at 1.0 its sticks crossed
+      the leaves 17.6% of edges, the test's limit is 14%). Battens skip a
+      ridge course on the plane inside the rounded crest (|z| < `F.rr` +
+      depth + rb): the straight lines sit nearer the crest than the old
+      contours and crossed the underlay's fold at Volume 2. `THATCH_VERSION` 11.
+      **Wording** (the user: technical names are fine, but you shouldn't
+      have to toggle things to see what they do): a collapsed "What the
+      words mean" section in step 3 (ridge, eaves, gable / verge, hip,
+      course, rafters, battens, purlins, ridge beam / wall plate, rachis,
+      underlay, span); palm labels in plain words (Shingle width, Loose top
+      fronds, Edge droop, Top fronds past edges, Butt lift, ...) and
+      tooltips that say what part of the roof a setting changes and when it
+      applies (Hip ends only, Gable ends only).
     - **Volume** (`_th_volume(s)`, after `_th_detail` in `thatch_build`;
       the user 2026-11-09: roofs look flimsy, "puff them out ... with an
       accurate layering", the wood too). `volume` 0.25..4 (a look key):

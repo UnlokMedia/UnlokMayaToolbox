@@ -516,7 +516,7 @@ def run():
     check("a cap of fronds over the ridge", max(p[1] for p in c1["straw"][0]) > max(p[1] for p in c0["straw"][0]))
     # the user, 2026-11-09: the messy ridge was a sawtooth of folded leaf ends under a pole floating off them.
     # Each ridge leaf drapes over the crest now, and the pole lies on the leaves (pressed in a little), tied down.
-    shack = dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), resolution=80, frame=True)
+    shack = dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), resolution=80, frame=True, lashings=True)
     sh = build(**shack)
     members = sh["field"].frame_extra
     rpole = max((m for m in members if m["kind"] == "pole"), key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
@@ -535,6 +535,33 @@ def run():
           gaps and gaps[len(gaps) // 2] < 0.15 * rp and gaps[-1] < 0.6 * rp and not above and len(ties) >= 6,
           "gap under the pole: median %.2f, worst %.2f pole radii (%d points), %d leaves above it, %d tie turns" % (
               gaps[len(gaps) // 2] / rp if gaps else -1, gaps[-1] / rp if gaps else -1, len(gaps), above, len(ties)))
+
+    # straight wood (the user, 2026-11-10: sticks and poles "super bendy and weird", hips clipping through each
+    # other at the ridge; lashings only as an option, off by default)
+    plain = build(**dict(shack, lashings=False, hip_poles=True, end_a="Hip", end_b="Hip"))
+    wood = plain["field"].frame_extra + plain["field"].stick_members
+    check("Lashings off (the default): no ties", not any(m["kind"] == "tie" for m in wood) and
+          tb["THATCH_DEFAULTS"]["lashings"] is False and "lashings" in tb["THATCH_LOOK_KEYS"])
+
+    def plan_bow(path):  # most a member strays sideways (in plan) off the line between its ends, / its length
+        (x0, _, z0), (x1, _, z1) = path[0], path[-1]
+        ln = math.hypot(x1 - x0, z1 - z0)
+        if ln < 1e-6:
+            return 0.0
+        return max(abs((p[0] - x0) * (z1 - z0) - (p[2] - z0) * (x1 - x0)) / ln for p in path) / ln
+    bows = sorted(plan_bow(m["path"]) for m in wood if m["kind"] in ("stick", "rachis", "pole") and len(m["path"]) > 2)
+    check("sticks, rachis and poles run straight in plan (no wandering with the roof's lumps, none bent round a hip)",
+          bows and bows[-1] < 0.02, "worst bow %.4f of its length (%d members)" % (bows[-1] if bows else -1, len(bows)))
+    rp_ = [m for m in plain["field"].frame_extra if m["kind"] == "pole" and m.get("rs") == 1.0]
+    ridge_ = max(rp_, key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
+    hips_ = [m for m in rp_ if m is not ridge_]
+    r_ = ridge_["r0"]
+    butts = [abs(m["path"][0][2]) for m in hips_]  # a hip pole starts at its butt
+    past = [max(abs(q[0]) for q in ridge_["path"]) - abs(m["path"][0][0]) for m in hips_]
+    check("hips: four hip poles butt against the ridge pole's sides (not through its axis), which runs on past them",
+          len(hips_) == 4 and min(butts) > 1.9 * r_ and max(butts) < 2.3 * r_ and min(past) > 0.0,
+          "butts %s pole radii off its axis, ridge runs on %s" % (["%.2f" % (b / r_) for b in butts],
+                                                                    ["%.2f" % p for p in past]))
 
     # the ends: leaves hang off the gable verges; a hipped end has no fringe
     edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
@@ -650,7 +677,8 @@ def run():
         return sum(1 for i in range(n + 1) for j in range(n + 1) if not fn.closestIntersection(
             om.MFloatPoint(-2.8 + 5.6 * i / float(n), 2.4, -1.85 + 3.7 * j / float(n)),
             om.MFloatVector(0.0, 1.0, 0.0), om.MSpace.kObject, 100.0, False, accelParams=acc))
-    jk = dict(tb["thatch_preset"]("Palm: jungle hut (tied bundles)"), frame=True, detail="Medium", stacks=3)
+    jk = dict(tb["thatch_preset"]("Palm: jungle hut (tied bundles)"), frame=True, detail="Medium", stacks=3,
+              lashings=True)
     jg = build(**jk)
     kinds = [m["kind"] for m in jg["field"].frame_extra]
     n_pole, n_tie = kinds.count("pole"), kinds.count("tie")
@@ -760,7 +788,7 @@ def run():
           "frame y %.2f..%.2f, thatch top %.2f" % (fbb[1], fbb[4], sbb[4]))
     tb["update_thatch_roofs"]({root: {"ridge_poles": True}})
     n_wide = mesh_fn(tb, fr).numVertices
-    tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.075}})
+    tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.05}})
     check("closer rafters: more of them", mesh_fn(tb, fr).numVertices > n_wide * 1.1,
           "%d -> %d verts" % (n_wide, mesh_fn(tb, fr).numVertices))
     tb["update_thatch_roofs"]({root: {"rafter_spacing": 0.15, "detail": "Proxy"}})
