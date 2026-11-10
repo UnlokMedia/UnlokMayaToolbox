@@ -926,7 +926,20 @@
   debris_build with the other items zeroed; cached per layer JSON and
   surface mesh keys in `_SC_BUILT`, so a live edit rebuilds only its
   layer; then one `_roof_udims` over every part, keys "<layer id>/<part>",
-  in layer order); scene side `create_scatter_group`, `sc_add_layer`,
+  in layer order; the layer's name is left out of that key, so a rename
+  doesn't regrow it). **Per-mesh caches** (`_MI_TRIS`, `_MI_REST`,
+  `_MI_MOSS_TOPO`...) are trimmed by `_mi_trim` to 3 x the meshes of every
+  live group (`_mi_room`, set in `sc_build`; at least 24): a fixed 24
+  thrashed on a group of 40 planks. `_mi_surface` keeps the last few
+  `_MiSurface`s by mesh keys (checked with MObjectHandles, so a new scene
+  with the same names builds a new one). `_mi_mesh_key` can't see a mesh
+  reshaped inside its old bounding box, so the panel's Regrow runs
+  `mi_clear_caches()` first. Measured 2026-11-10 (40 planks, Carpet moss,
+  a Coverage edit ~6 s): no faster than before; the time is the bed's own
+  build (`_MossDetail.build`, `strays`, `_emit`), and `_mi_mesh_key` runs
+  ~180 times per mesh per edit (~0.4 s). Test `test_scatter.many_meshes`
+  (`UNLOK_ONLY=name,...` runs chosen parts of `test_scatter.py`). Scene
+  side `create_scatter_group`, `sc_add_layer`,
   `sc_remove_layer`, `sc_set_layer` (on / name / area), `sc_move_layer`,
   `sc_set_surfaces`, `sc_update` (live), `sc_regrow`, `sc_sync`,
   `bake_scatter`, `sc_selection`, `sc_owner`, `sc_new_group_from`; panel

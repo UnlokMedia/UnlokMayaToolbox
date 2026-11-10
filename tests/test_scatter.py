@@ -1819,19 +1819,94 @@ def box_outside():
     check("Bake still drops the box", not cmds.ls(bx))
 
 
+def many_meshes():
+    """Speed on a shack (2026-11-09 review): the per-mesh caches kept 24
+    meshes, so a group on more (40 planks here) pushed its own entries out
+    and every edit read every mesh again. They hold every surface now; the
+    surface queries are kept between edits; renaming a layer doesn't grow
+    it; Regrow's cache clear picks up a plank dented inside its old
+    bounding box."""
+    tb = load_toolbox()
+    cmds.undoInfo(state=True, infinity=True)
+    cmds.file(new=True, force=True)
+    grp = cmds.group(empty=True, name="planks_GRP")
+    planks = [box("plank%02d" % i, (2.0, 0.3, 20.0), (2.2 * i, 0.0, 0.0), grp, div=1.0) for i in range(40)]
+    grp = cmds.ls(grp, long=True)[0]
+    root = tb["create_scatter_group"]([grp], "Moss", {"style": "Carpet", "coverage": 0.9})["root"]
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+
+    def held(cache):
+        return len(set((k if isinstance(k[0], str) else k[0])[0] for k in cache))
+
+    tb["sc_update"](root, lid, {"coverage": 0.85})
+    names = ("_MI_TRIS", "_MI_REST", "_MI_MOSS_TOPO", "_MI_MAT_BASE", "_MI_LIMIT", "_MI_PIECES")
+    got = dict((n, held(tb[n])) for n in names)
+    check("40 surfaces: the per-mesh caches hold every one of them",
+          all(v in (0, 40) for v in got.values()) and 40 in got.values(), str(got))
+
+    made, grown = [], []
+    Surf = tb["_MiSurface"]
+    real_init = Surf.__init__
+
+    def counting(self, nodes):
+        made.append(1)
+        real_init(self, nodes)
+
+    real_layer = tb["_sc_build_layer"]
+
+    def layer_counting(*a, **kw):
+        grown.append(1)
+        return real_layer(*a, **kw)
+
+    Surf.__init__ = counting
+    tb["_sc_build_layer"] = layer_counting
+    try:
+        tb["sc_update"](root, lid, {"coverage": 0.8})
+        check("... an edit reuses the surface queries (none made again)", not made and len(grown) == 1,
+              "%d made, %d layer(s) grown" % (len(made), len(grown)))
+        del grown[:]
+        tb["sc_set_layer"](root, lid, name="north side")
+        check("renaming a layer doesn't grow it again", not grown and
+              tb["sc_data"](root)["layers"][0].get("name") == "north side", "%d grown" % len(grown))
+    finally:
+        Surf.__init__ = real_init
+        tb["_sc_build_layer"] = real_layer
+
+    part = tb["sc_parts"](root)[lid + "/moss"]
+    before = points(tb, part)
+    pts = points(tb, planks[3])
+    top = max(p[1] for p in pts)
+    zs = [p[2] for p in pts]
+    inner = [i for i, p in enumerate(pts) if abs(p[1] - top) < 1e-6 and abs(p[0] - 6.6) < 1e-6
+             and min(zs) + 1.0 < p[2] < max(zs) - 1.0]
+    key = tb["_mi_mesh_key"](planks[3])
+    cmds.move(0.0, -0.2, 0.0, ["%s.vtx[%d]" % (planks[3], i) for i in inner], relative=True)
+    check("(a plank dented inside its bounding box looks unchanged to the caches)",
+          inner and tb["_mi_mesh_key"](planks[3]) == key, "%d vertices" % len(inner))
+    tb["mi_clear_caches"]()
+    check("Regrow's cache clear empties them", not tb["_SC_BUILT"] and not tb["_MI_TRIS"] and not tb["_MI_SURFS"])
+    tb["sc_regrow"](root, readback=False, budget=False)
+    after = points(tb, tb["sc_parts"](root)[lid + "/moss"])
+    def crest(P):  # the moss's top along the middle of that plank
+        return max([p[1] for p in P if abs(p[0] - 6.6) < 0.3 and abs(p[2]) < 8.0] or [-1e9])
+
+    check("... and the moss follows the dent", crest(after) < crest(before) - 0.05,
+          "top along the plank's middle %.3f -> %.3f" % (crest(before), crest(after)))
+    cmds.file(new=True, force=True)  # the kept queries' meshes are gone
+    grp = cmds.group(empty=True, name="planks_GRP")
+    for i in range(40):
+        box("plank%02d" % i, (2.0, 0.3, 20.0), (2.2 * i, 0.0, 0.0), grp, div=1.0)
+    rep = tb["create_scatter_group"]([cmds.ls(grp, long=True)[0]], "Moss", {"style": "Carpet", "coverage": 0.9})
+    check("the same planks in a new scene grow (queries on the old scene's meshes aren't reused)",
+          rep.get("faces", 0) > 0, str(rep.get("faces")))
+
+
 try:
-    box_outside()
-    run()
-    drawing()
-    draw_on()
-    ivy_columns()
-    jungle()
-    moss_and_specks()
-    pause()
-    old_scatter()
-    draft()
-    height_fade()
-    dropped_leaves()
+    ONLY = [n for n in os.environ.get("UNLOK_ONLY", "").split(",") if n]
+    for fn in (box_outside, run, drawing, draw_on, ivy_columns, jungle, moss_and_specks, pause, old_scatter,
+               draft, height_fade, dropped_leaves, many_meshes):
+        if not ONLY or fn.__name__ in ONLY:
+            fn()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))
