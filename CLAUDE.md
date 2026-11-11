@@ -502,6 +502,39 @@
       ridge course on the plane inside the rounded crest (|z| < `F.rr` +
       depth + rb): the straight lines sit nearer the crest than the old
       contours and crossed the underlay's fold at Volume 2. `THATCH_VERSION` 11.
+      **Hold-down poles** (`hold_poles`, pairs along the ridge, default 0,
+      a look key; the user's project, 2026-11-10: old jungle shanties in
+      Brazil, palm roofs and corrugated ones, "accuracy and some
+      interesting details"): `hold_down()` at the end of `_th_fronds_mesh`
+      lays straight poles over the finished leaves, straight down each side
+      slope (none on hip ends / a cone; a lean-to's from its top edge), the
+      pair's tops crossing side by side just past the crest, over the ridge
+      pole, 0.1-0.35 leaf past the eave, yawed up to 5 deg (messy). Height:
+      the leaf points' tops on a plan grid (0.5 r, 3x3 cells) + (k -
+      `HOLD_PRESS`) r, k = sqrt(1 + slope^2): a sloped pole's underside is
+      k r straight under its axis (taken as r at first: on the steep test
+      box leaves pressed "under" it stayed inside it; the press uses k too); `_th_stiff(rise=0, bend=HOLD_BEND span)` on the points away from
+      the crest (within rp + 3 r of it the cap leaves arch up: on a steep
+      test box they held the pole 6 r over the ridge pole), then down to the
+      `HOLD_KEEP` (0.5) quantile of the leaves under it (soft leaves give;
+      they are pressed flat after), the top end moved up or down onto the
+      ridge pole and eased out over `HOLD_REACH` span: its target is the
+      ridge pole's circle (`sqrt((rp + r)^2 - dz^2)` over its axis), so the
+      axes end up rp + r apart (test: the axis distance, not the height
+      over the ridge pole's top, which a sloped pole touching off-centre
+      exceeds by (rp + r)(sqrt(1 + slope^2) - 1)). Then
+      the leaf points under each pole are pressed down onto its underside
+      (circle), eased back within a radius. Measured in 3D (test and
+      scratchpad `holdtest3.py`: leaf points' distance to the pole's axis):
+      none inside a pole, nearest leaf median 0.05-0.25 r off its surface,
+      p90 ~1.4 r (it bridges dips), on a 6 x 4 m and a steep 6 x 4 x 3
+      box (curled tips poked 6.5 r through before the press).
+      Tried and worse: resting it rigidly on two supports of the upper hull
+      (floated ~1-2 r between bumps), a ramp lift pivoting on the foot (the
+      eave end sank 1.3-2 r). Preset "Palm: Amazon jungle shack" (riverside
+      / caboclo shanty: woven panels on a pole frame, mixed fresh and old
+      leaves `dried_var` 0.9, 3 pairs of hold-down poles; overhang stays 0,
+      the box is the roof).
       **Wording** (the user: technical names are fine, but you shouldn't
       have to toggle things to see what they do): a collapsed "What the
       words mean" section in step 3 (ridge, eaves, gable / verge, hip,

@@ -20273,7 +20273,7 @@ THATCH_DEFAULTS = {
     "droop": 0.5, "neat": 0.8, "top_layer": 0.4, "end_reach": 0.3, "end_fronds": 0.5, "ridge_fronds": True,
     "top_leaf_width": 0.011, "overlap": 0.35, "edge_hang": 1.0, "sticks": True, "ridge_poles": True,
     "edge_hang_var": 0.0, "edge_len_var": 0.0, "edge_mess": 0.0, "edge_limp": 0.0,
-    "hip_poles": False, "lashings": False,
+    "hip_poles": False, "lashings": False, "hold_poles": 0,
     "leaf_thickness": 0.0006,
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
@@ -20289,7 +20289,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
@@ -20375,6 +20375,18 @@ THATCH_PRESETS = {
         "edge_hang": 1.4, "end_reach": 0.5, "end_fronds": 1.2, "ridge_fronds": True, "sticks": True,
         "segments": 6, "curl": 0.5, "dried": 0.8, "underlay": False, "frame_style": "Poles",
         "battens": "Every course", "rafter_spacing": 0.13},
+    # an Amazon riverside / jungle shanty (ribeirinho, caboclo): woven palm panels (ubim, babacu, caranai)
+    # tied in tight rows on a pole frame, a mix of fresh and old leaves from patching, a broad-leaf ridge
+    # cap held by a pole, poles laid over it all against storms
+    "Palm: Amazon jungle shack": {
+        "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
+        "lumps": 0.6, "warp": 0.45, "ridge_sag": 0.45, "ragged": 0.35, "gaps": 0.0, "levels": 1, "lip": 0.0,
+        "top": 0.0, "style": "Palm Fronds", "resolution": 150, "frond_form": "Leaflets", "density": 1.2,
+        "leaf_length": 0.17, "leaf_width": 0.024, "top_leaf_width": 0.012, "overlap": 0.3, "frond_width": 0.24,
+        "slant": 0.35, "droop": 0.8, "neat": 0.65, "top_layer": 0.5, "mess": 0.9, "lift": 0.5, "bend": 0.3,
+        "edge_hang": 1.2, "end_reach": 0.35, "end_fronds": 0.7, "ridge_fronds": True, "sticks": True,
+        "segments": 6, "curl": 0.4, "dried": 0.6, "dried_var": 0.9, "underlay": False, "frame_style": "Poles",
+        "battens": "Every course", "rafter_spacing": 0.12, "hold_poles": 3},
     "Palm: jungle hut (tied bundles)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.25,
         "lumps": 0.5, "warp": 0.3, "ridge_sag": 0.3, "ragged": 0.3, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -21761,6 +21773,16 @@ def _th_palm_courses(F, s, t_hi):
     return ts or [min(t_first, t_hi - 0.5 * dt)]
 
 
+# Hold-down poles (measured 2026-11-10 on the Amazon jungle shack, rays down onto the leaves: median gap
+# under a pole ~0, leaves under it pressed flat): its underside HOLD_PRESS radii into the leaves (measured straight down, scaled by the slope), resting
+# on HOLD_KEEP of the points under it (soft leaves give), following their slow give over HOLD_BEND of the span,
+# lifted over the ridge pole and eased back down over HOLD_REACH of the span
+HOLD_PRESS = 0.7
+HOLD_KEEP = 0.5
+HOLD_BEND = 0.08
+HOLD_REACH = 0.25
+
+
 def _th_fronds_mesh(F, G, s):
     """Palm thatch (nipa / attap shingles, palapa, Pacific and beach-hut
     roofs) that is a whole roof on its own, seen from outside or inside:
@@ -21871,7 +21893,8 @@ def _th_fronds_mesh(F, G, s):
     vv_leaf = [1.0 - v for v in k_seg]
     pts, counts, conn, us, vs, uvi = [], [], [], [], [], []
     sticks_out, poles = [], []  # members for the mesher (see tube)
-    state = {"capped": False, "pieces": 0, "anchors": [], "corners": [], "closed": False}  # anchors: points well inside the roof by a line's ends
+    state = {"capped": False, "pieces": 0, "anchors": [], "corners": [], "closed": False,
+             "ridge": None}  # anchors: points well inside the roof by a line's ends; ridge: the ridge pole
 
     def u_of(u, stack):
         return (u + stack) / stacks if columns else u + stack
@@ -22822,6 +22845,129 @@ def _th_fronds_mesh(F, G, s):
                         Nt.insert(0, Nt[0])
             tube(Qt, Nt, [rt] * len(Qt), min(stacks - 1, int(r[3] * stacks)), "tie", 0.0)
 
+    def hold_down(n_pairs):
+        """Hold-down poles (the user, 2026-11-10, jungle shanties: "accuracy and some interesting details"):
+        straight poles laid over the finished thatch straight down the slope, in pairs whose tops cross
+        side by side over the ridge (and over the ridge pole), running a little past the eaves: what keeps
+        a palm roof on in a storm. Each rests on the leaves under it (their highest points along a strip
+        its width, a little pressed in), stiff (_th_stiff), lifted at its top end to clear the ridge pole.
+        Side slopes only (hips and cones none); a lean-to's from its top edge."""
+        lean = F.shape == "Lean-to"
+        rh = 0.9 * rp
+        lo_r = -F.ends[1][3] if F.ends[1] else F.x0
+        hi_r = F.ends[0][3] if F.ends[0] else F.x1
+        m = min(0.08 * span, 0.25 * (hi_r - lo_r))  # in from the ridge's ends
+        if hi_r - lo_r - 2.0 * m < 4.0 * rh:
+            return
+        mx = min(1.0, 0.3 + 0.7 * mess)
+        cs = 0.5 * rh  # the leaves' tops on a plan grid (only near the poles)
+        lines = []
+        for i in range(n_pairs):
+            r = _rand12(seed, 8900, i, 0)
+            sp = (hi_r - lo_r - 2.0 * m) / n_pairs
+            xi = lo_r + m + sp * (i + 0.5) + (r[0] - 0.5) * 0.5 * sp * mx
+            for zs in ((1.0,) if lean else (1.0, -1.0)):
+                r2 = _rand12(seed, 8901 + int(zs > 0), i, 0)
+                z_top = F.z0 + 1e-3 if lean else -zs * 2.5 * rp  # a ridge pair crosses just past the crest
+                z_bot = F.z1 - 1e-3 if lean or zs > 0 else F.z0 + 1e-3
+                x_top = xi - (0.0 if lean else zs * 1.02 * rh)  # side by side where they cross
+                yaw = math.radians(5.0) * (r2[0] - 0.5) * 2.0 * mx  # laid by hand: never quite square
+                lines.append((x_top, z_top, z_bot, math.tan(yaw), rh * (0.9 + 0.2 * r2[1]), r2))
+        if not lines:
+            return
+        band_lo = min(min(x, x + t * (zb - zt)) for x, zt, zb, t, _, _ in lines) - 2.0 * rh
+        band_hi = max(max(x, x + t * (zb - zt)) for x, zt, zb, t, _, _ in lines) + 2.0 * rh
+        tops = {}
+        for p in pts:
+            if band_lo < p[0] < band_hi:
+                key = (int(math.floor(p[0] / cs)), int(math.floor(p[2] / cs)))
+                if p[1] > tops.get(key, -1e30):
+                    tops[key] = p[1]
+        ridge = state["ridge"]
+        laid = []
+        for x_top, z_top, z_bot, tn, rad, r in lines:
+            n = max(8, int(abs(z_bot - z_top) / (0.6 * rh)))
+            S, Q, Nn, need, crest_k = [], [], [], [], set()
+            for k in range(n + 1):
+                z = z_top + (z_bot - z_top) * k / float(n)
+                x = x_top + tn * (z - z_top)
+                cell = _th_cell(G, F, x, z)
+                if cell is None:
+                    continue
+                pos, nrm = _th_sample(G, *cell)[:2]
+                ci, ck = int(math.floor(x / cs)), int(math.floor(z / cs))
+                hs = [tops[(ci + a, ck + b)] for a in (-1, 0, 1) for b in (-1, 0, 1) if (ci + a, ck + b) in tops]
+                if not hs:
+                    continue
+                # on the leaves under it, pressed in a little: a sloped pole's underside is k = sqrt(1 + slope^2)
+                # radii straight under its axis (it was taken as one: on steep roofs leaves stayed inside it)
+                ks = math.sqrt(1.0 + (nrm[2] / max(0.2, nrm[1])) ** 2)
+                y = max(hs) + (ks - HOLD_PRESS) * rad
+                if ridge and abs(z) < rp + 3.0 * rad:  # by the crest it rests on the ridge pole, not the cap
+                    crest_k.add(len(Q))                 # leaves (they arch up there; pressed down under it)
+                if ridge and abs(z) < rp + rad:  # over the ridge pole
+                    rQ = ridge[1]
+                    j = min(range(len(rQ)), key=lambda i_: abs(rQ[i_][0] - x))
+                    dz_ = z - rQ[j][2]  # crossing a round pole: clear of its circle, touching at its top
+                    need.append((len(Q), rQ[j][1] + math.sqrt(max(0.0, (rp + 1.02 * rad) ** 2 - dz_ * dz_))))
+                S.append(math.hypot(x - x_top, z - z_top))
+                Q.append((x, y, z))
+                Nn.append(nrm)
+            if len(Q) < 4:
+                continue
+            Y = [q[1] for q in Q]
+            # stiff: one gentle curve through the leaves under it plus their slow give (not each tuft), then
+            # down onto them as far as their weight presses soft leaves in (HOLD_KEEP of the points it rests
+            # on stay under it), its top end lifted over the ridge pole, eased out down the slope (it bends a
+            # little there)
+            on = [k for k in range(len(Q)) if k not in crest_k]
+            Q = _th_stiff(S, Q, keep=on, rise=0.0, bend=HOLD_BEND * span)
+            dd = sorted(Y[k] - Q[k][1] for k in on) or [0.0]
+            sink = dd[min(len(dd) - 1, int(HOLD_KEEP * len(dd)))]
+            Q = [(q[0], q[1] + sink, q[2]) for q in Q]
+            if need:
+                reach_ = HOLD_REACH * span
+                # onto the ridge pole: up over it, or down onto it where its line comes in over the rounded crest
+                lift = max((h - Q[k][1]) / max(0.05, 1.0 - _rl_smooth01(S[k] / reach_)) for k, h in need)
+                Q = [(q[0], q[1] + lift * (1.0 - _rl_smooth01(s_ / reach_)), q[2]) for q, s_ in zip(Q, S)]
+            d = _rl_norm(_rl_sub(Q[-1], Q[-2]))  # on past the eaves, straight
+            Q.append(_rl_add(Q[-1], _rl_mul(d, (0.1 + 0.15 * r[2]) * ll)))
+            Nn.append(Nn[-1])
+            S.append(S[-1] + (0.1 + 0.15 * r[2]) * ll)
+            if tube(Q, Nn, [rad] * len(Q), 0, "pole", 0.0):
+                poles[-1]["rs"] = 1.0
+                poles[-1]["run"] = False
+                laid.append((x_top, z_top, tn, rad, [q[2] for q in Q], [q[1] for q in Q]))
+                if lashings and not lean and not state["capped"]:  # the pair tied together over the ridge
+                    band(S, Q, Nn, abs(z_top) + rp, 3, r, ends=False)
+        # the leaves under each pole pressed down under it (curled tips came up through it), eased back up
+        # within a radius either side
+        for x_top, z_top, tn, rad, zq, yq in laid:
+            up = zq[-1] > zq[0]
+            zk = zq if up else [-z for z in zq]
+            zlo, zhi = zk[0], zk[-1]
+            for i, p in enumerate(pts):
+                if not band_lo < p[0] < band_hi:
+                    continue
+                d = abs(p[0] - (x_top + tn * (p[2] - z_top)))
+                if d >= 2.0 * rad:
+                    continue
+                zz = p[2] if up else -p[2]
+                if not zlo <= zz <= zhi:
+                    continue
+                k = min(len(zk) - 2, max(0, bisect.bisect_right(zk, zz) - 1))
+                f = (zz - zk[k]) / max(1e-9, zk[k + 1] - zk[k])
+                cy = yq[k] + (yq[k + 1] - yq[k]) * f
+                kk = math.hypot(1.0, (yq[k + 1] - yq[k]) / max(1e-9, zk[k + 1] - zk[k]))  # its slope: see ks
+                if d < rad:
+                    floor_ = cy - kk * (math.sqrt(rad * rad - d * d) + 0.05 * rad)
+                    w = 1.0
+                else:
+                    floor_ = cy - kk * 0.05 * rad
+                    w = 1.0 - _rl_smooth01((d - rad) / rad)
+                if p[1] > floor_:
+                    pts[i] = (p[0], p[1] - w * (p[1] - floor_), p[2])
+
     # ---- the under layer: tiles in even courses from the eaves up (restarting at each level), every other
     # course shifted half a tile
     ts = _th_palm_courses(F, s, t_hi)
@@ -22874,6 +23020,7 @@ def _th_fronds_mesh(F, G, s):
             plo = lo - (2.05 * rp / F.ends[1][4] + 2.5 * rp if F.ends[1] and hip_poles else 0.0)
             phi = hi + (2.05 * rp / F.ends[0][4] + 2.5 * rp if F.ends[0] and hip_poles else 0.0)
             ridge_pole = pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [plo] + xs + [phi]], rest)
+            state["ridge"] = ridge_pole
             if F.shape == "Ridge":
                 for e, end in enumerate(F.ends):
                     if end is None or state["capped"]:
@@ -22962,6 +23109,9 @@ def _th_fronds_mesh(F, G, s):
                 emit(Q, Nn, [p * 0.5 * lw * (1.0 - 0.12 * r[4]) for p in prof_tile],
                      [(r[5] - 0.5) * 0.8 * v ** 1.2 for v in k_seg], uk_tile, min(stacks - 1, int(r[6] * stacks)),
                      mirror and r[7] < 0.5, 0.25 if three else 0.0)
+    hold = int(s.get("hold_poles", 0))
+    if hold > 0 and not F.cone and not state["capped"]:
+        hold_down(hold)
     # sticks and rachis (and the poles, without a frame mesh to go to): wood, not leaf, so a mesh of their own
     # (F.stick_mesh, the roof's "sticks" part) with stacked UVs like the leaves': skins round u 0..0.8, caps at 0.9
     F.frame_extra = poles if s["frame"] else []
@@ -29246,6 +29396,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                        "butted against the ridge pole. Off by default: real hips are mostly "
                                        "closed with leaves alone.")
         sec.add_full(self.f["hip_poles"])
+        row(sec, "hold_poles", "Hold-down poles", IntField(0, 12, 0, 6),
+            "Poles laid on top of the thatch straight down the slope, in pairs whose tops cross over the ridge, "
+            "to keep the leaves on in wind and storms (common on makeshift and jungle roofs). How many pairs "
+            "along the ridge (0: none). Side slopes only: none on hip ends or a cone.")
         self.f["lashings"] = CheckField("Vine ties (lashings)")
         self.f["lashings"].setToolTip("Turns of vine tying the poles down (along the ridge and hips, where they "
                                       "meet, each bundle to its pole). Off by default: small detail, many "
@@ -29476,6 +29630,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                                          zip(ends, ("verge_a", "verge_b"))),
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
+        shown["hold_poles"] = palm and not cone
         for key in ("frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):

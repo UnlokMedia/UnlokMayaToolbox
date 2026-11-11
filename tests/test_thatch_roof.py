@@ -419,7 +419,7 @@ def run():
     b = box("palm")
     frame = tb["thatch_frame"](b)
     palms = [k for k in tb["THATCH_PRESETS"] if k.startswith("Palm")]
-    check("five palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 5 and all(
+    check("six palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 6 and all(
         tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
         "stacks" not in tb["thatch_preset"](k) for k in palms))
     def sky_from_inside(straw, n=30):
@@ -570,6 +570,53 @@ def run():
           len(hips_) == 4 and min(butts) > 1.9 * r_ and max(butts) < 2.3 * r_ and min(past) > 0.0,
           "butts %s pole radii off its axis, ridge runs on %s" % (["%.2f" % (b / r_) for b in butts],
                                                                     ["%.2f" % p for p in past]))
+
+    # hold-down poles (the user, 2026-11-10, Brazilian jungle shanties): pairs laid down the slopes over the
+    # leaves, tops crossing over the ridge pole, straight, resting on the leaves with the leaves under them
+    # pressed flat; off by default
+    amz = build(**dict(tb["thatch_preset"]("Palm: Amazon jungle shack"), frame=True, resolution=80))
+    am_poles = [m for m in amz["field"].frame_extra if m["kind"] == "pole"]
+    am_ridge = max(am_poles, key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
+    holds = [m for m in am_poles if abs(m["path"][-1][2] - m["path"][0][2]) > abs(m["path"][-1][0] - m["path"][0][0])]
+    arp = am_ridge["r0"]
+    clear, pressed, rested = [], 0, []
+    am_straw = amz["straw"][0]
+    for m in holds:
+        hr = m["r0"]
+        wp = tb["_th_to_world"](frame, (m["path"],))[0]
+        # lying on the ridge pole where it crosses it: their axes a radius plus a radius apart
+        q = min(am_ridge["path"], key=lambda c: abs(c[0] - m["path"][0][0]))
+        near = min(math.hypot(c[1] - q[1], c[2] - q[2]) for c in m["path"][:-1])
+        clear.append((near - arp - hr) / hr)
+        # in 3D (a sloped pole's underside is further under its axis than its radius): no leaf point inside
+        # it, and along its middle the nearest leaf about at its surface
+        xs_ = [c[0] for c in wp]
+        near = [p for p in am_straw if min(xs_) - 3.0 * hr < p[0] < max(xs_) + 3.0 * hr]
+        segs = wp[len(wp) // 4: -2]
+        for c0, c1 in zip(segs, segs[1:]):
+            ab = [c1[j] - c0[j] for j in range(3)]
+            l2 = sum(v * v for v in ab)
+            ds = []
+            for p in near:
+                t_ = sum((p[j] - c0[j]) * ab[j] for j in range(3)) / l2
+                if 0.0 <= t_ <= 1.0:
+                    d_ = math.sqrt(sum((p[j] - c0[j] - t_ * ab[j]) ** 2 for j in range(3)))
+                    if d_ < 3.0 * hr:
+                        ds.append(d_)
+            if ds:
+                pressed += sum(1 for d_ in ds if d_ < 0.9 * hr)
+                rested.append((min(ds) - hr) / hr)
+    rested.sort()
+    hold_bows = [plan_bow(m["path"]) for m in holds]
+    check("hold-down poles: off by default; the Amazon shack's 3 pairs are straight, cross over the ridge pole and "
+          "rest on the leaves (pressed flat under them)",
+          tb["THATCH_DEFAULTS"]["hold_poles"] == 0 and "hold_poles" in tb["THATCH_LOOK_KEYS"] and len(holds) == 6
+          and max(hold_bows) < 0.02 and min(clear) > -0.15 and max(clear) < 0.5 and not pressed and rested
+          and -0.15 < rested[len(rested) // 2] < 0.6,
+          "%d poles, bow %.4f, over the ridge pole by %s radii, %d leaf points inside them, nearest leaf "
+          "median %.2f radii off them" % (len(holds), max(hold_bows) if hold_bows else -1,
+                                      ["%.2f" % c for c in clear], pressed,
+                                      rested[len(rested) // 2] if rested else -99))
 
     # the ends: leaves hang off the gable verges; a hipped end has no fringe
     edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
