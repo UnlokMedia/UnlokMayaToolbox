@@ -465,6 +465,14 @@ def run():
         bb = bbox(parts["straw"])
         check("%s: leaves cover the roof, tips hang past the eaves" % k, bb[1] < 2.5 - 0.05 and bb[4] > 5.3 and
               bb[0] < -3.0 and bb[3] > 3.0, str([round(v, 2) for v in bb]))
+    # Edges at their most (droop / length variation, messiness, limp top fronds, ragged eaves): still no gaps
+    for k in palms[:2]:
+        s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"](k))
+        s.update(edge_hang_var=1.0, edge_len_var=1.0, edge_mess=1.0, edge_limp=1.0, ragged=1.5)
+        tb["update_thatch_roofs"]({root: s})
+        miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
+        check("%s, Edges all at 1, Ragged eaves 1.5: no gaps from inside" % k, not miss,
+              "%d of %d rays see the sky: %s" % (len(miss), 31 * 31, miss[:5]))
 
     def build(**over):
         s = dict(tb["THATCH_DEFAULTS"], style="Palm Fronds", resolution=80)
@@ -607,6 +615,31 @@ def run():
     tips = build(top_layer=1.5, end_reach=1.0, edge_hang=1.5)
     check("the top layer sticks out further at the eaves than the hanging under layer",
           max(abs(p[2]) for p in tips["straw"][0]) > max(abs(p[2]) for p in limp["straw"][0]) + 0.05)
+    # Edges (the user, 2026-11-11): own controls for the leaves hanging off the eaves and verges; 0 = as before
+    base_e = build(end_a="Gable")
+    zero_e = build(end_a="Gable", edge_hang_var=0.0, edge_len_var=0.0, edge_mess=0.0, edge_limp=0.0, ragged=0.0)
+    check("Edges all 0: the same leaves as before", base_e["straw"] == zero_e["straw"])
+    low0 = min(p[1] for p in base_e["straw"][0])
+    rag = build(end_a="Gable", ragged=1.5)
+    lvar = build(end_a="Gable", edge_len_var=1.0)
+    check("Ragged eaves on palm fronds: stretches of the edge hang further down",
+          min(p[1] for p in rag["straw"][0]) < low0 - 0.05, "lowest %.3f vs %.3f" % (
+              min(p[1] for p in rag["straw"][0]), low0))
+    def hang_spread(o):  # how much the points hanging below the eaves differ in height
+        ys = [p[1] for p in o["straw"][0] if p[1] < 2.45]
+        m = sum(ys) / float(len(ys))
+        return (sum((y - m) ** 2 for y in ys) / float(len(ys))) ** 0.5
+    check("Hang length variation: the hanging leaves differ more in how far down they reach",
+          lvar["straw"][0] != base_e["straw"][0] and hang_spread(lvar) > 1.1 * hang_spread(base_e),
+          "spread %.4f vs %.4f" % (hang_spread(lvar), hang_spread(base_e)))
+    for key in ("edge_hang_var", "edge_mess"):
+        o = build(end_a="Gable", **{key: 1.0})
+        check("%s 1 changes the edge leaves, the roof's count stays" % key,
+              o["straw"][0] != base_e["straw"][0] and o["pieces"] == base_e["pieces"])
+    limp_top = build(top_layer=1.5, end_reach=1.0, edge_hang=1.5, edge_limp=1.0)
+    check("Limp top fronds 1: the top layer hangs at the eaves instead of sticking out",
+          max(abs(p[2]) for p in limp_top["straw"][0]) < max(abs(p[2]) for p in tips["straw"][0]) - 0.03,
+          "reach %.3f vs %.3f" % (max(abs(p[2]) for p in limp_top["straw"][0]), max(abs(p[2]) for p in tips["straw"][0])))
 
     # wood in the thatch (the user, 2026-11-09: "more accurate interaction with ... all the wood poles and
     # things ... Less clipping, more logic to it"): each top frond lies on the rachis laid under it and its

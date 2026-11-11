@@ -20189,7 +20189,7 @@ THATCH_UNDER_MATERIAL = "strawUnderlay"
 THATCH_FRAME_MATERIAL = "woodFrame"
 THATCH_PART_MATERIALS = (("straw", "strawThatch"), ("underlay", "strawUnderlay"), ("frame", "woodFrame"),
                          ("sticks", "woodStick"))  # sticks: palm fronds' laths, rachis (and poles without a frame)
-THATCH_VERSION = 11  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
+THATCH_VERSION = 12  # roofs remember it; Upgrade brings older ones up to date (new parts, new settings' defaults)
 THATCH_SHAPES = ("Ridge", "Lean-to", "Cone")
 THATCH_ENDS = ("Gable", "Hip", "Half-hip")
 THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it, or cut flush (against a wall)
@@ -20272,6 +20272,7 @@ THATCH_DEFAULTS = {
     "frond_form": "Leaflets", "frond_layout": "Shingles", "bundle_width": 0.06, "frond_width": 0.25, "leaf_length": 0.16, "leaf_width": 0.022, "slant": 0.35,
     "droop": 0.5, "neat": 0.8, "top_layer": 0.4, "end_reach": 0.3, "end_fronds": 0.5, "ridge_fronds": True,
     "top_leaf_width": 0.011, "overlap": 0.35, "edge_hang": 1.0, "sticks": True, "ridge_poles": True,
+    "edge_hang_var": 0.0, "edge_len_var": 0.0, "edge_mess": 0.0, "edge_limp": 0.0,
     "hip_poles": False, "lashings": False,
     "leaf_thickness": 0.0006,
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
@@ -20288,7 +20289,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "sticks", "ridge_poles", "hip_poles", "lashings", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
@@ -21033,14 +21034,16 @@ def _th_shell_mesh(F, G, strands=True, inset=0.0, relief=None):
     return pts, counts, conn, us, vs, uvi
 
 
-def _th_walk(F, G, x, z, pos, nrm, length, seg, yaw=0.0, fall=0.0, heading=None):
+def _th_walk(F, G, x, z, pos, nrm, length, seg, yaw=0.0, fall=0.0, heading=None, swing=0.0, info=None):
     """Walk up the slope from (x, z) (shell point pos, normal nrm) for length
     in seg steps, turned by yaw (pi: down the slope): [(shell point, normal)]
     * (seg + 1). It follows the roof round hips, carries straight on over the
     ridge (never turns back) and straight off the edge, bending down by fall
     a step there (leaves hanging off the eaves). heading: a fixed direction
     in plan (x, z) instead (cap leaves: round a hip's apex the fall line
-    swings along the ridge and they slid off down the hip)."""
+    swings along the ridge and they slid off down the hip). swing: off the
+    edge, each step also turned that many radians sideways (a messy fringe);
+    info: a dict that gets "off", the index of the last point on the roof."""
     cy, sy = math.cos(yaw), math.sin(yaw)
 
     def up_dir(n_, x_, z_):
@@ -21066,6 +21069,12 @@ def _th_walk(F, G, x, z, pos, nrm, length, seg, yaw=0.0, fall=0.0, heading=None)
             p1, n1 = line[-1]
             p0 = line[-2][0] if len(line) > 1 else _rl_sub(p1, (direction[0] * k, 0.0, direction[1] * k))
             d = _rl_sub(p1, p0)
+            if info is not None and "off" not in info:
+                info["off"] = len(line) - 1
+            if swing:
+                cw, sw = math.cos(swing), math.sin(swing)
+                d = (d[0] * cw - d[2] * sw, d[1], d[0] * sw + d[2] * cw)
+                n1 = (n1[0] * cw - n1[2] * sw, n1[1], n1[0] * sw + n1[2] * cw)
             if fall:
                 ln = _rl_len(d)
                 d = _rl_mul(_rl_norm((d[0], d[1] - fall * ln, d[2]), (0.0, -1.0, 0.0)), ln)
@@ -21820,6 +21829,16 @@ def _th_fronds_mesh(F, G, s):
     m_top = 0.4 + 0.8 * mess
     fall_under = 0.15 + 0.7 * hang  # per walk step off the eaves: limp leaves hang down
     fall_top = 0.03  # the top layer is stiff: it sticks out
+    # Edges (the user, 2026-11-11: control over the leaves hanging off the eaves and verges): per leaf, how
+    # much more or less it droops, how long its hanging part is (Ragged eaves: clumps that hang much
+    # further), how messily it splays sideways, and how many top-layer fronds hang limp. All 0: as before
+    e_hvar = clamp(float(s.get("edge_hang_var", 0.0)), 0.0, 1.0)
+    e_lvar = clamp(float(s.get("edge_len_var", 0.0)), 0.0, 1.0)
+    e_mess = clamp(float(s.get("edge_mess", 0.0)), 0.0, 1.0)
+    e_limp = clamp(float(s.get("edge_limp", 0.0)), 0.0, 1.0)
+    e_rag = clamp(F.ragged, 0.0, 3.0)
+    edges_on = bool(e_hvar or e_lvar or e_mess or e_limp or e_rag)
+    e_cell = 0.5 * ll  # neighbours within about half a leaf droop / reach alike (clumps)
     wood = float(s.get("_wood", 1.0))  # Volume: heavier sticks and poles under more thatch
     rs = 0.1 * lw * wood  # stick radius: leaves rest on it
     bundles = s.get("frond_layout") == "Bundles"
@@ -21978,14 +21997,41 @@ def _th_fronds_mesh(F, G, s):
         (poles if kind in ("pole", "tie") else sticks_out).append(m)
         return True
 
-    def verge(q, n, d, ex0, limp):
+    def edge_leaf(x, z, limp):
+        """Edges: (fall per step off the edge, hang multiplier, hanging length scale, sideways swing per
+        step) for a leaf starting at (x, z). Clumped noise plus a random of its own (keyed to its base, not
+        to segment counts; their own _rand12 key, so nothing else moves)."""
+        fall = fall_under if limp else fall_top
+        if not edges_on:
+            return fall, 1.0, 1.0, 0.0, limp
+        r = _rand12(seed, int(math.floor(x / span * 2e5)), int(math.floor(z / span * 2e5)), 7741)
+        nx, nz = x / e_cell, z / e_cell
+        hk, ls, sw = 1.0, 1.0, 0.0
+        if e_limp and not limp and r[3] < e_limp:  # a top-layer frond gone limp: hangs like the under layer
+            fall = fall_top + 0.8 * (fall_under - fall_top)
+            limp = True
+        if e_hvar:
+            hk = max(0.1, 1.0 + e_hvar * (0.75 * _th_noise(nx, nz, seed + 731) + 1.1 * (r[0] - 0.5)))
+            fall *= hk
+        if e_lvar:
+            ls *= max(0.3, 1.0 + e_lvar * (0.6 * _th_noise(nx + 17.3, nz, seed + 732) + 1.2 * (r[1] - 0.5)))
+        if e_rag:  # ragged eaves: stretches of the edge (about a leaf long) hang much further
+            jag = 0.5 + 0.5 * (0.65 * _th_noise(0.6 * nx, 0.6 * nz + 5.1, seed + 733) +
+                               0.35 * _th_noise(1.8 * nx, 1.8 * nz + 9.7, seed + 734))
+            ls *= 1.0 + 1.2 * e_rag * jag * jag
+        if e_mess:
+            sw = e_mess * (r[2] - 0.5) * 0.5 + 0.12 * e_mess * _th_noise(nx, nz + 3.3, seed + 735)
+        return fall, hk, ls, sw, limp
+
+    def verge(q, n, d, ex0, limp, hk=1.0):
         """A leaf carried past a gable verge (its base ex0 past it): limp leaves (the under layer) turn
-        down, more the further out; stiff ones (the top layer) only sag."""
+        down, more the further out; stiff ones (the top layer) only sag. hk: its own hang (Edges)."""
         if ex0 <= 0.0:
             return q, n
         if limp:
-            k = hang * ex0 / (ex0 + 0.08 * ll)
-            q = (q[0], q[1] - 0.4 * hang * ex0 - 0.9 * k * d, q[2])
+            h = hang * hk
+            k = h * ex0 / (ex0 + 0.08 * ll)
+            q = (q[0], q[1] - 0.4 * h * ex0 - 0.9 * k * d, q[2])
             sign = 1.0 if q[0] > 0.0 else -1.0
             n = _rl_norm(_rl_add(n, (sign * k, 0.0, 0.0)), n)
         else:
@@ -21998,13 +22044,14 @@ def _th_fronds_mesh(F, G, s):
     def past_flush(x):
         return max([sign * x - edge for sign, edge in flushes] or [-1e9])
 
-    def leaf_line(base, L, yaw, layer, curl, limp, heading=None, drop=True, floor=None, note=None):
+    def leaf_line(base, L, yaw, layer, curl, limp, heading=None, drop=True, floor=None, note=None, edge=True):
         """A leaf's centreline walking the roof from base ((x, z), ox, oz: on
         a course, or carried past its end) for length L, turned by yaw (pi:
         down the slope), off the roof by layer(distance from its top), bowed
         by bend, curled up at the tip. Off the eaves it hangs (limp) or holds
         its line. floor(x, z): never lower than that off the roof there (what's
-        laid under it); note: a list its (x, z, height off the roof) go on. None off the roof."""
+        laid under it); note: a list its (x, z, height off the roof) go on. edge: False keeps the Edges
+        controls' per-leaf variation off (a card's columns must stay together). None off the roof."""
         (x, z), ox, oz = base
         cell = _th_cell(G, F, x, z)
         if cell is None:
@@ -22019,8 +22066,17 @@ def _th_fronds_mesh(F, G, s):
         if flushes and past_flush(x + ox) > 0.25 * lw:  # starts past a flush verge: it would only be cut off
             return None
         Q, Nn = [], []
-        for k, (p, n) in enumerate(_th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall_under if limp else fall_top,
-                                            heading)):
+        if edge:
+            fall, hk, ls, sw, limp = edge_leaf(x + ox, z + oz, limp)
+        else:
+            fall, hk, ls, sw = fall_under if limp else fall_top, 1.0, 1.0, 0.0
+        info = {} if ls != 1.0 else None
+        walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw, info)
+        if info and 0 < info["off"] < seg:  # Edges: only the part hanging off the roof longer / shorter
+            on = L * info["off"] / float(seg)
+            L = on + (L - on) * ls  # the offsets below go by distance along the new length
+            walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw)
+        for k, (p, n) in enumerate(walk):
             v = k_seg[k]
             off = layer(v * L) + bend * 0.04 * L * math.sin(math.pi * v) + curl * v ** 2.5
             if floor:
@@ -22029,7 +22085,7 @@ def _th_fronds_mesh(F, G, s):
                 note.append((p[0] + ox, p[2] + oz, off))
             q = (p[0] + n[0] * off + ox, p[1] + n[1] * off, p[2] + n[2] * off + oz)
             if ex0:
-                q, n = verge(q, n, v * L, ex0, limp)
+                q, n = verge(q, n, v * L, ex0, limp, hk)
             Q.append(q)
             Nn.append(n)
         if gables and not (ex0 and limp):  # past a gable verge (a slanted leaflet walked off its side, a
@@ -22076,7 +22132,8 @@ def _th_fronds_mesh(F, G, s):
         for j in range(ncard + 1):
             r = _rand12(seed, key[0] * 7 + 5, key[1] * 131 + key[2], j)
             L = L0 * (1.0 + (r[0] - 0.5) * 0.15)
-            line = leaf_line(point_at(start + width * j / float(ncard)), L, yaw, layer, 0.0, limp, drop=False)
+            line = leaf_line(point_at(start + width * j / float(ncard)), L, yaw, layer, 0.0, limp, drop=False,
+                             edge=False)
             if line is None:
                 return False
             grid.append((line, L))
@@ -28866,7 +28923,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "The ridge (top line) sags in the middle, pulling the slopes down with it, as on an old frame.")
         row(sec, "ragged", "Ragged eaves", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "An uneven, hacked-off eave: some of it hangs much lower. Planes / pieces / panels: some hang "
-            "further, panels fray more.")
+            "further, panels fray more. Palm fronds: stretches of the leaves off the edges hang further.")
         row(sec, "gaps", "Gaps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Patchy thatch: planes, pieces or panels left out in clumps (the underlay shows, or the sky with it "
             "off).")
@@ -29137,9 +29194,6 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Width of each shingle (one stick with its leaves folded over it) along its row (fraction of the "
             "span: 0.25 = 1.25 m on 5 m). Every "
             "other course is shifted half a tile. The top layer's fronds are a bit wider.")
-        row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-            "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
-            "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
         row(sec, "top_leaf_width", "Top frond leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
             "The top layer's leaflets: thinner, for detail (fraction of the span).")
         row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
@@ -29197,6 +29251,22 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                       "meet, each bundle to its pole). Off by default: small detail, many "
                                       "polygons.")
         sec.add_full(self.f["lashings"])
+        card.add(sec)
+        sec = self.edge_sec = Section("Edges", expanded=False)
+        row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
+            "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
+        row(sec, "edge_hang_var", "Droop variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much the leaves hanging off the edges differ in droop: in clumps along the edge and leaf by "
+            "leaf (0: all the same).")
+        row(sec, "edge_len_var", "Hang length variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much the part of each leaf hanging off the edge differs in length (0: all the same). Ragged "
+            "eaves (Makeshift) adds stretches that hang much further.")
+        row(sec, "edge_mess", "Edge messiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Leaves hanging off the edges splay sideways, each its own way, so the fringe isn't combed straight.")
+        row(sec, "edge_limp", "Limp top fronds", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Share of the loose top fronds that hang down off the edges like the rows under them instead of "
+            "sticking out stiff (0: all stiff).")
         card.add(sec)
         sec = self.under_sec = Section("Underlay", expanded=False)
         self.f["underlay"] = CheckField("Underlay under the pieces")
@@ -29407,7 +29477,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         for key in ("frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
-                    "edge_hang", "top_leaf_width", "slant", "droop", "end_reach", "dried", "dried_var"):
+                    "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
+                    "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
         for key in ("curl", "curl_var"):
             shown[key] = palm or leaf or s["style"] == "Planes"
@@ -29441,6 +29512,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.under_sec.setVisible(thatch and not surface)
         self.stack_sec.setVisible(True)
         self.more_sec.setVisible(thatch)
+        self.edge_sec.setVisible(thatch and palm)
         self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
         self.trim_sec.setVisible(metal)
         self.tmk_sec.setVisible(tiles and s["t_mode"] == "Makeshift")

@@ -367,6 +367,21 @@
       first point past the verge further down, lengths kept (just lowering
       the points stretched them into long strands); limp more, both scaled
       by `edge_hang`. Limp leaves carried past keep `verge()`.
+    - **Edges controls** (the user, 2026-11-11: "reduce the hang, add
+      variation / messiness, length variation"): panel section "Edges"
+      (palm only) holds Edge droop (`edge_hang`) plus `edge_hang_var`,
+      `edge_len_var`, `edge_mess`, `edge_limp` (all 0 = the old build).
+      `edge_leaf(x, z, limp)` in `_th_fronds_mesh` gives each leaf (keyed
+      to its base point, `_rand12(..., 7741)`; clumped `_th_noise` at half
+      a leaf) its fall per step, a hang multiplier (also `verge()`), a
+      hanging-length scale and a sideways swing (`_th_walk(swing=)`, off
+      the edge only). Length: walk once (`info["off"]` = last on-roof
+      point), then again with only the off-roof part scaled, so rows stay
+      even. Limp top fronds: that share of the top layer falls like the
+      under layer. **Ragged eaves now works on palm** (it did nothing):
+      clumps of the edge hang up to 2.2x further. Cards skip the per-leaf
+      part (`leaf_line(edge=False)`: columns must stay together).
+      `THATCH_VERSION` 12.
     - **Gable edge** (`verge_a` / `verge_b`, `THATCH_VERGES` Hanging /
       Flush; own keys, shown only on a Gable end; the user, 2026-11-02:
       gable leaves hung like curtains and clipped a brick wall). Flush
