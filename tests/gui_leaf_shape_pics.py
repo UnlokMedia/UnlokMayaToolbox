@@ -1,10 +1,12 @@
 """Close-up pictures of palm leaflet shape (Crinkle, Twist, Width variation,
-Uneven edges, Bent tips): each palm preset with the controls off, at the
+Uneven edges, Bent tips, Cross-section): each palm preset with the controls off, at the
 preset's values and strong, from an eave corner and from above the ridge.
 
 Launch (GUI Maya), with UNLOK_TEST_DIR set to this folder:
 
     maya.exe -script tests/run_gui_leaf_shape_pics.mel
+
+UNLOK_PIC_SET=sections: the palapa preset with each cross-section instead.
 
 Pictures go to $UNLOK_TEST_OUT (default: tests/_out/leaf_shape_pics).
 """
@@ -31,6 +33,25 @@ def snap(name, eye, aim, width=1400, height=900):
                    widthHeight=(width, height), offScreen=True)
 
 
+def sections(ns):
+    """The palapa preset with each leaflet cross-section (As is, Rolled, Creased, Mixed), close up."""
+    for form in ns["THATCH_LEAF_SECTIONS"]:
+        cmds.file(new=True, force=True)
+        house = cmds.polyCube(w=6, h=3, d=4, ch=False, name="house")[0]
+        cmds.move(0, 1.5, 0, house)
+        box = cmds.polyCube(w=6, h=2, d=4, ch=False, name="roofBox")[0]
+        cmds.move(0, 4, 0, box)
+        s = dict(ns["thatch_preset"]("Palm: palapa (hipped, messy top)"), detail="High", frame=True,
+                 leaf_section=form, section_amount=1.0, section_var=0.3)
+        ns["make_thatch_roof"](box, s)
+        cmds.setAttr(box + ".visibility", 0)
+        cmds.select(clear=True)
+        tag = form.replace(" ", "_")
+        snap("section_%s_close.png" % tag, (1.2, 5.2, 2.2), (0.7, 4.45, 1.0))
+        snap("section_%s_eave.png" % tag, (3.2, 3.0, 2.9), (2.3, 3.0, 1.75))
+        print("pictures: section %s" % form)
+
+
 def main():
     if not os.path.isdir(OUT):
         os.makedirs(OUT)
@@ -40,6 +61,9 @@ def main():
     for panel in cmds.getPanel(type="modelPanel") or []:
         cmds.modelEditor(panel, edit=True, displayAppearance="smoothShaded", wireframeOnShaded=False,
                          grid=False, displayLights="default")
+    if os.environ.get("UNLOK_PIC_SET") == "sections":
+        sections(ns)
+        return
     for name in [k for k in ns["THATCH_PRESETS"] if k.startswith("Palm")]:
         tag = name.split(":")[1].split("(")[0].strip().replace(" ", "_")
         for look, over in (("off", dict((k, ns["THATCH_DEFAULTS"][k]) for k in keys)), ("preset", {}),
@@ -53,6 +77,7 @@ def main():
             s.update(over)
             ns["make_thatch_roof"](box, s)
             cmds.setAttr(box + ".visibility", 0)
+            cmds.select(clear=True)
             snap("%s_%s_eave.png" % (tag, look), (4.6, 3.3, 3.9), (2.4, 3.2, 1.7))
             snap("%s_%s_top.png" % (tag, look), (1.5, 6.6, 3.2), (0.6, 4.4, 0.6))
             print("pictures: %s %s" % (name, look))

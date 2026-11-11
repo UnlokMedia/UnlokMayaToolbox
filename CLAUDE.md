@@ -805,7 +805,18 @@
     up to 1.5x; others half) and needs columns only on the top layer. Bent
     tip = a two-row crease (half the angle at each), lengths kept. Palm
     presets carry modest values (+20-50% verts). Pictures:
-    `tests/run_gui_leaf_shape_pics.mel` (`tests/_out/leaf_shape_pics`).
+    `tests/run_gui_leaf_shape_pics.mel` (`tests/_out/leaf_shape_pics`;
+    `UNLOK_PIC_SET=sections` for one per cross-section).
+    **Cross-section** (`leaf_section`, `THATCH_LEAF_SECTIONS` As is /
+    Rolled / Creased / Mixed, `section_amount`, `section_var`; same day:
+    "thinner curled tubes, or flatter with a pinch down the middle, or as
+    they are now"): `_th_leaf_section` (randoms key 7919, 62). Rolled
+    replaces the curl with a cup (edges up, -(0.6 + 1.3 a)), 0.3 a
+    narrower, 5 columns; Creased flattens the curl and lifts the edges
+    (`sec[2] * h * |x|^0.8`, a V at the midrib). Caps only cup to -0.35
+    (half way opened the jungle hut's ridge at Rolled 1.5), the under
+    layer to -0.25; both crease 0.35 a (edges up, nothing narrower).
+    As is (the default) never touches a leaf, whatever the amount.
   - **Quick roof shape** (`thatch_shape_from_points`, pure maths;
     `create_thatch_box_from_points`, `thatch_roof_from_points` (one
     UndoChunk), `thatch_selected_points`, `ThatchPointPicker`): points split

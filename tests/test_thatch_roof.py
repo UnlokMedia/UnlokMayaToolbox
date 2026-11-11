@@ -1087,12 +1087,24 @@ def run():
           lf[0] != z0[0] and uv_up(lf) > 0.999 and max(frac) <= 0.8701 and min(lf[3]) >= -1e-6 and dt < 8.0,
           "%d -> %d verts, %.2f%% upright, widest u %.4f" % (len(z0[0]), len(lf[0]), uv_up(lf) * 100, max(frac)))
     check("Leaflet shape is repeatable (same seed, same leaves)", dry_build(stacks=3, **full)[0] == lf[0])
+    for form in ("Rolled", "Creased", "Mixed"):  # the leaflets' cross-section (the user: "thinner curled tubes,
+        sec_ = dry_build(stacks=3, leaf_section=form, section_amount=1.5, section_var=1.0)  # or flatter, pinched")
+        frac = [u - math.floor(u) for u in sec_[3] if u - math.floor(u) < 0.9999]
+        check("Cross-section %s at its most: changes the leaves, UVs upright and inside the strip" % form,
+              sec_[0] != z0[0] and uv_up(sec_) > 0.999 and max(frac) <= 0.8701,
+              "%d -> %d verts, %.2f%% upright, widest u %.4f" % (len(z0[0]), len(sec_[0]), uv_up(sec_) * 100,
+                                                                max(frac)))
+    check("Cross-section As is (any amount) builds exactly as before",
+          dry_build(leaf_section="As is", section_amount=1.5)[0] == dry_build()[0])
     for pk in ("Palm: nipa shingles (neat)", "Palm: jungle hut (tied bundles)"):
-        tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"](pk), resolution=100, **full)})
-        miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
-        check("Leaflet shape at its most, %s: still no gaps from inside" % pk, not miss,
-              "%d rays see the sky: %s" % (len(miss), miss[:5]))
-    tb["update_thatch_roofs"]({root: dict((k, tb["THATCH_DEFAULTS"][k]) for k in shape_keys)})
+        for form in ("Rolled", "Creased"):
+            tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"](pk), resolution=100, leaf_section=form,
+                                                  section_amount=1.5, section_var=1.0, **full)})
+            miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
+            check("Leaflet shape at its most (%s), %s: still no gaps from inside" % (form, pk), not miss,
+                  "%d rays see the sky: %s" % (len(miss), miss[:5]))
+    tb["update_thatch_roofs"]({root: dict([(k, tb["THATCH_DEFAULTS"][k]) for k in shape_keys] +
+                                          [("leaf_section", "As is")])})
 
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)

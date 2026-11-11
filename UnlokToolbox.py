@@ -20196,6 +20196,7 @@ THATCH_VERGES = ("Hanging", "Flush")  # a gable end's edge: leaves hang past it,
 THATCH_AXES = ("Auto", "X", "Z")
 THATCH_STYLES = ("Surface", "Planes", "3D Pieces", "Leaf Panels", "Palm Fronds")
 THATCH_FROND_FORMS = ("Cards", "Leaflets", "3D Leaflets")
+THATCH_LEAF_SECTIONS = ("As is", "Rolled", "Creased", "Mixed")  # a palm leaflet's cross-section
 THATCH_FROND_LAYOUTS = ("Shingles", "Bundles")  # palm: tiles on short sticks, or handfuls tied over long poles
 THATCH_DETAILS = ("Proxy", "Rough", "Medium", "High", "Hero")
 THATCH_FRAME_STYLES = ("Bamboo", "Poles", "Sawn")
@@ -20280,7 +20281,8 @@ THATCH_DEFAULTS = {
     "curl": 0.0, "curl_var": 0.5, "dried": 0.0, "dried_var": 0.6,
     # palm leaflet shape (0: as before)
     "crinkle": 0.0, "crinkle_var": 0.5, "leaf_twist": 0.0, "leaf_twist_var": 0.5, "width_var": 0.0,
-    "width_wobble": 0.0, "bent_tips": 0.0, "bent_var": 0.5,
+    "width_wobble": 0.0, "bent_tips": 0.0, "bent_var": 0.5, "leaf_section": "As is", "section_amount": 0.6,
+    "section_var": 0.4,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20296,7 +20298,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
-                    "width_wobble", "bent_tips", "bent_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
+                    "width_wobble", "bent_tips", "bent_var", "leaf_section", "section_amount", "section_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -21733,7 +21735,7 @@ def _th_dry_leaf(F, Q, Nn, half, twist, e, r, cross, coil=True):
 
 
 THATCH_LEAF_SHAPE_KEYS = ("crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var", "width_wobble",
-                          "bent_tips", "bent_var")
+                          "bent_tips", "bent_var", "section_amount", "section_var")
 
 
 def _th_leaf_shape_settings(s):
@@ -21741,8 +21743,13 @@ def _th_leaf_shape_settings(s):
     twist, or more variation in width, some having bent tips"): None when all are 0, so a roof without them
     builds exactly as it did."""
     v = dict((k, max(0.0, float(s.get(k, 0.0)))) for k in THATCH_LEAF_SHAPE_KEYS)
-    if not (v["crinkle"] or v["leaf_twist"] or v["width_var"] or v["width_wobble"] or v["bent_tips"]):
+    sec = s.get("leaf_section", THATCH_LEAF_SECTIONS[0])
+    v["section"] = sec if sec in THATCH_LEAF_SECTIONS[1:] and v["section_amount"] > 0.0 else None
+    if not (v["crinkle"] or v["leaf_twist"] or v["width_var"] or v["width_wobble"] or v["bent_tips"] or
+            v["section"]):
         return None
+    v["section_amount"] = min(1.5, v["section_amount"])
+    v["section_var"] = min(1.0, v["section_var"])
     for k in ("crinkle_var", "leaf_twist_var", "bent_var"):
         v[k] = min(1.0, v[k])
     v["crinkle"] = min(2.0, v["crinkle"])
@@ -21751,6 +21758,33 @@ def _th_leaf_shape_settings(s):
     v["width_wobble"] = min(1.0, v["width_wobble"])
     v["bent_tips"] = min(1.0, v["bent_tips"])
     return v
+
+
+def _th_leaf_section(sh, r, kind):
+    """One leaflet's cross-section (the user, 2026-11-11: "thinner curled tubes, or flatter with a pinch down
+    the middle, or as they are now"): (curl it takes on, how much of its own curl it keeps, V-fold depth per
+    half width, narrowing, fewest columns) or None (as it is). Rolled: the edges cupped up and round towards
+    a tube (arc length kept, so it reads thinner) and a little narrower; Creased: flattened, the edges lifted
+    either side of a pinched midrib. Mixed: each leaflet one of the three. The under layer only cups a
+    little (a rolled shingle would let the sky through), the caps a little more (rolled further, the
+    ridge opened: jungle hut, Rolled 1.5) and crease half as deep."""
+    form = sh["section"]
+    if form == "Mixed":
+        form = (None, "Rolled", "Creased")[min(2, int(r[0] * 3.0))]
+    if not form:
+        return None
+    a = min(1.5, max(0.0, sh["section_amount"] * (1.0 + (r[1] - 0.5) * 2.0 * sh["section_var"])))
+    if a <= 0.0:
+        return None
+    k = 1.0 if kind == "top" else 0.5
+    a1 = min(1.0, a)
+    if form == "Rolled":
+        if kind == "under":
+            return (-0.25 * a1, 1.0 - a1, 0.0, 0.0, 3)
+        if kind == "cap":
+            return (-0.35 * a1, 1.0 - a1, 0.0, 0.0, 3)
+        return (-(0.6 + 1.3 * a) * k, 1.0 - a1, 0.0, 0.3 * a1 * k, 5 if a * k > 0.4 else 3)
+    return (0.0, 1.0 - 0.8 * a1, (0.5 if kind == "top" else 0.35) * a, 0.0, 3)
 
 
 def _th_leaf_shape(F, sh, rv, Q, Nn, half, twist, vv, roll, flat, kind, hmax, cross):
@@ -22051,15 +22085,19 @@ def _th_fronds_mesh(F, G, s):
             Q, Nn, half, twist, vv, roll, wr = _th_dry_leaf(F, Q, Nn, half, twist, dry[0], dry[1], cross, dry[2])
             if vrow and not dry[2]:  # no coil: the same rows, keep their V
                 vv = vrow
-        crk = None
-        if shape_s:  # crinkle, twist, width, bent tips: randoms of its own (0: exactly as before)
+        crk = sec = None
+        if shape_s:  # crinkle, twist, width, bent tips, cross-section: randoms of its own (0: exactly as before)
             Q, Nn, half, twist, vv, roll, flat, crk = _th_leaf_shape(
                 F, shape_s, _rand12(seed, int(h01 * 2147483647), 7919, 61), Q, Nn, half, twist, vv, roll, flat,
                 kind, 0.425 / uk, cross)
+            if shape_s["section"]:
+                sec = _th_leaf_section(shape_s, _rand12(seed, int(h01 * 2147483647), 7919, 62), kind)
         n = len(Q)
         rows = n - 1
         # a curled / dried / crinkled top leaf needs columns across it (a crinkled shingle ripples its edges)
         wide = cross if c or roll or wr or (crk and not crk[5]) else (3 if crease else 2)  # a curled / dried leaf needs columns across it
+        if sec:  # a rolled / creased cross-section: enough columns for it (odd: a midrib column)
+            wide = max(wide, sec[4], cross)
         kink = 0.5 * max(half) * wr[0] if wr else 0.0
         if not room((rows * wide + 1) * (2 if thick else 1) + (4 * rows * 2 + 4 * wide if thick else 0)):
             return False
@@ -22073,14 +22111,18 @@ def _th_fronds_mesh(F, G, s):
             if twist[k]:
                 c_, s_ = math.cos(twist[k]), math.sin(twist[k])
                 b, nn = (_rl_add(_rl_mul(b, c_), _rl_mul(nn, s_)), _rl_sub(_rl_mul(nn, c_), _rl_mul(b, s_)))
-            h = half[k]
+            h = half[k] * (1.0 - sec[3]) if sec else half[k]
             ups.append(nn)
             du = h * uk * (-1.0 if flip else 1.0)
             vk = 1.0 - vv[k]
             kx = kink * vk * math.sin(6.2832 * (2.2 * vk + wr[3])) if wr else 0.0  # a crumpled midrib
             ck = c * (flat(1.0 - vv[k]) if callable(flat) else flat[k]) if flat else c
+            if sec:  # its cross-section: lies flatter over a stick or the ridge, like its curl
+                ck = ck * sec[1] + sec[0] * ((flat(1.0 - vv[k]) if callable(flat) else flat[k]) if flat else 1.0)
             for x, side, up in _th_curl_points(ck + roll[k] if roll else ck, h, wide):
                 up -= crease * h * (1.0 - abs(x))  # 3D: folded down the midrib
+                if sec and sec[2]:  # creased: the edges lifted either side of a pinched midrib
+                    up += sec[2] * h * abs(x) ** 0.8
                 if wr:  # crumpled: the blade wavy, most at the edges
                     up += wr[0] * h * (0.35 + 0.65 * abs(x)) * (0.6 * math.sin(6.2832 * (2.3 * vk + wr[1]) + 2.1 * x) +
                                                                 0.4 * math.sin(6.2832 * (3.9 * vk + wr[2]) - 3.4 * x))
@@ -29477,6 +29519,16 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         # palm leaflets' shape (the user, 2026-11-11: "crinkle a bit more, or twist, or more variation in width,
         # some having bent tips"): each an amount, most with a variation
         sec = self.leaf_sec = Section("Leaflet shape", expanded=False)
+        row(sec, "leaf_section", "Cross-section", SegmentField(THATCH_LEAF_SECTIONS, columns=2),
+            "The shape across each leaflet. As is: as Curl makes it. Rolled: the edges curled up and round "
+            "towards a thin tube (and a little narrower). Creased: flatter, the edges lifted either side of a "
+            "pinch down the midrib (a V-fold). Mixed: each leaflet one of the three. The loose top fronds take "
+            "it fully; the caps and the neat shingles under them only cup a little or crease, so the roof "
+            "stays closed.")
+        row(sec, "section_amount", "Section amount", FloatField(0.0, 1.5, 0.0, 1.0, decimals=2, step=0.05),
+            "How far the cross-section goes: Rolled 1 = nearly a closed tube; Creased 1 = a deep V. 0: as is.")
+        row(sec, "section_var", "Section variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's cross-section differs (0: all the same; 1: from none to twice the amount).")
         row(sec, "crinkle", "Crinkle", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
             "Small waves along and across each leaflet's blade, most at its edges (none at the base). The loose "
             "top fronds ripple both ways; the neat shingles and the caps only lift, so they stay in their "
