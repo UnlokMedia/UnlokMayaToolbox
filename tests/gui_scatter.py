@@ -511,7 +511,10 @@ def draft_mode(ns, panel, window):
     # a slow layer (the speed pass: a drag at High queued a rebuild per tick): while its slider is held a moss
     # edit grows the quick draft look; let go, the layer grows in full
     field = panel.f["Moss"]["coverage"]
-    panel._slow = True
+    # this layer grew slowly last time (remembered per layer): a held slider drafts from its very first tick,
+    # whatever the last update of another layer took
+    panel._slow = False
+    panel._took[(panel._root, panel._lid)] = 1.0
     field.slider.setSliderDown(True)
     field.setValue(0.47)
     panel._pending.add("coverage")

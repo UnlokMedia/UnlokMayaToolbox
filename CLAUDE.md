@@ -1059,10 +1059,19 @@
   `_MiSurface`s by mesh keys (checked with MObjectHandles, so a new scene
   with the same names builds a new one). `_mi_mesh_key` can't see a mesh
   reshaped inside its old bounding box, so the panel's Regrow runs
-  `mi_clear_caches()` first. Measured 2026-11-10 (40 planks, Carpet moss,
-  a Coverage edit ~6 s): no faster than before; the time is the bed's own
-  build (`_MossDetail.build`, `strays`, `_emit`), and `_mi_mesh_key` runs
-  ~180 times per mesh per edit (~0.4 s). Test `test_scatter.many_meshes`
+  `mi_clear_caches()` first. Measured 2026-11-10 (40 planks, a Coverage
+  edit): the cache sizing alone was no faster; the time is the bed's own
+  build. Then (2026-11-11): `_MiSurface.piece` reads the kept surface's
+  `mesh_keys` (set by `_mi_surface`) instead of a `_mi_mesh_key` per
+  triangle (~180 a mesh an edit); `_mi_write_colors` hands the (r, g, b)
+  tuples straight to `MColorArray`; `_MossMat` keeps each dome cell's snap
+  onto the surface in its layout cache (`_MI_MOSS_MATS` entry [2],
+  `self.snaps`: a closest-point search over every mesh per dome, redone on
+  every edit). Carpet 6.85 -> 5.9 s, Mat 2.65 -> 2.3 s, same meshes and
+  colours (hashed). The panel remembers each layer's last update time
+  (`ScatterPanel._took`, by group and layer), so a held slider on a layer
+  known to be slow drafts from its first tick instead of after one full
+  update. Test `test_scatter.many_meshes`
   (`UNLOK_ONLY=name,...` runs chosen parts of `test_scatter.py`). Scene
   side `create_scatter_group`, `sc_add_layer`,
   `sc_remove_layer`, `sc_set_layer` (on / name / area), `sc_move_layer`,

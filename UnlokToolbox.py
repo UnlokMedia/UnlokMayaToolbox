@@ -30712,7 +30712,7 @@ class _MiSurface(object):
         """Which connected piece of the k-th mesh (as it is queried: its rest
         surface if it has one) a vertex is on, as (k, lowest vertex id in it):
         the same for every build of an unchanged mesh."""
-        keys = getattr(self, "rest_key", None)
+        keys = getattr(self, "rest_key", None) or getattr(self, "mesh_keys", None)
         key = keys[k] if keys else _mi_mesh_key(self.nodes[k])
         labels = _mi_cache_get(_MI_PIECE_LABELS, key)
         if labels is None:
@@ -30841,6 +30841,8 @@ def _mi_surface(nodes):
     if hit is not None and all(h.isValid() and h.isAlive() for h in hit[1]):
         return hit[0]
     surf = _MiSurface(nodes)
+    if len(surf.nodes) == len(key):  # (every node a mesh) the keys just read: piece() looks them up per face
+        surf.mesh_keys = key
     _MI_SURFS[key] = (surf, [om.MObjectHandle(it[1].object()) for it in surf.items])
     _MI_SURFS.move_to_end(key)
     while len(_MI_SURFS) > 4:
@@ -31363,7 +31365,7 @@ def _mi_write_colors(shape, mesh):
     if MOSS_COLOR_SET not in have:
         fn.createColorSet(MOSS_COLOR_SET, False, rep=om.MFnMesh.kRGB)
     fn.setCurrentColorSetName(MOSS_COLOR_SET)
-    fn.setColors(om.MColorArray([om.MColor((c[0], c[1], c[2], 1.0)) for c in col]), MOSS_COLOR_SET,
+    fn.setColors(om.MColorArray(col), MOSS_COLOR_SET,
                  rep=om.MFnMesh.kRGB)
     fn.assignColors(mesh[2], MOSS_COLOR_SET)
     if cmds.attributeQuery("aiExportColors", node=shape, exists=True) and not cmds.getAttr(shape + ".aiExportColors"):
@@ -35082,12 +35084,16 @@ class _MossMat(_MossBed):
                None if faces is None else tuple(sorted((n, tuple(sorted(v))) for n, v in faces.items())))
         cache = _MI_MOSS_MATS.get(key)
         if cache is None:
-            cache = _MI_MOSS_MATS[key] = ({}, getattr(cands, "base", cands))
+            cache = _MI_MOSS_MATS[key] = ({}, getattr(cands, "base", cands), ({}, {}))
             while len(_MI_MOSS_MATS) > 4:
                 _MI_MOSS_MATS.popitem(last=False)
         else:
             _MI_MOSS_MATS.move_to_end(key)
         self.grids = cache[0]
+        # where each dome cell's centre lands on the surface (or None: off its own cell), per layer: it
+        # follows only the layout (seed, cell sizes, surfaces), so a Coverage / Thickness / Bumps edit keeps
+        # it (it was a closest-point search over every mesh per dome, a fifth of a Mat edit on 40 planks)
+        self.snaps = cache[2]
         self.active = []  # (grid, cells) the field can show moss in this time
         self.out_pts, self.out_quads, self.out_col = [], [], []
         self.out_us, self.out_vs, self.out_uvi = [], [], []  # no moss at all: an empty mat, not a crash
@@ -35271,20 +35277,28 @@ class _MossMat(_MossBed):
             return None
         # its centre on the surface (a centre off it would cut the surface in a narrow cap: a spike),
         # kept only if that lies in its own cell (cells above and below would stack more)
-        c = om.MPoint((i + 0.15 + 0.7 * r[1]) * gs, (j + 0.15 + 0.7 * r[2]) * gs, (k + 0.15 + 0.7 * r[3]) * gs)
-        best, bd = None, 1e30
-        far = 1.75 * gs  # a hit further off can't be in this cell (searches far from a mesh were slow)
-        for item in self.surf.items:
-            hit = item[0].closest(c, far)
-            if hit is not None:
-                d = hit[1].distanceTo(c)
-                if d < bd:
-                    best, bd = hit[1], d
-        if best is None or (int(math.floor(best.x / gs)), int(math.floor(best.y / gs)),
-                            int(math.floor(best.z / gs))) != key:
+        snaps = self.snaps[layer]
+        best = snaps.get(key, 0)
+        if best == 0:
+            c = om.MPoint((i + 0.15 + 0.7 * r[1]) * gs, (j + 0.15 + 0.7 * r[2]) * gs,
+                          (k + 0.15 + 0.7 * r[3]) * gs)
+            hb, bd = None, 1e30
+            far = 1.75 * gs  # a hit further off can't be in this cell (searches far from a mesh were slow)
+            for item in self.surf.items:
+                hit = item[0].closest(c, far)
+                if hit is not None:
+                    d = hit[1].distanceTo(c)
+                    if d < bd:
+                        hb, bd = hit[1], d
+            best = None
+            if hb is not None and (int(math.floor(hb.x / gs)), int(math.floor(hb.y / gs)),
+                                   int(math.floor(hb.z / gs))) == key:
+                best = (hb.x, hb.y, hb.z)
+            snaps[key] = best
+        if best is None:
             cache[key] = None
             return None
-        g = ((best.x, best.y, best.z), rad, hgt, int(r[6] * 1000))
+        g = (best, rad, hgt, int(r[6] * 1000))
         cache[key] = g
         return g
 
@@ -42101,6 +42115,9 @@ class ScatterPanel(QtWidgets.QWidget):
         self._edit_timer.setInterval(60)
         self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
         self._slow = False  # the last update took a while: a slider drag updates once, on release
+        # each layer's last update time: a drag on a layer known to be slow drafts from its first tick (it
+        # used to grow one full update first, a freeze of seconds on a big moss layer, before drafting)
+        self._took = {}
         self._drag_draft = False  # moss grown as a draft while a slider was held: in full once it's let go
         self._undo_timer = QtCore.QTimer(self)
         self._undo_timer.setSingleShot(True)
@@ -42895,7 +42912,8 @@ class ScatterPanel(QtWidgets.QWidget):
 
     @ui_safe
     def _apply_pending(self):
-        if self._slow and (self._pending or self._drag_draft) and self._dragging():
+        slow = self._took.get((self._root, self._lid), 0.0) > 0.3 if (self._root, self._lid) in self._took             else self._slow
+        if slow and (self._pending or self._drag_draft) and self._dragging():
             # a slow layer (moss at High: seconds a build) while its slider is held: moss shows its quick
             # draft look as it moves (a light viewport), anything else waits; in full once it's let go
             if self._pending and self._type() == "Moss" and not sc_drafting() and self._alive() and self._layer():
@@ -42929,7 +42947,8 @@ class ScatterPanel(QtWidgets.QWidget):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._drag_draft = False
-        self._slow = time.time() - t0 > 0.3
+        self._took[(self._root, self._lid)] = took = time.time() - t0
+        self._slow = took > 0.3
         self._report("Updated", rep, t0)
 
     def _udim_changed(self):
