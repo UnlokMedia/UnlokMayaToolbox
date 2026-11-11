@@ -29110,8 +29110,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         # ---- 2. make
         card = self.step_make = StepCard(2, "Make roof", "Roofs the selected box with the settings below (one "
                                                          "Ctrl+Z). The roof follows the box when you move or scale "
-                                                         "it. Duplicate copies a roof onto a box of its own; linked "
-                                                         "roofs share their look.")
+                                                         "it.")
         self.make_btn = primary_button("Make Roof")
         self.make_btn.setMinimumHeight(28)
         self.make_btn.setToolTip("Build a roof (thatch or corrugated metal, step 4) on the selected box (or mesh). "
@@ -29132,14 +29131,17 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.dup_link = CheckField("Link the copy")
         self.dup_link.setValue(True)
         self.dup_link.setToolTip("On: the copy and the original are linked (they share their look, see Link).")
-        card.add(button_row(dup, self.dup_link))
+        links = self.links_sec = Section("Copies and links", expanded=False)
+        links.header.setToolTip("Duplicate a roof onto a box of its own, make a lost box again, and link roofs "
+                                "so they share their look.")
+        links.add_full(button_row(dup, self.dup_link))
         remake = secondary_button("Make Box Again", "The selected roofs (or the one you're editing) whose box was "
                                                     "deleted, say to keep it out of a publish: a new box exactly "
                                                     "where the old one was, linked, so dragging it reshapes the "
                                                     "roof again. A roof without its box keeps its shape and still "
                                                     "takes every other edit. One Ctrl+Z.")
         remake.clicked.connect(lambda *_: self.remake_boxes())
-        card.add(button_row(remake))
+        links.add_full(button_row(remake))
         link = secondary_button("Link", "Link the selected roofs so they share their look: a change to any of "
                                         "them rebuilds the rest. Shared: everything in steps 3 and 4 but each "
                                         "roof's own Shape, Ridge along, ends, Hip pitch, Half-hip, Overhang and "
@@ -29152,7 +29154,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sel_linked = secondary_button("Select Linked", "Select the roof you're editing and every roof linked to "
                                                        "it.")
         sel_linked.clicked.connect(lambda *_: self.select_linked())
-        card.add(button_row(link, unlink, sel_linked))
+        links.add_full(button_row(link, unlink, sel_linked))
+        card.add(links)
         self.link_label = hint_label("")
         card.add(self.link_label)
         col.addWidget(card)
@@ -29430,15 +29433,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Gathered to about a third of that where it's tied. Overlap closes them up along the pole.")
         row(sec, "leaf_length", "Leaf length", FloatField(0.02, 0.6, 0.05, 0.3, decimals=3, step=0.005),
             "Length of a leaflet down the slope (fraction of the span: 0.16 = 80 cm on 5 m).")
-        row(sec, "leaf_width", "Under-layer leaf width", FloatField(0.002, 0.08, 0.005, 0.05, decimals=4, step=0.001),
-            "The under layer's (and caps') leaflets: wide, full width over their top half, then a long tip "
-            "(fraction of the span: 0.022 = 11 cm on 5 m).")
-        row(sec, "top_layer", "Loose top fronds", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+        row(sec, "top_layer", "Top fronds", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
             "Loose half fronds thrown over the neat rows, for a messier, lived-in top (0: none, 1: about one per "
             "frond width along each row).")
-        row(sec, "neat", "Neat under layer", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How regular the neat rows underneath are (1: even, leaflets straight). Messiness sets the loose top "
-            "fronds.")
         row(sec, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "How deep the straw grooves running down the slope are.")
         row(sec, "strand_width", "Strand width", FloatField(0.001, 0.05, 0.002, 0.02, decimals=4, step=0.0005),
@@ -29518,7 +29515,39 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         group[0] = "thatch"
         # palm leaflets' shape (the user, 2026-11-11: "crinkle a bit more, or twist, or more variation in width,
         # some having bent tips"): each an amount, most with a variation
-        sec = self.leaf_sec = Section("Leaflet shape", expanded=False)
+        sec = self.neat_sec = Section("Under layer (neat rows)", expanded=False)
+        sec.header.setToolTip("The tidy shingles / bundles tied on in courses, closing the roof.")
+        row(sec, "neat", "Neatness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How regular the neat rows underneath are (1: even, leaflets straight). Messiness sets the loose top "
+            "fronds.")
+        row(sec, "leaf_width", "Leaf width", FloatField(0.002, 0.08, 0.005, 0.05, decimals=4, step=0.001),
+            "The under layer's (and caps') leaflets: wide, full width over their top half, then a long tip "
+            "(fraction of the span: 0.022 = 11 cm on 5 m).")
+        row(sec, "overlap", "Leaf overlap", FloatField(0.0, 0.8, 0.0, 0.6, decimals=2, step=0.05),
+            "How much each under-layer leaflet overlaps its neighbour (0.35 = a third of its width). With the "
+            "courses a quarter leaf apart this closes every gap, seen from outside or inside.")
+        row(sec, "frond_width", "Shingle width", FloatField(0.05, 1.0, 0.1, 0.6, decimals=3, step=0.01),
+            "Width of each shingle (one stick with its leaves folded over it) along its row (fraction of the "
+            "span: 0.25 = 1.25 m on 5 m). Every "
+            "other course is shifted half a tile. The top layer's fronds are a bit wider.")
+        card.add(sec)
+        sec = self.top_sec = Section("Top layer (loose fronds)", expanded=False)
+        sec.header.setToolTip("The loose half fronds thrown over the neat rows (how many: Top fronds).")
+        row(sec, "top_leaf_width", "Leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
+            "The top layer's leaflets: thinner, for detail (fraction of the span).")
+        row(sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Loose top fronds: how far their leaflets lean sideways off their stem (rachis); 0: straight down "
+            "the slope.")
+        row(sec, "droop", "Droop", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too).")
+        row(sec, "end_reach", "Past the edges", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Loose top fronds are stiff: how far they stick out past the bottom edge (eaves) and past a gable "
+            "end's edge (verge).")
+        card.add(sec)
+        sec = self.leaf_sec = Section("Leaflet shape and ageing", expanded=False)
+        row(sec, "dried_var", "Dried variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
+            "leaves stand out among fresh ones).")
         row(sec, "leaf_section", "Cross-section", SegmentField(THATCH_LEAF_SECTIONS, columns=2),
             "The shape across each leaflet. As is: as Curl makes it. Rolled: the edges curled up and round "
             "towards a thin tube (and a little narrower). Creased: flatter, the edges lifted either side of a "
@@ -29553,59 +29582,31 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "bent_var", "Bent variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much the bent tips differ: where along the leaf they fold and how sharply (0: all alike).")
         card.add(sec)
-        sec = self.more_sec = Section("More controls", expanded=False)
-        row(sec, "resolution", "Resolution", IntField(16, 600, 30, 300),
-            "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
-            "while you shape the roof.")
-        row(sec, "overlap", "Leaf overlap", FloatField(0.0, 0.8, 0.0, 0.6, decimals=2, step=0.05),
-            "How much each under-layer leaflet overlaps its neighbour (0.35 = a third of its width). With the "
-            "courses a quarter leaf apart this closes every gap, seen from outside or inside.")
-        row(sec, "frond_width", "Shingle width", FloatField(0.05, 1.0, 0.1, 0.6, decimals=3, step=0.01),
-            "Width of each shingle (one stick with its leaves folded over it) along its row (fraction of the "
-            "span: 0.25 = 1.25 m on 5 m). Every "
-            "other course is shifted half a tile. The top layer's fronds are a bit wider.")
-        row(sec, "top_leaf_width", "Top frond leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
-            "The top layer's leaflets: thinner, for detail (fraction of the span).")
-        row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
-            "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
-            "leaflet is a closed, thin solid (underside, edges, tip); 0: single-sided.")
-        row(sec, "curl_var", "Curl variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaf's curl differs from the next (0: all the same; 1: from none to twice Curl).")
-        row(sec, "dried_var", "Dried variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
-            "leaves stand out among fresh ones).")
-        row(sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Loose top fronds: how far their leaflets lean sideways off their stem (rachis); 0: straight down "
-            "the slope.")
-        row(sec, "droop", "Droop", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too).")
-        row(sec, "end_reach", "Top fronds past edges", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Loose top fronds are stiff: how far they stick out past the bottom edge (eaves) and past a gable "
-            "end's edge (verge).")
+        sec = self.edge_sec = Section("Edges", expanded=False)
         row(sec, "end_fronds", "Gable fringe", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
             "Gable ends only (flat, upright ends): extra leaves tied along the sloping end edges (verges), "
             "hanging down over the end wall (0: none).")
-        row(sec, "lift", "Butt lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "How far the bottom (butt) end of each piece stands off the roof, so the rows read (the top end is "
-            "tucked in).")
-        row(sec, "bend", "Bend", FloatField(-2.0, 3.0, -1.0, 1.5, decimals=2, step=0.05),
-            "Bows each piece outwards (below 0: inwards).")
-        row(sec, "segments", "Segments", IntField(1, 12, 1, 8),
-            "Segments along each piece, so it can follow the roof's curve.")
-        row(sec, "sides", "Sides", IntField(3, 16, 3, 12), "3D pieces: sides round each bundle.")
-        row(sec, "flatness", "Flatness", FloatField(0.05, 1.0, 0.05, 1.0, decimals=2, step=0.05),
-            "3D pieces: thickness of a bundle across its width (1 = round).")
+        row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
+            "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
+        row(sec, "edge_hang_var", "Droop variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much the leaves hanging off the edges differ in droop: in clumps along the edge and leaf by "
+            "leaf (0: all the same).")
+        row(sec, "edge_len_var", "Hang length variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much the part of each leaf hanging off the edge differs in length (0: all the same). Ragged "
+            "eaves (Makeshift) adds stretches that hang much further.")
+        row(sec, "edge_mess", "Edge messiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Leaves hanging off the edges splay sideways, each its own way, so the fringe isn't combed straight.")
+        row(sec, "edge_limp", "Limp top fronds", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Share of the loose top fronds that hang down off the edges like the rows under them instead of "
+            "sticking out stiff (0: all stiff).")
+        card.add(sec)
+        sec = self.poles_sec = Section("Ridge, poles and ties", expanded=False)
         self.f["ridge_fronds"] = CheckField("Leaf cap over the ridge and hips")
         self.f["ridge_fronds"].setToolTip("Leaves folded over the top line (ridge), down each hip edge and round a "
                                           "cone's tip, so rain can't get in where the slopes meet. Off: the "
                                           "ridge is open. The ridge pole on top of them is its own switch.")
         sec.add_full(self.f["ridge_fronds"])
-        self.f["sticks"] = CheckField("Shingle sticks and frond stems")
-        self.f["sticks"].setToolTip("Thin wood in the thatch: the stick each shingle's leaves are folded over "
-                                    "(seen from inside) and the stems (rachis) of some loose top fronds. A mesh "
-                                    "of its own (woodStick, for a reed / stick material), stacked UVs: skin "
-                                    "0..0.8, ends at 0.9.")
-        sec.add_full(self.f["sticks"])
         self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
         self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
                                          "weighing it down, as on many palm roofs (in the frame's mesh when Frame "
@@ -29625,22 +29626,32 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                       "meet, each bundle to its pole). Off by default: small detail, many "
                                       "polygons.")
         sec.add_full(self.f["lashings"])
+        self.f["sticks"] = CheckField("Shingle sticks and frond stems")
+        self.f["sticks"].setToolTip("Thin wood in the thatch: the stick each shingle's leaves are folded over "
+                                    "(seen from inside) and the stems (rachis) of some loose top fronds. A mesh "
+                                    "of its own (woodStick, for a reed / stick material), stacked UVs: skin "
+                                    "0..0.8, ends at 0.9.")
+        sec.add_full(self.f["sticks"])
         card.add(sec)
-        sec = self.edge_sec = Section("Edges", expanded=False)
-        row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-            "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
-            "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
-        row(sec, "edge_hang_var", "Droop variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much the leaves hanging off the edges differ in droop: in clumps along the edge and leaf by "
-            "leaf (0: all the same).")
-        row(sec, "edge_len_var", "Hang length variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much the part of each leaf hanging off the edge differs in length (0: all the same). Ragged "
-            "eaves (Makeshift) adds stretches that hang much further.")
-        row(sec, "edge_mess", "Edge messiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Leaves hanging off the edges splay sideways, each its own way, so the fringe isn't combed straight.")
-        row(sec, "edge_limp", "Limp top fronds", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Share of the loose top fronds that hang down off the edges like the rows under them instead of "
-            "sticking out stiff (0: all stiff).")
+        sec = self.more_sec = Section("More controls", expanded=False)
+        row(sec, "resolution", "Resolution", IntField(16, 600, 30, 300),
+            "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
+            "while you shape the roof.")
+        row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
+            "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
+            "leaflet is a closed, thin solid (underside, edges, tip); 0: single-sided.")
+        row(sec, "curl_var", "Curl variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaf's curl differs from the next (0: all the same; 1: from none to twice Curl).")
+        row(sec, "lift", "Butt lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How far the bottom (butt) end of each piece stands off the roof, so the rows read (the top end is "
+            "tucked in).")
+        row(sec, "bend", "Bend", FloatField(-2.0, 3.0, -1.0, 1.5, decimals=2, step=0.05),
+            "Bows each piece outwards (below 0: inwards).")
+        row(sec, "segments", "Segments", IntField(1, 12, 1, 8),
+            "Segments along each piece, so it can follow the roof's curve.")
+        row(sec, "sides", "Sides", IntField(3, 16, 3, 12), "3D pieces: sides round each bundle.")
+        row(sec, "flatness", "Flatness", FloatField(0.05, 1.0, 0.05, 1.0, decimals=2, step=0.05),
+            "3D pieces: thickness of a bundle across its width (1 = round).")
         card.add(sec)
         sec = self.under_sec = Section("Underlay", expanded=False)
         self.f["underlay"] = CheckField("Underlay under the pieces")
@@ -29812,15 +29823,29 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def _fill_presets(self, current=None):
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        self.preset_combo.addItems(list(THATCH_PRESETS))
+        combo = self.preset_combo
+        kinds = [("Palm", []), ("Thatch", []), ("Metal", []), ("Tiles", []), ("Roof shape only", [])]
+        for name in THATCH_PRESETS:
+            head = name.split(":")[0]
+            if head in ("Palm", "Metal", "Tiles"):
+                dict(kinds)[head].append(name)
+            elif "style" in THATCH_PRESETS[name] or "covering" in THATCH_PRESETS[name]:
+                kinds[1][1].append(name)  # a whole look
+            else:
+                kinds[4][1].append(name)
         mine = sorted(n for n in thatch_user_presets() if n not in THATCH_PRESETS)
-        if mine:
-            self.preset_combo.insertSeparator(self.preset_combo.count())
-            self.preset_combo.addItems(mine)
-        if current:
-            i = self.preset_combo.findText(current)
-            if i >= 0:
-                self.preset_combo.setCurrentIndex(i)
+        kinds.append(("Yours", mine))
+        for head, names in kinds:
+            if not names:
+                continue
+            combo.addItem(head)  # a heading: not pickable
+            item = combo.model().item(combo.count() - 1)
+            item.setEnabled(False)
+            item.setData(QtGui.QFont("", -1, QtGui.QFont.Bold), QtCore.Qt.FontRole)
+            for name in names:
+                combo.addItem(name)
+        i = combo.findText(current) if current else -1
+        combo.setCurrentIndex(i if i > 0 and combo.model().item(i).isEnabled() else 1)  # never on a heading
         self.preset_combo.blockSignals(False)
 
     def _show(self, settings):
@@ -29888,6 +29913,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.stack_sec.setVisible(True)
         self.more_sec.setVisible(thatch)
         self.edge_sec.setVisible(thatch and palm)
+        for sec in (self.neat_sec, self.top_sec, self.poles_sec):
+            sec.setVisible(thatch and palm)
         self.leaf_sec.setVisible(thatch and s["style"] == "Palm Fronds" and s["frond_form"] != "Cards")
         self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
         self.trim_sec.setVisible(metal)
@@ -41248,7 +41275,7 @@ SC_FIELDS = {
                 "walls and frames, the bottom of slopes. Piles stretch out along them, leaves and grass lie "
                 "along them."),
     "edges": ("Avoid edges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
-              "Keeps it off exposed spots: ridges, convex edges, thin rails."),
+              "Keeps it off exposed spots: ridges, convex edges, thin rails (0 = edges like anywhere else)."),
     "patchiness": ("Patchiness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "Breaks it into patches (0 = even)."),
     "patch_size": ("Patch size", _scf(0.02, 50.0, 0.1, 4.0, 2, 0.05), "How big the patches are, in metres."),
     "mess": ("Messiness", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05), "Ragged patch edges (and more tangled grass)."),
@@ -41259,9 +41286,10 @@ SC_FIELDS = {
                      "UDIM tiles: stack 1 in the first tile, stack 2 in the next...\nAtlas columns: the stacks share "
                      "0..1, side by side."),
     "detail": ("Detail", lambda: SegmentField(MI_DETAILS),
-               "Proxy: layout. Normal: mid shots. High: close-ups. Hero: extreme close-ups (keep it small)."),
+               "How finely it's built, by how close the camera gets. Proxy: layout. Normal: mid shots. High: "
+               "close-ups. Hero: extreme close-ups (keep it small). Higher is slower."),
     # moss
-    "shoots": ("Shoots", lambda: SegmentField(MOSS_SHOOT_MODES),
+    "shoots": ("Shoots built as", lambda: SegmentField(MOSS_SHOOT_MODES),
                "Instances: each shoot an instance of a few shoot shapes (light scenes and renders, Hero doesn't "
                "hit the cap). Mesh: every shoot real geometry in the strands mesh. Bake always makes real "
                "geometry."),
@@ -41453,47 +41481,49 @@ _SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height"
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
-    "Moss": [("", True, ["style", "coverage", "spread", "clump_size", "thickness", "lumps", "mess", "strands",
-                         "capsules"]),
+    "Moss": [("", True, ["style", "detail", "coverage", "spread", "clump_size", "thickness", "lumps", "mess",
+                         "strands", "capsules"]),
              ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_merge", "clump_hvar",
                                "clump_mounds", "clump_ghvar"]),
              ("Mat", True, ["render_as", "disp_height", "edge_roll", "cage_detail", "bumps", "growths"]),
              ("Where it grows", True, _SC_WHERE + ["exposure", "spill"]),
              ("Edges", False, ["feather", "ragged", "strays"]),
              ("Surface", False, ["surface", "surface_detail"]),
-             ("More", False, ["size_var", "strand_length", "droop", "detail", "shoots", "shoot_form"]),
+             ("Shoots and strands", False, ["strand_length", "droop", "shoot_form", "shoots", "size_var"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
-    "Grass": [("", True, ["coverage", "spread", "grass", "bunch_size", "grass_length", "fullness", "grass_pile"]),
+    "Grass": [("", True, ["detail", "coverage", "spread", "grass", "bunch_size", "grass_length", "fullness",
+                          "grass_pile"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),
-              ("More", False, ["comb", "droop", "blade_width", "size_var", "detail"]),
+              ("Blades", False, ["comb", "droop", "blade_width", "size_var"]),
               ("UVs", False, ["stacks", "stack_layout"])],
-    "Leaves": [("", True, ["coverage", "spread", "leaves", "leaf_size", "curl"]),
+    "Leaves": [("", True, ["detail", "coverage", "spread", "leaves", "leaf_size", "curl"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("More", False, ["drape", "on_moss", "size_var", "detail"]),
+               ("How they lie", False, ["drape", "on_moss", "size_var"]),
                ("UVs", False, ["stacks", "stack_layout"])],
-    "Leaf piles": [("", True, ["coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
+    "Leaf piles": [("", True, ["detail", "coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                   ("More", False, ["drape", "on_moss", "size_var", "detail"]),
+                   ("How they lie", False, ["drape", "on_moss", "size_var"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
-    "Jungle leaves": [("", True, ["coverage", "spread", "jungle", "jungle_size", "jungle_cluster", "jungle_shape",
-                                  "jungle_green"]),
+    "Jungle leaves": [("", True, ["detail", "coverage", "spread", "jungle", "jungle_size", "jungle_cluster",
+                                  "jungle_shape", "jungle_green"]),
                       ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                      ("More", False, ["curl", "jungle_tear", "drape", "on_moss", "size_var", "detail"]),
+                      ("How they lie", False, ["curl", "jungle_tear", "drape", "on_moss", "size_var"]),
                       ("UVs", False, ["stacks", "stack_layout"])],
-    "Moss tufts": [("", True, ["coverage", "spread", "tufts", "tuft_size"]),
+    "Moss tufts": [("", True, ["detail", "coverage", "spread", "tufts", "tuft_size", "size_var"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                   ("More", False, ["size_var", "detail"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
-    "Specks": [("", True, ["coverage", "spread", "specks", "speck_size", "speck_dirt", "speck_cluster"]),
+    "Specks": [("", True, ["detail", "coverage", "spread", "specks", "speck_size", "speck_dirt",
+                           "speck_cluster"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("More", False, ["speck_spread", "size_var", "detail"]),
+               ("Clusters", False, ["speck_spread", "size_var"]),
                ("UVs", False, ["stacks", "stack_layout"])],
-    "Ivy": [("", True, ["vines", "vines_by", "vine_spacing", "length", "climb", "climb_var", "wander", "branching",
-                        "leaf_size", "leaf_density"]),
-            ("More", False, ["gravity", "stem_width", "leaf_var", "detail"]),
+    "Ivy": [("", True, ["detail", "vines", "vines_by", "vine_spacing", "length", "climb", "climb_var", "wander",
+                        "branching", "leaf_size", "leaf_density"]),
+            ("Stems and leaves", False, ["gravity", "stem_width", "leaf_var"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
 for _t in SC_LAYOUT:
-    SC_LAYOUT[_t].insert(len(SC_LAYOUT[_t]) - 2, _SC_FADE)  # before More and UVs
+    _at = [i + 1 for i, sec in enumerate(SC_LAYOUT[_t]) if sec[0].startswith("Where")]
+    SC_LAYOUT[_t].insert(_at[0] if _at else len(SC_LAYOUT[_t]) - 2, _SC_FADE)  # after where it grows
     SC_LAYOUT[_t].insert(1, _SC_DRAWING)  # shown when the layer has a drawing
 
 
@@ -42092,6 +42122,19 @@ class ScatterPainter(SurfacePathDrawer):
                 cmds.setAttr(self.show + ".visibility", True)
 
 
+class _ScLayerNameDelegate(QtWidgets.QStyledItemDelegate):
+    """Renaming a layer edits just its name, not the notes after it
+    ("(drawn, 2 strokes)", "(changed)")."""
+
+    def setEditorData(self, editor, index):
+        name = index.data(QtCore.Qt.UserRole + 2)
+        if name and isinstance(editor, QtWidgets.QLineEdit):
+            editor.setText(name)
+            editor.selectAll()
+        else:
+            super(_ScLayerNameDelegate, self).setEditorData(editor, index)
+
+
 class ScatterPanel(QtWidgets.QWidget):
     TOOL_NAME = "Scatter"
     TOOL_TIP = "Scatter groups: moss, dry grass, dead leaves, leaf piles, moss tufts and ivy on your meshes, in " \
@@ -42118,6 +42161,9 @@ class ScatterPanel(QtWidgets.QWidget):
         # each layer's last update time: a drag on a layer known to be slow drafts from its first tick (it
         # used to grow one full update first, a freeze of seconds on a big moss layer, before drafting)
         self._took = {}
+        # per type: what the next group's first layer gets (the settings shown with no layer picked), kept
+        # apart from the layers shown since, so a new group never picks up the last layer looked at
+        self._next = {}
         self._drag_draft = False  # moss grown as a draft while a slider was held: in full once it's let go
         self._undo_timer = QtCore.QTimer(self)
         self._undo_timer.setSingleShot(True)
@@ -42207,12 +42253,13 @@ class ScatterPanel(QtWidgets.QWidget):
         rl = QtWidgets.QHBoxLayout(row)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
-        lbl = QtWidgets.QLabel("Start with")
+        lbl = QtWidgets.QLabel("First layer")
         lbl.setMinimumWidth(92)
         self.start_type = _Combo()
         _guard_focus(self.start_type)
         self.start_type.addItems(list(SC_TYPES))
-        self.start_type.setToolTip("The first layer of a new group (add more in step 2).")
+        self.start_type.setToolTip("What a new group grows first (add more layers in step 2). Its settings are "
+                                   "in step 3: set them up before pressing New if you like.")
         self.start_type.activated.connect(lambda *_: self._show_layer())
         rl.addWidget(lbl)
         rl.addWidget(self.start_type, 1)
@@ -42234,24 +42281,31 @@ class ScatterPanel(QtWidgets.QWidget):
         self.scatter_draw_btn.clicked.connect(lambda *_: self.scatter_on_drawing())
         clear_d = secondary_button("Clear", "Clear the drawing (layers keep what was drawn for them).")
         clear_d.clicked.connect(lambda *_: self.clear_drawing())
-        card.add(button_row(self.draw_btn, self.scatter_draw_btn, clear_d))
-        don = Section("", header=False)
+        don = self.draw_fold = Section("Or draw where it goes", expanded=False)
+        don.header.setToolTip("Instead of selecting meshes: draw strokes over the surfaces and scatter along them.")
+        don.add_full(button_row(self.draw_btn, self.scatter_draw_btn, clear_d))
         self.draw_on = SegmentField(SC_DRAW_ON)
         don.add_row("Draw on", self.draw_on, "Surfaces: any mesh but scatter (live or baked). Selected: only the "
                                              "meshes (or groups) selected when you start drawing. Everything: any "
                                              "mesh, baked scatter too.")
         self.draw_on.changed.connect(lambda: self._draw_on_changed())
-        card.add(don)
         self.draw_label = hint_label("")
-        card.add(self.draw_label)
+        don.add_full(self.draw_label)
+        card.add(don)
         self.group_label = hint_label("")
         card.add(self.group_label)
+        # what the edited group grows on, and copies of it: only shown while a group is being edited
+        self.group_box = QtWidgets.QWidget()
+        gl = QtWidgets.QVBoxLayout(self.group_box)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(4)
+        gl.addWidget(hint_label("Grows on:"))
         self.surf_list = QtWidgets.QListWidget()
         self.surf_list.setMaximumHeight(96)
         self.surf_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.surf_list.setToolTip("What the group grows on. A group (G) is read fresh at every regrow; "
                                   "what's left out of it shows under it.")
-        card.add(self.surf_list)
+        gl.addWidget(self.surf_list)
         add_s = secondary_button("Add Selected", "Add the selected meshes / groups to the group being edited "
                                                  "(or put back what's picked under a group in the list).")
         add_s.clicked.connect(lambda *_: self.add_surfaces())
@@ -42259,7 +42313,7 @@ class ScatterPanel(QtWidgets.QWidget):
                                            "A mesh inside a group it grows on is left out of that group; the "
                                            "rest of the group stays.")
         rem_s.clicked.connect(lambda *_: self.remove_surfaces())
-        card.add(button_row(add_s, rem_s))
+        gl.addWidget(button_row(add_s, rem_s))
         from_g = secondary_button("New Group from This", "A new, empty scatter group on exactly what this one grows "
                                                          "on (its surfaces, what's left out, its Start UDIM): no "
                                                          "selecting them again. Then Add Layer (one Ctrl+Z).")
@@ -42267,7 +42321,8 @@ class ScatterPanel(QtWidgets.QWidget):
         dup_g = secondary_button("Duplicate Group", "A copy of this scatter group: the same surfaces and every "
                                                     "layer, each with a new seed (one Ctrl+Z).")
         dup_g.clicked.connect(lambda *_: self.new_group_from(layers=True))
-        card.add(button_row(from_g, dup_g))
+        gl.addWidget(button_row(from_g, dup_g))
+        card.add(self.group_box)
         self.box_btn = secondary_button("Make Box", "This group has no box (deleted, say, to keep it out of a "
                                                     "publish): make one round it again, to click (one Ctrl+Z). "
                                                     "The box sits beside the group, not in it.")
@@ -42281,31 +42336,26 @@ class ScatterPanel(QtWidgets.QWidget):
                                                         "Click a layer (or its mesh in the viewport) to edit it.")
         self.layer_list = QtWidgets.QListWidget()
         self.layer_list.setMaximumHeight(130)
+        self.layer_list.setItemDelegate(_ScLayerNameDelegate(self.layer_list))
         self.layer_list.itemChanged.connect(lambda item: self._layer_item_changed(item))
         self.layer_list.currentItemChanged.connect(lambda *_: self._layer_picked())
         card.add(self.layer_list)
-        row = QtWidgets.QWidget()
-        rl = QtWidgets.QHBoxLayout(row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(4)
-        self.add_type = _Combo()
-        _guard_focus(self.add_type)
-        self.add_type.addItems(list(SC_TYPES))
-        add_l = secondary_button("Add Layer", "Add a layer of this type to the group (from picked faces / vertices: "
-                                              "there only).")
-        add_l.clicked.connect(lambda *_: self.add_layer())
-        rl.addWidget(self.add_type, 1)
-        rl.addWidget(add_l)
-        card.add(row)
+        add_l = self.add_btn = secondary_button("Add Layer", "Add a layer to the group: pick what it grows. With "
+                                                             "faces / vertices picked it grows only there.")
+        menu = QtWidgets.QMenu(add_l)
+        for t in SC_TYPES:
+            menu.addAction(t).triggered.connect(lambda *_, t=t: self.add_layer(t))
+        add_l.setMenu(menu)
         dup = secondary_button("Duplicate", "Copy the layer (a new seed): e.g. a second, sparser moss.")
         dup.clicked.connect(lambda *_: self.duplicate_layer())
         dele = secondary_button("Delete", "Remove the layer and its meshes (one Ctrl+Z).")
         dele.clicked.connect(lambda *_: self.delete_layer())
-        up = secondary_button("Up", "Move the layer up the list (its UDIM tiles come earlier).")
+        up = secondary_button("Move Up", "Move the layer up the list (its UDIM tiles come earlier).")
         up.clicked.connect(lambda *_: self.move_layer(-1))
-        down = secondary_button("Down", "Move the layer down the list.")
+        down = secondary_button("Move Down", "Move the layer down the list.")
         down.clicked.connect(lambda *_: self.move_layer(1))
-        card.add(button_row(dup, dele, up, down))
+        card.add(button_row(add_l, dup, dele))
+        card.add(button_row(up, down))
         pick = secondary_button("Use Picked Area", "The layer grows only on the picked faces, or round the picked "
                                                    "vertices (ivy: vines start there).")
         pick.clicked.connect(lambda *_: self.set_area())
@@ -42376,7 +42426,10 @@ class ScatterPanel(QtWidgets.QWidget):
         plabel.setMinimumWidth(92)
         self.preset_combo = _Combo()
         _guard_focus(self.preset_combo)
-        self.preset_combo.setToolTip("Pick a preset to load it onto the layer (or for a new group's first layer).")
+        self.preset_combo.setToolTip("Pick a preset to load it onto the layer (or for a new group's first layer). "
+                                     "It shows the preset the settings match, or 'Custom settings' once they're "
+                                     "changed from it.")
+        self.preset_combo.setPlaceholderText("Custom settings")
         self.preset_combo.activated.connect(lambda *_: self.load_preset())
         save = secondary_button("Save...", "Keep the layer's settings as a preset of your own (in Maya's "
                                            "preferences, for every scene).")
@@ -42520,6 +42573,37 @@ class ScatterPanel(QtWidgets.QWidget):
             self.preset_combo.insertSeparator(self.preset_combo.count())
             self.preset_combo.addItems(user)
         self.preset_combo.blockSignals(False)
+        self._mark_preset()
+
+    def _mark_preset(self):
+        """The preset combo shows the preset the settings match (every
+        setting it names, seed aside; of several, the one naming most), else
+        'Custom settings'."""
+        typ = self._type()
+        cur = self._settings(typ)
+        user = sc_user_presets(typ)
+        best, most = -1, -1
+        for i in range(self.preset_combo.count()):
+            name = self.preset_combo.itemText(i)
+            over = SC_PRESETS[typ].get(name) if name in SC_PRESETS[typ] else user.get(name)
+            if not over:
+                continue
+            keys = [k for k in over if k != "seed" and k in cur]
+            same = True
+            for k in keys:
+                a, b = cur[k], over[k]
+                if isinstance(b, float) or isinstance(a, float):
+                    same = abs(float(a) - float(b)) <= 0.0051 * max(1.0, abs(float(b)))
+                else:
+                    same = a == b
+                if not same:
+                    break
+            if same and len(keys) > most:
+                best, most = i, len(keys)
+        if self.preset_combo.currentIndex() != best:
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentIndex(best)
+            self.preset_combo.blockSignals(False)
 
     def _show_layer(self):
         typ = self._type()
@@ -42535,7 +42619,8 @@ class ScatterPanel(QtWidgets.QWidget):
             if sc_settings(layer).get("fade", "Off") != "Off" and typ in self.fade_sec:
                 self.fade_sec[typ].header.setChecked(True)  # a faded layer shows its fade
         else:
-            self.step_look.title.setText("Settings for the first layer (%s)" % typ)
+            self._show(typ, self._next.get(typ) or sc_start_settings(typ))
+            self.step_look.title.setText("Settings for the next group's first layer (%s)" % typ)
         self._style_rows(typ)
         self._fill_presets()
         self._fill_strokes(layer)
@@ -42678,6 +42763,8 @@ class ScatterPanel(QtWidgets.QWidget):
                     elif layer["id"] in drafts:
                         item.setForeground(QtGui.QColor(*self.DRAFT_RGB))
                     item.setData(QtCore.Qt.UserRole, layer["id"])
+                    item.setData(QtCore.Qt.UserRole + 2, layer.get("name", layer["type"]))
+                    item.setToolTip("%s layer. Tick: on / off. Double-click: rename." % sc_type(layer["type"]))
                     item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEditable)
                     item.setCheckState(QtCore.Qt.Checked if layer.get("on", True) else QtCore.Qt.Unchecked)
                     self.layer_list.addItem(item)
@@ -42798,6 +42885,9 @@ class ScatterPanel(QtWidgets.QWidget):
                                 (" Ctrl+Z takes the last back, Enter stops." if drawing else "") if n or drawing
                                 else "")
         self.box_btn.setVisible(bool(root) and sc_box(root) is None)
+        self.group_box.setVisible(bool(root))
+        if (drawing or n) and not self.draw_fold.header.isChecked():
+            self.draw_fold.header.setChecked(True)  # strokes to scatter on: show their buttons
         self.step_group.set_state("done" if root else "current")
         self.step_layers.set_state("current" if root else "todo")
         self.step_look.set_state("current" if root and self._lid else "todo")
@@ -42899,6 +42989,9 @@ class ScatterPanel(QtWidgets.QWidget):
     def _queue(self, typ, key):
         if self._filling or typ != self._type():
             return
+        self._mark_preset()
+        if self._layer() is None:  # settings for the next group's first layer
+            self._next[typ] = self._settings(typ)
         self._pending.add(key)
         self._edit_timer.start()
 
@@ -42997,7 +43090,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self._lid = found[0]["id"] if found else None
         self._refresh()
         if not found:
-            self.set_status("Made %s on %s's surfaces, empty: pick a type and press <b>Add Layer</b>." % (
+            self.set_status("Made %s on %s's surfaces, empty: press <b>Add Layer</b> and pick what it grows." % (
                 short_name(self._root), src))
 
     @ui_safe
@@ -43031,11 +43124,10 @@ class ScatterPanel(QtWidgets.QWidget):
         self._structural("Removed %d from" % len(nodes), lambda: sc_set_surfaces(self._root, remove=nodes))
 
     @ui_safe
-    def add_layer(self):
+    def add_layer(self, typ):
         if not self._alive():
             self.set_status("Select a scatter group (click its box) first.", level="warn")
             return
-        typ = self.add_type.currentText()
         sel = sc_selection()
         self._structural("Added %s to" % typ.lower(),
                          lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"]))
@@ -43250,6 +43342,7 @@ class ScatterPanel(QtWidgets.QWidget):
             t0 = time.time()
             self._report("New seed for", sc_update(self._root, self._lid, {"seed": seed}), t0)
         else:
+            self._next[typ] = self._settings(typ)
             self.set_status("New seed for the next group.")
 
     @ui_safe
@@ -43403,6 +43496,7 @@ class ScatterPanel(QtWidgets.QWidget):
             t0 = time.time()
             self._report("'%s' on" % name, sc_update(self._root, self._lid, s), t0)
         else:
+            self._next[typ] = self._settings(typ)
             self.set_status("Loaded '%s' for the next group's first layer." % name)
 
     @ui_safe

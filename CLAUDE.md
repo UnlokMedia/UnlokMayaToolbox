@@ -291,6 +291,18 @@
   `_th_panels_mesh` / `_th_fronds_mesh`, all in
   `thatch_build`; scene side `make_thatch_roof`, `update_thatch_roofs`,
   `rebuild_stale_thatch`, `bake_thatch`; panel `ThatchRoofPanel`.
+- **Roof panel layout (UI pass, 2026-11-11).** Step 2's Duplicate / Make
+  Box Again / Link / Unlink / Select Linked are in a folded "Copies and
+  links" section (`links_sec`; the link status line stays outside it). The
+  preset combo is grouped under disabled bold headings: Palm, Thatch,
+  Metal, Tiles, Roof shape only, Yours (`_fill_presets` never leaves it on a
+  heading). Palm controls: the old "More controls" dump is split into
+  "Under layer (neat rows)" (`neat_sec`: Neatness, Leaf width, Leaf overlap,
+  Shingle width), "Top layer (loose fronds)" (`top_sec`: Leaf width, Slant,
+  Droop, Past the edges), "Leaflet shape and ageing" (Dried variation first),
+  "Edges" (Gable fringe first), "Ridge, poles and ties" (`poles_sec`: leaf
+  cap, ridge / hip / hold-down poles, lashings, sticks); "More controls"
+  keeps Resolution, Leaf thickness, Curl variation and the straw-piece rows.
   - **Frame** (`thatch_frame`): the box's world matrix and its mesh's local
     bounding box give roof space: x along the ridge, y up from the eaves
     (the box's bottom), z across; L / W half the length / width, H height.
@@ -1078,6 +1090,23 @@
   `sc_set_surfaces`, `sc_update` (live), `sc_regrow`, `sc_sync`,
   `bake_scatter`, `sc_selection`, `sc_owner`, `sc_new_group_from`; panel
   `ScatterPanel`.
+- **Scatter panel layout (UI pass, 2026-11-11).** Step 1 picks the
+  "First layer" type; drawing sits in a folded "Or draw where it goes"
+  section (opens itself while there are strokes); the group's surface list
+  and its New Group from This / Duplicate Group buttons only show while a
+  group is being edited (`group_box`). Step 2's Add Layer is a button with a
+  menu of types (`add_layer(typ)`; there's no second type combo). Renaming
+  a layer edits just its name (`_ScLayerNameDelegate`, the plain name in
+  item data UserRole + 2). Step 3: Detail is the first row for every type;
+  the old catch-all "More" sections are named for what they hold (Shoots
+  and strands, Blades, How they lie, Clusters, Stems and leaves) and Height
+  fade follows "Where it grows". The preset combo shows the preset the
+  settings match (every key it names, seed aside; `_mark_preset`), else
+  "Custom settings" (its placeholder, index -1). With no layer picked, step
+  3 shows the next group's first-layer settings, kept per type in
+  `ScatterPanel._next` (set by edits, presets and Randomize with no layer),
+  so a new group never picks up the last layer looked at. Note the fields'
+  `setValue` doesn't emit `changed`: a test emits it to act like a user.
   - **Scene:** `scatteredObjects####_GRP` (transforms free: `_rope_fill`
     writes parts through their inclusive matrix, so they sit on the
     surfaces under any parent; locked, Maya's parent couldn't compensate

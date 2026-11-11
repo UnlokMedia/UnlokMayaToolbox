@@ -304,8 +304,7 @@ def main():
     snap("05_after.png")
 
     # --- leaves: Flood Remove, then one stroke: only along it
-    panel.add_type.setCurrentIndex(panel.add_type.findText("Leaves"))
-    panel.add_layer()
+    panel.add_layer("Leaves")
     pump()
     leaves = panel._lid
     panel.f["Leaves"]["leaves"].setValue(25.0)

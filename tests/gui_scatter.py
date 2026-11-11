@@ -253,9 +253,8 @@ def main():
 
     # --- add layers through the panel
     def add(typ, edits):
-        panel.add_type.setCurrentIndex(panel.add_type.findText(typ))
         cmds.select(root)
-        panel.add_layer()
+        panel.add_layer(typ)
         pump()
         lid = panel._lid
         for key, value in edits.items():
@@ -354,9 +353,8 @@ def pause_play(ns, panel, window):
     pump()
     root = panel._root
     moss = panel._lid
-    panel.add_type.setCurrentIndex(panel.add_type.findText("Leaves"))
     cmds.select(root)
-    panel.add_layer()
+    panel.add_layer("Leaves")
     pump()
     leaves = panel._lid
 
