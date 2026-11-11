@@ -291,6 +291,36 @@
   `_th_panels_mesh` / `_th_fronds_mesh`, all in
   `thatch_build`; scene side `make_thatch_roof`, `update_thatch_roofs`,
   `rebuild_stale_thatch`, `bake_thatch`; panel `ThatchRoofPanel`.
+- **Bushy palapa: Shag and Cap leaf width (2026-11-11).** The user wanted a
+  bushy, shaggy palapa (photos of garden / beach palapas): volume, a neat
+  under layer and two layers of loose fronds, light and dry, only the odd
+  frond sticking out, never "wet hair" (leaves combed flat along the roof,
+  tips curled). Workshopped in the viewport with a sun and depth-map
+  shadows (flat default lighting hid all of it). What did it: `shag`
+  (Shag): in `leaf_line` each leaf's tip stands off the roof in a straight
+  lean, `shag * stiff * L * (0.04 + 0.16 h + 0.35 h^6)` times v^1.15, h a
+  hash of where the leaf starts (most a little, the odd one a lot); `stiff`
+  per caller: top fronds 1, under layer and bundles 0.6, caps 0.4, cards
+  and folded butts 0. `cap_width` (Cap leaf width, 0 = Leaf width): the
+  ridge / hip / apex cap leaves' width (`lwc`; `cap_gap` scales with it),
+  so thin cap leaves blend the hips instead of a herringbone of wide ones.
+  Plus Droop 0 (curled tips read as hair), sticks and ridge pole off.
+  `hip_blend` (Hip blend, hipped ends; the user, after Arnold renders: hips
+  read as a defined ridge, leaves bending out from it, "in the ref they're
+  just pointing straight down the ridge like the rest"): the hip fan of
+  headings closes to straight down the hip line (`1 - hb`, ramped in over
+  0.6 leaf from the ridge: the full fan there closes the hip / ridge joint),
+  `crest(blend=)` drops the cap lift 45% and scatters each start up to
+  0.3 leaf off the crest, hip step x (1 - 0.35 hb). 0 = bit-identical.
+  Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
+  (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
+  and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,
+  Bend 0.15, Softness 0.7, Cap leaf width 0.012, Hip blend 1. Its Medium
+  build is ~8.5 s; the test allows 10 s for it (others 6 s). Pictures: fast
+  Arnold renders with flat colour shaders (scratchpad `arnold_pics.py`)
+  showed far more than the viewport. That joint (x = +-0.93 on the 6 x 4
+  test box) is the preset's weak spot for gaps. Known: on a gable the thin
+  saddle leaves stand up as loops along the ridge (the preset is hipped).
 - **Roof panel layout (UI pass, 2026-11-11).** Step 2's Duplicate / Make
   Box Again / Link / Unlink / Select Linked are in a folded "Copies and
   links" section (`links_sec`; the link status line stays outside it). The

@@ -419,7 +419,7 @@ def run():
     b = box("palm")
     frame = tb["thatch_frame"](b)
     palms = [k for k in tb["THATCH_PRESETS"] if k.startswith("Palm")]
-    check("six palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 6 and all(
+    check("seven palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 7 and all(
         tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
         "stacks" not in tb["thatch_preset"](k) for k in palms))
     def sky_from_inside(straw, n=30):
@@ -453,7 +453,8 @@ def run():
         tiles = set(int(math.floor(max(0.0, u - 1e-6))) for u in us)
         normals = fn.getNormals(om.MSpace.kWorld)
         up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
-        check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < 6.0,
+        # the bushy palapa is denser on purpose (two layers of loose fronds over the rows): its own limit
+        check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < (10.0 if "bushy" in k else 6.0),
               "%d fronds, %d faces" % (rep["pieces"], fn.numPolygons))
         check("%s: 3 stacks, UVs the right way round, leaves face out" % k, tiles == {0, 1, 2} and good > 0.99 and
               up > 0.8, "%s, %.2f%% upright, %.1f%% up" % (sorted(tiles), good * 100, up * 100))
@@ -1125,6 +1126,27 @@ def run():
                   "%d rays see the sky: %s" % (len(miss), miss[:5]))
     tb["update_thatch_roofs"]({root: dict([(k, tb["THATCH_DEFAULTS"][k]) for k in shape_keys] +
                                           [("leaf_section", "As is")])})
+
+    # --- Shag and Cap leaf width (the user, 2026-11-11: a bushy palapa, shaggy, not "wet hair")
+    check("Shag and Cap leaf width: look keys, off by default",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in ("shag", "cap_width", "hip_blend")) and
+          tb["THATCH_DEFAULTS"]["shag"] == 0.0 and tb["THATCH_DEFAULTS"]["cap_width"] == 0.0 and
+          tb["THATCH_DEFAULTS"]["hip_blend"] == 0.0)
+    s_old = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"]("Palm: palapa (hipped, messy top)"))
+    s_old.update(resolution=80, dried=0.0)
+    s_old.pop("shag")
+    s_old.pop("cap_width")
+    s_old.pop("hip_blend")
+    check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
+          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
+    sh_, base_ = dry_build(shag=1.5), dry_build()
+    check("Shag stands the leaves off the roof", sh_[0] != base_[0])
+    check("Cap leaf width changes the cap leaves", dry_build(cap_width=0.01)[0] != base_[0])
+    check("Hip blend changes the hip cap leaves", dry_build(hip_blend=1.0)[0] != base_[0])
+    tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"]("Palm: bushy palapa (shaggy)"), resolution=100)})
+    miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
+    check("Bushy palapa preset: builds, no gaps from inside", not miss, "%d rays see the sky: %s" % (len(miss), miss[:5]))
+    tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"]("Palm: palapa (hipped, messy top)"), resolution=100)})
 
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)
