@@ -618,6 +618,26 @@ def run():
                                       ["%.2f" % c for c in clear], pressed,
                                       rested[len(rested) // 2] if rested else -99))
 
+    # the frame's parts each have a switch (the user, 2026-11-11): one off takes away only its own members,
+    # the rest stay exactly where they were (same crookedness, same cut ends); all off, no frame mesh
+    parts = ("frame_rafters", "frame_hips", "frame_beam", "frame_battens", "wall_plates")
+
+    def frame_pts(**over):
+        o = build(**dict(dict(style="Planes", end_a="Hip", end_b="Half-hip", frame=True, resolution=40), **over))
+        m = o.get("frame")
+        return set((round(p[0], 4), round(p[1], 4), round(p[2], 4)) for p in m[0]) if m else set()
+    full_pts = frame_pts()
+    part_rows = []
+    for key in parts:
+        less = frame_pts(**{key: False})
+        part_rows.append((key, len(less), less < full_pts))
+    none_pts = frame_pts(**dict((k, False) for k in parts))
+    check("frame parts: each part's switch takes away only that part (the rest unmoved); all off, no frame",
+          all(tb["THATCH_DEFAULTS"][k] is True and k in tb["THATCH_LOOK_KEYS"] for k in parts)
+          and all(ok for _, _, ok in part_rows) and not none_pts,
+          "full %d points; %s; all off %d" % (len(full_pts), ", ".join("%s %d%s" % (k, n, "" if ok else " MOVED")
+                                                                     for k, n, ok in part_rows), len(none_pts)))
+
     # the ends: leaves hang off the gable verges; a hipped end has no fringe
     edge = 3.0 + tb["THATCH_DEFAULTS"]["overhang"] * 4.0
 

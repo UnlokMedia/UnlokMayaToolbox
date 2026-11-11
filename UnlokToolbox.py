@@ -20278,6 +20278,7 @@ THATCH_DEFAULTS = {
     "leaf_thickness": 0.0006,
     "frame": True, "frame_style": "Bamboo", "rafter_spacing": 0.15, "rafter_size": 0.02, "batten_size": 0.008,
     "frame_wobble": 0.5, "wall_plates": True, "frame_subd": False, "battens": "Every 2nd",
+    "frame_rafters": True, "frame_hips": True, "frame_beam": True, "frame_battens": True,
     "curl": 0.0, "curl_var": 0.5, "dried": 0.0, "dried_var": 0.6,
     # palm leaflet shape (0: as before)
     "crinkle": 0.0, "crinkle_var": 0.5, "leaf_twist": 0.0, "leaf_twist_var": 0.5, "width_var": 0.0,
@@ -20296,7 +20297,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
                     "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
-                    "wall_plates", "frame_subd", "battens", "curl", "curl_var", "dried",
+                    "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
                     "width_wobble", "bent_tips", "bent_var", "leaf_section", "section_amount", "section_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
 THATCH_PRESETS = {
@@ -23409,6 +23410,9 @@ def _th_frame_courses(F, G, s):
     return ts
 
 
+STRAIGHT_COS = math.cos(math.radians(12.0))  # a frame member's end turning more than this off its line is cut off
+
+
 def _th_frame_members(F, G, s, depth):
     """The roof's frame as members (pure maths, roof space): rafters down
     the slope from a ridge beam to the eaves (on a hipped end, a hip rafter
@@ -23461,9 +23465,74 @@ def _th_frame_members(F, G, s, depth):
             travelled += step
         return path, nrms
 
+    # each part of the frame its own switch (the user, 2026-11-11: "control for toggling different parts,
+    # instead of just the entire frame as a whole"); the layout is worked out the same either way (the ridge
+    # beam still sits under where the rafters' tops would be), so turning one part off moves nothing else
+    keep = {"rafter": s.get("frame_rafters", True), "jack": s.get("frame_rafters", True),
+            "hip": s.get("frame_hips", True), "beam": s.get("frame_beam", True),
+            "batten": s.get("frame_battens", True), "plate": s["wall_plates"]}
+    rid = [0]  # every member's number in the whole frame, left-out ones too: its crookedness and cut ends are
+    # drawn from that, so the members that stay are exactly as they were
+
+    def gable_cut(path, nrms):
+        """Cut a member running along the roof off at a gable's outer rafter (past it, its end came out
+        through the leaves hanging off the verge); True when cut."""
+        if F.cone or len(path) < 2:
+            return path, nrms, False
+        hi = F.x1 - rr if F.ends[0] is None else None
+        lo = F.x0 + rr if F.ends[1] is None else None
+        out_p, out_n, cut = [], [], False
+
+        def inside(q):
+            return (hi is None or q[0] <= hi + 1e-9) and (lo is None or q[0] >= lo - 1e-9)
+
+        def lim(q):
+            return hi if hi is not None and q[0] > hi else lo
+        for k in range(len(path)):
+            a = path[k]
+            if k:
+                b = path[k - 1]
+                if inside(a) != inside(b):  # crossing the limit: a point on it
+                    o = b if inside(a) else a
+                    t = (lim(o) - b[0]) / (a[0] - b[0])
+                    out_p.append(tuple(b[j] + t * (a[j] - b[j]) for j in range(3)))
+                    out_n.append(nrms[k])
+            if inside(a):
+                out_p.append(a)
+                out_n.append(nrms[k])
+            else:
+                cut = True
+        return out_p, out_n, cut
+
     def add(path, nrms, r0, r1, kind):
+        if kind in ("rafter", "jack", "hip", "batten") and len(path) > 2 and not (F.cone and kind == "batten") and                 _rl_len(_rl_sub(path[-1], path[0])) > 1e-6:
+            # straight wood: an end that turns away (where the roof rounds off at an eave corner or over a hip's
+            # crest the surface turns, and the last point with it: a corner jack bent by a quarter of its length)
+            # is cut off, the member stops short of the turn
+            def turn(a, b):  # the end segment a-b against the line of the member's middle half
+                n_ = len(path)
+                i0 = n_ // 4
+                u, v = _rl_sub(path[max(i0 + 1, (3 * n_) // 4)], path[i0]), _rl_sub(b, a)
+                lu, lv = _rl_len(u), _rl_len(v)
+                if lu < 1e-9 or lv < 1e-9:
+                    return False
+                return (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (lu * lv) < STRAIGHT_COS
+            path, nrms = list(path), list(nrms)
+            if kind != "batten":  # walked down the roof: one that climbs at first started on the far face (a
+                # short lean-to's two hipped ends meet before its top: their hips crossed it) and begins at the top
+                while len(path) > 2 and path[1][1] > path[0][1] + 1e-6:
+                    path.pop(0)
+                    nrms.pop(0)
+            while len(path) > 2 and turn(path[-2], path[-1]):
+                path.pop()
+                nrms.pop()
+            while len(path) > 2 and turn(path[0], path[1]):
+                path.pop(0)
+                nrms.pop(0)
         if len(path) >= 2:
-            members.append({"path": path, "nrm": nrms, "r0": r0, "r1": r1, "kind": kind})
+            if keep.get(kind, True):
+                members.append({"path": path, "nrm": nrms, "r0": r0, "r1": r1, "kind": kind, "rid": rid[0]})
+            rid[0] += 1
 
     def spaced(lo, hi):
         n = max(1, int(math.ceil((hi - lo) / gap)))
@@ -23525,7 +23594,7 @@ def _th_frame_members(F, G, s, depth):
                 while True:
                     x = sign * (F.L - (h - h0) / me)
                     z = zs * (F.H - h) / F.ms if F.shape == "Ridge" else F.z0 + (F.H - h) / F.ms
-                    q = at(x, z, d_rafter)
+                    q = at(x, z, d_rafter + 0.35 * rr)  # a hip rafter is 1.3x thicker: as deep again
                     if q is None or h < max(h0, F.t_low * F.H) - 2.0 * step * F.ms:
                         break
                     path.append(q[0])
@@ -23557,7 +23626,11 @@ def _th_frame_members(F, G, s, depth):
                     path.append(c)
                     nrms.append(q[1])
                 x += step
+            path, nrms, cut = gable_cut(path, nrms)
+            n_before = len(members)
             add(path, nrms, rbeam, rbeam * 0.92, "beam")
+            if cut and len(members) > n_before:
+                members[-1]["run"] = False
     # battens: one along every course (round a hipped roof or a cone they follow the courses)
     # none over the rounded crest (the top course's contour wandered along it in scraps, through the underlay)
     # straight along each face (2026-11-10: on the roof's contours they wandered with its lumps), each face's
@@ -23602,16 +23675,18 @@ def _th_frame_members(F, G, s, depth):
                     path.append(path[0])
                     nrms.append(nrms[0])
                 if sum(_rl_len(_rl_sub(b, a)) for a, b in zip(path, path[1:])) >= 4.0 * rb:
+                    path, nrms, cut = gable_cut(path, nrms)
+                    n_before = len(members)
                     add(path, nrms, rb, rb * 0.9, "batten")
-                    if corners:  # ends at a hip: run on straight, they came up out of the far face
-                        members[-1]["run"] = False
+                    if (corners or cut) and len(members) > n_before:  # ends at a hip: no run-on (it came up out of
+                        members[-1]["run"] = False            # the far face)
     # wall plates on the wall tops (in from the wall line, where the rafters have risen above it), under the
     # rafters: level, at the height of the lowest rafter they carry (a plate centred on the wall line sank into
     # the walls: with no overhang the eave is the wall line)
-    if s["wall_plates"]:
+    if True:  # (left out by add() when Wall plates is off)
         inset = 2.5 * rp
 
-        def plate(xs_zs):
+        def plate(xs_zs, along=None):
             path = []
             for x, z in xs_zs:
                 q = at(x, z, d_rafter + rr + rp)
@@ -23620,6 +23695,9 @@ def _th_frame_members(F, G, s, depth):
             if len(path) < 2:
                 return
             y = min(q[1] for q in path)
+            if along is not None:  # a straight plate (the roof's normal at a corner had pushed its end out)
+                c = sorted(q[along] for q in path)[len(path) // 2]
+                path = [(c, q[1], q[2]) if along == 0 else (q[0], q[1], c) for q in path]
             add([(q[0], y, q[2]) for q in path], [(0.0, 1.0, 0.0)] * len(path), rp, rp, "plate")
         if F.cone:
             n = max(24, int(round(2.0 * math.pi * F.R / step)))
@@ -23630,11 +23708,13 @@ def _th_frame_members(F, G, s, depth):
             Lp, Wp = F.L - inset, F.W - inset
             nx = max(2, int(math.ceil(2.0 * Lp / step)))
             for z in (Wp, -Wp):
-                plate([(-Lp + 2.0 * Lp * i / float(nx), z) for i in range(nx + 1)])
+                plate([(-Lp + 2.0 * Lp * i / float(nx), z) for i in range(nx + 1)], 2)
             nz = max(2, int(math.ceil(2.0 * Wp / step)))
             for e, end in enumerate(F.ends):
                 if end is not None and end[2] <= 1e-6:  # a full hip rests on its end wall too
-                    plate([(end[0] * Lp, -Wp + 2.0 * Wp * i / float(nz)) for i in range(nz + 1)])
+                    plate([(end[0] * Lp, -Wp + 2.0 * Wp * i / float(nz)) for i in range(nz + 1)], 0)
+    for m in members:
+        m["rids"] = rid[0]
     return members
 
 
@@ -23681,7 +23761,11 @@ def _th_frame_mesh(F, members, s, uv_strip=None, strip=(0.88, 1.0, 0.94, 0.05)):
         return [(wk - e, hk), (-wk + e, hk), (-wk, hk - e), (-wk, -hk + e), (-wk + e, -hk), (wk - e, -hk),
                 (wk, -hk + e), (wk, hk - e)]
 
-    for mi, m in enumerate(members):
+    n_rid = max([m.get("rids", 0) for m in members] or [0])  # members added after the frame's own (palm poles,
+    mis = []                                                # fascias) number on from all the frame's members
+    for m in members:
+        mis.append(m["rid"] if "rid" in m else n_rid + len(mis) - sum(1 for q in members[:len(mis)] if "rid" in q))
+    for mi, m in zip(mis, members):
         path, nrms = m["path"], m["nrm"]
         style = m.get("style") or frame_style
         wob = wob0 * m.get("wob", 1.0)
@@ -29690,10 +29774,28 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "frame_wobble", "Crookedness", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
             "How crooked the members are (natural poles and bamboo), and how unevenly their ends are cut. 0: "
             "straight and even.")
-        self.f["wall_plates"] = CheckField("Wall plates under the rafters")
-        self.f["wall_plates"].setToolTip("A beam along the wall tops (the box's footprint) for the rafters to sit on.")
-        self._group["wall_plates"] = "both"
-        sec.add_full(self.f["wall_plates"])
+        parts_lbl = hint_label("Parts (each can be left out; the rest stay where they are):")
+        self._group["_frame_parts"] = "both"
+        sec.add_full(parts_lbl)
+        for key, label, tip in (
+                ("frame_rafters", "Rafters",
+                 "The poles running down the slope from the ridge to the eaves, the frame's main members (with "
+                 "the short jack rafters that run from a hip down to the eaves)."),
+                ("frame_hips", "Hip rafters",
+                 "Hip ends only: the heavier rafter under each hip line (the edge where a sloped end meets a side "
+                 "slope), which the jack rafters run from."),
+                ("frame_beam", "Ridge beam",
+                 "The beam along the top, under the rafters' upper ends (the ridge pole on top of a palm roof's "
+                 "leaf cap is its own switch, with the palm options)."),
+                ("frame_battens", "Battens / purlins",
+                 "The thinner members across the rafters that the covering is tied or fixed to: battens (laths) "
+                 "under thatch and tiles, purlins under metal sheets. How many is Battens, above."),
+                ("wall_plates", "Wall plates",
+                 "A beam along the wall tops (the box's footprint) for the rafters to sit on.")):
+            self.f[key] = CheckField(label)
+            self.f[key].setToolTip(tip)
+            self._group[key] = "both"
+            sec.add_full(self.f[key])
         group[0] = "metal"
         row(sec, "m_frame_style", "Style", SegmentField(THATCH_FRAME_STYLES),
             "Sawn: rectangular timber (the usual under metal).\nPoles / Bamboo: a makeshift frame.")
@@ -29924,6 +30026,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             sec.setVisible(thatch)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
         for key in ("ridge_fronds", "sticks", "ridge_poles", "hip_poles", "lashings"):
             self.f[key].setVisible(palm and thatch)
+        self.f["frame_hips"].setVisible(not cone and ends != ("Gable", "Gable"))  # a part only where there is one
+        self.f["frame_beam"].setVisible(s["shape"] == "Ridge")
 
     def target(self):
         """The roof being edited (selected, or the last one), or None."""

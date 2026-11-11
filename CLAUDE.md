@@ -748,6 +748,33 @@
       caps = inset ring + 4 quads. `_th_pack` packs skins and caps.
       `sin(pi * u) ** 0.5` with u a hair over 1 gave complex numbers:
       clamp before powers.
+    - **Part switches** (the user, 2026-11-11: "control for toggling
+      different parts, instead of just the entire frame"): `frame_rafters`
+      (rafters + jacks), `frame_hips`, `frame_beam`, `frame_battens`
+      (battens / metal purlins), `wall_plates`; all default True, look
+      keys, CheckFields under the Frame section (Hip rafters hidden on
+      gable-gable / cone, Ridge beam only on Ridge). The layout is always
+      worked out in full; `add()` drops a switched-off kind but still
+      numbers it (`rid`), and `_th_frame_mesh` draws each member's
+      randomness from `rid` (extras after the frame's own: palm poles,
+      fascias, numbered on from `rids`), so the parts left on are exactly
+      unmoved (test "frame parts"). All off and no extras: no frame mesh.
+    - **Straight members** (2026-11-11 check, `straight.py`-style bow =
+      worst distance off the end-to-end line / length): `add()` cuts
+      rafter / jack / hip / batten ends turning > 12 deg off the line of
+      the member's middle half (corner jacks bent 27% where the roof
+      rounds off at an eave corner; hip-end battens turning over the hip
+      crest), and a down-the-roof member that climbs at first (a short
+      lean-to's two hipped ends meet below its top: hips and jacks crossed
+      it) starts at its top. Plates: the constant coordinate set to the
+      median (the corner normal pushed their ends out). Now <= 1.6% bow
+      (the roof's own sag) except 4% on a double-hipped lean-to. Gable ends:
+      battens and the ridge beam stop at the outer rafter (x0 / x1 -+ rr),
+      no run-on there (they came through the hanging verge fronds: Amazon
+      3% -> 0.3%). Hip rafters sit 0.35 rr deeper (1.3x thick: through a
+      bundle roof's underlay, 9% of their edges). Left: bundle course poles
+      and palm poles lie in / on the leaves by design; a cone's rafters
+      touch its underlay at the apex (0.2%).
   - **2026-10-30, fourth round** (the user): overhang 0 by default (box =
     roof; every preset too). Frame samples `_th_sample_base` (grid P / N:
     sag, lumps, warp, ridge sag; not the lips / cap). `battens`
