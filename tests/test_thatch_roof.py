@@ -1066,6 +1066,34 @@ def run():
           "%d open edges, %d rays see the sky" % (boundary_edges(fn), len(miss)))
     tb["update_thatch_roofs"]({root: {"frond_form": "Leaflets", "dried": 0.0, "dried_var": 0.6}})
 
+    # --- Leaflet shape (the user, 2026-11-11: crinkle, twist, width variation, bent tips)
+    shape_keys = tb["THATCH_LEAF_SHAPE_KEYS"]
+    check("Leaflet shape: look keys, all off by default", all(k in tb["THATCH_LOOK_KEYS"] for k in shape_keys) and
+          not tb["_th_leaf_shape_settings"](tb["THATCH_DEFAULTS"]))
+    z0 = dry_build(**dict((k, tb["THATCH_DEFAULTS"][k]) for k in shape_keys))
+    s_old = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"]("Palm: palapa (hipped, messy top)"))
+    s_old.update(resolution=80, dried=0.0)
+    for k in shape_keys:
+        s_old.pop(k)
+    z1 = tb["thatch_build"](fr_, s_old)["straw"]
+    check("Leaflet shape 0 builds exactly what a roof without the settings builds", z0[0] == z1[0] and z0[3] == z1[3])
+    full = dict(crinkle=2.0, crinkle_var=1.0, leaf_twist=2.0, leaf_twist_var=1.0, width_var=1.0, width_wobble=1.0,
+                bent_tips=1.0, bent_var=1.0)
+    t0 = time.time()
+    lf = dry_build(stacks=3, **full)
+    dt = time.time() - t0
+    frac = [u - math.floor(u) for u in lf[3] if u - math.floor(u) < 0.9999]
+    check("Leaflet shape at its most: builds (%.2fs), UVs upright and inside each stack's strip" % dt,
+          lf[0] != z0[0] and uv_up(lf) > 0.999 and max(frac) <= 0.8701 and min(lf[3]) >= -1e-6 and dt < 8.0,
+          "%d -> %d verts, %.2f%% upright, widest u %.4f" % (len(z0[0]), len(lf[0]), uv_up(lf) * 100, max(frac)))
+    check("Leaflet shape is repeatable (same seed, same leaves)", dry_build(stacks=3, **full)[0] == lf[0])
+    for pk in ("Palm: nipa shingles (neat)", "Palm: jungle hut (tied bundles)"):
+        tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"](pk), resolution=100, **full)})
+        miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
+        check("Leaflet shape at its most, %s: still no gaps from inside" % pk, not miss,
+              "%d rays see the sky: %s" % (len(miss), miss[:5]))
+    tb["update_thatch_roofs"]({root: dict((k, tb["THATCH_DEFAULTS"][k]) for k in shape_keys)})
+
     # --- blockers: the thatch bends round boxes (walls, a lower roof) and follows them
     cmds.file(new=True, force=True)
     cmds.undoInfo(state=True, infinity=True)

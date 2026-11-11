@@ -786,6 +786,26 @@
     Pictures: run Maya from an empty folder (`scratchpad/run_cwd`); the
     scratchpad's own .py files shadowed Maya's Python modules ("Invalid
     Python Environment").
+  - **Leaflet shape** (`THATCH_LEAF_SHAPE_KEYS`: `crinkle`, `crinkle_var`,
+    `leaf_twist`, `leaf_twist_var`, `width_var`, `width_wobble`,
+    `bent_tips`, `bent_var`; the user, 2026-11-11: fronds too neat and
+    smooth, wanted controls to dial in realism). Panel section "Leaflet
+    shape" (palm, not Cards). `_th_leaf_shape_settings` is None when all
+    are 0, so `emit` skips it and the roof builds exactly as before (no
+    `THATCH_VERSION` bump: defaults are 0). `emit(kind=)` + `_th_leaf_shape`
+    with randoms `_rand12(seed, h01 hash of the leaf's base, 7919, 61)`:
+    "top" (loose fronds, gable fringe) gets everything; "cap" (crest,
+    saddle) gentler, "under" (shingles, bundles, butts) no width / twist
+    at all (narrowing even the taper let the sky through the beach
+    shack's thin under layer, which is borderline anyway: seeds 2, 4, 5
+    leak a ray with no shape at all); caps and under crinkle only upwards and
+    bend tips sideways in the roof's plane (no clipping into the course
+    above, no-gap rule kept). Width only narrows and is clamped to
+    0.425 / uk (u 0..0.85). Crinkle resamples rows (top: + rows x crinkle
+    up to 1.5x; others half) and needs columns only on the top layer. Bent
+    tip = a two-row crease (half the angle at each), lengths kept. Palm
+    presets carry modest values (+20-50% verts). Pictures:
+    `tests/run_gui_leaf_shape_pics.mel` (`tests/_out/leaf_shape_pics`).
   - **Quick roof shape** (`thatch_shape_from_points`, pure maths;
     `create_thatch_box_from_points`, `thatch_roof_from_points` (one
     UndoChunk), `thatch_selected_points`, `ThatchPointPicker`): points split
