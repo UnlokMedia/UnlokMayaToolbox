@@ -20286,7 +20286,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0,
+    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20298,7 +20298,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -20386,11 +20386,12 @@ THATCH_PRESETS = {
         "softness": 0.7, "sag": 0.15, "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
         "resolution": 150, "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.15, "leaf_width": 0.026,
         "top_leaf_width": 0.013, "overlap": 0.3, "frond_width": 0.25, "slant": 0.1, "droop": 0.0, "neat": 0.75,
-        "top_layer": 1.5, "mess": 0.35, "lift": 2.5, "bend": 0.15, "edge_hang": 0.9, "edge_len_var": 0.4,
+        "top_layer": 1.5, "mess": 0.35, "lift": 2.5, "bend": 0.05, "edge_hang": 0.3, "edge_len_var": 0.4,
         "edge_mess": 0.15, "end_reach": 0.4, "end_fronds": 0.5, "ridge_fronds": True, "sticks": False,
-        "ridge_poles": False, "segments": 6, "curl": 0.4, "dried": 0.15, "underlay": False,
+        "ridge_poles": False, "segments": 6, "curl": 0.4, "dried": 0.05, "underlay": False,
         "battens": "Every course", "rafter_spacing": 0.12, "shag": 1.2, "cap_width": 0.012, "hip_blend": 1.0, "flow": 1.0,
-        "crinkle": 0.4, "leaf_twist": 0.25, "width_var": 0.4, "width_wobble": 0.2, "bent_tips": 0.2},
+        "crinkle": 0.25, "leaf_twist": 0.25, "width_var": 0.4, "width_wobble": 0.2, "bent_tips": 0.05,
+        "pokes": 5, "poke_lift": 1.0, "poke_clump": 0.3, "tip_var": 0.5},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
         "lumps": 0.6, "warp": 0.5, "ridge_sag": 0.5, "ragged": 0.4, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -22020,6 +22021,29 @@ def _th_fronds_mesh(F, G, s):
     # Shag: each leaf's tip stands off the roof at a stiff angle of its own, most a little, the odd one a lot
     # (a bushy, dry palapa; 0: they lie along the roof as before)
     shag = clamp(float(s.get("shag", 0.0)), 0.0, 2.0)
+    # Poking out (the user, 2026-11-11: "the odd frond poking out more, rarely ... or clumps poke up, like
+    # one frond has lifted and brought a couple nearby ones with it ... like 4 in total across the whole
+    # roof, nowhere near each other"): Pokes spots on the roof, spread out (each the farthest from the others
+    # of a few random tries); a top frond whose leaflets start near one stands up off the roof, straight,
+    # Poke lift; Poke clump widens the spot from one frond to a handful, those further out lifting less
+    pokes = []
+    n_poke = max(0, min(200, int(s.get("pokes", 0))))
+    if n_poke:
+        p_lift = clamp(float(s.get("poke_lift", 1.0)), 0.0, 3.0)
+        p_rad = (0.5 + 0.7 * clamp(float(s.get("poke_clump", 0.0)), 0.0, 1.0)) * ll * (
+            0.35 + 0.65 * clamp(float(s.get("poke_clump", 0.0)), 0.0, 1.0))
+        for i in range(n_poke):
+            best = None
+            for j in range(12):
+                r_ = _rand12(int(s["seed"]), 9101, i, j)
+                px, pz = F.x0 + (F.x1 - F.x0) * r_[0], F.z0 + (F.z1 - F.z0) * r_[1]
+                if _th_cell(G, F, px, pz) is None:
+                    continue
+                d = min([math.hypot(px - q[0], pz - q[1]) for q in pokes] or [1e9])
+                if best is None or d > best[0]:
+                    best = (d, px, pz, 0.6 + 0.8 * r_[2])
+            if best:
+                pokes.append((best[1], best[2], best[3] * p_lift))
     tlw = max(1e-4, float(s["top_leaf_width"]) * span)  # top layer: thinner
     tile = max(3.0 * lw, float(s["frond_width"]) * span)
     form = s["frond_form"] if s["frond_form"] in THATCH_FROND_FORMS else "Leaflets"
@@ -22092,6 +22116,16 @@ def _th_fronds_mesh(F, G, s):
     # top layer's leaflets have a narrow base and taper all the way
     prof_tile = [0.9 + 0.1 * min(1.0, v / 0.1) if v <= 0.45 else ((1.0 - v) / 0.55) ** 1.1 for v in k_seg]
     prof_top = [min(1.0, 0.45 + 0.55 * v / 0.18) * (1.0 - v) ** 1.15 for v in k_seg]
+    # Tip shape (the user, 2026-11-11: "control how pointy the ends are ... some pointy and some less"): the top
+    # leaflets' taper exponent, -1 a long needle point (x2.5), 0 as before, 1 blunt (wide nearly to the end);
+    # Tip variation spreads it per leaflet
+    tip_s = clamp(float(s.get("tip_shape", 0.0)), -1.0, 1.0)
+    tip_v = clamp(float(s.get("tip_var", 0.0)), 0.0, 1.0)
+
+    def prof_top_of(r):
+        b = clamp(tip_s + (r - 0.5) * 2.0 * tip_v, -1.0, 1.0)
+        e = 1.15 * (1.0 + 1.5 * -b) if b < 0.0 else 1.15 * (1.0 - 0.85 * b)
+        return [min(1.0, 0.45 + 0.55 * v / 0.18) * (1.0 - v) ** e for v in k_seg]
     uk_tile = 0.425 / (0.5 * lw)  # planar UVs: the widest leaflet just fills 0..0.85
     uk_top = 0.425 / (0.5 * tlw * 1.2)
     vv_leaf = [1.0 - v for v in k_seg]
@@ -22294,7 +22328,7 @@ def _th_fronds_mesh(F, G, s):
         return max([sign * x - edge for sign, edge in flushes] or [-1e9])
 
     def leaf_line(base, L, yaw, layer, curl, limp, heading=None, drop=True, floor=None, note=None, edge=True,
-                  stiff=1.0):
+                  stiff=1.0, poke=False):
         """A leaf's centreline walking the roof from base ((x, z), ox, oz: on
         a course, or carried past its end) for length L, turned by yaw (pi:
         down the slope), off the roof by layer(distance from its top), bowed
@@ -22308,6 +22342,11 @@ def _th_fronds_mesh(F, G, s):
         if shag and stiff:  # Shag: a straight lean off the roof, its own (keyed to where it starts)
             hs = (math.sin((x + ox) * 91.731 + (z + oz) * 47.113 + seed * 0.731) * 24634.6345) % 1.0
             sh = shag * stiff * L * (0.04 + 0.16 * hs + 0.35 * hs ** 6)
+        if poke and pokes:  # Poking out: near a poke spot it stands well off the roof
+            for px, pz, pl in pokes:
+                d = math.hypot(x + ox - px, z + oz - pz)
+                if d < p_rad:
+                    sh += 0.6 * pl * L * (1.0 - d / p_rad) ** 1.5
         cell = _th_cell(G, F, x, z)
         if cell is None:
             return None
@@ -22685,12 +22724,13 @@ def _th_fronds_mesh(F, G, s):
                 return layer(d) + on_r + up * max(0.0, 1.0 - d / (0.6 * L)) ** 2
             note = [] if sticks else None
             line = leaf_line(point_at(start + a * width), L, yaw, layer_l, droop * 0.12 * L * m_top * ri[6], False,
-                             floor=rach_floor if rach else None, note=note)
+                             floor=rach_floor if rach else None, note=note, poke=True)
             if line is None:
                 continue
             ws = (1.0 + (ri[7] - 0.5) * 0.3 * m_top) * max(0.4, 1.0 - 0.3 * dry)
             tw_max = (ri[8] - 0.5) * 1.4 * m_top + ((rd[1] - 0.5) * 2.4 * dry if dry else 0.0)
-            if not emit(line[0], line[1], [p * 0.5 * tlw * ws for p in prof_top],
+            pt = prof_top_of(_rand12(seed, key[0] * 7 + 5, key[1] * 131 + key[2], i)[0]) if (tip_s or tip_v) else prof_top
+            if not emit(line[0], line[1], [p * 0.5 * tlw * ws for p in pt],
                         [tw_max * v ** 1.2 for v in k_seg], uk_top, stack, flip, 0.3 if three else 0.0,
                         (dry, rd, True) if dry else None, flat=over_wood if sticks else None):
                 return made
@@ -29705,6 +29745,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "end's edge (verge).")
         card.add(sec)
         sec = self.leaf_sec = Section("Leaflet shape and ageing", expanded=False)
+        row(sec, "tip_shape", "Tip shape", FloatField(-1.0, 1.0, -1.0, 1.0, decimals=2, step=0.05),
+            "The loose top leaflets' ends: -1 long needle points, 0 as they were, 1 blunt (wide nearly to the end).")
+        row(sec, "tip_var", "Tip variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's tip differs from Tip shape: some pointier, some blunter.")
         row(sec, "dried_var", "Dried variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
             "leaves stand out among fresh ones).")
@@ -29781,6 +29825,14 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Width of the leaves over the ridge, the hips and a cone's tip (fraction of the span). 0: as wide "
             "as the under layer's (Leaf width). Thinner (like the top fronds') blends a shaggy roof's hips in "
             "instead of a neat herringbone of wide leaves.")
+        row(sec, "pokes", "Fronds poking out", IntField(0, 200, 0, 20),
+            "How many spots on the roof where a loose top frond stands up off the rest (0: none). Spread out, "
+            "never near each other; a real roof has a handful.")
+        row(sec, "poke_lift", "Poke lift", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How far those fronds stand up (each spot varies a little).")
+        row(sec, "poke_clump", "Poke clump", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "0: just the one frond. Higher: it brings the fronds round it up too, those further out less, "
+            "as if one lifted and pulled its neighbours with it.")
         row(sec, "flow", "Flow round hips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Which way every leaf runs. 0: straight down its own face, turning sharply over a hip (a parting "
             "shows along it). 1: like the spokes of a cone, out from the ridge line: straight down the middle "
@@ -30067,7 +30119,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("shag", "cap_width", "hip_blend", "flow", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm

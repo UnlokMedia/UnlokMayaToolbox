@@ -319,6 +319,17 @@
   plan direction to the nearest point of the ridge line (`flow_x`: hip
   ends' ridge ends, gables open), so every leaf on every style follows one
   smooth radial field; fixed-heading walks (caps) are untouched.
+  **Fronds poking out** (`pokes` count per roof, `poke_lift`, `poke_clump`;
+  the user: "the odd frond poking out ... rarely ... or clumps ... like 4 in
+  total across the whole roof, nowhere near each other"): spots spread out
+  (each the farthest of 12 seeded tries from those placed, on the roof);
+  top-frond leaflets (`leaf_line(poke=True)`, `frond_at` only) starting
+  within `p_rad` (about 0.18 leaf for one frond, up to 1.2 leaf at Clump 1)
+  add a straight lean `0.6 lift L (1 - d / p_rad)^1.5` to the Shag term.
+  Under layer untouched, so no new gaps. The same day the preset went
+  straighter (the user: "too curved/bendy"): Bend 0.05, Dried 0.05, Bent
+  tips 0.05, Crinkle 0.25; Pokes 5, lift 1, clump 0.3; Edge droop 0.3
+  (0.9 hung heavy and wet at the eaves).
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

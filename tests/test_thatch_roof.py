@@ -1138,6 +1138,8 @@ def run():
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
     s_old.pop("flow")
+    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var"):
+        s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
           dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
     sh_, base_ = dry_build(shag=1.5), dry_build()
@@ -1147,6 +1149,12 @@ def run():
     check("Flow round hips: a look key, 0 by default, changes the leaves",
           "flow" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["flow"] == 0.0 and
           dry_build(flow=1.0)[0] != base_[0])
+    check("Fronds poking out: look keys, none by default, lift some top fronds",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in ("pokes", "poke_lift", "poke_clump")) and
+          tb["THATCH_DEFAULTS"]["pokes"] == 0 and dry_build(pokes=4, poke_clump=1.0)[0] != base_[0])
+    check("Tip shape and variation: look keys, 0 by default, change the top leaflets",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in ("tip_shape", "tip_var")) and
+          tb["THATCH_DEFAULTS"]["tip_shape"] == 0.0 and dry_build(tip_shape=0.8, tip_var=0.5)[0] != base_[0])
     tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"]("Palm: bushy palapa (shaggy)"), resolution=100)})
     miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
     check("Bushy palapa preset: builds, no gaps from inside", not miss, "%d rays see the sky: %s" % (len(miss), miss[:5]))
