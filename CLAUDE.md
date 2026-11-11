@@ -329,7 +329,22 @@
   Under layer untouched, so no new gaps. The same day the preset went
   straighter (the user: "too curved/bendy"): Bend 0.05, Dried 0.05, Bent
   tips 0.05, Crinkle 0.25; Pokes 5, lift 1, clump 0.3; Edge droop 0.3
-  (0.9 hung heavy and wet at the eaves).
+  (0.9 hung heavy and wet at the eaves). **Tip shape** (`tip_shape` -1
+  needle .. 1 blunt, `tip_var` per leaflet; `prof_top_of` in
+  `_th_fronds_mesh`, top layer only, randoms key `key[0] * 7 + 5`).
+  **Messiness master** (`messy`, default 1 = untouched; `_th_messy` after
+  `_th_volume` in `thatch_build` scales `THATCH_MESS_KEYS`: mess, slant,
+  twist, crinkle, uneven edges, bent tips, edge messiness). Panel: the
+  master is "Messiness" in the main rows; the parts moved into a folded
+  "Messiness, part by part" section (`mess_sec`; the old Messiness is now
+  "Turn and size"). **Preset "Palm: round palapa (dense, bushy)"**, matched
+  to a photo of a round palapa (scratchpad `arnold_pics.py` view "match":
+  portrait 600 x 900, needs `deviceAspectRatio` and filmFit horizontal or
+  it stretches): Cone, Softness 1 (rounded top), Sag -0.6 (sides bulge),
+  leaf length 0.2, under leaf 0.02 / top 0.011, Density 1.6, Top fronds 2,
+  Shag 0.4, Lift 1.5, Edge droop 1.3 with Limp top fronds 1 (a fringe
+  hanging straight down), Past the edges 0, Messiness parts low. The test's
+  sky rays only count inside a cone's ellipse (`oval`).
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

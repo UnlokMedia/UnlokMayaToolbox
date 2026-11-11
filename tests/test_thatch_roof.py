@@ -419,18 +419,21 @@ def run():
     b = box("palm")
     frame = tb["thatch_frame"](b)
     palms = [k for k in tb["THATCH_PRESETS"] if k.startswith("Palm")]
-    check("seven palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 7 and all(
+    check("eight palm presets, each a whole palm look (Detail and stacks stay yours)", len(palms) == 8 and all(
         tb["thatch_preset"](k)["style"] == "Palm Fronds" and "detail" not in tb["thatch_preset"](k) and
         "stacks" not in tb["thatch_preset"](k) for k in palms))
-    def sky_from_inside(straw, n=30):
+    def sky_from_inside(straw, n=30, oval=False):
         """Rays straight up from under the roof over the walls (the ridge line and a hip end's middle
-        included): the ones that miss every leaf."""
+        included): the ones that miss every leaf. oval: a cone's roof covers the ellipse in the 6 x 4 box,
+        so only rays inside it (a little in) count."""
         fn = mesh_fn(tb, straw)
         acc = fn.autoUniformGridParams()
         miss = []
         for i in range(n + 1):
             for j in range(n + 1):
                 x, z = -2.8 + 5.6 * i / float(n), -1.85 + 3.7 * j / float(n)
+                if oval and (x / 3.0) ** 2 + (z / 2.0) ** 2 > 0.92:
+                    continue
                 hit = fn.closestIntersection(om.MFloatPoint(x, 2.4, z), om.MFloatVector(0.0, 1.0, 0.0),
                                              om.MSpace.kWorld, 100.0, False, accelParams=acc)
                 if not hit:
@@ -460,7 +463,7 @@ def run():
               up > 0.8, "%s, %.2f%% upright, %.1f%% up" % (sorted(tiles), good * 100, up * 100))
         check("%s: no underlay: the fronds are the whole roof" % k,
               not cmds.getAttr(parts["underlay"] + ".visibility"))
-        miss = sky_from_inside(parts["straw"])
+        miss = sky_from_inside(parts["straw"], oval=s.get("shape") == "Cone")
         check("%s: no gaps: looking up from inside, every ray hits a leaf" % k, not miss,
               "%d of %d rays see the sky: %s" % (len(miss), 31 * 31, miss[:5]))
         bb = bbox(parts["straw"])
@@ -1138,7 +1141,7 @@ def run():
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
     s_old.pop("flow")
-    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var"):
+    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy"):
         s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
           dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
@@ -1152,6 +1155,12 @@ def run():
     check("Fronds poking out: look keys, none by default, lift some top fronds",
           all(k in tb["THATCH_LOOK_KEYS"] for k in ("pokes", "poke_lift", "poke_clump")) and
           tb["THATCH_DEFAULTS"]["pokes"] == 0 and dry_build(pokes=4, poke_clump=1.0)[0] != base_[0])
+    check("Messiness master: 1 by default builds exactly the same; 0 and 2 change it",
+          tb["THATCH_DEFAULTS"]["messy"] == 1.0 and "messy" in tb["THATCH_LOOK_KEYS"] and
+          dry_build(messy=1.0)[0] == base_[0] and dry_build(messy=0.0)[0] != base_[0] and
+          dry_build(messy=2.0)[0] != base_[0])
+    m2 = tb["_th_messy"](dict(tb["THATCH_DEFAULTS"], mess=0.4, slant=0.3, messy=2.0))
+    check("Messiness master scales its parts", abs(m2["mess"] - 0.8) < 1e-9 and abs(m2["slant"] - 0.6) < 1e-9)
     check("Tip shape and variation: look keys, 0 by default, change the top leaflets",
           all(k in tb["THATCH_LOOK_KEYS"] for k in ("tip_shape", "tip_var")) and
           tb["THATCH_DEFAULTS"]["tip_shape"] == 0.0 and dry_build(tip_shape=0.8, tip_var=0.5)[0] != base_[0])
