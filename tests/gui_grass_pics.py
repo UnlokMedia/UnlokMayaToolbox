@@ -1,6 +1,8 @@
 """Pictures of dry grass bunches: flat (Pile height 0, how they were), a new
 Grass layer (Pile height 0.6) and the Loose piles preset, side by side on
-the same floor with a wall and a step: run inside an interactive Maya.
+the same floor with a wall and a step, then the scattered-grass presets
+(Scattered blades, Loose wisps, Small messy piles) and a mix with every
+scattered-grass setting up: run inside an interactive Maya.
 
 UNLOK_TEST_OUT picks the folder (default tests/_out/grass_pics).
 
@@ -80,7 +82,15 @@ def main():
     cmds.setAttr("persp.focalLength", 45)
     looks = (("flat", {"grass_pile": 0.0}),  # how bunches were
              ("pile", {}),  # a new Grass layer: Pile height 0.6
-             ("loose", ns["sc_preset"]("Grass", "Loose piles")))
+             ("loose", ns["sc_preset"]("Grass", "Loose piles")),
+             ("scattered", ns["sc_preset"]("Grass", "Scattered blades")),
+             ("wisps", ns["sc_preset"]("Grass", "Loose wisps")),
+             ("messy_piles", ns["sc_preset"]("Grass", "Small messy piles")),
+             ("all_up", {"grass": 6.0, "grass_strays": 30.0, "bunch_var": 1.0, "bunch_shape": 1.0,
+                         "blade_scatter": 0.8, "grass_pile": 0.5}))
+    only = [n for n in os.environ.get("UNLOK_PIC_ONLY", "").split(",") if n]
+    if only:
+        looks = tuple(lk for lk in looks if lk[0] in only)
     for k, (name, s) in enumerate(looks):
         x = k * 100.0
         flr = box("floor_" + name, (24, 1, 24), (x, -0.5, 0), div=4.0)
@@ -88,7 +98,9 @@ def main():
         step = box("step_" + name, (6, 1.5, 4), (x + 7, 0.75, -8), div=1.0)
         shade([flr, wall, step], "pic_ground", (0.42, 0.42, 0.42))
         s = dict(s)
-        s.update({"grass": 4.0, "coverage": 0.85, "seed": 3})
+        if name in ("flat", "pile", "loose"):
+            s.update({"grass": 4.0, "coverage": 0.85})
+        s["seed"] = 3
         root = ns["create_scatter_group"]([flr, wall, step], "Grass", s)["root"]
         for key, node in ns["sc_parts"](root).items():
             shade(node, "pic_grass", (0.78, 0.64, 0.36))

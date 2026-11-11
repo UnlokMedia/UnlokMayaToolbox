@@ -2184,6 +2184,34 @@
       before); a NEW Grass layer gets 0.6 (`SC_TYPES` "new"), presets Dry
       grass 0.6, Loose piles 0.9, Grass mat 0. Cost about 2x the flat
       bunches (yard: 1.9 vs 0.9 s).
+    - **Scattered grass** (the user, 2026-11-11: "its currently just doing
+      small bunches ... individual bits of grass here and there, or
+      smaller piles, instead of neat round bunches, more random, more
+      extreme values possible"). Grass keys, all 0 in `DEBRIS_DEFAULTS`
+      (an old group / Moss & Ivy Debris builds exactly as before,
+      `tests/test_grass_scatter.py` vs `UNLOK_OLD_TOOLBOX`), panel section
+      "Shape and scatter" plus Stray blades in the main grid:
+      `grass_strays` (Stray blades per m2: `_strays`, debris kind 7,
+      `DEBRIS_GATHER` 0.3, `_spots(reach=0.25)` so they reach past the
+      patches; 1-3 crossed blades lying flat, `counts["strays"]` /
+      `debris_build`'s "strays"; zeroed for other layer types in
+      `_sc_build_layer`); `bunch_var` (Size range: radius x 2^(4 v (u -
+      0.6)), a fifth to 3x, mostly small; blades follow the area, so tiny
+      bunches are a few blades); `bunch_shape` (Irregular: `_bunch` splits
+      into 1-4 lumps round the spot, each snapped, skipped behind a wall /
+      inside a box, stretched up to 1 + 2.5 irr along a random axis and
+      lobed, `_shape_xy`; piles too); `blade_scatter` (Scatter, 0..2:
+      `_thrown`, a share min(0.95, 0.7 sc) of blades thrown out to Rb (1 +
+      5 sc u^2), any heading; a pile's thrown blades lie flat round it);
+      `bunch_blades` (Blades per bunch, 0 = by size; else 0.5-1.5x it).
+      The old body is `_bunch_lump(j=0, shape=None)`; a lump j > 0 offsets
+      the blade randoms by 7919 j, and the new randoms are their own
+      streams (9/83, 10/89, 11/97, 12/101, 13/103), so nothing moves when
+      they're 0. Wider ranges: Bunches 0-500, Bunch size 5 mm-10 m, Grass
+      length 5 mm-5 m, Fullness 0.01-10, Pile height 0-3, Droop 0-4 (the
+      engine clamps widened to match). Presets Scattered blades (Bunches
+      0, strays 60), Loose wisps, Small messy piles. Pictures:
+      `tests/run_gui_grass_pics.mel` (`UNLOK_PIC_ONLY=scattered,...`).
     - **Grass inside boxes** (the user asked, 2026-11-06): the floor under a
       box standing on it is sampled like any other, so bunches grew inside
       the box (test_grass_pile's yard: ~2k points in the step), and blades
@@ -3272,6 +3300,8 @@ Loose grass piles: `tests/test_grass_pile.py` (`UNLOK_OLD_TOOLBOX` an older copy
 exactly what it built on open ground; grass under a single-sided roof plane), pictures from GUI `tests/run_gui_grass_pics.mel` (flat / new layer / Loose piles,
 `tests/_out/grass_pics`). Both GUI picture scripts sometimes leave Maya open after `cmds.quit` once the
 pictures are written: check the command line before stopping it.
+Scattered grass: `tests/test_grass_scatter.py` (`UNLOK_OLD_TOOLBOX`: the new keys at 0 build exactly the old
+flat bunches and piles; strays, size range, lumps, scatter, blades per bunch; presets safe on the yard / ramp).
 Quad Fill: `tests/test_quad_fill.py`, GUI `tests/run_gui_quad_fill.mel`.
 Renamer: `tests/test_renamer.py`. Reframe: `tests/test_reframe_embed.py`
 (and `python tools/embed_reframe.py --check`). Launch time and every tool
