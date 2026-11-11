@@ -312,11 +312,18 @@
   0.6 leaf from the ridge: the full fan there closes the hip / ridge joint),
   `crest(blend=)` drops the cap lift 45% and scatters each start up to
   0.3 leaf off the crest, hip step x (1 - 0.35 hb). 0 = bit-identical.
+  That fixed only the caps: the courses under them still parted along the
+  hip (the user's paintover: real leaves turn gradually across a face like a
+  cone's spokes). `flow` (Flow round hips, Ridge shape only): `ThatchField.
+  flow_up` blends the walk's up direction (`_th_walk` `up_dir`) with the
+  plan direction to the nearest point of the ridge line (`flow_x`: hip
+  ends' ridge ends, gables open), so every leaf on every style follows one
+  smooth radial field; fixed-heading walks (caps) are untouched.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,
-  Bend 0.15, Softness 0.7, Cap leaf width 0.012, Hip blend 1. Its Medium
-  build is ~8.5 s; the test allows 10 s for it (others 6 s). Pictures: fast
+  Bend 0.15, Softness 0.7, Cap leaf width 0.012, Hip blend 1, Flow 1. Its Medium
+  build is ~8.5-9.4 s; the test allows 10 s for it (others 6 s). Pictures: fast
   Arnold renders with flat colour shaders (scratchpad `arnold_pics.py`)
   showed far more than the viewport. That joint (x = +-0.93 on the 6 x 4
   test box) is the preset's weak spot for gaps. Known: on a gable the thin

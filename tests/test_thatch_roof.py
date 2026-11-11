@@ -1137,12 +1137,16 @@ def run():
     s_old.pop("shag")
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
+    s_old.pop("flow")
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
-          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
+          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
     sh_, base_ = dry_build(shag=1.5), dry_build()
     check("Shag stands the leaves off the roof", sh_[0] != base_[0])
     check("Cap leaf width changes the cap leaves", dry_build(cap_width=0.01)[0] != base_[0])
     check("Hip blend changes the hip cap leaves", dry_build(hip_blend=1.0)[0] != base_[0])
+    check("Flow round hips: a look key, 0 by default, changes the leaves",
+          "flow" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["flow"] == 0.0 and
+          dry_build(flow=1.0)[0] != base_[0])
     tb["update_thatch_roofs"]({root: dict(tb["thatch_preset"]("Palm: bushy palapa (shaggy)"), resolution=100)})
     miss = sky_from_inside(tb["thatch_parts"](root)["straw"])
     check("Bushy palapa preset: builds, no gaps from inside", not miss, "%d rays see the sky: %s" % (len(miss), miss[:5]))

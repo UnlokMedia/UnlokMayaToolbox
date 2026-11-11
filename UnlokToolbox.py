@@ -20286,7 +20286,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0,
+    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20298,7 +20298,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -20389,7 +20389,7 @@ THATCH_PRESETS = {
         "top_layer": 1.5, "mess": 0.35, "lift": 2.5, "bend": 0.15, "edge_hang": 0.9, "edge_len_var": 0.4,
         "edge_mess": 0.15, "end_reach": 0.4, "end_fronds": 0.5, "ridge_fronds": True, "sticks": False,
         "ridge_poles": False, "segments": 6, "curl": 0.4, "dried": 0.15, "underlay": False,
-        "battens": "Every course", "rafter_spacing": 0.12, "shag": 1.2, "cap_width": 0.012, "hip_blend": 1.0,
+        "battens": "Every course", "rafter_spacing": 0.12, "shag": 1.2, "cap_width": 0.012, "hip_blend": 1.0, "flow": 1.0,
         "crinkle": 0.4, "leaf_twist": 0.25, "width_var": 0.4, "width_wobble": 0.2, "bent_tips": 0.2},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
@@ -20538,6 +20538,13 @@ class ThatchField(object):
                 a[3], b[3] = xm, -xm
         self.z0 = -W if self.shape == "Lean-to" else -(W + o)
         self.z1 = W + o
+        # Flow (the user, 2026-11-11, a paintover of a palapa: real leaves turn gradually across a face, like
+        # a cone's spokes, straight down its middle, more and more along the hip near it, so a hip shows no
+        # parting; ours ran down each face's own fall line and turned sharply over the rounded hip): leaves
+        # walk up a blend of the fall line and the way to the nearest point of the ridge line (radial)
+        self.flow = clamp(float(s.get("flow", 0.0)), 0.0, 1.0) if self.shape == "Ridge" else 0.0
+        a, b = self.ends
+        self.flow_x = (-b[3] if b else -1e9, a[3] if a else 1e9)
         self.rho = 1.0 + o / self.R  # cone: the eave edge (1 = the box)
         self.sag = float(s["sag"]) * 0.04 * span
         self.lumps = float(s["lumps"]) * 0.012 * span
@@ -20691,6 +20698,18 @@ class ThatchField(object):
         a = _th_noise(p / sw, d / (sw * 16.0), self.seed + 7, self.wrap)
         b = _th_noise(p / (sw * 5.0), d / (sw * 40.0), self.seed + 11, self.wrap // 5)
         return self.strand_amp * (0.6 * a + 0.4 * b)
+
+    def flow_up(self, u, x, z):
+        """Flow: the plan direction up the roof u (unit) turned towards the ridge line's nearest point."""
+        dx = min(max(x, self.flow_x[0]), self.flow_x[1]) - x
+        dz = -z
+        ln = math.hypot(dx, dz)
+        if ln < 1e-9:
+            return u
+        f = self.flow
+        v = ((1.0 - f) * u[0] + f * dx / ln, (1.0 - f) * u[1] + f * dz / ln)
+        lv = math.hypot(v[0], v[1])
+        return (v[0] / lv, v[1] / lv) if lv > 1e-9 else u
 
     def fallback_up(self, x, z):
         """Up the slope where the surface is level (the ridge, the apex)."""
@@ -21095,6 +21114,8 @@ def _th_walk(F, G, x, z, pos, nrm, length, seg, yaw=0.0, fall=0.0, heading=None,
             u = (f[0], f[2])
             ln = math.hypot(u[0], u[1]) or 1.0
         u = (u[0] / ln, u[1] / ln)
+        if getattr(F, "flow", 0.0):
+            u = F.flow_up(u, x_, z_)
         return (u[0] * cy - u[1] * sy, u[0] * sy + u[1] * cy)
 
     direction = heading if heading else up_dir(nrm, x, z)
@@ -29760,6 +29781,10 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Width of the leaves over the ridge, the hips and a cone's tip (fraction of the span). 0: as wide "
             "as the under layer's (Leaf width). Thinner (like the top fronds') blends a shaggy roof's hips in "
             "instead of a neat herringbone of wide leaves.")
+        row(sec, "flow", "Flow round hips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Which way every leaf runs. 0: straight down its own face, turning sharply over a hip (a parting "
+            "shows along it). 1: like the spokes of a cone, out from the ridge line: straight down the middle "
+            "of each face and gradually more along the hip near it, so hips show no parting at all.")
         row(sec, "hip_blend", "Hip blend", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Hipped ends only: 0 lays the hip's cap leaves from a sharp crest down both sides (a defined "
             "ridge line, a herringbone). Higher rounds the hip off: the leaves run down along the hip, start "
@@ -30042,7 +30067,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("shag", "cap_width", "hip_blend", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("shag", "cap_width", "hip_blend", "flow", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
