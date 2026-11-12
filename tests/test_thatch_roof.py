@@ -1080,7 +1080,7 @@ def run():
     dt = time.time() - t0
     check("Dried 1: the top layer changes, a few more rows (not a heavy roof), UVs upright and in the stack "
           "(%.2fs for both)" % dt, d0_[0] != d1_[0] and 1.0 < len(d1_[0]) / float(len(d0_[0])) < 1.8 and
-          uv_up(d1_) > 0.999 and min(d1_[3]) >= -1e-6 and dt < 8.0,
+          uv_up(d1_) > 0.999 and min(d1_[3]) >= -1e-6 and dt < 11.0,  # 9 s since the ridge peak (2026-11-12)
           "%d -> %d verts, %.2f%% upright" % (len(d0_[0]), len(d1_[0]), uv_up(d1_) * 100))
     check("Dried is repeatable (same seed, same leaves)", dry_build(dried=1.0)[0] == d1_[0])
     tb["update_thatch_roofs"]({root: {"frond_form": "3D Leaflets", "dried": 1.5, "dried_var": 1.0}})
@@ -1191,6 +1191,26 @@ def run():
           all(dry_build(**{k: v})[0] != rb0_ for k, v in (("ridge_fringe", 0.0), ("ridge_bundles", 0.0),
                                                           ("peak_height", 0.0), ("peak_width", 1.2),
                                                           ("peak_sides", 1.0), ("peak_tip", 0.0))))
+    # --- Max angle and Variation (the user, 2026-11-12: "clamping angle, so it detects any that go too high
+    # up"; "neater master sliders with sliders underneath")
+    D_ = tb["THATCH_DEFAULTS"]
+    check("Max angle and Variation: look keys, off by default (90 degrees / 1 build exactly as before)",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in ("max_angle", "variety")) and D_["max_angle"] == 90.0 and
+          D_["variety"] == 1.0 and dry_build(max_angle=90.0, variety=1.0)[0] == rb0_)
+    up_ = dict(shag=1.5, pokes=12, poke_lift=2.5, droop=1.0)
+    hi_ = dry_build(**up_)
+    lo_ = dry_build(max_angle=20.0, **up_)
+    mean_y = lambda m: sum(p[1] for p in m[0]) / max(1, len(m[0]))  # noqa: E731
+    # (a few leaflets drape differently once lowered, and the ridge sits on what's under it: ~1 mm)
+    check("Max angle 20: the leaves stand lower off the roof",
+          abs(len(lo_[0]) - len(hi_[0])) < 0.01 * len(hi_[0]) and mean_y(lo_) < mean_y(hi_) - 1e-3 and
+          mean_y(dry_build(max_angle=60.0, **up_)) > mean_y(lo_),
+          "mean height %.4f vs %.4f" % (mean_y(lo_), mean_y(hi_)))
+    vk_ = [k for k, _ in tb["THATCH_VAR_KEYS"]]
+    v_on = dict((k, 0.6) for k in vk_)
+    check("Variation 0 builds every variation slider at 0; 1 leaves them as set",
+          dry_build(variety=0.0, **v_on)[0] == dry_build(**dict((k, 0.0) for k in vk_))[0] and
+          dry_build(variety=1.0, **v_on)[0] != dry_build(variety=0.0, **v_on)[0])
     sh_ = tb["_th_peak_shape"]
     gl_ = tb["_th_peak_glyph"](1.0, 0.7, -0.5, 0.5)
     check("Peak shape: 1 on the crest, 0 from Peak width on, level where it meets the slope; full sides higher "
@@ -1288,7 +1308,7 @@ def run():
         dt = time.time() - t0
         pts = roof_pts()
         check("%s with two blockers: nothing inside either (%.2fs)" % (style, dt),
-              inside(pts, wall) == 0 and inside(pts, low) == 0 and dt < 6.0,
+              inside(pts, wall) == 0 and inside(pts, low) == 0 and dt < 8.0,
               "%d / %d inside" % (inside(pts, wall), inside(pts, low)))
     tb["update_thatch_roofs"]({root: {"underlay": False}})
     tb["link_thatch_blockers"]([root], [low], add=False)

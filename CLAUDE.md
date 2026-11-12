@@ -409,13 +409,40 @@
   links" section (`links_sec`; the link status line stays outside it). The
   preset combo is grouped under disabled bold headings: Palm, Thatch,
   Metal, Tiles, Roof shape only, Yours (`_fill_presets` never leaves it on a
-  heading). Palm controls: the old "More controls" dump is split into
-  "Under layer (neat rows)" (`neat_sec`: Neatness, Leaf width, Leaf overlap,
-  Shingle width), "Top layer (loose fronds)" (`top_sec`: Leaf width, Slant,
-  Droop, Past the edges), "Leaflet shape and ageing" (Dried variation first),
-  "Edges" (Gable fringe first), "Ridge, poles and ties" (`poles_sec`: leaf
-  cap, ridge / hip / hold-down poles, lashings, sticks); "More controls"
-  keeps Resolution, Leaf thickness, Curl variation and the straw-piece rows.
+  heading).
+- **Roof panel, second pass (2026-11-12;** the user: confusing, several
+  controls editing the same thing, "not always obvious which way a slider
+  should go", language too specific; wanted a frond angle, a clamp for
+  leaves standing too high, "master sliders with sliders underneath").
+  UI only apart from two new look keys; every setting key is unchanged.
+  - **Main rows (palm):** Form, Laid as, Leaf length, Density, Top fronds,
+    then masters, each with its parts in a folded sub-section right under
+    it (`Section(sub=True)`: indented, quiet header): **Frond angle** (`shag`)
+    + `angle_sec` (Max angle, Tip curl = `droop`, Odd ones poking out /
+    how far up / in clumps); **Messiness** + `mess_sec` "Messiness parts";
+    Dried, Curl, **Variation** (`variety`).
+  - **Sections (palm):** Under layer (+ "Last row runs up over the top" =
+    `under_over_top`), Top layer (Leaf width, Past the edges, Where they
+    start, start variation, Sink their roots), Leaf shape (all the per-leaf
+    shape + Dried / Curl variation + Leaf thickness), Edges, Ridge
+    (`ridge_sec`: cap, cover, Cap leaf width, Ridge lift = `ridge_height`,
+    width, lumps, bundles, Ragged edges = `ridge_fringe`, Loose leaves on
+    top = `ridge_shag`, how spiky), Ridge peak (`peak_sec`, Ridge shape
+    only), Hips (`hip_sec`: Flow, Hip blend), Poles and ties (`poles_sec`),
+    Pieces and resolution (`more_sec`). Step 3's straw cap is "Ridge cap
+    (straw)" and hidden on palm roofs.
+  - **Slider words:** `ROOF_WORDS` (key -> (left, right)), applied by
+    `FloatField.set_words`: a small word under each end of the slider.
+  - **Max angle** (`max_angle`, degrees, 90 = off, bit-identical): in
+    `leaf_line` the rise over `layer()` is eased into tan(angle) x the
+    distance from the leaf's root (unchanged below half the cap, smooth,
+    never past it). Dried coils (in `emit`) are not clamped.
+  - **Variation** (`variety`, 1 = off): `_th_variety` scales
+    `THATCH_VAR_KEYS` like `_th_messy`, after it in `thatch_build`.
+  - Checked headless: `scratchpad` panel_shot idea, mayapy with a
+    QApplication made *before* `maya.standalone.initialize` (after it,
+    mayapy fast-fails 0xC0000409; `QT_QPA_PLATFORM=offscreen` won't start),
+    never `show()`, `widget.grab().save()` for a picture.
 - **Roof Map (2026-11-12).** `RoofMap` (above `ThatchRoofPanel`), pinned
   between the NEXT banner and the scroll area, foldable: a QPainter picture
   of the roof in three views (Cut open, the default: layers stepped back

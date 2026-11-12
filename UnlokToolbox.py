@@ -2266,6 +2266,27 @@ class FloatField(QtWidgets.QWidget):
         self.spin.valueChanged.connect(self._spin_changed)
         self.slider.valueChanged.connect(self._slider_changed)
 
+    def set_words(self, left, right):
+        """A small word under each end of the slider: what that end does ("flat" ... "standing off")."""
+        lay = self.layout()
+        i = lay.indexOf(self.slider)
+        box = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        lay.removeWidget(self.slider)
+        v.addWidget(self.slider)
+        h = QtWidgets.QHBoxLayout()
+        h.setContentsMargins(2, 0, 2, 0)
+        for k, word in enumerate((left, right)):
+            lbl = QtWidgets.QLabel(word)
+            lbl.setStyleSheet("color: #7f8a8c; font-size: 10px;")
+            h.addWidget(lbl)
+            if k == 0:
+                h.addStretch(1)
+        v.addLayout(h)
+        lay.insertWidget(i, box, 1)
+
     def _to_slider(self, v):
         lo, hi = self.soft
         return int(round(clamp((v - lo) / float(hi - lo), 0.0, 1.0) * self.STEPS)) if hi > lo else 0
@@ -2404,7 +2425,7 @@ class SegmentField(QtWidgets.QWidget):
 class Section(QtWidgets.QWidget):
     """Collapsible block with a two-column grid (label | field)."""
 
-    def __init__(self, title, expanded=True, parent=None, header=True):
+    def __init__(self, title, expanded=True, parent=None, header=True, sub=False):
         super(Section, self).__init__(parent)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -2430,6 +2451,12 @@ class Section(QtWidgets.QWidget):
         if not header:  # plain label | field grid inside a step card
             self.header.setVisible(False)
             self.grid.setContentsMargins(0, 0, 0, 0)
+        if sub:  # the parts of the slider above it: indented under it, a quiet header
+            self.header.setProperty("unlokSection", False)
+            self.header.setAutoRaise(True)
+            self.header.setStyleSheet("QToolButton { color: #8fa9b0; font-size: 11px; border: none; "
+                                      "padding: 1px 0px 1px 96px; text-align: left; }")
+            self.grid.setContentsMargins(14, 2, 0, 6)
 
     def _toggled(self, on):
         self.header.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
@@ -20310,7 +20337,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
+    "shag": 0.0, "max_angle": 90.0, "variety": 1.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
     "peak_height": 0.0, "peak_width": 0.7, "peak_sides": 0.0, "peak_tip": 0.8,
     "udim": 1001,
 }
@@ -20323,7 +20350,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "max_angle", "variety", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -21829,6 +21856,25 @@ THATCH_MESS_KEYS = (("mess", 2.0), ("slant", 1.0), ("leaf_twist", 2.0), ("crinkl
                     ("bent_tips", 1.0), ("edge_mess", 1.0))
 
 
+# Variation master (the user, 2026-11-12: "neater master sliders with sliders underneath"): every per-leaf
+# "variation" slider times `variety`; 1 = each as set (the old build), 0 = every leaf alike
+THATCH_VAR_KEYS = (("curl_var", 1.0), ("dried_var", 1.0), ("tip_var", 1.0), ("width_var", 1.0), ("section_var", 1.0),
+                   ("crinkle_var", 1.0), ("leaf_twist_var", 1.0), ("bent_var", 1.0), ("edge_hang_var", 1.0),
+                   ("edge_len_var", 1.0), ("root_var", 1.0))
+
+
+def _th_variety(s):
+    """Variation master: the parts in THATCH_VAR_KEYS times `variety` (unchanged at 1)."""
+    m = clamp(float(s.get("variety", 1.0)), 0.0, 3.0)
+    if m == 1.0:
+        return s
+    s = dict(s)
+    for k, most in THATCH_VAR_KEYS:
+        if k in s:
+            s[k] = clamp(float(s[k]) * m, 0.0, most)
+    return s
+
+
 def _th_messy(s):
     """Messiness master: the parts in THATCH_MESS_KEYS times `messy` (unchanged at 1)."""
     m = clamp(float(s.get("messy", 1.0)), 0.0, 3.0)
@@ -22119,6 +22165,10 @@ def _th_fronds_mesh(F, G, s):
     # Shag: each leaf's tip stands off the roof at a stiff angle of its own, most a little, the odd one a lot
     # (a bushy, dry palapa; 0: they lie along the roof as before)
     shag = clamp(float(s.get("shag", 0.0)), 0.0, 2.0)
+    # Max frond angle (the user, 2026-11-12: "clamping angle, so it detects any that go too high up"): no leaf
+    # stands off the roof steeper than this from its root; 90 = off (the old build)
+    max_ang = clamp(float(s.get("max_angle", 90.0)), 0.0, 90.0)
+    ang_t = math.tan(math.radians(max_ang)) if max_ang < 89.9 else None
     # Art direction (the user, 2026-11-12: cap leaves arching up off the ridge in loops, frond roots floating
     # in rows near the top; "what notes am I going to get from a supervisor? ... make the ridge a little
     # thinner, ... move all fronds in a bit more"): the ridge cap's height off the roof, its width down each
@@ -22544,7 +22594,13 @@ def _th_fronds_mesh(F, G, s):
             walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw)
         for k, (p, n) in enumerate(walk):
             v = k_seg[k]
-            off = layer(v * L) + bend * 0.04 * L * math.sin(math.pi * v) + curl * v ** 2.5 + sh * v ** 1.15
+            lay0 = layer(v * L)
+            off = lay0 + bend * 0.04 * L * math.sin(math.pi * v) + curl * v ** 2.5 + sh * v ** 1.15
+            if ang_t is not None and off - lay0 > 0.0:  # Max frond angle: a soft cap on the rise from its root
+                cap = ang_t * v * L
+                ex = off - lay0
+                if ex > 0.5 * cap:  # eased into the cap (same slope at half of it, never past it)
+                    off = lay0 + (cap - 0.25 * cap * cap / ex if cap > 0.0 else 0.0)
             if tuck_l and v * L < tuck_l:  # Tuck roots: the root sinks back into what's under it
                 off -= root_tuck * layer(0.0) * (1.0 - _rl_smooth01(v * L / tuck_l))
             if floor:
@@ -27894,7 +27950,7 @@ def thatch_build(frame, settings, blockers=None):
     if s["covering"] == "Tiles":
         return _roof_udims(tile_build(frame, s, blockers), s["udim"])
     s, level, under_res = _th_detail(s)
-    s = _th_messy(_th_volume(s))
+    s = _th_variety(_th_messy(_th_volume(s)))
     F = ThatchField(frame["L"], frame["W"], frame["H"], s)
     F.blockers = _th_blockers_in_roof(frame, blockers)
     span = F.span
@@ -29766,8 +29822,37 @@ RM_NAMES = {
 
 # part -> the settings a click opens (and flashes), per covering. "_X" keys are
 # the clicked end's (end_a / end_b ...). Keys the panel doesn't have are skipped.
+# The Roof panel's sliders: what each end of the slider does, in a word (the user, 2026-11-12: "it's not always
+# obvious which way a slider should go")
+ROOF_WORDS = {
+    "softness": ("sharp", "round"), "sag": ("bulging", "sagging"), "lumps": ("smooth", "lumpy"),
+    "volume": ("thin", "puffed up"), "warp": ("straight", "crooked"), "ridge_sag": ("straight", "sagging"),
+    "ragged": ("even", "ragged"), "gaps": ("none", "patchy"), "lip": ("flush", "proud"),
+    "top_layer": ("none", "lots"), "shag": ("lying flat", "standing off"), "max_angle": ("flat", "no limit"),
+    "droop": ("straight", "curled up"), "poke_lift": ("a little", "a lot"), "poke_clump": ("one frond", "a clump"),
+    "messy": ("neat", "wild"), "mess": ("neat", "random"), "slant": ("down the slope", "sideways"),
+    "leaf_twist": ("flat", "twisted"), "crinkle": ("smooth", "wavy"), "width_wobble": ("clean", "chewed"),
+    "bent_tips": ("none", "all"), "edge_mess": ("combed", "splayed"), "dried": ("fresh", "shrivelled"),
+    "curl": ("cupped", "arched"), "variety": ("all alike", "all different"), "neat": ("messy", "even"),
+    "overlap": ("edge to edge", "overlapping"), "end_reach": ("at the edge", "sticking out"),
+    "root_shift": ("further out", "further in"), "root_tuck": ("as they lie", "sunk in"),
+    "tip_shape": ("needle", "blunt"), "section_amount": ("none", "full"), "edge_hang": ("straight out", "hanging"),
+    "edge_limp": ("all stiff", "all limp"), "end_fronds": ("none", "lots"), "ridge_height": ("flat", "arched up"),
+    "ridge_width": ("thin", "wide"), "ridge_lumps": ("even", "lumpy"), "ridge_bundles": ("single leaves", "bundles"),
+    "ridge_fringe": ("clean edge", "ragged"), "ridge_shag": ("none", "bushy"), "ridge_spikes": ("lying", "spiky"),
+    "flow": ("straight down", "fanned round"), "hip_blend": ("sharp crest", "rounded"), "lift": ("flat", "raised"),
+    "bend": ("bowed in", "bowed out"), "underlay_relief": ("plain", "coursed"), "frame_wobble": ("straight", "crooked"),
+    "m_mess": ("neat", "mismatched"), "m_patches": ("none", "lots"), "m_dents": ("none", "lots"),
+    "m_lift": ("none", "lots"), "m_sag": ("straight", "sagging"), "m_trim_drape": ("straight", "follows"),
+    "t_mess": ("neat", "uneven"), "t_sag": ("straight", "sagging"),
+}
+for _k in ("curl_var", "dried_var", "tip_var", "width_var", "section_var", "crinkle_var", "leaf_twist_var", "bent_var",
+           "edge_hang_var", "edge_len_var", "root_var"):
+    ROOF_WORDS[_k] = ("all alike", "varied")
+
 RM_JUMPS = {
-    "ridge": {"palm": ("ridge_fronds", "ridge_poles", "cap_width", "lashings", "softness", "ridge_sag"),
+    "ridge": {"palm": ("ridge_fronds", "ridge_height", "ridge_width", "ridge_fringe", "peak_height", "ridge_poles",
+                       "softness", "ridge_sag"),
               "straw": ("top", "cap", "pattern", "pattern_size", "pattern_depth", "softness", "ridge_sag"),
               "metal": ("m_ridge_cap", "m_trim_gap"), "tiles": ("t_ridge", "t_ridge_size")},
     "pole": {"all": ("ridge_poles", "lashings")},
@@ -29781,7 +29866,7 @@ RM_JUMPS = {
     "eave": {"palm": ("overhang", "edge_hang", "edge_hang_var", "edge_len_var", "end_reach", "ragged"),
              "straw": ("overhang", "ragged", "lip"), "metal": ("m_gutter", "m_fascia"),
              "tiles": ("t_gutter", "t_fascia")},
-    "outer": {"palm": ("top_layer", "droop", "slant", "top_leaf_width", "shag", "dried"),
+    "outer": {"palm": ("top_layer", "shag", "max_angle", "messy", "dried", "top_leaf_width"),
               "straw": ("style", "strands", "density", "piece_width", "piece_length", "panel_width", "mess"),
               "metal": ("m_mode", "m_profile", "m_pitch", "m_depth", "m_cover"),
               "tiles": ("t_mode", "t_profile", "t_length", "t_width", "t_headlap")},
@@ -31581,7 +31666,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "How far each level stands out at its bottom edge (fraction of the thickness). 1 level: the eave's "
             "rounded lip.")
         card.add(sec)
-        sec = self.cap_sec = Section("Ridge cap", expanded=False)
+        sec = self.cap_sec = Section("Ridge cap (straw)", expanded=False)
         row(sec, "top", "Top depth", FloatField(0.0, 0.8, 0.0, 0.4, decimals=3, step=0.01),
             "How far down from the ridge the cap reaches (fraction of the roof's height). 0: no cap.")
         row(sec, "cap", "Cap thickness", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
@@ -31699,16 +31784,6 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "What's under the battens, seen through missing tiles and from inside: Felt (1 m strips of roofing "
             "felt), Boards (sarking boards), Reed mat, or None (sky). A mesh of its own, named for it.")
         group[0] = "thatch"
-        row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
-            "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
-            "roof), below 0 it cups (edges up), 1 = a half tube, 2 = rolled round. Width (and UVs) kept. Leaf "
-            "panels: a gentle arch across each panel. 3 columns across (High / Hero: 5); 0 keeps them flat and "
-            "lightest.")
-        row(sec, "dried", "Dried", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Palm fronds: the top layer's leaflets dried out over the years: shrunk (shorter, narrower), the tip "
-            "end coiled up off the roof (some into corkscrews), the edges rolled in, the blade crumpled and "
-            "twisted, more of them broken off. The caps get a little crumple. 0: fresh; 1: old and dry; 2: "
-            "shrivelled. Leaflets and 3D Leaflets (not Cards); a coiled leaflet gets a few more rows.")
         row(sec, "frond_form", "Form", SegmentField(THATCH_FROND_FORMS),
             "Cards: one card per tile / frond, for an alpha-mapped texture (lightest; caps stay leaflets).\n"
             "Leaflets: every leaflet a flat tapered strip (UVs in true proportion in the left 85% of 0..1; "
@@ -31723,14 +31798,6 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Gathered to about a third of that where it's tied. Overlap closes them up along the pole.")
         row(sec, "leaf_length", "Leaf length", FloatField(0.02, 0.6, 0.05, 0.3, decimals=3, step=0.005),
             "Length of a leaflet down the slope (fraction of the span: 0.16 = 80 cm on 5 m).")
-        row(sec, "shag", "Shag", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Palm fronds: each leaf's tip stands off the roof at a stiff angle of its own, most a little, the odd "
-            "one well out, for a bushy, dry, shaggy roof (a palapa) instead of leaves lying combed flat. The "
-            "loose top fronds take it fully, the neat rows under them less, the ridge and hip caps a little. "
-            "0: they lie along the roof.")
-        row(sec, "top_layer", "Top fronds", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Loose half fronds thrown over the neat rows, for a messier, lived-in top (0: none, 1: about one per "
-            "frond width along each row).")
         row(sec, "strands", "Strands", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "How deep the straw grooves running down the slope are.")
         row(sec, "strand_width", "Strand width", FloatField(0.001, 0.05, 0.002, 0.02, decimals=4, step=0.0005),
@@ -31745,16 +31812,81 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Leaf panels: width along the roof (fraction of the span: 0.25 = 1.25 m on 5 m).")
         row(sec, "panel_length", "Panel length", FloatField(0.02, 0.6, 0.05, 0.35, decimals=3, step=0.005),
             "Leaf panels: length up the slope. Each course covers just over half of the one below.")
+        row(sec, "top_layer", "Top fronds", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+            "Loose half fronds thrown over the neat rows, for a messier, lived-in top (0: none, 1: about one per "
+            "frond width along each row).")
+        row(sec, "shag", "Frond angle", FloatField(0.0, 2.0, 0.0, 1.5, decimals=2, step=0.05),
+            "How far the leaves stand off the roof: each leaf's tip leans out at a stiff angle of its own, most a "
+            "little, the odd one well out, for a bushy, dry, shaggy roof (a palapa) instead of leaves lying "
+            "combed flat. The loose top fronds take it fully, the neat rows under them less, the ridge and hip "
+            "caps a little. 0: they lie along the roof. Too steep in places? Max angle (open the angle parts "
+            "under it) eases every leaf down to a limit.")
+        self.angle_sec = Section("Angle: limit, tip curl, odd ones poking out", expanded=False, sub=True)
+        self.angle_sec.header.setToolTip("What Frond angle is made of, and a limit on it.")
+        sec.add_full(self.angle_sec)
+        row(self.angle_sec, "max_angle", "Max angle", FloatField(0.0, 90.0, 0.0, 90.0, decimals=0, step=1.0),
+            "The steepest any leaf may stand off the roof, measured from where it starts (degrees). Leaves that "
+            "would rise steeper (Frond angle, Tip curl, the odd ones poking out, Bend) are eased down to it, the "
+            "rest are untouched. 90: no limit. Dried leaves' coiled tips are their own shape and keep it.")
+        row(self.angle_sec, "droop", "Tip curl", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
+            "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too). 0: "
+            "straight leaves (curled tips read as wet hair; Frond angle lifts them straight).")
+        row(self.angle_sec, "pokes", "Odd ones poking out", IntField(0, 200, 0, 20),
+            "How many spots on the roof where a loose top frond stands up off the rest (0: none). Spread out, "
+            "never near each other; a real roof has a handful.")
+        row(self.angle_sec, "poke_lift", "... how far up", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How far those fronds stand up (each spot varies a little).")
+        row(self.angle_sec, "poke_clump", "... in clumps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "0: just the one frond. Higher: it brings the fronds round it up too, those further out less, "
+            "as if one lifted and pulled its neighbours with it.")
         row(sec, "messy", "Messiness", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-            "One slider for how messy the whole roof is: it scales every part in \"Messiness, part by part\" "
-            "below together (the pieces' random turn and size, and on palm roofs the leaflets' slant, twist, "
+            "One slider for how messy the whole roof is: it scales every part in \"Messiness parts\" "
+            "under it together (the pieces' random turn and size, and on palm roofs the leaflets' slant, twist, "
             "crinkle, uneven edges, bent tips and the fringe's splay). 1: each part as set there; 0: all neat; "
-            "2: twice as messy. Open that section to set the parts one by one.")
-        card.add(sec)
-        sec = self.mess_sec = Section("Messiness, part by part", expanded=False)
-        sec.header.setToolTip("Each part of the mess on its own. The Messiness slider above scales them all.")
-        row(sec, "mess", "Turn and size", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "2: twice as messy. Open Messiness parts to set them one by one.")
+        self.mess_sec = Section("Messiness parts", expanded=False, sub=True)
+        self.mess_sec.header.setToolTip("Each part of the mess on its own. Messiness above scales them all.")
+        sec.add_full(self.mess_sec)
+        row(self.mess_sec, "mess", "Turn and size", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
             "Random turn, roll and size of each piece / leaf (and how much the caps vary).")
+        row(self.mess_sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Loose top fronds: how far their leaflets lean sideways off their stem (rachis); 0: straight down "
+            "the slope.")
+        row(self.mess_sec, "leaf_twist", "Twist", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Each leaflet turned about its own length, more towards the tip, either way (1: about 60 degrees "
+            "at the tip on the top fronds; the caps less). The neat shingles under them don't twist, so they "
+            "still close the roof.")
+        row(self.mess_sec, "leaf_twist_var", "Twist variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's twist differs (0: all the same; 1: from none to twice Twist).")
+        row(self.mess_sec, "crinkle", "Crinkle", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Small waves along and across each leaflet's blade, most at its edges (none at the base). The loose "
+            "top fronds ripple both ways; the neat shingles and the caps only lift, so they stay in their "
+            "courses. 0: smooth. Adds a few rows to each leaflet (more with more crinkle).")
+        row(self.mess_sec, "crinkle_var", "Crinkle variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's crinkle differs (0: all the same; 1: from smooth to twice Crinkle).")
+        row(self.mess_sec, "width_wobble", "Uneven edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Each leaflet's width wanders along its length (pinched in places, like a torn or chewed edge).")
+        row(self.mess_sec, "bent_tips", "Bent tips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "The share of leaflets with a bent or broken tip (0.2: one in five), folded near the end. Loose top "
+            "fronds fold up off the roof or sideways; the shingles and caps bend sideways along the roof.")
+        row(self.mess_sec, "bent_var", "Bent variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much the bent tips differ: where along the leaf they fold and how sharply (0: all alike).")
+        row(self.mess_sec, "edge_mess", "Edge messiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Leaves hanging off the edges splay sideways, each its own way, so the fringe isn't combed straight.")
+        row(sec, "dried", "Dried", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Palm fronds: the top layer's leaflets dried out over the years: shrunk (shorter, narrower), the tip "
+            "end coiled up off the roof (some into corkscrews), the edges rolled in, the blade crumpled and "
+            "twisted, more of them broken off. The caps get a little crumple. 0: fresh; 1: old and dry; 2: "
+            "shrivelled. Leaflets and 3D Leaflets (not Cards); a coiled leaflet gets a few more rows.")
+        row(sec, "curl", "Curl", FloatField(-2.0, 2.0, -1.0, 1.0, decimals=2, step=0.05),
+            "Bends each leaf / straw plane across its width (not along it): above 0 it arches (edges down to the "
+            "roof), below 0 it cups (edges up), 1 = a half tube, 2 = rolled round. Width (and UVs) kept. Leaf "
+            "panels: a gentle arch across each panel. 3 columns across (High / Hero: 5); 0 keeps them flat and "
+            "lightest.")
+        row(sec, "variety", "Variation", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+            "One slider for how different the leaves are from each other: it scales every \"variation\" slider "
+            "together (curl, dried, tip, width, cross-section, crinkle, twist, bent tips, edge droop and hang "
+            "length, and where the top fronds start). 1: each as set; 0: every leaf alike; 2: twice as varied.")
         card.add(sec)
         group[0] = "metal"
         sec = self.mmk_sec = Section("Makeshift panels", expanded=True)
@@ -31816,8 +31948,6 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "A screw in every n-th crest along each purlin (plus the side lap).")
         card.add(sec)
         group[0] = "thatch"
-        # palm leaflets' shape (the user, 2026-11-11: "crinkle a bit more, or twist, or more variation in width,
-        # some having bent tips"): each an amount, most with a variation
         sec = self.neat_sec = Section("Under layer (neat rows)", expanded=False)
         sec.header.setToolTip("The tidy shingles / bundles tied on in courses, closing the roof.")
         row(sec, "neat", "Neatness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
@@ -31833,28 +31963,41 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Width of each shingle (one stick with its leaves folded over it) along its row (fraction of the "
             "span: 0.25 = 1.25 m on 5 m). Every "
             "other course is shifted half a tile. The top layer's fronds are a bit wider.")
+        self.f["under_over_top"] = CheckField("Last row runs up over the top (under the ridge cap)")
+        self.f["under_over_top"].setToolTip("The under layer's last course right up at the ridge, under the leaf "
+                                            "cap, so the top is closed even where the cap and the loose top layer "
+                                            "are sparse. Off: the courses stop short of the ridge and the cap "
+                                            "covers it alone.")
+        sec.add_full(self.f["under_over_top"])
         card.add(sec)
         sec = self.top_sec = Section("Top layer (loose fronds)", expanded=False)
-        sec.header.setToolTip("The loose half fronds thrown over the neat rows (how many: Top fronds).")
+        sec.header.setToolTip("The loose half fronds thrown over the neat rows. How many: Top fronds; how they stand: Frond angle.")
         row(sec, "top_leaf_width", "Leaf width", FloatField(0.002, 0.08, 0.004, 0.04, decimals=4, step=0.001),
             "The top layer's leaflets: thinner, for detail (fraction of the span).")
-        row(self.mess_sec, "slant", "Slant", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Loose top fronds: how far their leaflets lean sideways off their stem (rachis); 0: straight down "
-            "the slope.")
-        row(sec, "droop", "Droop", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
-            "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too).")
         row(sec, "end_reach", "Past the edges", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
             "Loose top fronds are stiff: how far they stick out past the bottom edge (eaves) and past a gable "
             "end's edge (verge).")
+        row(sec, "root_shift", "Where they start", FloatField(-0.5, 0.5, -0.5, 0.5, decimals=2, step=0.02),
+            "Move where the loose fronds start up the slope (in, under the course above: plus) or down it "
+            "(out: minus), in leaf lengths. The tips stay about where they are, so it's the roots that move.")
+        row(sec, "root_var", "... start variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Each leaflet starts its own random way further in or out, so the starts don't line up along "
+            "the course (a ruled line of roots reads as artificial).")
+        row(sec, "root_tuck", "Sink their roots", FloatField(0.0, 1.5, 0.0, 1.5, decimals=2, step=0.05),
+            "Where each loose top frond's leaflets (and the hip caps' leaves) start, they sink back into the "
+            "leaves under them, so no root floats in the air. 0: they start at their full lift; 1: down on "
+            "the layer under them; past 1: tucked deeper still.")
         card.add(sec)
-        sec = self.leaf_sec = Section("Leaflet shape and ageing", expanded=False)
+        sec = self.leaf_sec = Section("Leaf shape", expanded=False)
+        sec.header.setToolTip("Each leaflet's outline and cross-section. Their mess (twist, crinkle, bent tips): Messiness parts.")
         row(sec, "tip_shape", "Tip shape", FloatField(-1.0, 1.0, -1.0, 1.0, decimals=2, step=0.05),
             "The loose top leaflets' ends: -1 long needle points, 0 as they were, 1 blunt (wide nearly to the end).")
         row(sec, "tip_var", "Tip variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much each leaflet's tip differs from Tip shape: some pointier, some blunter.")
-        row(sec, "dried_var", "Dried variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
-            "leaves stand out among fresh ones).")
+        row(sec, "width_var", "Width variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Some leaflets narrower than others (1: down to about half). Leaves only ever get narrower (their "
+            "UVs fill the width). The top fronds and (less) the caps; the neat shingles keep their width, so "
+            "the roof stays closed.")
         row(sec, "leaf_section", "Cross-section", SegmentField(THATCH_LEAF_SECTIONS, columns=2),
             "The shape across each leaflet. As is: as Curl makes it. Rolled: the edges curled up and round "
             "towards a thin tube (and a little narrower). Creased: flatter, the edges lifted either side of a "
@@ -31865,112 +32008,76 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "How far the cross-section goes: Rolled 1 = nearly a closed tube; Creased 1 = a deep V. 0: as is.")
         row(sec, "section_var", "Section variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much each leaflet's cross-section differs (0: all the same; 1: from none to twice the amount).")
-        row(self.mess_sec, "crinkle", "Crinkle", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Small waves along and across each leaflet's blade, most at its edges (none at the base). The loose "
-            "top fronds ripple both ways; the neat shingles and the caps only lift, so they stay in their "
-            "courses. 0: smooth. Adds a few rows to each leaflet (more with more crinkle).")
-        row(self.mess_sec, "crinkle_var", "Crinkle variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaflet's crinkle differs (0: all the same; 1: from smooth to twice Crinkle).")
-        row(self.mess_sec, "leaf_twist", "Twist", FloatField(0.0, 2.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Each leaflet turned about its own length, more towards the tip, either way (1: about 60 degrees "
-            "at the tip on the top fronds; the caps less). The neat shingles under them don't twist, so they "
-            "still close the roof.")
-        row(self.mess_sec, "leaf_twist_var", "Twist variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaflet's twist differs (0: all the same; 1: from none to twice Twist).")
-        row(sec, "width_var", "Width variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Some leaflets narrower than others (1: down to about half). Leaves only ever get narrower (their "
-            "UVs fill the width). The top fronds and (less) the caps; the neat shingles keep their width, so "
-            "the roof stays closed.")
-        row(self.mess_sec, "width_wobble", "Uneven edges", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Each leaflet's width wanders along its length (pinched in places, like a torn or chewed edge).")
-        row(self.mess_sec, "bent_tips", "Bent tips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "The share of leaflets with a bent or broken tip (0.2: one in five), folded near the end. Loose top "
-            "fronds fold up off the roof or sideways; the shingles and caps bend sideways along the roof.")
-        row(self.mess_sec, "bent_var", "Bent variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much the bent tips differ: where along the leaf they fold and how sharply (0: all alike).")
+        row(sec, "dried_var", "Dried variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaflet's dryness differs (0: all the same; 1: from fresh to twice Dried, so old "
+            "leaves stand out among fresh ones).")
+        row(sec, "curl_var", "Curl variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "How much each leaf's curl differs from the next (0: all the same; 1: from none to twice Curl).")
+        row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
+            "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
+            "leaflet is a closed, thin solid (underside, edges, tip); 0: single-sided.")
         card.add(sec)
-        sec = self.edge_sec = Section("Edges", expanded=False)
-        row(sec, "end_fronds", "Gable fringe", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-            "Gable ends only (flat, upright ends): extra leaves tied along the sloping end edges (verges), "
-            "hanging down over the end wall (0: none).")
+        sec = self.edge_sec = Section("Edges (eaves and gable ends)", expanded=False)
+        sec.header.setToolTip("The leaves where they run off the roof's bottom edges and gable ends.")
         row(sec, "edge_hang", "Edge droop", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
             "The neat rows' leaves where they run off the roof's edges (the eaves at the bottom, the verges at a "
             "gable end): 0 carries them on in line with the roof, 1 hangs them nearly straight down.")
-        row(sec, "edge_hang_var", "Droop variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+        row(sec, "edge_hang_var", "... droop variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much the leaves hanging off the edges differ in droop: in clumps along the edge and leaf by "
             "leaf (0: all the same).")
-        row(sec, "edge_len_var", "Hang length variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+        row(sec, "edge_len_var", "... length variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "How much the part of each leaf hanging off the edge differs in length (0: all the same). Ragged "
             "eaves (Makeshift) adds stretches that hang much further.")
-        row(self.mess_sec, "edge_mess", "Edge messiness", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Leaves hanging off the edges splay sideways, each its own way, so the fringe isn't combed straight.")
         row(sec, "edge_limp", "Limp top fronds", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Share of the loose top fronds that hang down off the edges like the rows under them instead of "
             "sticking out stiff (0: all stiff).")
+        row(sec, "end_fronds", "Gable fringe", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
+            "Gable ends only (flat, upright ends): extra leaves tied along the sloping end edges (verges), "
+            "hanging down over the end wall (0: none).")
         card.add(sec)
-        sec = self.poles_sec = Section("Ridge, poles and ties", expanded=False)
+        sec = self.ridge_sec = Section("Ridge (the leaves over the top)", expanded=False)
+        sec.header.setToolTip("The cap of leaves folded over the ridge (and the hips and a cone's tip). Its cross-section shape: Ridge peak.")
         self.f["ridge_fronds"] = CheckField("Leaf cap over the ridge and hips")
         self.f["ridge_fronds"].setToolTip("Leaves folded over the top line (ridge), down each hip edge and round a "
                                           "cone's tip, so rain can't get in where the slopes meet. Off: the "
                                           "ridge is open. The ridge pole on top of them is its own switch.")
         sec.add_full(self.f["ridge_fronds"])
-        self.f["under_over_top"] = CheckField("Under layer over the top")
-        self.f["under_over_top"].setToolTip("The under layer's last course right up at the ridge, under the leaf "
-                                            "cap, so the top is closed even where the cap and the loose top layer "
-                                            "are sparse. Off: the courses stop short of the ridge and the cap "
-                                            "covers it alone.")
-        sec.add_full(self.f["under_over_top"])
-        self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
-        self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
-                                         "weighing it down, as on many palm roofs (in the sticks mesh, with the "
-                                         "fronds' wood). Off: the cap leaves stay, the pole goes.")
-        sec.add_full(self.f["ridge_poles"])
-        self.f["hip_poles"] = CheckField("Hip poles")
-        self.f["hip_poles"].setToolTip("A pole down each hip edge (where a sloped end meets a side slope), "
-                                       "butted against the ridge pole. Off by default: real hips are mostly "
-                                       "closed with leaves alone.")
-        sec.add_full(self.f["hip_poles"])
+        row(sec, "ridge_cover", "Ridge cover", SegmentField(THATCH_RIDGE_COVERS),
+            "What holds the ridge down. Leaves: the leaves folded over the ridge are all you see. Wood strip: short "
+            "boards along the top, one each side meeting at the crest, the leaves pinched under them and spreading "
+            "out from it (Bali style). Bamboo pole: a pole laid along the ridge on the leaves.")
         row(sec, "cap_width", "Cap leaf width", FloatField(0.0, 0.08, 0.0, 0.05, decimals=4, step=0.001),
             "Width of the leaves over the ridge, the hips and a cone's tip (fraction of the span). 0: as wide "
             "as the under layer's (Leaf width). Thinner (like the top fronds') blends a shaggy roof's hips in "
             "instead of a neat herringbone of wide leaves.")
-        row(sec, "pokes", "Fronds poking out", IntField(0, 200, 0, 20),
-            "How many spots on the roof where a loose top frond stands up off the rest (0: none). Spread out, "
-            "never near each other; a real roof has a handful.")
-        row(sec, "poke_lift", "Poke lift", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-            "How far those fronds stand up (each spot varies a little).")
-        row(sec, "poke_clump", "Poke clump", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "0: just the one frond. Higher: it brings the fronds round it up too, those further out less, "
-            "as if one lifted and pulled its neighbours with it.")
-        row(sec, "flow", "Flow round hips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Which way every leaf runs. 0: straight down its own face, turning sharply over a hip (a parting "
-            "shows along it). 1: like the spokes of a cone, out from the ridge line: straight down the middle "
-            "of each face and gradually more along the hip near it, so hips show no parting at all.")
-        row(sec, "hip_blend", "Hip blend", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Hipped ends only: 0 lays the hip's cap leaves from a sharp crest down both sides (a defined "
-            "ridge line, a herringbone). Higher rounds the hip off: the leaves run down along the hip, start "
-            "scattered off the crest and sit lower in the loose top layer, so the corner reads as one smooth "
-            "rounded slope.")
-        row(sec, "ridge_height", "Ridge height", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-            "How high the leaf cap stands off the roof over the ridge and hips. 1: as built before (it arches "
-            "up as high as the leaves under it lift); lower lays the cap leaves down onto the ridge, flatter "
-            "and tighter; 0: right on the leaves under it.")
+        row(sec, "ridge_height", "Ridge lift", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "How far the cap's leaves arch up off the leaves under them over the ridge and hips. 1: the usual; "
+            "lower lays them down onto the ridge, flatter and tighter; 0: right on the leaves under them. The "
+            "ridge's shape seen end on (a round hump or a point) is Ridge peak.")
         row(sec, "ridge_width", "Ridge width", FloatField(0.3, 2.0, 0.3, 2.0, decimals=2, step=0.05),
             "How far the cap leaves reach down each side of the ridge and hips (their length). Lower: a "
             "thinner ridge; higher: a wider, heavier cap.")
         row(sec, "ridge_lumps", "Ridge lumps", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
             "How much the ridge line rises and falls in clumps along its length. 0: an even ridge; 1: as "
             "Messiness sets it; higher: lumpier.")
-        row(sec, "root_tuck", "Tuck roots", FloatField(0.0, 1.5, 0.0, 1.5, decimals=2, step=0.05),
-            "Where each loose top frond's leaflets (and the hip caps' leaves) start, they sink back into the "
-            "leaves under them, so no root floats in the air. 0: they start at their full lift; 1: down on "
-            "the layer under them; past 1: tucked deeper still.")
-        row(sec, "root_shift", "Frond starts in / out", FloatField(-0.5, 0.5, -0.5, 0.5, decimals=2, step=0.02),
-            "Move where the loose fronds start up the slope (in, under the course above: plus) or down it "
-            "(out: minus), in leaf lengths. The tips stay about where they are, so it's the roots that move.")
-        row(sec, "root_var", "Start variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Each leaflet starts its own random way further in or out, so the starts don't line up along "
-            "the course (a ruled line of roots reads as artificial).")
+        row(sec, "ridge_bundles", "Ridge bundles", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Lay the leaves over the ridge in flat bundles, as thatchers do: a handful of leaves side by side, "
+            "folded over the ridge pole and pressed down, then the next bundle lapping it. 0: single leaves; "
+            "1: clear bundles, each thicker in its middle and a step over or under the next.")
+        row(sec, "ridge_fringe", "Ragged edges", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "The ridge cap's edges: the leaves over the ridge end at uneven lengths down each side and their cut "
+            "ends stand off the slope, a ragged fringe (as real ridge thatch looks from above) instead of a "
+            "smooth band with a clean edge. They also arch less and turn more. 0: as before.")
+        row(sec, "ridge_shag", "Loose leaves on top", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
+            "Loose thin leaflets laid over the ridge and hip caps, roots down in the cap, tips standing off "
+            "like the loose top fronds on the slopes, so the crest isn't combed smooth. 0: none; 1: about "
+            "two for every cap leaf; higher: bushier.")
+        row(sec, "ridge_spikes", "... how spiky", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
+            "How far the Ridge shag leaflets' tips stand up off the cap (most a little, the odd one a lot). "
+            "0: they lie along the cap; higher: spikier.")
+        card.add(sec)
+        sec = self.peak_sec = Section("Ridge peak (its shape from the end)", expanded=False)
+        sec.header.setToolTip("The ridge seen end on: a round hump (Peak height 0) or a peak. The little pictures at each end of a slider show what that end looks like.")
         g_ = _th_peak_glyph  # a little ridge cross-section at each end of the slider: what that end looks like
         row(sec, "peak_height", "Peak height", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05,
                                                           ends=(g_(0.0, 0.7, 0.0, 0.8), g_(1.0, 0.7, 0.0, 0.8))),
@@ -31989,25 +32096,31 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                                     ends=(g_(0.8, 0.7, 0.0, 0.0), g_(0.8, 0.7, 0.0, 1.0))),
             "The very top line. Left (0): the leaves bent round over it; right (1): creased into a crisp "
             "knife edge.")
-        row(sec, "ridge_cover", "Ridge cover", SegmentField(THATCH_RIDGE_COVERS),
-            "What holds the ridge down. Leaves: the leaves folded over the ridge are all you see. Wood strip: short "
-            "boards along the top, one each side meeting at the crest, the leaves pinched under them and spreading "
-            "out from it (Bali style). Bamboo pole: a pole laid along the ridge on the leaves.")
-        row(sec, "ridge_bundles", "Ridge bundles", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Lay the leaves over the ridge in flat bundles, as thatchers do: a handful of leaves side by side, "
-            "folded over the ridge pole and pressed down, then the next bundle lapping it. 0: single leaves; "
-            "1: clear bundles, each thicker in its middle and a step over or under the next.")
-        row(sec, "ridge_shag", "Ridge shag", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
-            "Loose thin leaflets laid over the ridge and hip caps, roots down in the cap, tips standing off "
-            "like the loose top fronds on the slopes, so the crest isn't combed smooth. 0: none; 1: about "
-            "two for every cap leaf; higher: bushier.")
-        row(sec, "ridge_fringe", "Ridge fringe", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
-            "The ridge cap's edges: the leaves over the ridge end at uneven lengths down each side and their cut "
-            "ends stand off the slope, a ragged fringe (as real ridge thatch looks from above) instead of a "
-            "smooth band with a clean edge. They also arch less and turn more. 0: as before.")
-        row(sec, "ridge_spikes", "Ridge spikes", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
-            "How far the Ridge shag leaflets' tips stand up off the cap (most a little, the odd one a lot). "
-            "0: they lie along the cap; higher: spikier.")
+        card.add(sec)
+        sec = self.hip_sec = Section("Hips (sloped ends)", expanded=False)
+        sec.header.setToolTip("How the leaves turn round a sloped end.")
+        row(sec, "flow", "Flow round hips", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Which way every leaf runs. 0: straight down its own face, turning sharply over a hip (a parting "
+            "shows along it). 1: like the spokes of a cone, out from the ridge line: straight down the middle "
+            "of each face and gradually more along the hip near it, so hips show no parting at all.")
+        row(sec, "hip_blend", "Hip blend", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "Hipped ends only: 0 lays the hip's cap leaves from a sharp crest down both sides (a defined "
+            "ridge line, a herringbone). Higher rounds the hip off: the leaves run down along the hip, start "
+            "scattered off the crest and sit lower in the loose top layer, so the corner reads as one smooth "
+            "rounded slope.")
+        card.add(sec)
+        sec = self.poles_sec = Section("Poles and ties", expanded=False)
+        sec.header.setToolTip("Wood laid on or in the thatch: the ridge pole, hip poles, hold-down poles, vine ties and the shingles' sticks.")
+        self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
+        self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
+                                         "weighing it down, as on many palm roofs (in the sticks mesh, with the "
+                                         "fronds' wood). Off: the cap leaves stay, the pole goes.")
+        sec.add_full(self.f["ridge_poles"])
+        self.f["hip_poles"] = CheckField("Hip poles")
+        self.f["hip_poles"].setToolTip("A pole down each hip edge (where a sloped end meets a side slope), "
+                                       "butted against the ridge pole. Off by default: real hips are mostly "
+                                       "closed with leaves alone.")
+        sec.add_full(self.f["hip_poles"])
         row(sec, "hold_poles", "Hold-down poles", IntField(0, 12, 0, 6),
             "Poles laid on top of the thatch straight down the slope, in pairs whose tops cross over the ridge, "
             "to keep the leaves on in wind and storms (common on makeshift and jungle roofs). How many pairs "
@@ -32024,15 +32137,11 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                     "0..0.8, ends at 0.9.")
         sec.add_full(self.f["sticks"])
         card.add(sec)
-        sec = self.more_sec = Section("More controls", expanded=False)
+        sec = self.more_sec = Section("Pieces and resolution", expanded=False)
+        sec.header.setToolTip("How finely it's built, and how each piece / leaf sits.")
         row(sec, "resolution", "Resolution", IntField(16, 600, 30, 300),
             "Grid points across the span: the surface's detail, or the underlay the pieces sit on. Lower it "
             "while you shape the roof.")
-        row(sec, "leaf_thickness", "Leaf thickness", FloatField(0.0, 0.01, 0.0, 0.003, decimals=4, step=0.0001),
-            "3D Leaflets: how thick each leaflet is (fraction of the span: 0.0006 = 3 mm on 5 m). Above 0 every "
-            "leaflet is a closed, thin solid (underside, edges, tip); 0: single-sided.")
-        row(sec, "curl_var", "Curl variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How much each leaf's curl differs from the next (0: all the same; 1: from none to twice Curl).")
         row(sec, "lift", "Butt lift", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "How far the bottom (butt) end of each piece stands off the roof, so the rows read (the top end is "
             "tucked in).")
@@ -32194,6 +32303,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         for key, widget in self.f.items():
             widget.setValue(THATCH_DEFAULTS[key])
             widget.changed.connect(lambda k=key: self._queue(k))
+            if key in ROOF_WORDS and hasattr(widget, "set_words"):
+                widget.set_words(*ROOF_WORDS[key])
 
         # ---- 5. finish
         card = self.step_finish = StepCard(5, "Finish", "Bake keeps the roof as plain meshes and removes its box. "
@@ -32286,10 +32397,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("max_angle", "shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
+        shown["variety"] = palm and s["frond_form"] != "Cards"
+        shown["hip_blend"] = palm and not cone and ends != ("Gable", "Gable")
         for key in ("curl", "curl_var"):
             shown[key] = palm or leaf or s["style"] == "Planes"
         for key in ("crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_wobble", "bent_tips", "bent_var"):
@@ -32326,15 +32439,20 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.more_sec.setVisible(thatch)
         self.edge_sec.setVisible(thatch and palm)
         self.mess_sec.setVisible(thatch and not surface)
+        self.angle_sec.setVisible(thatch and palm)
         for sec in (self.neat_sec, self.top_sec, self.poles_sec):
             sec.setVisible(thatch and palm)
+        self.ridge_sec.setVisible(thatch and palm and s["shape"] != "Lean-to")
+        self.peak_sec.setVisible(thatch and palm and s["shape"] == "Ridge")
+        self.hip_sec.setVisible(thatch and palm and s["shape"] == "Ridge")
         self.leaf_sec.setVisible(thatch and s["style"] == "Palm Fronds" and s["frond_form"] != "Cards")
         self.mmk_sec.setVisible(metal and s["m_mode"] == "Makeshift")
         self.trim_sec.setVisible(metal)
         self.tmk_sec.setVisible(tiles and s["t_mode"] == "Makeshift")
         self.ttrim_sec.setVisible(tiles)
-        for sec in (self.mk_sec, self.levels_sec, self.cap_sec, self.block_sec):
-            sec.setVisible(thatch)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
+        for sec in (self.mk_sec, self.levels_sec, self.block_sec):
+            sec.setVisible(thatch)
+        self.cap_sec.setVisible(thatch and not palm)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
         for key in ("ridge_fronds", "under_over_top", "sticks", "ridge_poles", "hip_poles", "lashings"):
             self.f[key].setVisible(palm and thatch)
         self.f["frame_hips"].setVisible(not cone and ends != ("Gable", "Gable"))  # a part only where there is one
