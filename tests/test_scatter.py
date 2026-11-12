@@ -507,6 +507,14 @@ def drawing():
     tb["sc_set_layer"](root, cp, area=([], {}), drawing=[])
     pts = leaf_points(root, cp)
     check("Clear Area lets it grow everywhere again", pts and max(abs(p[2]) for p in pts) > 50.0)
+    # Add Layer with a drawn layer picked (the user: "is that other layer on the same strokes?"): it goes
+    # along the picked layer's strokes, its own copy
+    rep, nl = tb["sc_add_layer"](root, "Leaves", draw_of=lid)
+    pts = leaf_points(root, nl)
+    check("Add Layer with a drawn layer picked goes along its strokes",
+          tb["sc_area"](tb["sc_layer"](tb["sc_data"](root), nl))[2] == 1 and pts and
+          max(abs(p[2]) for p in pts) < 10.0, "%d leaves" % len(pts))
+    tb["sc_remove_layer"](root, nl)
 
     # --- strokes one by one (the user: "one of the ones I painted I don't want anymore ... how can I just
     # remove that?"): Delete Stroke, Add Strokes

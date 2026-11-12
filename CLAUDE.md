@@ -1555,7 +1555,9 @@
     strokes as curves `scatterStroke*` (NoUndo, doNotWrite, picked ones
     yellow and thicker), rebuilt when the layer's draw JSON changes;
     `_sync_from_selection` first checks `_pick_stroke_lines` (a selected
-    line picks its row and keeps the group / layer open).
+    line picks its row and keeps the group / layer open). Add Layer with a
+    drawn layer picked copies its strokes (`sc_add_layer(draw_of=)`; the
+    user, 2026-11-12: a new layer had none and grew everywhere).
   - **Draw on** (the user, 2026-11-05: "if I bake a bunch of scattered
     stuff and then want to draw another one, it suddenly starts drawing on
     top of the scattered stuff ... I want to be able to sometimes just

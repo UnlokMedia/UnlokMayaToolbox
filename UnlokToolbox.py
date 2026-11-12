@@ -43586,11 +43586,14 @@ def _sc_change(root, label, fn):
     return sc_regrow(root)
 
 
-def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None, drawing=None):
+def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None, drawing=None,
+                 draw_of=None):
     """Add a layer (one Ctrl+Z): a type's defaults (or settings), or a copy
     of another layer (copy_of: its id; a new seed); drawing: strokes it goes
     along (meshes they're on that the group doesn't scatter onto yet are
-    added). Returns (report, id)."""
+    added); draw_of: another layer's id, whose strokes it goes along too
+    (Add Layer with a drawn layer picked: the user, 2026-11-12, "is that
+    other layer on the same strokes?"). Returns (report, id)."""
     made = []
 
     def edit(data):
@@ -43612,6 +43615,10 @@ def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_
             if drawing:
                 _sc_add_drawn_surfaces(data, drawing)
                 layer["draw"] = sc_store_drawing(drawing)
+            elif draw_of:
+                src = sc_layer(data, draw_of)
+                if src is not None and src.get("draw"):
+                    layer["draw"] = json.loads(json.dumps(src["draw"]))
         data["layers"].append(layer)
         made.append(layer["id"])
     rep = _sc_change(root, "Add scatter layer", edit)
@@ -45207,7 +45214,9 @@ class ScatterPanel(QtWidgets.QWidget):
         self.layer_list.currentItemChanged.connect(lambda *_: self._layer_picked())
         card.add(self.layer_list)
         add_l = self.add_btn = secondary_button("Add Layer", "Add a layer to the group: pick what it grows. With "
-                                                             "faces / vertices picked it grows only there.")
+                                                             "faces / vertices picked it grows only there. With a "
+                                                             "drawn layer picked in the list it goes along the same "
+                                                             "strokes (Clear Area: everywhere).")
         menu = QtWidgets.QMenu(add_l)
         for t in SC_TYPES:
             menu.addAction(t).triggered.connect(lambda *_, t=t: self.add_layer(t))
@@ -46046,8 +46055,14 @@ class ScatterPanel(QtWidgets.QWidget):
             self.set_status("Select a scatter group (click its box) first.", level="warn")
             return
         sel = sc_selection()
-        self._structural("Added %s to" % typ.lower(),
-                         lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"]))
+        src = sc_layer(sc_data(self._root), self._lid) if self._lid else None
+        n = sc_area(src)[2] if src is not None and src.get("draw") else 0
+        verb = "Added %s to" % typ.lower()
+        if n:
+            verb = "Added %s along %s's %d stroke%s to" % (
+                typ.lower(), src.get("name", src["type"]), n, "" if n == 1 else "s")
+        self._structural(verb, lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"],
+                                                    draw_of=self._lid if n else None))
 
     @ui_safe
     def duplicate_layer(self):
