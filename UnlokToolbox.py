@@ -32994,7 +32994,7 @@ DEBRIS_DEFAULTS = {
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
-    "on_moss": False, "on_layers": False,
+    "bend_size": 0.0, "on_moss": False, "on_layers": False,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
@@ -39308,7 +39308,7 @@ def _mi_drop_settle(field, pts, start, yq, contacts, L, droop, lift):
 
 
 def _mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far, relief=None, quads=None, over=None,
-                     coarse=False, most=160):
+                     coarse=False, most=160, smooth=0.0):
     """The contact pass after a piece's rest and settle (the user,
     2026-11-05: "lots of floating leaves ... no proper draping onto the
     surface"): what's right under each of its points (field.exact: the
@@ -39327,6 +39327,11 @@ def _mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far, relief=No
        midrib with its edges still turned up. Points with nothing within
        reach under them (past an edge: settle's drape; between rails it
        bridges) move with the nearest one that has;
+    2b. smooth > 0 (Bend size): how far each point comes down is averaged
+       over its neighbours within smooth, never past what's under it, a
+       few passes (the user, 2026-11-12: leaves on grass took "small little
+       bumps" round each blade; wanted them to "bend around the grass"):
+       the leaf rests on the highest blades and bends in broad curves;
     3. no point under what's under it (+ lift). Points whose ray starts
        inside something (a pile leaf's corner in a wall's foot) stay put;
     4. no face through a laid leaf's point (tris.rims: a curled rim
@@ -39367,9 +39372,10 @@ def _mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far, relief=No
     up = [i for i in near if base[i] > tiny]  # the rest already lie on what's under them
     for i in near:
         D[i] = base[i]
+    xs = [pts[start + i][0] for i in range(n)]
+    zs = [pts[start + i][2] for i in range(n)]
+    nbs = _mi_bend_nbs(xs, zs, smooth) if smooth > 0.0 and n > 2 else None
     if up:
-        xs = [pts[start + i][0] for i in range(n)]
-        zs = [pts[start + i][2] for i in range(n)]
         P = near if len(near) <= most else near[::int(math.ceil(len(near) / float(most)))]
         pw = sorted((base[i], xs[i], zs[i]) for i in P)
         for i in up:
@@ -39387,19 +39393,97 @@ def _mi_drop_contact(field, tris, pts, start, lift, kappa, reach, far, relief=No
                 x, z = xs[i], zs[i]
                 k = min(near, key=lambda m: (xs[m] - x) ** 2 + (zs[m] - z) ** 2) if near else None
                 D[i] = D[k] if k is not None else 0.0
+        if nbs:
+            D = _mi_bend_smooth(D, base, stuck, nbs)
     pushed = 0
+    low = [] if nbs else None  # Bend size: where each point was before any push-up
     for i in range(n):
         if i in stuck:
+            if nbs:
+                low.append(pts[start + i][1])
             continue
         x, y, z = pts[start + i]
         y -= g0 + (D[i] or 0.0)
+        if nbs:
+            low.append(y)
         if gap[i] is not None and y < sup[i] + lift - 1e-9:
             y = sup[i] + lift
             pushed += 1
         pts[start + i] = (x, y, z)
     if tris is not None and quads:
         pushed += tris.rims(pts, start, quads, lift, over)
+    if nbs:  # push-ups spread into broad bulges (only ever up: nothing goes back through)
+        rise = _mi_bend_spread([0.0 if i in stuck else max(0.0, pts[start + i][1] - low[i]) for i in range(n)],
+                               nbs)
+        for i in range(n):
+            if i not in stuck:
+                x, y, z = pts[start + i]
+                y2 = low[i] + rise[i]
+                if y2 > y:
+                    pts[start + i] = (x, y2, z)
     return g0, pushed
+
+
+def _mi_bend_nbs(xs, zs, r, most=24):
+    """Each point's neighbours within r in plan, [(j, weight)] with weights
+    1 - d^2 / r^2 summing to 1 (at most `most` of them, every k-th: a big
+    leaf has hundreds within half its length)."""
+    n = len(xs)
+    r2 = r * r
+    grid = {}
+    for i in range(n):
+        grid.setdefault((int(math.floor(xs[i] / r)), int(math.floor(zs[i] / r))), []).append(i)
+    nbs = []
+    for i in range(n):
+        x, z = xs[i], zs[i]
+        ci, ck = int(math.floor(x / r)), int(math.floor(z / r))
+        lst = []
+        for a in (ci - 1, ci, ci + 1):
+            for b in (ck - 1, ck, ck + 1):
+                for j in grid.get((a, b), ()):
+                    d2 = (xs[j] - x) ** 2 + (zs[j] - z) ** 2
+                    if d2 < r2:
+                        lst.append((j, 1.0 - d2 / r2))
+        if len(lst) > most:
+            lst = lst[::int(math.ceil(len(lst) / float(most)))] + [(i, 1.0)]
+        tw = sum(w for _, w in lst)
+        nbs.append([(j, w / tw) for j, w in lst] if tw > 0.0 else [(i, 1.0)])
+    return nbs
+
+
+def _mi_bend_spread(up, nbs, passes=4):
+    """Bend size, after the push-up: a point lifted over a blade lifts its
+    neighbours part way too (each pass the more of its own lift and its
+    neighbours' average), so it's a broad bulge, not a crease."""
+    for _ in range(passes):
+        E = []
+        for i in range(len(up)):
+            v = 0.0
+            for j, w in nbs[i]:
+                v += w * up[j]
+            E.append(max(up[i], v))
+        up = E
+    return up
+
+
+def _mi_bend_smooth(D, cap, stuck, nbs, passes=6):
+    """Bend size: each point's come-down averaged over its neighbours
+    (`_mi_bend_nbs`), never more than its own gap (cap; None: past an edge,
+    free), points stuck in something kept at 0."""
+    n = len(D)
+    hi = [float("inf") if (cap[i] is None) else cap[i] for i in range(n)]
+    for _ in range(passes):
+        E = []
+        for i in range(n):
+            if i in stuck:
+                E.append(0.0)
+                continue
+            v = 0.0
+            for j, w in nbs[i]:
+                v += w * D[j]
+            E.append(min(hi[i], v))
+        D = E
+    return D
 
 
 class _DebrisBuild(object):
@@ -39440,6 +39524,7 @@ class _DebrisBuild(object):
             (None, {}, 1.0)
         self.piles_at = {}  # cell -> [(centre, radius)] of the piles so far
         self.drape = clamp(float(s.get("drape", 0.5)), 0.0, 1.0)
+        self.bend_size = clamp(float(s.get("bend_size", 0.0)), 0.0, 1.0)
         self.on_below = any(len(g) > 2 and g[2] for g in s.get("_rest_on") or ())  # lies on lower layers' debris
         self.fields = {}
         self.stack = None  # the leaves laid so far (_MiDropStack, made with the first field)
@@ -39556,12 +39641,15 @@ class _DebrisBuild(object):
     def _contact(self, pts, b, L, bend, relief=None, quads=None, pile=False):
         """A leaf's contact pass (_mi_drop_contact): down onto what's under
         it and bent onto it (bend / L: stiffness), checked; False (its
-        points taken off) when nothing is under it at all."""
+        points taken off) when nothing is under it at all. Bend size: the
+        bends smoothed over up to half the leaf (not in a pile)."""
         field = self._field(L)
         m = self.m
+        sm = 0.0 if pile else 0.5 * L * self.bend_size
         got = _mi_drop_contact(field, self.tris, pts, b, self.lift, bend / L,
                                clamp(0.3 * L, 0.015 / m, 0.03 / m), max(L, 0.1 / m), relief, quads,
-                               max(2.0 * field.c, 0.1 * L), pile)  # reach under 4 cm: across rails it bridges
+                               max(2.0 * field.c, 0.1 * L), pile,
+                               smooth=sm)  # reach under 4 cm: across rails it bridges
         st = self.contact
         if got is None:
             st["removed"] += 1
@@ -41247,7 +41335,8 @@ SC_TYPES = collections.OrderedDict([
                                            "bunch_shape", "blade_scatter", "bunch_blades", "on_layers"),
                "over": {"slope": 40.0, "grass": 1.5}, "new": {"grass_pile": 0.6, "on_layers": True}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
-                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "on_moss", "on_layers"),
+                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "bend_size", "on_moss",
+                                             "on_layers"),
                 "over": {"slope": 35.0, "leaves": 8.0}, "new": {"on_moss": True, "on_layers": True}}),
     ("Leaf piles", {"parts": (("piles", "leafPile"),),
                     "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape", "on_moss",
@@ -41256,8 +41345,8 @@ SC_TYPES = collections.OrderedDict([
                                                                                    "on_layers": True}}),
     ("Jungle leaves", {"parts": (("green", "leafJungle"), ("dry", "leafJungleDry")),
                        "keys": SC_DEBRIS_COMMON + ("jungle", "jungle_size", "jungle_cluster", "jungle_shape",
-                                                   "jungle_green", "jungle_tear", "curl", "drape", "on_moss",
-                                                   "on_layers"),
+                                                   "jungle_green", "jungle_tear", "curl", "drape", "bend_size",
+                                                   "on_moss", "on_layers"),
                        "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}, "new": {"on_moss": True,
                                                                                        "on_layers": True}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
@@ -44330,6 +44419,11 @@ SC_FIELDS["drape"] = ("Drape", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                       "Leaves land on the highest things under them (corrugation crests, frames, a lip) as if "
                       "dropped there; Drape is how much they then sag over gaps and bend down past edges (0 = stiff "
                       "and flat, 1 = soft). They never go into the surface or stand up against a wall.")
+SC_FIELDS["bend_size"] = ("Bend size", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                          "How broad a leaf's bends are. 0: it follows every little thing under it (small bumps "
+                          "round each grass blade). 1: it rests on the highest bits and bends in broad curves over "
+                          "about half its length, like a stiffer leaf. Drape is how far it sags; this is how wide "
+                          "the bends are.")
 _SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
@@ -44352,7 +44446,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
               ("UVs", False, ["stacks", "stack_layout"])],
     "Leaves": [("", True, ["detail", "coverage", "spread", "leaves", "leaf_size", "curl"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("How they lie", False, ["on_layers", "drape", "on_moss", "size_var"]),
+               ("How they lie", False, ["on_layers", "drape", "bend_size", "on_moss", "size_var"]),
                ("UVs", False, ["stacks", "stack_layout"])],
     "Leaf piles": [("", True, ["detail", "coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
@@ -44361,7 +44455,8 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
     "Jungle leaves": [("", True, ["detail", "coverage", "spread", "jungle", "jungle_size", "jungle_cluster",
                                   "jungle_shape", "jungle_green"]),
                       ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                      ("How they lie", False, ["curl", "jungle_tear", "on_layers", "drape", "on_moss", "size_var"]),
+                      ("How they lie", False, ["curl", "jungle_tear", "on_layers", "drape", "bend_size", "on_moss",
+                                               "size_var"]),
                       ("UVs", False, ["stacks", "stack_layout"])],
     "Moss tufts": [("", True, ["detail", "coverage", "spread", "tufts", "tuft_size", "size_var"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),

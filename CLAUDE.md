@@ -1696,7 +1696,15 @@
       was 48 / 52 for the stiff rest). Pile leaves come down onto the leaves
       under them too (no air pockets in the mound).
     `drape` (0.5) in `DEBRIS_DEFAULTS` and on Leaves / Leaf piles / Jungle
-    leaves (More). Pile leaves (lift > 0) keep their pile placement, then
+    leaves (More). **Bend size** (`bend_size`, 0 = as before; Leaves and
+    Jungle leaves, not piles; the user, 2026-11-12: jungle leaves on grass
+    took "small little bumps" round each blade, wanted them to "bend around
+    the grass"): `_mi_drop_contact(smooth=0.5 L x Bend size)` averages each
+    point's come-down over its plan neighbours (`_mi_bend_nbs`, at most 24,
+    `_mi_bend_smooth`, never past its own gap) and spreads the push-ups and
+    rims afterwards into bulges (`_mi_bend_spread`, only up). Drape = how
+    far it sags, Bend size = how wide the bends are. ~+25% on a jungle
+    layer's build at 1. Test: `tests/test_layer_stack.py`. Pile leaves (lift > 0) keep their pile placement, then
     the contact pass, and are laid in the stack. `_leaf_spine` is gone.
   - **Moss Style** (the user, 2026-11-04: the carpet "can become a bit
     heavy ... it doesn't always have to be one object ... a scattered thing

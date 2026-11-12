@@ -127,6 +127,40 @@ def main():
     check("... instead of in among the piles' blades", buried_on < 0.5 * buried_off,
           "%d leaf points under blades vs %d without" % (buried_on, buried_off))
 
+    # --- Bend size (the user: leaves on grass took "small little bumps" round each blade; wanted them to "bend
+    # around the grass"): 0 = as before; 1 = broad bends, still on top of the grass
+    def lap(ms):
+        """Mean |height - its edge neighbours' mean| over the leaves' points."""
+        tot, cnt = 0.0, 0
+        for mm in ms:
+            pts, counts, conn = mm[0], mm[1], mm[2]
+            nb = {}
+            k = 0
+            for c in counts:
+                f = conn[k:k + c]
+                for a in range(c):
+                    nb.setdefault(f[a], set()).update((f[a - 1], f[(a + 1) % c]))
+                k += c
+            for i, s in nb.items():
+                if len(s) >= 3:
+                    tot += abs(pts[i][1] - sum(pts[j][1] for j in s) / len(s))
+                    cnt += 1
+        return tot / max(1, cnt)
+    check("Bend size: a Leaves and Jungle leaves setting, 0 by default (as before), in the panel",
+          D.get("bend_size") == 0.0 and all("bend_size" in types[t]["keys"] and
+                                             any("bend_size" in sec[2] for sec in tb["SC_LAYOUT"][t])
+                                             for t in ("Leaves", "Jungle leaves")) and "bend_size" in tb["SC_FIELDS"])
+    tb["sc_update"](root, lj, {"bend_size": 1.0})
+    got = meshes(root)
+    jung_bent = jungle_of(got, lj)
+    l0, l1 = lap(jung_on), lap(jung_bent)
+    check("Bend size 1: smoother leaves over the grass (fewer small bumps)", l1 < 0.9 * l0,
+          "%.4f vs %.4f dm" % (l1, l0))
+    buried_bent = under(jung_bent, [grass])
+    check("... still on top of the grass, not pressed into it", buried_bent <= max(buried_on * 1.5, buried_on + 20),
+          "%d leaf points under blades vs %d" % (buried_bent, buried_on))
+    tb["sc_update"](root, lj, {"bend_size": 0.0})
+
     # --- Move Up: the grass on top now lies over the leaves
     tb["sc_move_layer"](root, lg, -1)
     got = meshes(root)
