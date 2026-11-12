@@ -29209,6 +29209,1559 @@ def _roof_counts(report):
     return ", %s pieces" % "{:,}".format(report["pieces"]) if report.get("pieces") else ""
 
 
+# =============================================================================
+# Roof Map: a clickable picture of the roof at the top of the Roof panel
+# =============================================================================
+# The user, 2026-11-12: a cut-open roof, switchable to a slice and a view from
+# above, where every part says its plain name on hover and a click opens and
+# flashes its settings (right-click: quick choices). Drawn with QPainter from
+# the panel's own fields only: it never touches the scene, and its edits go
+# through the fields' own changed -> _queue path (live rebuild, links, undo).
+
+RM_VIEWS = ("Cut open", "Slice", "From above")
+RM_VIEW_VAR = "unlokRoofMapView"   # optionVar: the last view picked
+RM_OPEN_VAR = "unlokRoofMapOpen"   # optionVar: 0 when the map is folded away
+RM_COL = {
+    "wood": (168, 121, 74), "woodDark": (122, 86, 52), "inside": (42, 37, 33), "underlay": (107, 75, 48),
+    "underLine": (79, 55, 34), "neat": (95, 127, 52), "neatLine": (63, 90, 29), "palm": (143, 174, 74),
+    "palmDry": (173, 156, 92), "palmLine": (90, 120, 38), "palmDryLine": (125, 109, 56), "cap": (109, 140, 53),
+    "capDry": (141, 125, 69), "straw": (199, 166, 80), "strawLine": (142, 114, 47), "strawCap": (169, 138, 62),
+    "metal": (156, 168, 174), "metalLine": (108, 120, 126), "metalCap": (201, 209, 213), "tile": (178, 95, 63),
+    "tileLine": (120, 56, 31), "tileCap": (143, 68, 40), "tileDot": (106, 48, 24), "felt": (61, 65, 68),
+    "boards": (122, 98, 71), "reed": (141, 122, 70), "wall": (58, 54, 50), "wallLine": (91, 85, 78),
+    "pole": (155, 113, 70), "poleNode": (110, 78, 44), "tie": (201, 178, 122), "batten": (195, 154, 99),
+    "purlin": (185, 144, 94), "plate": (140, 98, 57), "fascia": (216, 210, 196), "edge": (0, 0, 0, 115),
+    "seam": (0, 0, 0, 90), "label": (214, 218, 212), "chip": (58, 61, 61), "chipLine": (93, 99, 98),
+    "chipText": (229, 232, 230), "bg": (38, 40, 40), "metalJoin": (91, 102, 107), "metalPatch": (139, 151, 156),
+}
+RM_END_KEY = {"Gable": "gable", "Hip": "hip", "Half-hip": "half"}
+RM_END_WORD = {"gable": "Upright", "hip": "Sloped", "half": "Half"}
+
+# part -> (plain name, the technical word), per covering ("all": any)
+RM_NAMES = {
+    "ridge": {"palm": ("Top line cover", "ridge + leaf cap"), "straw": ("Top line cap", "ridge cap"),
+              "metal": ("Top line capping", "ridge capping"), "tiles": ("Top line tiles", "ridge tiles"),
+              "cone": ("Tip cap", "the cone's tip")},
+    "pole": {"all": ("Top pole", "ridge pole")},
+    "corner": {"all": ("Corner line", "hip")},
+    "verge": {"all": ("End edge", "gable verge")},
+    "eave": {"all": ("Bottom edge", "eaves")},
+    "outer": {"palm": ("Loose top layer", "loose top fronds"), "straw": ("Thatch", "the straw / leaf pieces"),
+              "metal": ("Metal sheets", "corrugated sheets"), "tiles": ("Tiles", "clay tiles")},
+    "neat": {"all": ("Neat under layer", "neat rows / shingles")},
+    "underlay": {"tiles": ("Felt under the tiles", "underlay"), "all": ("Inner mat", "underlay")},
+    "battens": {"metal": ("Cross beams", "purlins"), "tiles": ("Cross strips", "battens"),
+                "all": ("Cross poles", "battens / laths")},
+    "rafters": {"all": ("Sloping poles", "rafters, the frame")},
+    "beam": {"all": ("Top beam", "ridge beam")},
+    "plate": {"all": ("Wall-top beam", "wall plate")},
+    "end": {"all": ("End shape", "gable / hip / half-hip end")},
+    "shape": {"all": ("Roof shape", "ridge / lean-to / cone")},
+}
+
+# part -> the settings a click opens (and flashes), per covering. "_X" keys are
+# the clicked end's (end_a / end_b ...). Keys the panel doesn't have are skipped.
+RM_JUMPS = {
+    "ridge": {"palm": ("ridge_fronds", "ridge_poles", "cap_width", "lashings", "softness", "ridge_sag"),
+              "straw": ("top", "cap", "pattern", "pattern_size", "pattern_depth", "softness", "ridge_sag"),
+              "metal": ("m_ridge_cap", "m_trim_gap"), "tiles": ("t_ridge", "t_ridge_size")},
+    "pole": {"all": ("ridge_poles", "lashings")},
+    "corner": {"palm": ("end_X", "hip_pitch", "half_hip", "ridge_fronds", "hip_poles", "hip_blend", "flow"),
+               "straw": ("end_X", "hip_pitch", "half_hip", "softness"),
+               "metal": ("end_X", "hip_pitch", "half_hip", "m_hip_cap"),
+               "tiles": ("end_X", "hip_pitch", "half_hip", "t_hip")},
+    "verge": {"palm": ("end_X", "verge_X", "end_fronds", "end_reach", "edge_hang"),
+              "straw": ("end_X", "verge_X", "overhang"),
+              "metal": ("end_X", "m_barge", "m_fascia"), "tiles": ("end_X", "t_verge", "t_verge_over", "t_fascia")},
+    "eave": {"palm": ("overhang", "edge_hang", "edge_hang_var", "edge_len_var", "end_reach", "ragged"),
+             "straw": ("overhang", "ragged", "lip"), "metal": ("m_gutter", "m_fascia"),
+             "tiles": ("t_gutter", "t_fascia")},
+    "outer": {"palm": ("top_layer", "droop", "slant", "top_leaf_width", "shag", "dried"),
+              "straw": ("style", "strands", "density", "piece_width", "piece_length", "panel_width", "mess"),
+              "metal": ("m_mode", "m_profile", "m_pitch", "m_depth", "m_cover"),
+              "tiles": ("t_mode", "t_profile", "t_length", "t_width", "t_headlap")},
+    "neat": {"all": ("neat", "frond_layout", "leaf_width", "leaf_length", "overlap", "frond_width", "bundle_width")},
+    "underlay": {"tiles": ("t_underlay",), "all": ("underlay", "underlay_relief")},
+    "battens": {"metal": ("frame_battens", "m_purlin_spacing", "m_purlin_size"),
+                "tiles": ("frame_battens", "t_batten_size"), "all": ("frame_battens", "battens", "batten_size")},
+    "rafters": {"metal": ("frame", "frame_rafters", "m_frame_style", "m_rafter_spacing", "m_rafter_size"),
+                "tiles": ("frame", "frame_rafters", "t_frame_style", "t_rafter_spacing", "t_rafter_size"),
+                "all": ("frame", "frame_rafters", "frame_style", "rafter_spacing", "rafter_size", "frame_wobble")},
+    "beam": {"metal": ("frame_beam", "m_rafter_size"), "tiles": ("frame_beam", "t_rafter_size"),
+             "all": ("frame_beam", "rafter_size")},
+    "plate": {"all": ("wall_plates",)},
+    "end": {"all": ("end_X", "hip_pitch", "half_hip", "verge_X")},
+    "shape": {"all": ("shape",)},
+}
+
+_RM_ONOFF = (("Off", False), ("On", True))
+
+
+def _rm_pick(table, cov):
+    if cov in table:
+        return table[cov]
+    if cov == "cone" and "straw" in table:
+        return table["straw"]
+    return table.get("all")
+
+
+def _rm_choices(part, end, s):
+    """Right-click quick choices: [(title, key, [(text, value)])]."""
+    cov, x = s["cov"], end or "a"
+    frame_style = {"metal": "m_frame_style", "tiles": "t_frame_style"}.get(cov, "frame_style")
+    styles = [(v, v) for v in THATCH_FRAME_STYLES]
+    ends = [("Upright (gable)", "Gable"), ("Sloped (hip)", "Hip"), ("Half (half-hip)", "Half-hip")]
+    out = []
+    if end and part in ("end", "corner", "verge"):
+        out.append(("This end (%s)" % ("+" if end == "a" else u"\u2212"), "end_" + x, ends))
+    if part == "ridge":
+        if cov == "palm":
+            out += [("Leaf cap", "ridge_fronds", _RM_ONOFF), ("Top pole", "ridge_poles", _RM_ONOFF),
+                    ("Vine ties", "lashings", _RM_ONOFF)]
+        elif cov == "straw":
+            out.append(("Cap edge", "pattern", [(v, v) for v in THATCH_PATTERNS]))
+        elif cov == "metal":
+            out.append(("Capping", "m_ridge_cap", _RM_ONOFF))
+        elif cov == "tiles":
+            out.append(("Ridge tiles", "t_ridge", _RM_ONOFF))
+        if s["shape"] == "Ridge":
+            out.append(("Ridge along", "ridge", [(v, v) for v in THATCH_AXES]))
+    elif part == "pole":
+        out += [("Top pole", "ridge_poles", _RM_ONOFF), ("Vine ties", "lashings", _RM_ONOFF)]
+    elif part == "corner":
+        out += {"palm": [("Corner poles", "hip_poles", _RM_ONOFF)], "metal": [("Corner capping", "m_hip_cap", _RM_ONOFF)],
+                "tiles": [("Corner tiles", "t_hip", _RM_ONOFF)]}.get(cov, [])
+    elif part == "verge":
+        if cov in ("palm", "straw"):
+            out.append(("Edge", "verge_" + x, [("Hangs over", "Hanging"), ("Cut flush", "Flush")]))
+        elif cov == "metal":
+            out.append(("Edge flashing", "m_barge", _RM_ONOFF))
+        elif cov == "tiles":
+            out.append(("Edge tiles", "t_verge", [(v, v) for v in TILE_VERGES]))
+    elif part == "eave":
+        if cov in ("metal", "tiles"):
+            out.append(("Edge board", "m_fascia" if cov == "metal" else "t_fascia", _RM_ONOFF))
+    elif part == "outer":
+        if cov in ("palm", "straw", "cone"):
+            out.append(("Made of", "style", [(v, v) for v in THATCH_STYLES]))
+        elif cov == "metal":
+            out += [("Laid", "m_mode", [(v, v) for v in METAL_MODES]), ("Profile", "m_profile",
+                                                                         [(v, v) for v in METAL_PROFILES])]
+        elif cov == "tiles":
+            out += [("Tile", "t_profile", [(v, v) for v in TILE_PROFILES]),
+                    ("Laid", "t_mode", [(v, v) for v in TILE_MODES])]
+        out.append(("Covering", "covering", [(v, v) for v in ROOF_COVERINGS]))
+    elif part == "neat":
+        out.append(("Laid as", "frond_layout", [(v, v) for v in THATCH_FROND_LAYOUTS]))
+    elif part == "underlay":
+        if cov == "tiles":
+            out.append(("Under the tiles", "t_underlay", [(v, v) for v in TILE_UNDERLAYS]))
+        else:
+            out.append(("Inner mat", "underlay", _RM_ONOFF))
+    elif part == "battens":
+        out.append(("Cross poles" if cov not in ("metal", "tiles") else "Shown", "frame_battens", _RM_ONOFF))
+        if cov not in ("metal", "tiles"):
+            out.append(("How many", "battens", [(v, v) for v in THATCH_BATTENS]))
+    elif part == "rafters":
+        out += [("Frame", "frame", _RM_ONOFF), ("Sloping poles", "frame_rafters", _RM_ONOFF),
+                ("Wood", frame_style, styles)]
+    elif part == "beam":
+        out += [("Top beam", "frame_beam", _RM_ONOFF), ("Frame", "frame", _RM_ONOFF)]
+    elif part == "plate":
+        out.append(("Wall-top beams", "wall_plates", _RM_ONOFF))
+    if part in ("shape", "end") or (part == "outer" and s["shape"] != "Ridge"):
+        out.append(("Shape", "shape", [(v, v) for v in THATCH_SHAPES]))
+    return out
+
+
+def _rm_state(fields):
+    """What the map draws, read from the panel's fields (never the scene)."""
+    def v(key, default=None):
+        w = fields.get(key)
+        if w is None:
+            return default
+        try:
+            return w.value()
+        except Exception:
+            return default
+    covering, style = v("covering", "Thatch"), v("style", "Palm Fronds")
+    cov = "metal" if covering == "Corrugated" else "tiles" if covering == "Tiles" else (
+        "palm" if style == "Palm Fronds" else "straw")
+    s = {"cov": cov, "shape": v("shape", "Ridge"), "style": style,
+         "endA": RM_END_KEY.get(v("end_a"), "gable"), "endB": RM_END_KEY.get(v("end_b"), "gable"),
+         "hh": clamp(float(v("half_hip", 0.55) or 0.55), 0.1, 0.9),
+         "hp": clamp(float(v("hip_pitch", 1.0) or 1.0), 0.7, 2.5)}
+    s["ridgeTop"] = ("pole" if v("ridge_poles", False) else "leaves") if v("ridge_fronds", True) else "open"
+    s["ties"], s["hipPoles"] = bool(v("lashings", False)), bool(v("hip_poles", False))
+    frame = bool(v("frame", True))
+    s["frame"] = frame
+    s["rafters"] = frame and bool(v("frame_rafters", True))
+    s["beam"] = frame and bool(v("frame_beam", True))
+    s["battens_on"] = frame and bool(v("frame_battens", True))
+    s["plates"] = frame and bool(v("wall_plates", True))
+    s["under"] = bool(v("underlay", True)) and style != "Surface"
+    s["tUnder"] = v("t_underlay", "Felt")
+    tl = float(v("top_layer", 1.0) or 0.0)
+    s["top"] = "none" if tl <= 0.05 else ("lots" if tl > 1.3 else "some")
+    s["dried"] = float(v("dried", 0.0) or 0.0) > 0.4
+    s["droop"] = float(v("edge_hang", 1.0) or 0.0) > 0.4
+    s["flushA"], s["flushB"] = v("verge_a") == "Flush", v("verge_b") == "Flush"
+    ef = float(v("end_fronds", 1.0) or 0.0)
+    s["fringe"] = "none" if ef <= 0.05 else ("lots" if ef > 1.3 else "some")
+    s["battens"] = {"Every course": "every", "Every 2nd": "second"}.get(v("battens", "Every course"), "third")
+    s["fstyle"] = v({"metal": "m_frame_style", "tiles": "t_frame_style"}.get(cov, "frame_style"), "Bamboo")
+    s["layout"] = v("frond_layout", "Shingles")
+    s["strawCap"] = "None" if (float(v("top", 0.1) or 0) <= 1e-3 or float(v("cap", 1) or 0) <= 1e-3) else v(
+        "pattern", "Straight")
+    s["ragged"] = float(v("ragged", 0.0) or 0.0) > 0.3
+    s["mMode"], s["tMode"] = v("m_mode", "Clean"), v("t_mode", "Clean")
+    s["mCap"], s["mHip"], s["mBarge"] = bool(v("m_ridge_cap", True)), bool(v("m_hip_cap", True)), bool(
+        v("m_barge", True))
+    s["fascia"] = bool(v("m_fascia" if cov == "metal" else "t_fascia", True))
+    s["tProfile"], s["tRidge"], s["tHip"] = v("t_profile", "Barrel"), bool(v("t_ridge", True)), bool(v("t_hip", True))
+    s["tVerge"] = v("t_verge", "Verge tiles")
+    return s
+
+
+def _rm_has_under(s):
+    if s["cov"] == "metal":
+        return False
+    if s["cov"] == "tiles":
+        return s["tUnder"] != "None"
+    return s["under"]
+
+
+def _rm_layers(s):
+    out = ["frame"] if s["frame"] else []
+    if _rm_has_under(s):
+        out.append("underlay")
+    if s["cov"] == "palm":
+        out.append("neat")
+        if s["top"] != "none":
+            out.append("outer")
+    else:
+        out.append("outer")
+    return out
+
+
+def _rm_cap_on(s, hip=False):
+    c = s["cov"]
+    if c == "palm":
+        return s["ridgeTop"] != "open"
+    if c == "straw":
+        return s["strawCap"] != "None"
+    if c == "metal":
+        return s["mHip"] if hip else s["mCap"]
+    return s["tHip"] if hip else s["tRidge"]
+
+
+def _rm_cap_col(s):
+    c = s["cov"]
+    if c == "palm":
+        return "capDry" if s["dried"] else "cap"
+    return {"straw": "strawCap", "metal": "metalCap"}.get(c, "tileCap")
+
+
+def _rm_outer_fill(s):
+    c = s["cov"]
+    if c == "palm":
+        return "palmDry" if s["dried"] else "palm"
+    return {"straw": "straw", "metal": "metal"}.get(c, "tile")
+
+
+def _rm_outer_line(s):
+    c = s["cov"]
+    if c == "palm":
+        return "palmDryLine" if s["dried"] else "palmLine"
+    return {"straw": "strawLine", "metal": "metalLine"}.get(c, "tileLine")
+
+
+def _rm_under_fill(s):
+    if s["cov"] == "tiles":
+        return {"Boards": "boards", "Reed mat": "reed"}.get(s["tUnder"], "felt")
+    return "underlay"
+
+
+def _rm_clip_half(poly, f):
+    """The part of a polygon where f(p) >= 0."""
+    out = []
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        fp, fq = f(p), f(q)
+        if fp >= 0:
+            out.append(p)
+        if (fp >= 0) != (fq >= 0):
+            t = fp / (fp - fq)
+            out.append(tuple(a + (b - a) * t for a, b in zip(p, q)))
+    return out
+
+
+def _rm_top_at(poly, c):
+    """Highest y of a polygon's outline at x = c (-1: none)."""
+    best = -1.0
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        if (p[0] - c) * (q[0] - c) <= 0 and p[0] != q[0]:
+            t = (c - p[0]) / (q[0] - p[0])
+            best = max(best, p[1] + (q[1] - p[1]) * t)
+        elif p[0] == c:
+            best = max(best, p[1])
+    return best
+
+
+def _rm_slice_y(poly, y):
+    """(lowest, highest) x of a polygon's outline at height y."""
+    lo, hi = 1e9, -1e9
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        if (p[1] - y) * (q[1] - y) <= 0 and p[1] != q[1]:
+            x = p[0] + (q[0] - p[0]) * (y - p[1]) / (q[1] - p[1])
+            lo, hi = min(lo, x), max(hi, x)
+    return lo, hi
+
+
+def _rm_qcolor(c):
+    if isinstance(c, QtGui.QColor):
+        return c
+    if isinstance(c, str):
+        c = RM_COL.get(c, c)
+        if isinstance(c, str):
+            return QtGui.QColor(c)
+    return QtGui.QColor(*c)
+
+
+class _RMDrawing(object):
+    """One view's picture: a list of items, each with the part it belongs to
+    (None: just context) and a shape to hit-test. Coordinates are the view's
+    own (420 wide); the canvas scales them to fit."""
+
+    def __init__(self, width, height):
+        self.size = (width, height)
+        self.items = []  # (part, end, kind, data)
+        self._stroker = QtGui.QPainterPathStroker()
+        self._stroker.setWidth(11)
+        self._stroker.setCapStyle(QtCore.Qt.RoundCap)
+
+    @staticmethod
+    def _poly_path(pts):
+        path = QtGui.QPainterPath()
+        if pts:
+            path.moveTo(pts[0][0], pts[0][1])
+            for p in pts[1:]:
+                path.lineTo(p[0], p[1])
+        return path
+
+    def _add(self, part, end, kind, data, hit):
+        self.items.append((part, end, kind, data, hit))
+
+    def poly(self, part, end, pts, fill, stroke=(0, 0, 0, 90), width=1.0, shade=0):
+        if len(pts) < 3:
+            return
+        path = self._poly_path(pts)
+        path.closeSubpath()
+        col = _rm_qcolor(fill)
+        if shade:
+            col = col.darker(shade)
+        self._add(part, end, "path", (path, col, _rm_qcolor(stroke) if stroke else None, width, None),
+                  path if part else None)
+
+    def line(self, part, end, pts, color, width=1.0, cap="round", dash=None, hit=False):
+        path = self._poly_path(pts)
+        self._add(part, end, "line", (path, _rm_qcolor(color), width, cap, dash), None)
+        if hit and part:
+            self.hit(part, end, pts, hit if not isinstance(hit, bool) else 11.0)
+
+    def hit(self, part, end, pts, width=11.0):
+        stroker = self._stroker
+        if width != 11.0:
+            stroker = QtGui.QPainterPathStroker()
+            stroker.setWidth(width)
+            stroker.setCapStyle(QtCore.Qt.RoundCap)
+        self._add(part, end, "hit", None, stroker.createStroke(self._poly_path(pts)))
+
+    def path(self, part, end, path, fill=None, stroke=None, width=1.0):
+        self._add(part, end, "path", (path, _rm_qcolor(fill) if fill else None,
+                                      _rm_qcolor(stroke) if stroke else None, width, None),
+                  (path if fill else self._stroker.createStroke(path)) if part else None)
+
+    def ellipse(self, part, end, cx, cy, rx, ry, fill=None, stroke=None, width=1.0):
+        path = QtGui.QPainterPath()
+        path.addEllipse(QtCore.QPointF(cx, cy), rx, ry)
+        self.path(part, end, path, fill, stroke, width)
+
+    def rect(self, part, end, x, y, w, h, fill=None, stroke=None, width=1.0, radius=0.0, angle=0.0):
+        path = QtGui.QPainterPath()
+        if radius:
+            path.addRoundedRect(QtCore.QRectF(x, y, w, h), radius, radius)
+        else:
+            path.addRect(QtCore.QRectF(x, y, w, h))
+        if angle:
+            cx, cy = x + w * 0.5, y + h * 0.5
+            path = QtGui.QTransform().translate(cx, cy).rotate(angle).translate(-cx, -cy).map(path)
+        self.path(part, end, path, fill, stroke, width)
+
+    def dots(self, part, end, a, b, gap, r, color):
+        """Round tiles / ties along a line (a dotted ridge)."""
+        n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / gap))
+        for i in range(n + 1):
+            u = i / float(n)
+            self.ellipse(part, end, a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, r, r, color)
+
+    def text(self, x, y, text, anchor="middle", color="label", size=8.5, part=None, end=None):
+        self._add(part, end, "text", (x, y, text, anchor, _rm_qcolor(color), size), None)
+
+    def chip(self, part, end, x, y, text):
+        w = len(text) * 5.4 + 16
+        self.rect(part, end, x - w / 2, y - 9, w, 17, "chip", "chipLine", 1.0, radius=8.5)
+        self.text(x, y + 3.5, text, "middle", "chipText", 8.5, part, end)
+
+
+class _RoofMapCanvas(QtWidgets.QWidget):
+    """Paints the picked view and turns the mouse into parts."""
+
+    def __init__(self, owner):
+        super(_RoofMapCanvas, self).__init__(owner)
+        self.owner = owner
+        self.setMouseTracking(True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setFixedHeight(190)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+
+    def _xf(self):
+        d = self.owner.drawing
+        vw, vh = d.size if d else (420.0, 250.0)
+        s = min(self.width() / float(vw), self.height() / float(vh))
+        return s, (self.width() - vw * s) * 0.5, (self.height() - vh * s) * 0.5
+
+    def resizeEvent(self, event):
+        super(_RoofMapCanvas, self).resizeEvent(event)
+        self.fit()
+
+    def fit(self):
+        d = self.owner.drawing
+        vw, vh = d.size if d else (420.0, 250.0)
+        h = int(clamp(self.width() * vh / float(vw), 120, 230))
+        if h != self.height():
+            self.setFixedHeight(h)
+
+    def part_at(self, pos):
+        d = self.owner.drawing
+        if not d:
+            return None
+        s, ox, oy = self._xf()
+        p = QtCore.QPointF((pos.x() - ox) / s, (pos.y() - oy) / s)
+        for part, end, kind, data, hit in reversed(d.items):
+            if part and hit is not None and hit.contains(p):
+                return part, end
+        return None
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        try:
+            self._paint(painter)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            painter.end()
+
+    def _paint(self, painter):
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(_rm_qcolor("bg"))
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
+        d = self.owner.drawing
+        if not d:
+            return
+        s, ox, oy = self._xf()
+        painter.translate(ox, oy)
+        painter.scale(s, s)
+        hot, sel = self.owner.hot, self.owner.sel
+
+        def same(a, part, end):
+            return a is not None and a[0] == part and (a[1] is None or end is None or a[1] == end)
+
+        caps = {"round": QtCore.Qt.RoundCap, "square": QtCore.Qt.SquareCap, "flat": QtCore.Qt.FlatCap}
+        font = QtGui.QFont(painter.font())
+        for part, end, kind, data, hit in d.items:
+            painter.setOpacity(0.3 if (hot is not None and not same(hot, part, end)) else 1.0)
+            if kind == "path":
+                path, fill, stroke, width, _ = data
+                painter.setBrush(fill if fill is not None else QtCore.Qt.NoBrush)
+                if stroke is not None:
+                    pen = QtGui.QPen(stroke, width)
+                    pen.setJoinStyle(QtCore.Qt.RoundJoin)
+                    painter.setPen(pen)
+                else:
+                    painter.setPen(QtCore.Qt.NoPen)
+                painter.drawPath(path)
+            elif kind == "line":
+                path, color, width, cap, dash = data
+                pen = QtGui.QPen(color, width)
+                pen.setCapStyle(caps.get(cap, QtCore.Qt.RoundCap))
+                pen.setJoinStyle(QtCore.Qt.RoundJoin)
+                if dash:
+                    pen.setDashPattern(dash)
+                painter.setPen(pen)
+                painter.setBrush(QtCore.Qt.NoBrush)
+                painter.drawPath(path)
+            elif kind == "text":  # as a filled path: grey-scale edges at any zoom (no colour fringes)
+                x, y, text, anchor, color, size = data
+                font.setPixelSize(max(1, int(round(size * 4))))
+                fm = QtGui.QFontMetricsF(font)
+                w = fm.horizontalAdvance(text) if hasattr(fm, "horizontalAdvance") else fm.width(text)
+                tp = QtGui.QPainterPath()
+                tp.addText(0, 0, font, text)
+                k = 0.25
+                tp = QtGui.QTransform().translate(x - {"middle": w * k * 0.5, "end": w * k}.get(anchor, 0), y).scale(
+                    k, k).map(tp)
+                if part is None:  # a label on the picture: a soft dark edge keeps it readable on any fill
+                    painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 140), 1.6, QtCore.Qt.SolidLine,
+                                              QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+                    painter.setBrush(QtCore.Qt.NoBrush)
+                    painter.drawPath(tp)
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(color)
+                painter.drawPath(tp)
+        painter.setOpacity(1.0)
+        painter.setPen(QtCore.Qt.NoPen)
+        for mark, color in ((sel, QtGui.QColor(55, 165, 150, 95)), (hot, QtGui.QColor(255, 255, 255, 45))):
+            if mark is None:
+                continue
+            painter.setBrush(color)  # a soft tint over the part's hit area
+            for part, end, kind, data, hit in d.items:
+                if hit is not None and same(mark, part, end):
+                    painter.drawPath(hit)
+
+    def mouseMoveEvent(self, event):
+        self.owner.hover(self.part_at(event.pos()), event.globalPos())
+
+    def leaveEvent(self, event):
+        self.owner.hover(None, None)
+        super(_RoofMapCanvas, self).leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        hit = self.part_at(event.pos())
+        if event.button() == QtCore.Qt.LeftButton and hit:
+            self.owner.open_part(hit)
+        elif event.button() == QtCore.Qt.RightButton and hit:
+            self.owner.quick_menu(hit, event.globalPos())
+        event.accept()
+
+
+class RoofMap(QtWidgets.QFrame):
+    """The Roof panel's map: a cut-open roof (or a slice, or from above) whose
+    parts name themselves on hover; click one to open and flash its settings,
+    right-click for quick choices. Reads the panel's fields; edits go through
+    the fields (field.setValue + changed), so the roof updates live as from
+    the panel itself."""
+
+    def __init__(self, panel):
+        super(RoofMap, self).__init__(panel)
+        self.panel = panel
+        self.scroll = None  # the panel's scroll area (set by the panel)
+        self.drawing = None
+        self.state = None
+        self.hot = None
+        self.sel = None
+        self._flashed = []
+        self._scroll_to = None
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
+        self.fold = QtWidgets.QToolButton()
+        self.fold.setText("Roof map")
+        self.fold.setProperty("unlokSection", True)
+        self.fold.setCheckable(True)
+        self.fold.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.fold.setToolTip("A picture of the roof: point at a part to see its name, click it to open its "
+                             "settings, right-click for quick choices.")
+        self.views = SegmentField(RM_VIEWS)
+        self.views.setToolTip("Cut open: the roof with its layers stepped back, frame to covering.\nSlice: cut "
+                              "across the roof, with a side view under it for the ends.\nFrom above: the roof "
+                              "from a drone, with its layers in a bar under it.")
+        head.addWidget(self.fold, 1)
+        head.addWidget(self.views)
+        lay.addLayout(head)
+        self.body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(self.body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(3)
+        self.canvas = _RoofMapCanvas(self)
+        bl.addWidget(self.canvas)
+        self.hint = hint_label("")
+        bl.addWidget(self.hint)
+        lay.addWidget(self.body)
+        self._flash_timer = QtCore.QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(1300)
+        self._flash_timer.timeout.connect(self._unflash)
+        self._scroll_timer = QtCore.QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(0)
+        self._scroll_timer.timeout.connect(self._do_scroll)
+        view, opened = RM_VIEWS[0], True
+        try:
+            if cmds.optionVar(exists=RM_VIEW_VAR) and cmds.optionVar(q=RM_VIEW_VAR) in RM_VIEWS:
+                view = cmds.optionVar(q=RM_VIEW_VAR)
+            if cmds.optionVar(exists=RM_OPEN_VAR):
+                opened = bool(cmds.optionVar(q=RM_OPEN_VAR))
+        except Exception:
+            pass
+        self.views.setValue(view)
+        self.fold.setChecked(opened)
+        self._show_body(opened)
+        self.fold.toggled.connect(self._folded)
+        self.views.changed.connect(self._view_changed)
+        self._idle_hint()
+
+    # ------------------------------------------------------------ state
+    def set_status(self, text, level="info"):
+        try:
+            self.panel.set_status(text, level=level)
+        except Exception:
+            pass
+
+    def _idle_hint(self):
+        self.hint.setText("Point at a part to name it. Click: open its settings. Right-click: quick choices.")
+
+    def _show_body(self, on):
+        self.fold.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.body.setVisible(on)
+        self.views.setVisible(on)
+
+    @ui_safe
+    def _folded(self, on):
+        self._show_body(on)
+        try:
+            cmds.optionVar(intValue=(RM_OPEN_VAR, int(bool(on))))
+        except Exception:
+            pass
+        self.hot = None
+        self.refresh()  # folded: drops the picture
+
+    @ui_safe
+    def _view_changed(self):
+        try:
+            cmds.optionVar(stringValue=(RM_VIEW_VAR, self.views.value()))
+        except Exception:
+            pass
+        self.hot = None
+        self.refresh()
+
+    def refresh(self):
+        """Redraw from the panel's fields (the panel calls this whenever its
+        rows update: any edit, a preset, a roof picked)."""
+        if not self.fold.isChecked():
+            self.drawing = None  # folded: rebuilt when opened
+            return
+        try:
+            self.state = _rm_state(getattr(self.panel, "f", {}) or {})
+            view = self.views.value()
+            if self.state["shape"] != "Ridge":
+                self.drawing = self._draw_simple(self.state)
+            elif view == "Slice":
+                self.drawing = self._draw_slice(self.state)
+            elif view == "From above":
+                self.drawing = self._draw_top(self.state)
+            else:
+                self.drawing = self._draw_cut(self.state)
+        except Exception:
+            traceback.print_exc()
+            self.drawing = None
+        self.canvas.fit()
+        self.canvas.update()
+
+    def name(self, part, end=None):
+        s = self.state or {}
+        cov = "cone" if s.get("shape") == "Cone" and part == "ridge" else s.get("cov", "palm")
+        plain, tech = _rm_pick(RM_NAMES.get(part, {}), cov) or (part, part)
+        if part == "end" and end and s:
+            plain = "%s end: %s" % ("+" if end == "a" else u"\u2212", RM_END_WORD[s["end" + end.upper()]])
+        elif end and part in ("corner", "verge"):
+            plain = "%s (%s end)" % (plain, "+" if end == "a" else u"\u2212")
+        return plain, tech
+
+    def keys(self, part, end):
+        s = self.state or {}
+        out = []
+        for key in _rm_pick(RM_JUMPS.get(part, {}), s.get("cov", "palm")) or ():
+            if key.endswith("_X"):
+                ends = (end,) if end else ("a", "b")
+                out += [key[:-1] + e for e in ends]
+            else:
+                out.append(key)
+        return out
+
+    # ------------------------------------------------------------ mouse
+    @ui_safe
+    def hover(self, hit, gpos):
+        if hit != self.hot:
+            self.hot = hit
+            self.canvas.setCursor(QtCore.Qt.PointingHandCursor if hit else QtCore.Qt.ArrowCursor)
+            self.canvas.update()
+            if hit:
+                plain, tech = self.name(*hit)
+                self.hint.setText(u"<b>%s</b> \xb7 %s" % (plain, tech))
+            else:
+                self._idle_hint()
+        if hit and gpos is not None:
+            plain, tech = self.name(*hit)
+            QtWidgets.QToolTip.showText(gpos, u"<b>%s</b><br><span style='color:#9a9a9a'>%s</span><br>"
+                                              u"Click: its settings. Right-click: quick choices." % (plain, tech),
+                                        self.canvas)
+        elif gpos is None or not hit:
+            QtWidgets.QToolTip.hideText()
+
+    @ui_safe
+    def open_part(self, hit):
+        """Open the step cards and sections holding the part's settings,
+        scroll to them and flash them."""
+        self.sel = hit
+        self.canvas.update()
+        panel = self.panel
+        fields, rows = getattr(panel, "f", {}), getattr(panel, "_rows", {})
+        targets = []
+        for key in self.keys(*hit):
+            w = fields.get(key)
+            if w is None or w.isHidden():
+                continue
+            chain, p, hidden = [], w.parentWidget(), False
+            while p is not None and p is not panel:
+                if isinstance(p, (Section, StepCard)):
+                    if p.isHidden():
+                        hidden = True
+                        break
+                    chain.append(p)
+                p = p.parentWidget()
+            if hidden:
+                continue
+            for c in chain:
+                if isinstance(c, StepCard):
+                    c.set_expanded(True, user=True)
+                elif not c.header.isChecked():
+                    c.header.setChecked(True)
+            label = rows.get(key, (None, None))[0]
+            targets.append(label if label is not None else w)
+        plain = self.name(*hit)[0]
+        self._unflash()
+        if not targets:
+            self.set_status("%s: nothing to set for this covering." % plain)
+            return
+        for t in targets:
+            self._flashed.append((t, t.styleSheet()))
+            sel = "QCheckBox" if isinstance(t, QtWidgets.QCheckBox) else (
+                "QLabel" if isinstance(t, QtWidgets.QLabel) else None)
+            if sel:
+                t.setStyleSheet("%s { background: rgba(47, 143, 131, 120); border-radius: 3px; }" % sel)
+        self._scroll_to = targets[0]
+        self._scroll_timer.start()
+        self._flash_timer.start()
+        self.set_status("%s: its settings are lit below." % plain)
+
+    @ui_safe
+    def _do_scroll(self):
+        t, self._scroll_to = self._scroll_to, None
+        if t is not None and self.scroll is not None:
+            self.scroll.ensureWidgetVisible(t, 0, 60)
+
+    def _unflash(self):
+        for w, sheet in self._flashed:
+            try:
+                w.setStyleSheet(sheet)
+            except Exception:
+                pass
+        self._flashed = []
+
+    @ui_safe
+    def quick_menu(self, hit, gpos):
+        self.sel = hit
+        self.canvas.update()
+        fields = getattr(self.panel, "f", {})
+        menu = QtWidgets.QMenu(self)
+        plain = self.name(*hit)[0]
+        menu.addSection(plain)
+        menu.addAction("Open its settings").triggered.connect(lambda *_: self.open_part(hit))
+        for title, key, opts in _rm_choices(hit[0], hit[1], self.state or {}):
+            w = fields.get(key)
+            if w is None or w.isHidden():
+                continue
+            menu.addSection(title)
+            group = QtWidgets.QActionGroup(menu)
+            cur = w.value()
+            for text, value in opts:
+                act = menu.addAction(text)
+                act.setCheckable(True)
+                act.setChecked(cur == value)
+                group.addAction(act)
+                act.triggered.connect(lambda *_, k=key, v=value: self._set(k, v))
+        menu.exec_(gpos)
+
+    @ui_safe
+    def _set(self, key, value):
+        w = getattr(self.panel, "f", {}).get(key)
+        if w is None or w.value() == value:
+            return
+        w.setValue(value)
+        w.changed.emit()  # the panel's own path: _queue -> live rebuild (setValue alone is silent)
+
+    def shutdown(self):
+        for timer in (self._flash_timer, self._scroll_timer):
+            timer.stop()
+        self._unflash()
+
+    # ------------------------------------------------------------ views
+    def _draw_cut(self, S):
+        D = _RMDrawing(420, 250)
+        L, W, H = 3.3, 1.7, 1.3
+        d = min(W * 0.95 / S["hp"], L * 0.9)
+        hh = S["hh"] * H
+        cx, cy, k = 213.0, 124.0, 46.0
+        nl = math.hypot(W, H)
+        ny, nz = W / nl, H / nl
+        cov = S["cov"]
+        R = random.Random(7).random
+
+        def P(p, t=0.0):
+            x, y, z = p[0], p[1] + ny * t, p[2] + nz * t
+            return (cx + k * (0.97 * x - 0.5 * z), cy + k * (0.2 * x + 0.42 * z - 0.98 * y))
+
+        def chain(sg, typ):
+            X = sg * L
+            if typ == "gable":
+                return [(X, 0.0, W), (X, H, 0.0)]
+            if typ == "hip":
+                return [(X, 0.0, W), (sg * (L - d), H, 0.0)]
+            return [(X, 0.0, W), (X, hh, W * (1 - hh / H)), (sg * (L - 0.45 * d), H, 0.0)]
+
+        cA, cB = chain(1, S["endA"]), chain(-1, S["endB"])
+        rA, rB = cA[-1], cB[-1]
+        front = [cB[0], cA[0]] + cA[1:] + list(reversed(cB[1:]))
+        back = [(p[0], p[1], -p[2]) for p in front]
+        LY = _rm_layers(S)
+        n = len(LY)
+
+        def cut(i, y):
+            return -L + 1.0 * i + 1.15 * (y / H)
+
+        TOFF = {"frame": -0.07, "underlay": 0.0, "neat": 0.05, "outer": 0.1 if cov == "palm" else 0.04}
+        tO = TOFF[LY[-1]]
+        oline = _rm_outer_line(S)
+        # the walls (context)
+        wy, wz = -0.8, W - 0.12
+        D.poly(None, None, [P((-L + 0.12, 0, wz)), P((L - 0.12, 0, wz)), P((L - 0.12, wy, wz)),
+                            P((-L + 0.12, wy, wz))], "wall", "wallLine")
+        D.poly(None, None, [P((L - 0.12, 0, wz)), P((L - 0.12, 0, -wz)), P((L - 0.12, wy, -wz)),
+                            P((L - 0.12, wy, wz))], (51, 48, 44), "wallLine")
+        for i, key in enumerate(LY):
+            region = _rm_clip_half(front, lambda p, i=i: p[0] - cut(i, p[1]))
+            t = TOFF[key]
+            if len(region) < 3:
+                continue
+            if key == "frame":
+                inside = _rm_clip_half(_rm_clip_half(back, lambda p: p[0] - cut(0, p[1])),
+                                       lambda p: cut(1, p[1]) + 0.4 - p[0])
+                D.poly(None, None, [P(p) for p in inside], "inside", None)
+                rw = 3.2 if S["fstyle"] == "Sawn" else 2.6
+                c = -L + 0.18
+                while S["rafters"] and c < cut(1, H) + 0.3:
+                    tp = _rm_top_at(front, c)
+                    if tp >= 0.05:
+                        D.line("rafters", None, [P((c, 0, -W), t), P((c, tp, -W * (1 - tp / H)), t)], "woodDark",
+                               rw * 0.8)
+                    c += 0.42
+                if S["beam"]:
+                    bx0, bx1 = max(rB[0], -L), min(rA[0], cut(1, H) + 0.25)
+                    if bx1 > bx0:
+                        D.line("beam", None, [P((bx0, H - 0.13, 0)), P((bx1, H - 0.13, 0))], "wood", 5.5, hit=True)
+                c = -L + 0.18
+                while S["rafters"] and c <= L:
+                    tp = _rm_top_at(front, c)
+                    if tp >= 0.05:
+                        a, b = P((c, 0, W), t), P((c, tp, W * (1 - tp / H)), t)
+                        D.line("rafters", None, [a, b], "wood", rw, hit=True)
+                        if S["fstyle"] == "Bamboo":
+                            u = 0.2
+                            while u < 0.95:
+                                m = (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u)
+                                D.line("rafters", None, [(m[0] - 2, m[1]), (m[0] + 2, m[1])], "woodDark", 1.0)
+                                u += 0.27
+                    c += 0.42
+                if S["rafters"]:  # the - end's member: a hip rafter or the gable's last rafter
+                    D.line("corner" if S["endB"] == "hip" else "verge", "b", [P(p, t) for p in cB], "wood", 4.2,
+                           hit=True)
+                if S["battens_on"]:
+                    nb = 3 if cov == "metal" else 9 if cov == "tiles" else {"every": 8, "second": 5}.get(
+                        S["battens"], 3)
+                    for j in range(nb):
+                        y = H * (j + 0.6) / (nb + 0.4)
+                        zz = W * (1 - y / H)
+                        lo, hi = _rm_slice_y(front, y)
+                        xa = max(lo, cut(0, y))
+                        if hi > xa:
+                            D.line("battens", None, [P((xa, y, zz), t + 0.04), P((hi, y, zz), t + 0.04)],
+                                   "purlin" if cov == "metal" else "batten", 3.4 if cov == "metal" else 1.8, hit=True)
+                if S["plates"]:
+                    D.line("plate", None, [P((-L + 0.1, -0.07, W - 0.15)), P((cut(1, 0) + 0.1, -0.07, W - 0.15))],
+                           "plate", 5.0, cap="square", hit=True)
+                D.text(*P((cut(0, 0.35 * H) + 0.55, 0.35 * H, W * 0.65), t), text="frame")
+                continue
+            fill = _rm_under_fill(S) if key == "underlay" else "neat" if key == "neat" else _rm_outer_fill(S)
+            D.poly(key, None, [P(p, t) for p in region], fill)
+
+            def in_region(x, y, i=i):
+                return x >= cut(i, y) and y < _rm_top_at(front, x) - 0.02 and y > 0
+
+            if key == "underlay":
+                for q in range(1, 6):
+                    yy = H * q / 6.2
+                    lo, hi = _rm_slice_y(front, yy)
+                    x0 = max(lo, cut(i, yy))
+                    if hi > x0:
+                        D.line(key, None, [P((x0, yy, W * (1 - yy / H)), t), P((hi, yy, W * (1 - yy / H)), t)],
+                               (85, 89, 92) if cov == "tiles" else "underLine", 1.0)
+            elif key == "neat":
+                rows = 8
+                for q in range(rows):
+                    y0 = H * q / rows + 0.05
+                    zq = W * (1 - y0 / H)
+                    lo, hi = _rm_slice_y(front, y0)
+                    xs = max(lo, cut(i, y0))
+                    if hi <= xs:
+                        continue
+                    D.line(key, None, [P((xs, y0, zq), t), P((hi, y0, zq), t)], "neatLine", 1.2)
+                    if S["layout"] == "Bundles":
+                        bx = xs + 0.15
+                        while bx < hi - 0.1:
+                            c0 = P((bx, y0 + 0.06, zq - 0.06 * W / H), t)
+                            D.ellipse(key, None, c0[0], c0[1], 5.5, 2.6, (111, 145, 64), "neatLine", 0.8)
+                            bx += 0.34
+                    else:
+                        lx = xs + 0.08
+                        while lx < hi:
+                            y1 = max(0.0, y0 - 0.14)
+                            D.line(key, None, [P((lx, y0, zq), t), P((lx + 0.02, y1, W * (1 - y1 / H)), t)],
+                                   "neatLine", 0.7)
+                            lx += 0.13
+            elif cov == "palm":
+                sp = 0.33 if S["top"] == "lots" else 0.55
+                for q in range(5):
+                    yr = H * (0.2 + q * 0.17)
+                    fx = -L + R() * sp
+                    while fx < L:
+                        yb = yr + R() * 0.06
+                        if in_region(fx, yb):
+                            ye = max(0.01, yb - 0.32)
+                            A, B = P((fx, yb, W * (1 - yb / H)), t), P((fx + 0.06, ye, W * (1 - ye / H)), t)
+                            D.line(key, None, [A, B], oline, 1.3)
+                            u = 0.15
+                            while u < 1:
+                                mx, my = A[0] + (B[0] - A[0]) * u, A[1] + (B[1] - A[1]) * u
+                                ll = (4 + 5 * (1 - u)) * (0.7 if S["dried"] else 1.0)
+                                D.line(key, None, [(mx, my), (mx - ll, my + ll * 0.9)], oline, 0.8)
+                                D.line(key, None, [(mx, my), (mx + ll, my + ll * 0.7)], oline, 0.8)
+                                u += 0.17
+                        fx += sp * (0.75 + R() * 0.5)
+            elif cov == "straw":
+                sx = -L
+                while sx < L:
+                    sy = 0.02
+                    while sy < H:
+                        y2 = sy + R() * 0.1
+                        if in_region(sx, y2):
+                            y3 = max(0.0, y2 - 0.2)
+                            D.line(key, None, [P((sx, y2, W * (1 - y2 / H)), t), P((sx, y3, W * (1 - y3 / H)), t)],
+                                   "strawLine", 0.7)
+                        sy += 0.24
+                    sx += 0.075
+            elif cov == "metal":
+                mk = S["mMode"] == "Makeshift"
+                mx = -L
+                while mx < L:
+                    tp = _rm_top_at(front, mx)
+                    yhi = min(tp - 0.02, (mx - (-L + i)) * H / 1.15)
+                    if tp >= 0.05 and yhi > 0.02:
+                        D.line(key, None, [P((mx, 0, W), t), P((mx, yhi, W * (1 - yhi / H)), t)], "metalLine", 0.7)
+                    mx += 0.11
+                jx = -L + 0.95
+                while jx < L:
+                    cj = min(_rm_top_at(front, jx), (jx - (-L + i)) * H / 1.15)
+                    if cj >= 0.05:
+                        D.line(key, None, [P((jx, 0, W), t), P((jx, cj, W * (1 - cj / H)), t)], "metalJoin", 1.6)
+                    jx += 0.92 + ((R() * 0.5 - 0.25) if mk else 0.0)
+                if mk:
+                    for _ in range(6):
+                        px, py = -L + i + 1 + R() * (2 * L - i - 1.4), 0.15 + R() * 0.8
+                        if in_region(px, py):
+                            q1 = P((px, py, W * (1 - py / H)), t)
+                            D.rect(key, None, q1[0] - 7, q1[1] - 5, 14, 9, "metalPatch", "metalJoin", 0.8,
+                                   angle=R() * 16 - 8)
+            else:  # tiles
+                plain = S["tProfile"] == "Plain"
+                cr = 11 if plain else 8
+                for q in range(cr):
+                    yt = H * q / cr + 0.02
+                    zt = W * (1 - yt / H)
+                    lo, hi = _rm_slice_y(front, yt)
+                    xt = max(lo, cut(i, yt))
+                    if hi <= xt:
+                        continue
+                    D.line(key, None, [P((xt, yt, zt), t), P((hi, yt, zt), t)], "tileLine", 1.1)
+                    step = 0.17 if plain else 0.22
+                    off = (q % 2) * step * 0.5
+                    tx = math.ceil((xt - off) / step) * step + off
+                    while tx < hi:
+                        y4 = min(yt + H / cr, _rm_top_at(front, tx) - 0.01)
+                        if y4 > yt and not (S["tMode"] == "Makeshift" and R() < 0.05):
+                            D.line(key, None, [P((tx, yt, zt), t), P((tx, y4, W * (1 - y4 / H)), t)], "tileLine",
+                                   1.6 if S["tProfile"] == "Barrel" else 0.8)
+                        tx += step
+            lab = {"underlay": S["tUnder"].lower() if cov == "tiles" else "inner mat",
+                   "neat": "neat rows"}.get(key) or self.name("outer")[0].lower()
+            if i == n - 1:
+                D.text(*P((1.2, 0.45 * H, W * 0.55), t), text=lab)
+            else:
+                D.text(*P((cut(i, 0.42 * H) + 0.5, 0.42 * H, W * 0.58), t), text=lab)
+        # the + end's face
+        tE = tO * 0.6
+        ofill = _rm_outer_fill(S)
+        if S["endA"] == "hip":
+            D.poly("outer", None, [P((L, 0, W), tE), P((L, 0, -W), tE), P(rA, tE)], ofill, shade=122)
+            e = 0.2
+            while e < 1:
+                ea, eb = P((L, 0, W - 2 * W * e), tE), P(rA, tE)
+                D.line("outer", None, [ea, (ea[0] + (eb[0] - ea[0]) * 0.55, ea[1] + (eb[1] - ea[1]) * 0.55)], oline,
+                       0.8)
+                e += 0.2
+        else:
+            half = S["endA"] == "half"
+            wz2 = W * (1 - hh / H) if half else 0.0
+            wall = [P((L - 0.05, 0, W)), P((L - 0.05, 0, -W)), P((L - 0.05, hh, -wz2)), P((L - 0.05, hh, wz2))] if \
+                half else [P((L - 0.05, 0, W)), P((L - 0.05, 0, -W)), P((L - 0.05, H, 0))]
+            D.poly("end", "a", wall, (64, 59, 54), "wallLine")
+            if half:
+                D.poly("outer", None, [P((L, hh, wz2), tE), P((L, hh, -wz2), tE), P(rA, tE)], ofill, shade=122)
+        # the eaves (the finished front)
+        xe0 = max(-L, cut(n - 1, 0))
+        ea0, ea1 = P((xe0, 0, W), tO), P((L, 0, W), tO)
+        D.line("eave", None, [ea0, ea1], (0, 0, 0, 115), 1.4)
+        runs = [((xe0, 0, W), (L, 0, W))]
+        if S["endA"] != "gable":
+            runs.append(((L, 0, W), (L, 0, -W)))
+        for r0, r1 in runs:
+            a, b = P(r0, tO), P(r1, tO)
+            D.hit("eave", None, [a, b])
+            ln = math.hypot(b[0] - a[0], b[1] - a[1])
+            nt = max(1, int(ln / 5))
+            for m2 in range(nt + 1):
+                u = m2 / float(nt)
+                x, y = a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u
+                if cov == "palm":
+                    hl = 9 + R() * 5 if S["droop"] else 5
+                    dx, dy = (R() * 1.6 - 0.8, hl) if S["droop"] else (-2.4, 3.4)
+                    D.line("eave", None, [(x, y), (x + dx, y + dy)], oline, 1.0)
+                elif cov == "straw":
+                    D.line("eave", None, [(x, y), (x - 0.6, y + (3 + R() * 9 if S["ragged"] else 3))], "strawLine",
+                           0.9)
+            if cov == "tiles" and S["tProfile"] == "Barrel":
+                D.dots("eave", None, (a[0], a[1] + 1), (b[0], b[1] + 1), 9, 2.4, "tileCap")
+            if cov in ("metal", "tiles") and S["fascia"]:
+                D.line("eave", None, [(a[0], a[1] + 4), (b[0], b[1] + 4)], "fascia", 4.0)
+        # the + end's verges
+        if S["endA"] != "hip":
+            half = S["endA"] == "half"
+            vtop = (L, hh, W * (1 - hh / H)) if half else (L, H, 0)
+            vback = (L, hh, -W * (1 - hh / H)) if half else (L, H, 0)
+            col = "metalCap" if cov == "metal" and S["mBarge"] else "tileCap" if (
+                cov == "tiles" and S["tVerge"] == "Verge tiles") else (0, 0, 0, 128)
+            for v in ([P((L, 0, W), tO), P(vtop, tO)], [P((L, 0, -W), tE), P(vback, tE)]):
+                D.line("verge", "a", v, col, 3.2 if cov in ("metal", "tiles") else 1.6, hit=True)
+                if cov == "palm" and not S["flushA"] and S["fringe"] != "none":
+                    lenf = 16 if S["fringe"] == "lots" else 9
+                    for f in range(15):
+                        u = f / 14.0
+                        x, y = v[0][0] + (v[1][0] - v[0][0]) * u, v[0][1] + (v[1][1] - v[0][1]) * u
+                        h = lenf * (0.6 + R() * 0.5) * (0.4 + 0.6 * (1 - u * 0.5))
+                        D.line("verge", "a", [(x, y), (x + R() * 2 - 1, y + h)], oline, 0.9)
+                if cov == "straw" and not S["flushA"]:
+                    for f in range(13):
+                        u = f / 12.0
+                        x, y = v[0][0] + (v[1][0] - v[0][0]) * u, v[0][1] + (v[1][1] - v[0][1]) * u
+                        D.line("verge", "a", [(x, y), (x + 3, y + 2)], "strawLine", 0.8)
+        # the + end's corner lines
+        hip_cap = _rm_cap_on(S, hip=True)
+        if S["endA"] != "gable":
+            st = cA[1] if S["endA"] == "half" else cA[0]
+            for h in ([P(st, tO), P(rA, tO)], [P((st[0], st[1], -st[2]), tE), P(rA, tE)]):
+                if hip_cap:
+                    D.line("corner", "a", h, _rm_cap_col(S), 4.2 if cov == "metal" else 7.0)
+                else:
+                    D.line("corner", "a", h, (0, 0, 0, 140), 1.6)
+                if cov == "palm" and S["hipPoles"]:
+                    D.line("corner", "a", [(h[0][0], h[0][1] - 3), (h[1][0], h[1][1] - 3)], "pole", 3.2)
+                if cov == "tiles" and S["tHip"]:
+                    D.dots("corner", "a", h[0], h[1], 7, 1.6, "tileDot")
+                D.hit("corner", "a", h)
+        # the top line
+        xr0 = max(rB[0], cut(n - 1, H))
+        if xr0 < rA[0]:
+            ra, rb = P((xr0, H, 0), tO), P(rA, tO)
+            cap_on = _rm_cap_on(S)
+            cc = _rm_cap_col(S)
+            if cap_on:
+                D.line("ridge", None, [ra, rb], cc, 4.5 if cov == "metal" else 8.5)
+                if cov == "palm":
+                    nr = max(1, int(math.hypot(rb[0] - ra[0], rb[1] - ra[1]) / 5))
+                    for z in range(nr + 1):
+                        u = z / float(nr)
+                        x3, y3 = ra[0] + (rb[0] - ra[0]) * u, ra[1] + (rb[1] - ra[1]) * u
+                        D.line("ridge", None, [(x3, y3 - 3), (x3 - 3, y3 + 7)],
+                               (108, 95, 48) if S["dried"] else (78, 106, 34), 0.9)
+                if cov == "straw" and S["strawCap"] != "Straight":
+                    ns = max(1, int(math.hypot(rb[0] - ra[0], rb[1] - ra[1]) / 9))
+                    path = QtGui.QPainterPath(QtCore.QPointF(ra[0], ra[1] + 4))
+                    px, py = ra[0], ra[1] + 4
+                    for z in range(1, ns + 1):
+                        u = z / float(ns)
+                        x4, y4 = ra[0] + (rb[0] - ra[0]) * u, ra[1] + (rb[1] - ra[1]) * u + 4
+                        if S["strawCap"] == "Scallops":
+                            path.quadTo((px + x4) * 0.5, (py + y4) * 0.5 + 6, x4, y4)
+                        else:
+                            path.lineTo(x4 - 4.5, y4 + 5)
+                            path.lineTo(x4, y4)
+                        px, py = x4, y4
+                    D._add("ridge", None, "line", (path, _rm_qcolor(cc), 3.0, "round", None), None)
+                if cov == "tiles":
+                    D.dots("ridge", None, ra, rb, 10, 2.2, "tileDot")
+            else:
+                D.line("ridge", None, [ra, rb], (0, 0, 0, 153), 1.6)
+            D.hit("ridge", None, [ra, rb])
+            if cov == "palm" and S["ridgeTop"] == "pole":
+                pa, pb = (ra[0], ra[1] - 5), (rb[0] + 6, rb[1] - 3)
+                D.line("pole", None, [pa, pb], "pole", 4.0, hit=True)
+                nd = 0.1
+                while nd < 1:
+                    x, y = pa[0] + (pb[0] - pa[0]) * nd, pa[1] + (pb[1] - pa[1]) * nd
+                    D.line("pole", None, [(x, y - 2), (x, y + 2)], "poleNode", 1.0)
+                    nd += 0.12
+                if S["ties"]:
+                    td = 0.16
+                    while td < 1:
+                        x, y = pa[0] + (pb[0] - pa[0]) * td, pa[1] + (pb[1] - pa[1]) * td
+                        D.ellipse("pole", None, x, y + 2, 2, 5, None, "tie", 1.1)
+                        td += 0.22
+                D.text((pa[0] + pb[0]) / 2 + 18, (pa[1] + pb[1]) / 2 - 8, "top pole")
+            elif cov == "palm" and S["ties"] and cap_on:
+                td = 0.16
+                while td < 1:
+                    x, y = ra[0] + (rb[0] - ra[0]) * td, ra[1] + (rb[1] - ra[1]) * td
+                    D.ellipse("ridge", None, x, y, 2, 5, None, "tie", 1.1)
+                    td += 0.22
+            D.text((ra[0] + rb[0]) / 2 - 30, (ra[1] + rb[1]) / 2 - 12, "top line")
+        if S["endA"] != "gable":
+            hp, hr = P(cA[1] if S["endA"] == "half" else cA[0], tO), P(rA, tO)
+            D.text((hp[0] + hr[0]) / 2 + 22, (hp[1] + hr[1]) / 2, "corner", "start")
+        else:
+            vp = P((L, H * 0.5, W * 0.5), tO)
+            D.text(vp[0] + 10, vp[1], "end edge", "start")
+        be = P((1.4, 0, W), tO)
+        D.text(be[0], be[1] + (24 if cov == "palm" and S["droop"] else 16), "bottom edge")
+        cbp, cap2 = P((-L, -0.55, W)), P((L, -0.85, 0))
+        D.chip("end", "b", cbp[0] + 24, cbp[1] + 20, u"\u2212 end: " + RM_END_WORD[S["endB"]])
+        D.chip("end", "a", min(cap2[0], 380), cap2[1] + 12, "+ end: " + RM_END_WORD[S["endA"]])
+        return D
+
+    def _draw_slice(self, S):
+        D = _RMDrawing(420, 300)
+        W, H = 1.7, 1.05
+        E = W + 0.06
+        cov = S["cov"]
+        R = random.Random(11).random
+        oline = _rm_outer_line(S)
+
+        def X(z):
+            return 210 + z * 108
+
+        def Y(y):
+            return 168 - y * 112
+
+        c = math.hypot(1, H / W)
+
+        def V(z, t):
+            return (X(z), Y(H - (H / W) * abs(z) + t * c))
+
+        def band(t0, t1, e=E):
+            return [V(-e, t1), V(0, t1), V(e, t1), V(e, t0), V(0, t0), V(-e, t0)]
+
+        for sg in (-1, 1):
+            D.rect(None, None, X(sg * (W - 0.1)) - 5, Y(-0.05), 10, Y(-0.62) - Y(-0.05), "wall", "wallLine")
+        D.text(210, Y(-0.4), "inside", color=(125, 130, 127))
+        if S["frame"]:
+            for sg in (-1, 1):
+                if S["rafters"]:
+                    D.line("rafters", None, [V(sg * (W + 0.02), -0.075), V(0, -0.075)], "wood",
+                           6.0 if S["fstyle"] == "Sawn" else 5.0, hit=True)
+            if S["beam"]:
+                bp = V(0, -0.21)
+                D.rect("beam", None, bp[0] - 6, bp[1] - 6, 12, 12, "wood", "woodDark", 1.0,
+                       radius=0 if S["fstyle"] == "Sawn" else 6)
+            if S["battens_on"]:
+                nb = 3 if cov == "metal" else 7 if cov == "tiles" else {"every": 7, "second": 4}.get(S["battens"], 3)
+                for sg in (-1, 1):
+                    for j in range(nb):
+                        p = V(sg * W * (j + 0.55) / (nb + 0.2), -0.025)
+                        if cov == "metal":
+                            D.rect("battens", None, p[0] - 4, p[1] - 5, 8, 9, "purlin", "woodDark", 0.8)
+                        else:
+                            D.ellipse("battens", None, p[0], p[1], 3, 3, "batten", "woodDark", 0.8)
+            if S["plates"]:
+                for sg in (-1, 1):
+                    D.rect("plate", None, X(sg * (W - 0.1)) - 6, Y(-0.02) - 6, 12, 10, "plate", "woodDark")
+            D.text(X(-1.05) - 34, Y(H - (H / W) * 1.05) + 22, "sloping pole")
+        if _rm_has_under(S):
+            D.poly("underlay", None, band(0, 0.035), _rm_under_fill(S), (0, 0, 0, 102))
+        top = 0.035
+        if cov == "palm":
+            D.poly("neat", None, band(0.035, 0.09), "neat", (0, 0, 0, 102))
+            for sg in (-1, 1):
+                z = 0.05
+                while z < E:
+                    D.line("neat", None, [V(sg * z, 0.035), V(sg * (z + 0.16), 0.095)], "neatLine", 1.1)
+                    z += 0.13
+            top = 0.09
+            if S["top"] != "none":
+                sp = 0.16 if S["top"] == "lots" else 0.26
+                D.poly("outer", None, band(0.09, 0.12), (0, 0, 0, 1), None)
+                for sg in (-1, 1):
+                    z = 0.15 + R() * 0.1
+                    while z < W:
+                        a, b = V(sg * z, 0.115), V(sg * (z + 0.28), 0.1)
+                        D.line("outer", None, [a, b], oline, 2.0, hit=True)
+                        u = 0.2
+                        while u < 1:
+                            m = (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u)
+                            D.line("outer", None, [m, (m[0] + sg * 3, m[1] + 5)], _rm_outer_fill(S), 1.6)
+                            u += 0.25
+                        z += sp * (0.8 + R() * 0.4)
+                top = 0.12
+        elif cov == "straw":
+            D.poly("outer", None, band(0.035, 0.17), "straw", (0, 0, 0, 102))
+            for sg in (-1, 1):
+                z = 0.04
+                while z < E:
+                    D.line("outer", None, [V(sg * z, 0.045), V(sg * (z + 0.12), 0.16)], "strawLine", 0.7)
+                    z += 0.06
+            top = 0.17
+        elif cov == "metal":
+            D.poly("outer", None, band(0.005, 0.03), "metal", "metalLine")
+            top = 0.03
+        else:
+            D.poly("outer", None, band(0.035, 0.075), "tile", (0, 0, 0, 102))
+            for sg in (-1, 1):
+                z = 0.08
+                while z < E:
+                    D.line("outer", None, [V(sg * z, 0.035), V(sg * (z + 0.2), 0.085)], "tileLine", 1.3)
+                    z += 0.19
+            top = 0.085
+        for sg in (-1, 1):
+            a, b = V(sg * E, top), V(sg * E, 0)
+            if cov == "palm":
+                for kk in range(6):
+                    y, x = a[1] + kk * 2.2, a[0] - sg * kk * 0.6
+                    tip = (x + sg * R() * 2, y + 16 + R() * 6) if S["droop"] else (x + sg * 10, y + 6)
+                    D.line("eave", None, [(x, y), tip], oline, 1.0)
+            elif cov == "straw":
+                for kk in range(5):
+                    D.line("eave", None, [(a[0] - sg * kk * 1.2, a[1] + kk * 2.6),
+                                          (a[0] + sg * 3, a[1] + kk * 2.6 + (6 + R() * 8 if S["ragged"] else 4))],
+                           "strawLine", 1.0)
+            elif S["fascia"]:
+                D.rect("eave", None, a[0] - (0 if sg > 0 else 4), a[1], 4, 16, "fascia")
+            D.rect("eave", None, a[0] - 8, a[1] - 4, 16, 24, (0, 0, 0, 1))
+        ap = V(0, top)
+        if _rm_cap_on(S):
+            if cov == "metal":
+                D.line("ridge", None, [V(-0.32, top + 0.012), (ap[0], ap[1] - 7), V(0.32, top + 0.012)], "metalCap",
+                       3.4)
+            elif cov == "tiles":
+                path = QtGui.QPainterPath(QtCore.QPointF(ap[0] - 13, ap[1] + 2))
+                path.arcTo(QtCore.QRectF(ap[0] - 13, ap[1] - 11, 26, 26), 180, -180)
+                path.closeSubpath()
+                D.path("ridge", None, path, "tileCap", "tileLine")
+            else:
+                l, r = V(-0.42, top), V(0.42, top)
+                path = QtGui.QPainterPath(QtCore.QPointF(*l))
+                path.quadTo(ap[0], ap[1] - 22, r[0], r[1])
+                D._add("ridge", None, "line", (path, _rm_qcolor(_rm_cap_col(S)), 9.0 if cov == "straw" else 7.0,
+                                               "round", None), None)
+        else:
+            D.ellipse("ridge", None, ap[0], ap[1], 3, 3, (34, 34, 34))
+        D.ellipse("ridge", None, ap[0], ap[1] - 6, 14, 14, (0, 0, 0, 1))
+        if cov == "palm" and S["ridgeTop"] == "pole":
+            D.ellipse("pole", None, ap[0], ap[1] - 14, 6.5, 6.5, "pole", "poleNode")
+            if S["ties"]:
+                D.ellipse("pole", None, ap[0], ap[1] - 10, 9.5, 11, None, "tie", 1.2)
+        D.text(ap[0] + 44, ap[1] - 12, "top line", "start")
+        if _rm_has_under(S):
+            D.text(X(1.0) + 40, Y(H - (H / W) * 1.0) + 16, self.name("underlay")[0].lower(), "start")
+        if cov == "palm":
+            D.text(X(0.55) + 38, Y(H - (H / W) * 0.55) - 2, "neat rows", "start")
+            if S["top"] != "none":
+                D.text(X(-0.6) - 40, Y(H - (H / W) * 0.6) - 14, "loose top", "end")
+        else:
+            D.text(X(-0.6) - 34, Y(H - (H / W) * 0.6) - 10, self.name("outer")[0].lower(), "end")
+        D.text(X(E) - 4, Y(0) + 34, "bottom edge")
+        D.text(12, 16, "slice, looking along the top line", "start", (141, 145, 143))
+        # the side strip
+        sy0, sy1, sx0, sx1, hd = 228.0, 284.0, 60.0, 360.0, 40.0
+        D.line(None, None, [(0, 216), (420, 216)], (58, 61, 61), 1.0)
+        D.text(12, 232, "side view", "start", (141, 145, 143))
+
+        def end_pts(sg, typ):
+            xe = sx1 if sg > 0 else sx0
+            if typ == "gable":
+                return [(xe, sy1), (xe, sy0)]
+            if typ == "hip":
+                return [(xe, sy1), (xe - sg * hd, sy0)]
+            return [(xe, sy1), (xe, sy1 - (sy1 - sy0) * S["hh"]), (xe - sg * hd * 0.45, sy0)]
+
+        eA, eB = end_pts(1, S["endA"]), end_pts(-1, S["endB"])
+        rA, rB = eA[-1], eB[-1]
+        face = [eB[0], eA[0]] + eA[1:] + list(reversed(eB[1:]))
+        D.poly("outer", None, face, _rm_outer_fill(S), (0, 0, 0, 102))
+        for q in range(1, 4):
+            yy = sy1 - (sy1 - sy0) * q / 4.0
+            D.line("outer", None, [(sx0 + 6, yy), (sx1 - 6, yy)], oline, 0.7)
+        hip_cap = _rm_cap_on(S, hip=True)
+        D.line("ridge", None, [rB, rA], _rm_cap_col(S) if _rm_cap_on(S) else (34, 34, 34),
+               5.0 if _rm_cap_on(S) else 1.6, hit=True)
+        D.line("eave", None, [(sx0, sy1), (sx1, sy1)], (0, 0, 0, 153), 1.6, hit=True)
+        for end, typ, ch in (("a", S["endA"], eA), ("b", S["endB"], eB)):
+            hc = _rm_cap_col(S) if hip_cap else (0, 0, 0, 153)
+            if typ == "gable":
+                D.line("verge", end, ch, (0, 0, 0, 153), 2.0, hit=True)
+            elif typ == "hip":
+                D.line("corner", end, ch, hc, 4.5 if hip_cap else 2.0, hit=True)
+            else:
+                D.line("verge", end, ch[:2], (0, 0, 0, 153), 2.0, hit=True)
+                D.line("corner", end, ch[1:], hc, 4.5 if hip_cap else 2.0, hit=True)
+        D.chip("end", "b", sx0 - 28, sy1 - 12, u"\u2212 " + RM_END_WORD[S["endB"]])
+        D.chip("end", "a", sx1 + 30, sy1 - 12, "+ " + RM_END_WORD[S["endA"]])
+        return D
+
+    def _layer_bar(self, D, S, y, caption=True):
+        cov = S["cov"]
+        if caption:
+            D.text(12, y - 6, u"layers, inside \u2192 outside", "start", (141, 145, 143))
+        bars = [("rafters", "Frame", "wood", S["frame"])]
+        if cov != "metal":
+            bars.append(("underlay", "Under tiles" if cov == "tiles" else "Inner mat", _rm_under_fill(S),
+                         _rm_has_under(S)))
+        if cov == "palm":
+            bars += [("neat", "Neat rows", "neat", True), ("outer", "Loose top", _rm_outer_fill(S), S["top"] != "none")]
+        else:
+            bars.append(("outer", self.name("outer")[0], _rm_outer_fill(S), True))
+        x0, x1, h = 40.0, 380.0, 26.0
+        bw = (x1 - x0) / len(bars)
+        for i, (part, text, fill, on) in enumerate(bars):
+            x = x0 + i * bw
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(QtCore.QRectF(x + 2, y, bw - 4, h), 4, 4)
+            D._add(part, None, "path", (path, _rm_qcolor(fill) if on else None,
+                                        _rm_qcolor((0, 0, 0, 102) if on else (119, 119, 119)), 1.0,
+                                        None), path)
+            if not on:
+                D._add(part, None, "line", (path, _rm_qcolor((119, 119, 119)), 1.0, "flat", [4, 3]), None)
+            D.text(x + bw / 2, y + 17, text + ("" if on else " (off)"), "middle", (17, 17, 17) if on else (
+                154, 159, 156), 9.5, part)
+
+    def _draw_top(self, S):
+        D = _RMDrawing(420, 262)
+        L, W = 3.25, 1.55
+        d = min(W * 0.95 / S["hp"], L * 0.9)
+        hf = S["hh"]
+        cov = S["cov"]
+        R = random.Random(5).random
+        oline, ofill = _rm_outer_line(S), _rm_outer_fill(S)
+
+        def P(x, z):
+            return (210 + x * 54, 104 + z * 52)
+
+        def chain(sg, typ):
+            xe = sg * L
+            if typ == "gable":
+                return [(xe, W), (xe, 0.0)]
+            if typ == "hip":
+                return [(xe, W), (sg * (L - d), 0.0)]
+            return [(xe, W), (xe, W * (1 - hf)), (sg * (L - 0.45 * d), 0.0)]
+
+        cA, cB = chain(1, S["endA"]), chain(-1, S["endB"])
+        rA, rB = cA[-1], cB[-1]
+        front = [cB[0], cA[0]] + cA[1:] + list(reversed(cB[1:]))
+        back = [(p[0], -p[1]) for p in front]
+        D.text(12, 14, "from above", "start", (141, 145, 143))
+        for fi, f in enumerate((front, back)):
+            D.poly("outer", None, [P(*p) for p in f], ofill, (0, 0, 0, 102), shade=114 if fi else 0)
+        for end, typ, ch, sg in (("a", S["endA"], cA, 1), ("b", S["endB"], cB, -1)):
+            if typ == "gable":
+                continue
+            wz, xe, r = (W * (1 - hf) if typ == "half" else W), sg * L, ch[-1]
+            D.poly("outer", None, [P(xe, wz), P(xe, -wz), P(r[0], 0)], ofill, (0, 0, 0, 102), shade=132)
+        x = -L + 0.15
+        while x < L:  # fall lines down each side slope
+            for sg in (1, -1):
+                zs = None
+                zz = 0.0
+                while zz <= W:
+                    a, b = _rm_slice_y(front, zz)
+                    if a <= x <= b:
+                        zs = zz
+                        break
+                    zz += 0.05
+                if zs is None:
+                    continue
+                D.line("outer", None, [P(x, sg * max(zs, 0.04)), P(x, sg * (W - 0.03))],
+                       tuple(list(_rm_qcolor(oline).getRgb()[:3]) + [166]), 0.6 if cov == "metal" else 0.8)
+            x += 0.12 if cov == "metal" else 0.22
+        runs = [(P(-L, W), P(L, W)), (P(-L, -W), P(L, -W))]
+        if S["endA"] == "hip":
+            runs.append((P(L, -W), P(L, W)))
+        if S["endB"] == "hip":
+            runs.append((P(-L, -W), P(-L, W)))
+        for a, b in runs:
+            D.line("eave", None, [a, b], (20, 21, 21), 2.0, hit=True)
+            horiz = abs(b[1] - a[1]) < 1
+            ln = (b[0] - a[0]) if horiz else (b[1] - a[1])
+            out = (1 if a[1] > 104 else -1) if horiz else (1 if a[0] > 210 else -1)
+            if cov in ("palm", "straw"):
+                u = 0.0
+                while u <= ln:
+                    px, py = (a[0] + u, a[1]) if horiz else (a[0], a[1] + u)
+                    l2 = (3 if S["droop"] else 6) if cov == "palm" else (2 + R() * 6 if S["ragged"] else 3)
+                    D.line("eave", None, [(px, py), (px, py + out * l2) if horiz else (px + out * l2, py)], oline, 1.0)
+                    u += 5
+            elif S["fascia"]:
+                o = (0, out * 3) if horiz else (out * 3, 0)
+                D.line("eave", None, [(a[0] + o[0], a[1] + o[1]), (b[0] + o[0], b[1] + o[1])], "fascia", 2.2)
+        for end, typ, sg in (("a", S["endA"], 1), ("b", S["endB"], -1)):
+            if typ == "hip":
+                continue
+            xe, wz = sg * L, (W * (1 - hf) if typ == "half" else 0.0)
+            segs = [(P(xe, -W), P(xe, W))] if typ == "gable" else [(P(xe, W), P(xe, wz)), (P(xe, -wz), P(xe, -W))]
+            col = "metalCap" if cov == "metal" and S["mBarge"] else "tileCap" if (
+                cov == "tiles" and S["tVerge"] == "Verge tiles") else (20, 21, 21)
+            flush = S["flushA"] if end == "a" else S["flushB"]
+            for a, b in segs:
+                D.line("verge", end, [a, b], col, 3.4, hit=True)
+                if cov == "palm" and not flush and S["fringe"] != "none":
+                    y = min(a[1], b[1])
+                    while y <= max(a[1], b[1]):
+                        D.line("verge", end, [(a[0], y), (a[0] + sg * (11 if S["fringe"] == "lots" else 6), y + 1)],
+                               oline, 1.0)
+                        y += 4
+        hip_cap = _rm_cap_on(S, hip=True)
+        for end, typ, ch in (("a", S["endA"], cA), ("b", S["endB"], cB)):
+            if typ == "gable":
+                continue
+            st, r = (ch[1] if typ == "half" else ch[0]), ch[-1]
+            for h in ([P(st[0], st[1]), P(r[0], 0)], [P(st[0], -st[1]), P(r[0], 0)]):
+                D.line("corner", end, h, _rm_cap_col(S) if hip_cap else (20, 21, 21), 6.0 if hip_cap else 2.0)
+                if cov == "palm" and S["hipPoles"]:
+                    D.line("corner", end, h, "pole", 2.6)
+                D.hit("corner", end, h)
+        ra, rb = P(rB[0], 0), P(rA[0], 0)
+        if _rm_cap_on(S):
+            D.line("ridge", None, [ra, rb], _rm_cap_col(S), 6.0 if cov == "metal" else 10.0)
+            if cov == "straw" and S["strawCap"] != "Straight":
+                sx = ra[0] + 4
+                while sx < rb[0] - 2:
+                    for dy in (6, -6):
+                        if S["strawCap"] == "Scallops":
+                            D.ellipse("ridge", None, sx, ra[1] + dy, 2.2, 2.2, "strawCap")
+                        else:
+                            D.rect("ridge", None, sx - 2, ra[1] + dy - 2, 4, 4, "strawCap", angle=45)
+                    sx += 8
+            if cov == "tiles":
+                D.dots("ridge", None, ra, rb, 10, 2.4, "tileDot")
+        else:
+            D.line("ridge", None, [ra, rb], (20, 21, 21), 2.0)
+        D.hit("ridge", None, [ra, rb])
+        if cov == "palm" and S["ridgeTop"] == "pole":
+            D.line("pole", None, [(ra[0] - 6, ra[1]), (rb[0] + 6, rb[1])], "pole", 3.4, hit=4.0)
+            if S["ties"]:
+                tx = ra[0] + 10
+                while tx < rb[0]:
+                    D.line("pole", None, [(tx, ra[1] - 5), (tx, ra[1] + 5)], "tie", 1.6)
+                    tx += 26
+        D.text((ra[0] + rb[0]) / 2, ra[1] - 10, "top line")
+        D.text(210, 104 + W * 52 + 16, "bottom edge")
+        if S["endA"] != "gable":
+            hs, hr = P(L, W), P(rA[0], 0)
+            D.text((hs[0] + hr[0]) / 2 - 6, (hs[1] + hr[1]) / 2 + 4, "corner", "end")
+        if S["endA"] != "hip":
+            D.text(210 + L * 54 + 8, 104 - W * 52 - 4, "end edge", "start")
+        D.chip("end", "b", 210 - L * 54 + 14, 104 + W * 52 + 16, u"\u2212 " + RM_END_WORD[S["endB"]])
+        D.chip("end", "a", 210 + L * 54 - 14, 104 + W * 52 + 16, "+ " + RM_END_WORD[S["endA"]])
+        self._layer_bar(D, S, 222)
+        return D
+
+    def _draw_simple(self, S):
+        """Lean-to and cone: a plain outline with its edges and the layer bar
+        (the same in every view)."""
+        D = _RMDrawing(420, 262)
+        cov, shape = S["cov"], S["shape"]
+        ofill, oline = _rm_outer_fill(S), _rm_outer_line(S)
+        if shape == "Cone":
+            cx, ty, by, rx, ry = 210.0, 30.0, 160.0, 150.0, 34.0
+            back = QtGui.QPainterPath()
+            back.addEllipse(QtCore.QPointF(cx, by), rx, ry)
+            D.path(None, None, back, (51, 48, 44), "wallLine")
+            face = QtGui.QPainterPath(QtCore.QPointF(cx - rx, by))
+            face.lineTo(cx, ty)
+            face.lineTo(cx + rx, by)
+            face.arcTo(QtCore.QRectF(cx - rx, by - ry, 2 * rx, 2 * ry), 0, -180)
+            face.closeSubpath()
+            D.path("outer", None, face, ofill, (0, 0, 0, 102))
+            for i in range(1, 12):
+                a = math.pi * i / 12.0
+                D.line("outer", None, [(cx, ty + 8), (cx - rx * math.cos(a), by + ry * math.sin(a))], oline, 0.7)
+            rim = QtGui.QPainterPath(QtCore.QPointF(cx + rx, by))
+            rim.arcTo(QtCore.QRectF(cx - rx, by - ry, 2 * rx, 2 * ry), 0, -180)
+            D.path("eave", None, rim, None, (20, 21, 21), 2.0)
+            D.ellipse("ridge", None, cx, ty + 6, 9 if _rm_cap_on(S) else 4, 9 if _rm_cap_on(S) else 4,
+                      _rm_cap_col(S) if _rm_cap_on(S) else (34, 34, 34))
+            D.ellipse("ridge", None, cx, ty + 6, 15, 15, (0, 0, 0, 1))
+            D.text(cx + 22, ty + 10, "tip", "start")
+            D.text(cx, by + ry + 14, "bottom edge")
+        else:
+            P = lambda x, y, z: (213 + 46 * (0.97 * x - 0.5 * z), 120 + 46 * (0.2 * x + 0.42 * z - 0.98 * y))
+            L, W, H = 3.0, 1.6, 1.4
+            D.poly(None, None, [P(-L, 0, W), P(L, 0, W), P(L, -0.8, W), P(-L, -0.8, W)], "wall", "wallLine")
+            D.poly(None, None, [P(L, 0, W), P(L, H, -W), P(L, -0.8, -W), P(L, -0.8, W)], (64, 59, 54), "wallLine")
+            D.poly("outer", None, [P(-L, 0, W), P(L, 0, W), P(L, H, -W), P(-L, H, -W)], ofill, (0, 0, 0, 102))
+            for i in range(1, 9):
+                y = H * i / 9.0
+                z = W - 2 * W * i / 9.0
+                D.line("outer", None, [P(-L, y, z), P(L, y, z)], oline, 0.7)
+            D.line("ridge", None, [P(-L, H, -W), P(L, H, -W)], _rm_cap_col(S) if cov in ("metal", "tiles") and
+                   _rm_cap_on(S) else (20, 21, 21), 3.0, hit=True)
+            D.line("eave", None, [P(-L, 0, W), P(L, 0, W)], (20, 21, 21), 2.0, hit=True)
+            D.line("verge", "a", [P(L, 0, W), P(L, H, -W)], (20, 21, 21), 2.0, hit=True)
+            D.line("verge", "b", [P(-L, 0, W), P(-L, H, -W)], (20, 21, 21), 2.0, hit=True)
+            D.text(*P(0, H, -W), text="top edge")
+            be = P(0, 0, W)
+            D.text(be[0], be[1] + 14, "bottom edge")
+        D.chip("shape", None, 360, 22, shape)
+        self._layer_bar(D, S, 222)
+        return D
+
+
 class ThatchRoofPanel(QtWidgets.QWidget):
     TOOL_NAME = "Roof"
     TOOL_TIP = "Roofs from a box: gable, hip or half-hip ends, lean-to or cone, thatched (a surface, straw " \
@@ -29274,9 +30827,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                         "tiles."))
         self.next_banner = NextBanner()
         tl.addWidget(self.next_banner)
+        self.roof_map = RoofMap(self)  # the clickable roof picture
+        tl.addWidget(self.roof_map)
         outer.addWidget(top)
         scroll, col = scroll_column()
         outer.addWidget(scroll, 1)
+        self.roof_map.scroll = scroll
         self.f = {}
         self._rows = {}
         self._group = {}  # key -> "thatch" / "metal" / "tiles" / "both": which covering shows it
@@ -30139,6 +31695,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self._update_rows()
 
     def _update_rows(self):
+        self.roof_map.refresh()
         s = self._settings()
         metal = s["covering"] == "Corrugated"
         tiles = s["covering"] == "Tiles"
@@ -30810,6 +32367,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             timer.stop()
         self._kill(self._jobs + self._box_jobs)
         self._jobs, self._box_jobs = [], []
+        self.roof_map.shutdown()
 
 
 # =============================================================================

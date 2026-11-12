@@ -366,6 +366,24 @@
   "Edges" (Gable fringe first), "Ridge, poles and ties" (`poles_sec`: leaf
   cap, ridge / hip / hold-down poles, lashings, sticks); "More controls"
   keeps Resolution, Leaf thickness, Curl variation and the straw-piece rows.
+- **Roof Map (2026-11-12).** `RoofMap` (above `ThatchRoofPanel`), pinned
+  between the NEXT banner and the scroll area, foldable: a QPainter picture
+  of the roof in three views (Cut open, the default: layers stepped back
+  frame -> underlay -> neat rows -> top; Slice + a side strip; From above +
+  a layer bar). Lean-to and cone get one simple outline in every view.
+  Hover names a part in plain words (top line, corner line, end edge,
+  bottom edge...), click opens its step card and sections, scrolls and
+  flashes its rows (~1.3 s), right-click gives quick choices. It reads
+  only `panel.f` (`_rm_state`) and edits by `field.setValue(v)` then
+  `field.changed.emit()` (setValue alone is silent), so live rebuild,
+  links and undo are the panel's own. Tables: `RM_NAMES` (names),
+  `RM_JUMPS` (part -> keys per covering, `_X` = the clicked end; missing
+  keys are skipped, so renamed settings only drop out of the map),
+  `_rm_choices` (menus). Hooks in the panel: built in `_build`,
+  `refresh()` first thing in `_update_rows` (every edit, preset, roof
+  pick), `shutdown()`. View / fold kept in optionVars `unlokRoofMapView` /
+  `unlokRoofMapOpen`. Folded, it keeps no picture. Test:
+  `tests/run_gui_roof_map.mel` (pictures in `tests/_out/roof_map`).
   - **Frame** (`thatch_frame`): the box's world matrix and its mesh's local
     bounding box give roof space: x along the ridge, y up from the eaves
     (the box's bottom), z across; L / W half the length / width, H height.
