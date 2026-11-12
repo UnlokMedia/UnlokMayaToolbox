@@ -345,6 +345,16 @@
   Shag 0.4, Lift 1.5, Edge droop 1.3 with Limp top fronds 1 (a fringe
   hanging straight down), Past the edges 0, Messiness parts low. The test's
   sky rays only count inside a cone's ellipse (`oval`).
+  **Under layer over the top** (`under_over_top`, off by default; on in
+  the two ridged palapa presets; the user, 2026-11-12: "the under layer of
+  leaves doesn't go over the top ridge at all, so if the top layers are
+  sparse, theres big gaps"): a last under course at t_hi - 0.03 course
+  under the cap too. Closed every sky hole along the ridge at 60x30x40 and
+  60x15x40 (dm). A steep 60x50x40 still shows ~3 at the hip/ridge joints
+  (the top course there is a closed loop already: not its ends). Palm
+  leaf sizes are fractions of the span, so a roof builds the same at any
+  scale: the earlier preset tests at 4-6 units (a 0.5 m roof in dm) hold
+  at 40-60.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

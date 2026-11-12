@@ -1142,10 +1142,16 @@ def run():
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
     s_old.pop("flow")
-    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy"):
+    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top"):
         s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
-          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0)[0] == tb["thatch_build"](fr_, s_old)["straw"][0])
+          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0, under_over_top=False)[0] ==
+          tb["thatch_build"](fr_, s_old)["straw"][0])
+    check("Under layer over the top: a look key, off by default, on in the ridged palapas, adds a course",
+          "under_over_top" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["under_over_top"] is False and
+          all(tb["thatch_preset"](n_).get("under_over_top") for n_ in ("Palm: palapa (hipped, messy top)",
+                                                                      "Palm: bushy palapa (shaggy)")) and
+          dry_build(under_over_top=False)[0] != dry_build(under_over_top=True)[0])
     sh_, base_ = dry_build(shag=1.5), dry_build()
     check("Shag stands the leaves off the roof", sh_[0] != base_[0])
     check("Cap leaf width changes the cap leaves", dry_build(cap_width=0.01)[0] != base_[0])

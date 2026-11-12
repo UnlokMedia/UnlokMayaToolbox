@@ -20286,7 +20286,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0,
+    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20298,7 +20298,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -20370,6 +20370,7 @@ THATCH_PRESETS = {
         "battens": "Every course", "rafter_spacing": 0.11,
         "crinkle": 0.25, "leaf_twist": 0.2, "width_var": 0.25, "width_wobble": 0.2, "bent_tips": 0.08},
     "Palm: palapa (hipped, messy top)": {
+        "under_over_top": True,
         "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "thickness": 0.04, "softness": 0.45, "sag": 0.15,
         "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
         "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
@@ -20382,6 +20383,7 @@ THATCH_PRESETS = {
     # two layers of loose fronds, lots of volume, leaf tips standing off at stiff angles (Shag), the odd one
     # sticking right out; light and dry, not combed flat ("wet hair"); thin leaves over the hips
     "Palm: bushy palapa (shaggy)": {
+        "under_over_top": True,
         "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "overhang": 0.0, "thickness": 0.04, "volume": 1.6,
         "softness": 0.7, "sag": 0.15, "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
         "resolution": 150, "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.15, "leaf_width": 0.026,
@@ -23287,8 +23289,11 @@ def _th_fronds_mesh(F, G, s):
     # course shifted half a tile
     ts = _th_palm_courses(F, s, t_hi)
     has_cap = capped_ridge and F.shape != "Lean-to"
-    if not has_cap and t_hi - 0.08 * dt > (ts[-1] if ts else F.t_low):
-        ts.append(t_hi - 0.08 * dt)  # no cap: a last course right at the top
+    # Under over top (the user, 2026-11-12: "the under layer of leaves doesn't go over the top ridge at all, so if
+    # the top layers are sparse, theres big gaps"): a last course right at the top under the cap too
+    over_top = bool(s.get("under_over_top", False)) and F.shape != "Lean-to"
+    if (not has_cap or over_top) and t_hi - 0.08 * dt > (ts[-1] if ts else F.t_low):
+        ts.append(t_hi - (0.03 if over_top else 0.08) * dt)  # a last course right at the top
     t_topmax = t_hi - (0.3 * ll / F.slope if has_cap else 0.2 * dt)  # loose fronds lap onto the cap
     tops = [t + 0.5 * dt for t in ts if t + 0.5 * dt < t_topmax] if top_amt > 0.0 else []
     found = _th_course_lines(F, G, ts + tops)  # straight along each face (contours wandered with every lump)
@@ -31409,6 +31414,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                                           "cone's tip, so rain can't get in where the slopes meet. Off: the "
                                           "ridge is open. The ridge pole on top of them is its own switch.")
         sec.add_full(self.f["ridge_fronds"])
+        self.f["under_over_top"] = CheckField("Under layer over the top")
+        self.f["under_over_top"].setToolTip("The under layer's last course right up at the ridge, under the leaf "
+                                            "cap, so the top is closed even where the cap and the loose top layer "
+                                            "are sparse. Off: the courses stop short of the ridge and the cap "
+                                            "covers it alone.")
+        sec.add_full(self.f["under_over_top"])
         self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
         self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
                                          "weighing it down, as on many palm roofs (in the sticks mesh, with the "
@@ -31767,7 +31778,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.ttrim_sec.setVisible(tiles)
         for sec in (self.mk_sec, self.levels_sec, self.cap_sec, self.block_sec):
             sec.setVisible(thatch)  # metal / tiles have their own makeshift controls; levels / blockers: thatch
-        for key in ("ridge_fronds", "sticks", "ridge_poles", "hip_poles", "lashings"):
+        for key in ("ridge_fronds", "under_over_top", "sticks", "ridge_poles", "hip_poles", "lashings"):
             self.f[key].setVisible(palm and thatch)
         self.f["frame_hips"].setVisible(not cone and ends != ("Gable", "Gable"))  # a part only where there is one
         self.f["frame_beam"].setVisible(s["shape"] == "Ridge")
