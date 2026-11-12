@@ -395,6 +395,34 @@
   Ridge cover (Leaves / Wood strip boards `ridge_boards()` / Bamboo pole).
   Presets: Peak height 0.6, width 0.7, sides -0.3, tip 0.9, bundles 1, cap
   width 0.008.
+  **Ridge layers** (`ridge_layers` 1-4, default 1 = unchanged; Ridge
+  section, IntField): from a low camera the cap is one thin smooth sheet
+  and reads as a flat bright plank on top. Layers 2+ are extra `saddle()`
+  passes (own randoms, `seed + 7919 k`, the first pass's `peak_prep`
+  reused via `state["saddle_pk"]`): sunk at the crest by `3 k cap_step`
+  (fading to 0 at the tip) and longer (`Lt x (1 + 0.35 k)`), so the ridge
+  is a bulky roll stepping down into the slope. Even with layers, any Peak
+  height left a flat-fronted band from the low view: the dock hut preset
+  uses Peak height 0.
+  **Preset "beach_dock_hut_001"** (2026-11-12, matched to the user's photo
+  of a palapa on a lagoon dock, camera at eave height from front-right;
+  then their notes: shorter fronds, dry but straight, only tiny crinkle,
+  packed down tight not fluffy, eave fringe slightly wind-swept, the ridge
+  the same leaves as the rest, small tufts on the hips): short leaves
+  0.12, Density 3, Top fronds 2.5, Volume 1.4, Lift 0.7, Shag 0, Max
+  angle 30, Lumps 1, crinkle 0.08, curl 0.1, Fringe length 1.8, Wind
+  0.8, Edge droop 2.2 / limp 1, Pokes 0 (a clump left a dark hole), cap
+  width 0.008 and Ridge width 0.5 (Cap leaf width 0 means the UNDER
+  layer's width, ~2x the top fronds: the ridge read as different
+  leaves), Ridge layers 3, no peak, ridge shag 0.8. Grouped under Palm in
+  the combo (no "Palm:" head; palm style). Checked on an 80 x 30 x 52 dm
+  box (posts 23 dm). Pictures: scratchpad `dock/dock_pics.py` (mayapy +
+  Arnold, no GUI; argv variants.json, out folder, toolbox).
+  **Wind** (`edge_wind` -1..1) swings the hanging leaves on the long sides
+  (|z| F.L >= |x| F.W) one way along the eave (a bias on `edge_leaf`'s
+  swing). **Fringe length** (`edge_length` 0.3-4, 1 = as before) scales
+  only the part of a leaf hanging off an edge (`edge_leaf`'s ls), so
+  short fronds can still hang in a long curtain.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

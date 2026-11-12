@@ -1211,6 +1211,22 @@ def run():
     check("Variation 0 builds every variation slider at 0; 1 leaves them as set",
           dry_build(variety=0.0, **v_on)[0] == dry_build(**dict((k, 0.0) for k in vk_))[0] and
           dry_build(variety=1.0, **v_on)[0] != dry_build(variety=0.0, **v_on)[0])
+    # --- Ridge layers and the photo-matched dock hut preset (the user, 2026-11-12)
+    check("Ridge layers: a look key, 1 by default (exactly as before); 3 adds cap leaves, with or without a peak",
+          "ridge_layers" in tb["THATCH_LOOK_KEYS"] and D_["ridge_layers"] == 1 and
+          dry_build(ridge_layers=1)[0] == rb0_ and len(dry_build(ridge_layers=3)[0]) > len(rb0_) and
+          len(dry_build(ridge_layers=3, peak_height=0.0)[0]) > len(dry_build(peak_height=0.0)[0]))
+    fl_ = dry_build(edge_length=2.0)
+    check("Wind and Fringe length: look keys, neutral by default; each changes the leaves; a longer fringe "
+          "hangs lower",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in ("edge_wind", "edge_length")) and D_["edge_wind"] == 0.0 and
+          D_["edge_length"] == 1.0 and dry_build(edge_wind=0.0, edge_length=1.0)[0] == rb0_ and
+          dry_build(edge_wind=0.8)[0] != rb0_ and fl_[0] != rb0_ and
+          min(p[1] for p in fl_[0]) < min(p[1] for p in rb0_) - 1e-3)
+    dk_ = tb["thatch_preset"]("beach_dock_hut_001")
+    check("Preset beach_dock_hut_001: palm fronds, hipped, 3 ridge layers, no peak",
+          dk_ is not None and dk_["style"] == "Palm Fronds" and dk_["end_a"] == dk_["end_b"] == "Hip" and
+          dk_["ridge_layers"] == 3 and dk_["peak_height"] == 0.0)
     sh_ = tb["_th_peak_shape"]
     gl_ = tb["_th_peak_glyph"](1.0, 0.7, -0.5, 0.5)
     check("Peak shape: 1 on the crest, 0 from Peak width on, level where it meets the slope; full sides higher "
