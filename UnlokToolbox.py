@@ -37308,6 +37308,7 @@ class _DebrisBuild(object):
         tried = int(min(MOSS_MAX_CUSHIONS, max(16, sampler.total / (math.pi * self.R * self.R) * 4.5)))
         self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
         self.cover = 0.05 / m
+        self.blocked = getattr(s.get("_paint"), "blocked", None)  # the group's blockers (_ScBlocked): no item in one
 
     # ------------------------------------------------------------- placing
     def _spots(self, density, kind, reach=0.0):
@@ -37323,6 +37324,7 @@ class _DebrisBuild(object):
         step = math.sqrt(self.per)
         lim = float(self.s["slope"])
         cut = math.cos(math.radians(min(90.0, lim + 15.0))) - 1e-6  # past Slope limit + 15 degrees: never
+        blocked = self.blocked
         for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
             _poll()  # a long build: the Working window, Esc / Cancel
             if row is None or cand[1][1] < cut:
@@ -37349,6 +37351,8 @@ class _DebrisBuild(object):
                 c = self.surf.closest((p[0] + t1[0] * x + t2[0] * y, p[1] + t1[1] * x + t2[1] * y,
                                        p[2] + t1[2] * x + t2[2] * y))
                 if c is None or _rl_dot(c[2], n) < 0.3 or c[2][1] < cut:  # snapped onto a face turned away
+                    continue
+                if blocked is not None and blocked(c[1]):  # jittered into a blocker
                     continue
                 out.append((c[1], c[2], rr, row[0], i))
         return out
@@ -37933,6 +37937,8 @@ class _DebrisBuild(object):
         return spine, nrms
 
     def _ribbon(self, spine, nrms, w, twist, stack):
+        if self.blocked is not None and any(self.blocked(p) for p in spine):
+            return  # a grass blade (any of them: bunch, heap, stray) that would lie in a blocker
         pts, counts, conn, us, vs, uvi = self.G
         b = len(pts)
         last = len(spine) - 1
@@ -39045,6 +39051,8 @@ SC_BOX_ATTR = "unlokScatterBox"    # bool on the box
 SC_BOX_OF = "unlokScatterBoxOf"    # string on the box: its group's uuid
 SC_BOX_ID = "unlokScatterBoxId"    # string on the group: its box's uuid
 SC_BOX_AUTO = "unlokScatterBoxAuto"  # bool on a box made outside the undo queue (a Ctrl+D copy's)
+SC_BLOCKER_ATTR = "unlokScatterBlocker"  # string on a blocker box the tool made: its group's uuid
+SC_BLOCK_GAP = 0.1  # metres: just outside a blocker things thin out (none inside)
 # the control group (the user, 2026-11-09: only normal geometry in what gets published; the box, instancers,
 # particles and hidden shapes in a group of their own, next to the box): scatterControl####_GRP
 SC_CTL = "unlokScatterControl"     # string on a control group: its scatter group's uuid
@@ -39685,6 +39693,62 @@ class _MiInfluence(object):
         return f + k * (1.0 - f) if k > 0.0 else f * (1.0 + k)
 
 
+class _ScBlocked(object):
+    """A layer's influence paint (_MiPaint or None) with the group's
+    blockers (the user, 2026-11-12: "a quick blockers system for scatters,
+    same as the thatched roofs ... block things from spawning in certain
+    areas"): at(p) is -1 (nothing grows) inside any blocker box, easing
+    back to the paint over SC_BLOCK_GAP outside it; blocked(p): inside one
+    (debris checks each item's own spot too). boxes: world boxes {"c", "u",
+    "h"} (_th_blocker_box)."""
+
+    def __init__(self, paint, boxes):
+        self.paint = paint
+        self.base = paint.base if paint is not None else 0.0
+        self.top = paint.top if paint is not None else 0.0
+        self.gap = SC_BLOCK_GAP / scene_m_per_unit()
+        self.boxes = []
+        for b in boxes:
+            c, u, h = tuple(b["c"]), [tuple(v) for v in b["u"]], tuple(b["h"])
+            r = [sum(abs(u[k][i]) * h[k] for k in range(3)) + self.gap for i in range(3)]  # its world reach
+            self.boxes.append((c, u, h, [c[i] - r[i] for i in range(3)], [c[i] + r[i] for i in range(3)]))
+        self.key = hash((paint.key if paint is not None else 0,
+                         json.dumps([[b["c"], b["u"], b["h"]] for b in boxes], sort_keys=True)))
+
+    def __repr__(self):
+        return "<blocked paint %x>" % (self.key & 0xffffffffffff)
+
+    def _out(self, p):
+        """How far p is outside the nearest blocker (0 inside), or None past every gap."""
+        best = None
+        for c, u, h, lo, hi in self.boxes:
+            if p[0] < lo[0] or p[1] < lo[1] or p[2] < lo[2] or p[0] > hi[0] or p[1] > hi[1] or p[2] > hi[2]:
+                continue
+            d = (p[0] - c[0], p[1] - c[1], p[2] - c[2])
+            e2 = 0.0
+            for k in range(3):
+                e = abs(d[0] * u[k][0] + d[1] * u[k][1] + d[2] * u[k][2]) - h[k]
+                if e > 0.0:
+                    e2 += e * e
+            if best is None or e2 < best:
+                best = e2
+                if not e2:
+                    return 0.0
+        return None if best is None else math.sqrt(best)
+
+    def blocked(self, p):
+        return self._out(p) == 0.0
+
+    def at(self, p):
+        k = self.paint.at(p) if self.paint is not None else 0.0
+        d = self._out(p)
+        if d is None or d >= self.gap:
+            return k
+        if d <= 0.0:
+            return -1.0
+        return min(k, -(1.0 - d / self.gap) ** 2)
+
+
 def _sc_paint_margin(margin, k, cov):
     """A spot's coverage margin with influence k painted on it (cov: the
     layer's Coverage): painted in, its coverage goes up by k of the way to
@@ -39737,11 +39801,11 @@ def _mi_drop_repeats(mesh):
     return (pts, nc, ncon, us, vs, nuv)
 
 
-def _sc_build_layer(layer, surf, draft=False, rest_on=None):
+def _sc_build_layer(layer, surf, draft=False, rest_on=None, blocks=None):
     """A layer's parts {part: mesh} and counts, built on the surfaces (draft:
     a moss layer grows its quick look, "draft" in its counts; rest_on: the
     group's moss beds grown before it, [(mesh, lift)], for leaves that Rest
-    on moss)."""
+    on moss; blocks: the group's blocker boxes, where nothing grows)."""
     typ = sc_type(layer.get("type"))
     s = sc_settings(layer)
     seeds = mi_seed_points(layer) or None
@@ -39750,6 +39814,8 @@ def _sc_build_layer(layer, surf, draft=False, rest_on=None):
     draw = _MiDrawing(strokes, float(s["draw_width"]) / scene_m_per_unit(), s["draw_falloff"], s["draw_follow"],
                       surf.nodes) if strokes else None
     paint = sc_paint_of(layer)
+    if blocks:
+        paint = _ScBlocked(paint, blocks)
     counts = {}
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
@@ -39915,6 +39981,8 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     surf = surf or _mi_surface(meshes)
     _mi_room(root, len(surf.nodes))
     skey = tuple(_mi_mesh_key(x) for x in surf.nodes)
+    blocks = _sc_blocker_boxes(data)
+    skey = skey + _sc_blocker_keys(blocks)  # a blocker moved or resized grows the layers again, like a surface
     report["skey"] = skey
     grown = _sc_grown_layers(root, data, skey) if readback else {}
     saved = {}
@@ -39942,7 +40010,7 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             hit = _sc_read_layer(root, layer, saved.get(lid))
         if hit is None:
             kw = {"rest_on": list(rest)} if on_moss else {}
-            hit = _sc_build_layer(layer, surf, draft, **kw) if surf.items else ({}, {})
+            hit = _sc_build_layer(layer, surf, draft, blocks=blocks, **kw) if surf.items else ({}, {})
             fresh = fresh or typ == "Moss"
         if typ == "Moss" and hit[0].get("moss") and hit[0]["moss"][1]:
             ls = sc_settings(layer)
@@ -40527,6 +40595,9 @@ def sc_owner(node):
     if _sc_ctl_of(node):  # a control group
         found = cmds.ls(_sc_ctl_of(node), long=True)
         return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
+    if _sc_blocker_of(node):  # a blocker box the tool made picks its group
+        found = cmds.ls(_sc_blocker_of(node), long=True)
+        return (found[0], None) if found and _sc_attr(found[0]) else (None, None)
     up = node
     for _ in range(3):  # instanced shoots: the instancer, the shapes' group, a shape under their node
         if cmds.attributeQuery(SC_SHOOTS, node=up, exists=True):
@@ -40560,7 +40631,8 @@ def sc_surfaces(data):
     but the ones left out of it (exclude: a mesh, or a group inside it),
     never anything inside a scatter group."""
     groups = [g + "|" for g in sc_groups(baked=True)]
-    left_out = _sc_left_out(data)
+    blockers = sc_blockers(data)  # a blocker is never grown on
+    left_out = _sc_left_out(data) + blockers
     out = []
     for uid in data.get("surfaces") or []:
         found = cmds.ls(uid, long=True) or []
@@ -40577,12 +40649,14 @@ def sc_surfaces(data):
                 if cmds.attributeQuery(SC_PART, node=sh, exists=True):  # baked scatter moved in: added only by hand
                     continue
                 t = cmds.listRelatives(sh, parent=True, fullPath=True)[0]
-                if cmds.attributeQuery(SC_BOX_ATTR, node=t, exists=True):  # a group's box moved in
+                if cmds.attributeQuery(SC_BOX_ATTR, node=t, exists=True) or \
+                        cmds.attributeQuery(SC_BLOCKER_ATTR, node=t, exists=True):  # a box / blocker moved in
                     continue
                 if t not in cand and not _sc_inside(t, left_out):
                     cand.append(t)
         for t in cand:
-            if t not in out and not any((t + "|").startswith(g) for g in groups):
+            if t not in out and not any((t + "|").startswith(g) for g in groups) and \
+                    not (blockers and _sc_inside(t, blockers)):
                 out.append(t)
     return out
 
@@ -41484,6 +41558,116 @@ def sc_surface_names(data):
     return out
 
 
+# --------------------------------------------------------------- blockers
+# Like the Roof tool's: boxes (or any meshes / groups) where nothing in the group grows, every layer. A mesh
+# keeps its own box through its transform (rotate and scale it), a group its world bounding box. Stored on the
+# group's JSON as "blockers": [uuid]; moving one grows the group again at the next regrow (its box is in the
+# surface key).
+def sc_blockers(data):
+    """The group's blockers that still exist (long names)."""
+    out = []
+    for uid in data.get("blockers") or []:
+        found = cmds.ls(uid, long=True)
+        if found and found[0] not in out:
+            out.append(found[0])
+    return out
+
+
+def _sc_blocker_boxes(data):
+    """World boxes {"id", "c", "u", "h"} of the group's blockers as they are
+    now (rounded, so a reopened scene keys the same; gone or flat ones left
+    out)."""
+    boxes = []
+    for node in sc_blockers(data):
+        b = _th_blocker_box(node)
+        if b:
+            boxes.append({"id": b["id"], "c": [round(v, 6) for v in b["c"]],
+                          "u": [[round(v, 6) for v in u] for u in b["u"]], "h": [round(v, 6) for v in b["h"]]})
+    return boxes
+
+
+def _sc_blocker_keys(blocks):
+    """Blocker boxes as entries of a group's surface key (_sc_same_surf compares them like meshes)."""
+    return tuple(("blocker:" + b["id"], 0, 0, tuple(b["c"]) + tuple(v for u in b["u"] for v in u), tuple(b["h"]))
+                 for b in blocks)
+
+
+def sc_blockers_moved(root):
+    """True when a blocker of the group was moved, rotated or scaled since
+    it last grew (the panel regrows it then)."""
+    _sc_note(root)
+    known = _SC_SURF.get(root)
+    if known is None or not is_scatter(root):
+        return False
+    old = [x for x in known if str(x[0]).startswith("blocker:")]
+    now = json.loads(json.dumps(_sc_blocker_keys(_sc_blocker_boxes(sc_data(root)))))
+    return not _sc_same_surf(old, now)
+
+
+def sc_set_blockers(root, add=(), remove=(), label="Scatter blockers"):
+    """Make nodes blockers of the group (add) or stop them being blockers
+    (remove), then regrow (one Ctrl+Z). Its own box and parts never are."""
+    def edit(data):
+        have = [u for u in data.get("blockers") or [] if cmds.ls(u)]
+        own = set(cmds.ls([n for n in [sc_box(root), sc_control(root)] if n], uuid=True) or [])
+        for n in add or ():
+            if not n or not cmds.objExists(n) or sc_owner(n)[0] == root and not _sc_blocker_of(n):
+                continue
+            uid = cmds.ls(n, uuid=True)[0]
+            if uid not in have and uid not in own:
+                have.append(uid)
+        gone = set(u for n in remove or () if n and cmds.objExists(n) for u in cmds.ls(n, uuid=True))
+        data["blockers"] = [u for u in have if u not in gone]
+    return _sc_change(root, label, edit)
+
+
+def _sc_blocker_of(node):
+    """The uuid of the group a blocker box the tool made belongs to, or ""."""
+    if node and cmds.objExists(node) and cmds.attributeQuery(SC_BLOCKER_ATTR, node=node, exists=True):
+        return cmds.getAttr(node + "." + SC_BLOCKER_ATTR) or ""
+    return ""
+
+
+def sc_create_blocker(root):
+    """A blocker box for the group: a red wireframe cube (never renders) in
+    the middle of the group's box, a third of its size and as tall, in its
+    control group (one Ctrl+Z with linking it). Selected; returns
+    (report, node)."""
+    ref = sc_box(root)
+    bb = cmds.exactWorldBoundingBox(ref) if ref else None
+    if not bb:
+        meshes = sc_surfaces(sc_data(root))
+        if not meshes:
+            raise ValueError("%s has nothing to place a blocker by" % short_name(root))
+        bb = cmds.exactWorldBoundingBox(meshes)
+    size = [max(bb[3 + i] - bb[i], 1e-3) for i in range(3)]
+    s = [size[0] / 3.0, max(size[1], 0.5 / scene_m_per_unit()), size[2] / 3.0]
+    with UndoChunk("Scatter blocker"):
+        num = _th_free_number("scatterBlocker%04d")
+        node = long_name(cmds.polyCube(width=1, height=1, depth=1, constructionHistory=False,
+                                       name="scatterBlocker%04d" % num)[0])
+        shape = _log_shape(node)
+        cmds.addAttr(node, longName=SC_BLOCKER_ATTR, dataType="string")
+        cmds.setAttr(node + "." + SC_BLOCKER_ATTR, cmds.ls(root, uuid=True)[0], type="string")
+        for attr in ("castsShadows", "receiveShadows", "primaryVisibility", "visibleInReflections",
+                     "visibleInRefractions"):
+            if cmds.attributeQuery(attr, node=shape, exists=True):
+                cmds.setAttr(shape + "." + attr, False)
+        cmds.setAttr(node + ".overrideEnabled", True)
+        cmds.setAttr(node + ".overrideShading", False)
+        cmds.setAttr(node + ".overrideColor", 13)  # red wireframe: not the group's box
+        ctl = sc_control(root)
+        if ctl:
+            node = long_name(cmds.parent(node, ctl)[0])
+        mid = ((bb[0] + bb[3]) * 0.5, bb[1] + s[1] * 0.5 - 0.1 * size[1], (bb[2] + bb[5]) * 0.5)
+        cmds.xform(node, worldSpace=True, matrix=[s[0], 0.0, 0.0, 0.0, 0.0, s[1], 0.0, 0.0, 0.0, 0.0, s[2], 0.0,
+                                                   mid[0], mid[1], mid[2], 1.0])
+        rep = sc_set_blockers(root, add=[node], label="Scatter blocker")
+        if cmds.objExists(node):
+            cmds.select(node, replace=True)
+    return rep, node
+
+
 def bake_scatter(roots):
     """Plain meshes (one Ctrl+Z): empty parts and the box go, the settings
     move to a hidden attribute. Edits saved while paused grow first (it
@@ -41515,6 +41699,11 @@ def bake_scatter(roots):
             box = sc_box(root)
             if box:
                 cmds.delete(box)
+            mine = cmds.ls(root, uuid=True)[0]  # blocker boxes the tool made for it (yours stay), unless
+            used = set(u for r in sc_groups() if r != root for u in sc_data(r).get("blockers") or [])  # shared
+            for node in sc_blockers(sc_data(root)):
+                if _sc_blocker_of(node) == mine and cmds.ls(node, uuid=True)[0] not in used:
+                    cmds.delete(node)
             ctl = sc_control(root)
             if ctl and not [k for k in cmds.listRelatives(ctl, children=True, fullPath=True) or []
                             if not cmds.attributeQuery(SC_SHOOTS, node=k, exists=True)]:
@@ -42763,6 +42952,25 @@ class ScatterPanel(QtWidgets.QWidget):
                                            "rest of the group stays.")
         rem_s.clicked.connect(lambda *_: self.remove_surfaces())
         gl.addWidget(button_row(add_s, rem_s))
+        # blockers (like the Roof tool's): where nothing in the group grows
+        self.block_label = hint_label("")
+        gl.addWidget(self.block_label)
+        add_b = secondary_button("Add Blocker", "A red wireframe box (never renders) in the middle of the group: "
+                                                "nothing in any layer grows inside it (things thin out just round "
+                                                "it). Move, rotate and scale it over the area to keep clear, then "
+                                                "Regrow (or change anything).")
+        add_b.clicked.connect(lambda *_: self.add_blocker())
+        use_b = secondary_button("Use Selected", "Make the selected meshes or groups blockers of the group being "
+                                                 "edited: a mesh blocks its own box (rotated, scaled), a group its "
+                                                 "bounding box. A blocker is never grown on.")
+        use_b.clicked.connect(lambda *_: self.use_blockers())
+        rem_b = secondary_button("Remove", "Stop the selected blockers blocking the group (or all of them when "
+                                           "none is selected). The boxes stay in the scene.")
+        rem_b.clicked.connect(lambda *_: self.remove_blockers())
+        sel_b = secondary_button("Select", "Select the group's blockers.")
+        sel_b.clicked.connect(lambda *_: self.select_blockers())
+        gl.addWidget(button_row(add_b, use_b))
+        gl.addWidget(button_row(rem_b, sel_b))
         from_g = secondary_button("New Group from This", "A new, empty scatter group on exactly what this one grows "
                                                          "on (its surfaces, what's left out, its Start UDIM): no "
                                                          "selecting them again. Then Add Layer (one Ctrl+Z).")
@@ -43335,6 +43543,11 @@ class ScatterPanel(QtWidgets.QWidget):
                                 else "")
         self.box_btn.setVisible(bool(root) and sc_box(root) is None)
         self.group_box.setVisible(bool(root))
+        if root:
+            names = [short_name(n) for n in sc_blockers(sc_data(root))]
+            self.block_label.setText(("Blocked by: %s." % ", ".join(names[:5]) + (
+                " (+%d)" % (len(names) - 5) if len(names) > 5 else "")) if names else
+                "No blockers: Add Blocker for a box where nothing grows, or select meshes and Use Selected.")
         if (drawing or n) and not self.draw_fold.header.isChecked():
             self.draw_fold.header.setChecked(True)  # strokes to scatter on: show their buttons
         self.step_group.set_state("done" if root else "current")
@@ -43391,7 +43604,11 @@ class ScatterPanel(QtWidgets.QWidget):
                     self._lid = sel["layer"]
             self._sel_now = sel  # _update_states reuses it (a 200-mesh pick read it twice)
             try:
-                self._refresh()
+                root = self._alive()
+                if root and not sc_paused() and sc_blockers_moved(root):  # a blocker was moved: grow round it
+                    self._structural("Regrew (blocker moved)", lambda: sc_regrow(root))
+                else:
+                    self._refresh()
             finally:
                 self._sel_now = None
         except Exception:
@@ -43571,6 +43788,48 @@ class ScatterPanel(QtWidgets.QWidget):
             self.set_status("Pick the surfaces to remove in the list.", level="warn")
             return
         self._structural("Removed %d from" % len(nodes), lambda: sc_set_surfaces(self._root, remove=nodes))
+
+    @ui_safe
+    def add_blocker(self):
+        if not self._alive():
+            self.set_status("Select a scatter group (click its box) first: the blocker goes in it.", level="warn")
+            return
+        root = self._root
+        self._structural("Added a blocker to", lambda: sc_create_blocker(root)[0])
+        self._root = root  # (the new box is selected: it picks this group)
+
+    @ui_safe
+    def use_blockers(self):
+        if not self._alive():
+            self.set_status("Select a scatter group (click its box) first, then the meshes to block it.",
+                            level="warn")
+            return
+        picked = sc_selection()["surfaces"]
+        if not picked:
+            self.set_status("Select the meshes or groups that should block the group.", level="warn")
+            return
+        self._structural("Blocked by %d:" % len(picked), lambda: sc_set_blockers(self._root, add=picked))
+
+    @ui_safe
+    def remove_blockers(self):
+        if not self._alive():
+            return
+        have = sc_blockers(sc_data(self._root))
+        sel = set(long_name(n) for n in cmds.ls(selection=True, objectsOnly=True, long=True) or [])
+        picked = [n for n in have if n in sel] or have
+        if not picked:
+            self.set_status("%s has no blockers." % short_name(self._root))
+            return
+        self._structural("Unblocked %d:" % len(picked), lambda: sc_set_blockers(self._root, remove=picked))
+
+    @ui_safe
+    def select_blockers(self):
+        nodes = sc_blockers(sc_data(self._root)) if self._alive() else []
+        if nodes:
+            cmds.select(nodes, replace=True)
+            self.set_status("Selected %d blocker(s)." % len(nodes))
+        else:
+            self.set_status("No blockers to select.", level="warn")
 
     @ui_safe
     def add_layer(self, typ):

@@ -226,8 +226,13 @@ def main():
     cmds.select(bx)
     panel._sync_from_selection()
     pump()
+    def beside(box, grp):  # in the group's control group, never inside the scatter group
+        par = cmds.listRelatives(box, parent=True, fullPath=True)
+        ctl = ns["sc_control"](grp)
+        return bool(par) and bool(ctl) and cmds.ls(par[0], uuid=True) == cmds.ls(ctl, uuid=True) and \
+            not cmds.ls(box, long=True)[0].startswith(cmds.ls(grp, long=True)[0] + "|")
     check("the box is beside the group, and clicking it picks the group",
-          not cmds.listRelatives(bx, parent=True) and panel._root == root and panel.box_btn.isHidden())
+          beside(bx, root) and panel._root == root and panel.box_btn.isHidden())
     pub = cmds.group(empty=True, world=True, name="publish_GRP")
     cmds.xform(pub, translation=(5, 2, 0), rotation=(0, 20, 0))
     moved = cmds.ls(cmds.parent(root, pub)[0], long=True)[0]
@@ -243,7 +248,7 @@ def main():
     panel.box_btn.click()
     pump()
     nb = ns["sc_box"](moved)
-    check("Make Box puts one back beside it", nb and not cmds.listRelatives(nb, parent=True) and
+    check("Make Box puts one back beside it", nb and beside(nb, moved) and
           panel.box_btn.isHidden(), panel.status.text())
     cmds.parent(moved, world=True)
     cmds.delete(pub)
@@ -291,12 +296,12 @@ def main():
             if panel.layer_list.item(k).data(QtCore.Qt.UserRole) == grass][0]
     item.setCheckState(QtCore.Qt.Unchecked)
     pump()
-    gnode = ns["sc_parts"](root)[grass + "/grass"]
-    check("unticking a layer hides it", not cmds.getAttr(gnode + ".visibility") and
+    check("unticking a layer removes its parts", grass + "/grass" not in ns["sc_parts"](root) and
           not ns["sc_layer"](ns["sc_data"](root), grass)["on"])
     cmds.undo()
     panel._after_undo()  # a scripted undo sends no Undo event
-    check("one Ctrl+Z ticks it back on", cmds.getAttr(gnode + ".visibility") and
+    gnode = ns["sc_parts"](root).get(grass + "/grass")
+    check("one Ctrl+Z ticks it back on", gnode and cmds.getAttr(gnode + ".visibility") and
           panel.layer_list.item([l["id"] for l in ns["sc_data"](root)["layers"]].index(grass)).checkState() ==
           QtCore.Qt.Checked)
 
@@ -324,6 +329,34 @@ def main():
     check("Duplicate copies the layer", panel.layer_list.count() == 5 and
           ns["sc_data"](root)["layers"][-1]["type"] == "Leaf piles", panel.status.text())
     panel.delete_layer()
+
+    # --- blockers: Add Blocker, moving it regrows round it, Select, Remove
+    panel._lid = None
+    check("the blockers row shows while editing, none yet", not panel.block_label.isHidden() and
+          "No blockers" in panel.block_label.text(), panel.block_label.text())
+    panel.add_blocker()
+    pump()
+    blk = (ns["sc_blockers"](ns["sc_data"](root)) or [None])[0]
+    check("Add Blocker makes a red box, selected, and the panel stays on the group",
+          blk and cmds.ls(selection=True, long=True) == [blk] and panel._root == root and
+          "scatterBlocker" in panel.block_label.text(), panel.block_label.text())
+    stamp = cmds.getAttr(root + "." + ns["SC_STAMP"])
+    cmds.move(3.0, 0, 0, blk, relative=True)
+    panel._sync_from_selection()
+    pump()
+    check("moved, the next selection change regrows round it", cmds.getAttr(root + "." + ns["SC_STAMP"]) != stamp and
+          not ns["sc_blockers_moved"](root), panel.status.text())
+    cmds.select(clear=True)
+    panel._sync_from_selection()
+    panel.select_blockers()
+    check("Select picks the group's blockers", cmds.ls(selection=True, long=True) == [blk])
+    panel.remove_blockers()
+    pump()
+    check("Remove unblocks it (the box stays)", not ns["sc_data"](root).get("blockers") and cmds.objExists(blk) and
+          "No blockers" in panel.block_label.text(), panel.status.text())
+    cmds.delete(blk)
+    cmds.select(root)
+    panel._sync_from_selection()
 
     # --- pictures of piles alone, at the wall's foot / in the gutter
     for lid in (moss, leaves, grass):

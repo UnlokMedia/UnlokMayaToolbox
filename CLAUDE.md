@@ -1398,6 +1398,31 @@
     Flood / Clear, `paint_label`), `(painted)` rows, PAINTING banner,
     `_paint_states` keeps the brush on the layer being edited, `_after_undo`
     reloads it.
+  - **Blockers** (the user, 2026-11-12: "a quick blockers system for
+    scatters, same as the thatched roofs ... block things from spawning in
+    certain areas"): group level, every layer. `data["blockers"]` = uuids
+    (`sc_blockers`); `_sc_blocker_boxes` = `_th_blocker_box` per node (a
+    mesh's own box through its matrix, a group's world bbox), rounded.
+    Build: `_sc_build_layer(blocks=)` wraps the layer's paint in
+    `_ScBlocked(paint, boxes)`: `at(p)` -1 inside a box, easing back to the
+    paint over `SC_BLOCK_GAP` (0.1 m) outside, so moss / ivy / debris
+    fields avoid it like painted-out; `blocked(p)` (inside) is also a hard
+    check on each debris spot (`_DebrisBuild._spots`) and every grass
+    blade (`_DebrisBuild._ribbon`: bunches, heaps and strays all end
+    there; a heap's blades don't go through `_blade`). No blockers = no
+    wrapper (bit-identical). The boxes join the surface key
+    (`_sc_blocker_keys`, "blocker:<uuid>" entries `_sc_same_surf` compares
+    like meshes), so a moved blocker misses the layer cache and readback;
+    `sc_blockers_moved(root)` compares them with `_SC_SURF`, and the
+    panel's `_sync_from_selection` regrows the edited group when it's true
+    (not paused). A blocker is never grown on (`sc_surfaces` skips it and
+    anything tagged `SC_BLOCKER_ATTR`). `sc_set_blockers` (through
+    `_sc_change`, one Ctrl+Z); `sc_create_blocker` (one UndoChunk round the
+    red wireframe `scatterBlocker####` in the control group, tagged with
+    the group's uuid so `sc_owner` picks the group, and the link). Bake
+    deletes only the tool's own boxes no other group uses. Panel: in
+    `group_box` (Add Blocker / Use Selected / Remove / Select,
+    `block_label`). `tests/test_scatter_blockers.py`.
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass
