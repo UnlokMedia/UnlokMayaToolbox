@@ -369,20 +369,32 @@
   hip caps, roots in the cap) and Ridge spikes. One more layer on top of a
   combed cap did little: the fix had to be in the cap leaves. Presets:
   fringe 1.5, shag 1, width 0.7. Pictures: `arnold_pics.py` view "drone".
-  **Pinched ridge** (2026-11-12, the user's paintover: a triangle from the
-  side with a crisp top line, leaves in bundles clamped over the ridge):
-  Ridge bundles (`slots` in `saddle`, randoms 8860), Ridge pinch (the cap's
-  bend becomes a sharp fold, `fold()`; also takes `ThatchField.rr`
-  rounding off the ridge line), Ridge profile (`r_curve`, bows the fold's
-  legs), Ridge cover (Leaves / Wood strip boards `ridge_boards()` / Bamboo
-  pole), Ridge sink (`dip()`: lowers the cap's crest into the roof, none at
-  the leaf's end) and Pinch height. Measured with a slice through the ridge:
-  the slope courses stop short of the crest, so the roof's own crest stood
-  ~1 unit above their thatch and the cap rode on it as a hood with upright
-  sides ("sticking up too much"); sink fixes that. Sink past ~0.85 rise
-  pressed the cap leaves flat into one clipping sheet, so the slider tops
-  out below that. Presets: bundles 1, pinch 0.75, sink 0.78, cap width
-  0.008.
+  **Ridge peak** (2026-11-12, the user's paintover: a triangle from the
+  side with a crisp top line, leaves in bundles clamped over the ridge).
+  First tried as Ridge pinch / sink / pinch height / profile (still read
+  with Peak height 0, for old roofs; no panel rows): they fought each
+  other and the user couldn't steer the shape. Now the cap is laid on a
+  set cross-section (`peak_prep()` in `_th_fronds_mesh`): the slopes'
+  thatch top is measured in space across the ridge (75th percentile of
+  leaf heights in 8 bands just past Peak width, a line fitted, carried up
+  to the crest), the cap's top = that line + a cap step + Peak height x
+  rise x `_th_peak_shape(u, Peak sides)` (hollow / straight / full, eased
+  level into the slope over its last 40%: no corners). Cap leaves walk the
+  roof, then `onto()` sets them straight up onto it (offsets along the
+  roof's normal threw them sideways off a sharp crest: a wide flat hood);
+  Peak tip blends the bend over the top to a crease (`fold()`). Everything
+  laid before the cap within reach is pressed below it (the under layer's
+  top course and its sticks poked through). Frame: `frame()` takes
+  directions from the roof's own samples; the ridge's ends are saddle's
+  lo / hi (F.x0..x1 spans the hips too: measuring over them gave nonsense).
+  Ridge shag tufts on the ridge root via `onto()` too. Check shape with a
+  slice through the ridge (`scratchpad` slice.py idea: plot leaf vertices
+  in a thin slab across the ridge), not just renders. Panel: FloatField
+  `ends=` draws a little cross-section (`_th_peak_glyph`) at each end of
+  the four Peak sliders. Also Ridge bundles (`slots`, randoms 8860) and
+  Ridge cover (Leaves / Wood strip boards `ridge_boards()` / Bamboo pole).
+  Presets: Peak height 0.6, width 0.7, sides -0.3, tip 0.9, bundles 1, cap
+  width 0.008.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

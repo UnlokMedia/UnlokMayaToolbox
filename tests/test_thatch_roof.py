@@ -456,8 +456,8 @@ def run():
         tiles = set(int(math.floor(max(0.0, u - 1e-6))) for u in us)
         normals = fn.getNormals(om.MSpace.kWorld)
         up = sum(1 for n in normals if n.y > 0.0) / float(len(normals))
-        # the bushy palapa is denser on purpose (two layers of loose fronds over the rows): its own limit
-        check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < (10.0 if "bushy" in k else 6.0),
+        # the bushy palapa is denser on purpose (two layers of loose fronds over the rows; Ridge peak ~0.5s): its own limit
+        check("%s: builds at Medium (%.2fs)" % (k, dt), rep["pieces"] > 100 and dt < (11.0 if "bushy" in k else 6.0),
               "%d fronds, %d faces" % (rep["pieces"], fn.numPolygons))
         check("%s: 3 stacks, UVs the right way round, leaves face out" % k, tiles == {0, 1, 2} and good > 0.99 and
               up > 0.8, "%s, %.2f%% upright, %.1f%% up" % (sorted(tiles), good * 100, up * 100))
@@ -1145,13 +1145,14 @@ def run():
     s_old.pop("flow")
     for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height",
                "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes",
-               "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height"):
+               "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height",
+               "peak_height", "peak_width", "peak_sides", "peak_tip"):
         s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
           dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0, under_over_top=False, ridge_height=1.0,
                     ridge_width=1.0, ridge_lumps=1.0, root_tuck=0.0, root_shift=0.0, root_var=0.0, ridge_shag=0.0,
                     ridge_spikes=1.0, ridge_fringe=0.0, ridge_bundles=0.0, ridge_pinch=0.0, ridge_curve=0.5, ridge_sink=0.0, pinch_height=1.0,
-                    ridge_cover="Leaves")[0] ==
+                    ridge_cover="Leaves", peak_height=0.0)[0] ==
           tb["thatch_build"](fr_, s_old)["straw"][0])
     art_ = ("ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var")
     check("Ridge and root art direction: look keys, as before by default, each changes the leaves",
@@ -1168,7 +1169,7 @@ def run():
           all(tb["thatch_preset"](n_).get("ridge_shag", 0.0) > 0.0 for n_ in ("Palm: palapa (hipped, messy top)",
                                                                              "Palm: bushy palapa (shaggy)")) and
           len(sh1_[0]) > len(sh0_[0]) and dry_build(ridge_shag=1.0, ridge_spikes=2.0)[0] != sh1_[0])
-    rk_ = ("ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height")
+    rk_ = ("ridge_fringe", "ridge_bundles", "ridge_cover", "peak_height", "peak_width", "peak_sides", "peak_tip")
     rb0_ = dry_build()[0]
 
     def full_build(**over):
@@ -1180,12 +1181,23 @@ def run():
     skw_ = full_build(ridge_cover="Wood strip")["sticks"]
     skb_ = full_build(ridge_cover="Bamboo pole", ridge_poles=False)["sticks"]
     skn_ = full_build(ridge_poles=False)["sticks"]
-    check("Ridge fringe, bundles, pinch, profile and cover: look keys, neutral by default, each changes the leaves",
+    check("Ridge fringe, bundles, cover and peak: look keys, neutral by default (Peak height 0: off), each "
+          "changes the leaves",
           all(k in tb["THATCH_LOOK_KEYS"] for k in rk_) and tb["THATCH_DEFAULTS"]["ridge_fringe"] == 0.0 and
-          tb["THATCH_DEFAULTS"]["ridge_bundles"] == 0.0 and tb["THATCH_DEFAULTS"]["ridge_pinch"] == 0.0 and
+          tb["THATCH_DEFAULTS"]["ridge_bundles"] == 0.0 and tb["THATCH_DEFAULTS"]["peak_height"] == 0.0 and
           tb["THATCH_DEFAULTS"]["ridge_cover"] == "Leaves" and
+          all(tb["thatch_preset"](n_).get("peak_height", 0.0) > 0.0 for n_ in ("Palm: palapa (hipped, messy top)",
+                                                                              "Palm: bushy palapa (shaggy)")) and
           all(dry_build(**{k: v})[0] != rb0_ for k, v in (("ridge_fringe", 0.0), ("ridge_bundles", 0.0),
-                                                          ("ridge_pinch", 0.0), ("ridge_curve", -0.8), ("ridge_sink", 0.0), ("pinch_height", 0.4))))
+                                                          ("peak_height", 0.0), ("peak_width", 1.2),
+                                                          ("peak_sides", 1.0), ("peak_tip", 0.0))))
+    sh_ = tb["_th_peak_shape"]
+    gl_ = tb["_th_peak_glyph"](1.0, 0.7, -0.5, 0.5)
+    check("Peak shape: 1 on the crest, 0 from Peak width on, level where it meets the slope; full sides higher "
+          "than straight, hollow lower; slider pictures in 0..1",
+          abs(sh_(0.0, 0.0) - 1.0) < 1e-9 and sh_(1.0, 0.0) == 0.0 and sh_(1.5, 1.0) == 0.0 and
+          abs(sh_(0.999, 0.0)) < 1e-4 and sh_(0.5, 1.0) > sh_(0.5, 0.0) > sh_(0.5, -1.0) > 0.0 and
+          all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in gl_) and len(gl_) > 10)
     check("Ridge cover: Wood strip adds boards to the sticks, Bamboo pole turns the ridge pole on",
           skw_ and sk0_ is not None and len(skw_[0]) > len(sk0_[0] if sk0_ else []) and
           skb_ and len(skb_[0]) > len(skn_[0] if skn_ else []),

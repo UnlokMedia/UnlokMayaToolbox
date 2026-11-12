@@ -2217,6 +2217,25 @@ def _guard_focus(widget):
     return widget
 
 
+class _ShapeGlyph(QtWidgets.QWidget):
+    """A tiny drawn shape beside a slider (a polyline in 0..1, y up): what that end of the slider leans to."""
+
+    def __init__(self, pts, parent=None):
+        super(_ShapeGlyph, self).__init__(parent)
+        self.pts = list(pts)
+        self.setFixedSize(30, 16)
+
+    def paintEvent(self, ev):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        pen = QtGui.QPen(self.palette().color(QtGui.QPalette.WindowText))
+        pen.setWidthF(1.4)
+        p.setPen(pen)
+        w, h = self.width() - 4.0, self.height() - 4.0
+        p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(2.0 + x * w, 2.0 + (1.0 - y) * h) for x, y in self.pts]))
+        p.end()
+
+
 class FloatField(QtWidgets.QWidget):
     """Spin box + slider. The slider covers a soft range; typing can go
     beyond it up to the hard range."""
@@ -2224,7 +2243,7 @@ class FloatField(QtWidgets.QWidget):
     changed = QtCore.Signal()
     STEPS = 1000
 
-    def __init__(self, lo, hi, soft_lo=None, soft_hi=None, decimals=3, step=0.1, parent=None):
+    def __init__(self, lo, hi, soft_lo=None, soft_hi=None, decimals=3, step=0.1, parent=None, ends=None):
         super(FloatField, self).__init__(parent)
         self.soft = (lo if soft_lo is None else soft_lo, hi if soft_hi is None else soft_hi)
         lay = QtWidgets.QHBoxLayout(self)
@@ -2239,7 +2258,11 @@ class FloatField(QtWidgets.QWidget):
         self.slider = _guard_focus(_Slider(QtCore.Qt.Horizontal))
         self.slider.setRange(0, self.STEPS)
         lay.addWidget(self.spin)
+        if ends:  # ends: two little pictures (polylines) of what each end of the slider leans to
+            lay.addWidget(_ShapeGlyph(ends[0]))
         lay.addWidget(self.slider, 1)
+        if ends:
+            lay.addWidget(_ShapeGlyph(ends[1]))
         self.spin.valueChanged.connect(self._spin_changed)
         self.slider.valueChanged.connect(self._slider_changed)
 
@@ -20288,6 +20311,7 @@ THATCH_DEFAULTS = {
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
     "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
+    "peak_height": 0.0, "peak_width": 0.7, "peak_sides": 0.0, "peak_tip": 0.8,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20299,7 +20323,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -20373,7 +20397,7 @@ THATCH_PRESETS = {
     "Palm: palapa (hipped, messy top)": {
         "under_over_top": True, "ridge_height": 0.35, "ridge_lumps": 0.8, "root_tuck": 0.6, "root_var": 0.4,
         "root_shift": 0.05, "ridge_shag": 1.0, "ridge_fringe": 1.5, "ridge_width": 0.7, "ridge_bundles": 1.0,
-        "ridge_pinch": 0.75, "cap_width": 0.008, "ridge_sink": 0.78,
+        "peak_height": 0.6, "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "cap_width": 0.008,
         "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "thickness": 0.04, "softness": 0.45, "sag": 0.15,
         "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
         "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
@@ -20388,7 +20412,7 @@ THATCH_PRESETS = {
     "Palm: bushy palapa (shaggy)": {
         "under_over_top": True, "ridge_height": 0.35, "ridge_lumps": 0.8, "root_tuck": 0.6, "root_var": 0.4,
         "root_shift": 0.05, "ridge_shag": 1.0, "ridge_fringe": 1.5, "ridge_width": 0.7, "ridge_bundles": 1.0,
-        "ridge_pinch": 0.75, "cap_width": 0.008, "ridge_sink": 0.78,
+        "peak_height": 0.6, "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "cap_width": 0.008,
         "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "overhang": 0.0, "thickness": 0.04, "volume": 1.6,
         "softness": 0.7, "sag": 0.15, "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
         "resolution": 150, "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.15, "leaf_width": 0.026,
@@ -20536,8 +20560,8 @@ class ThatchField(object):
         # Ridge pinch (palm, 2026-11-12: "super flat along the top, we're not getting that nice thin pinch down the
         # middle"): the ridge line's own rounding goes (hips keep Softness), so the leaves fold over a sharp crest
         pinch = clamp(float(s.get("ridge_pinch", 0.0)), 0.0, 1.0)
-        if s.get("ridge_cover") == "Wood strip":
-            pinch = max(pinch, 0.85)
+        if s.get("ridge_cover") == "Wood strip" or float(s.get("peak_height", 0.0)) > 0.0:
+            pinch = max(pinch, 1.0 if float(s.get("peak_height", 0.0)) > 0.0 else 0.85)
         self.rr = soft * 0.15 * W * (1.0 - 0.85 * pinch)
         self.apex = soft * 0.12
         self.ms = H / (self.R if self.cone else (2.0 * W if self.shape == "Lean-to" else W))
@@ -22026,6 +22050,36 @@ HOLD_BEND = 0.08
 HOLD_REACH = 0.25
 
 
+def _th_peak_shape(u, sides):
+    """The ridge peak's height (1 on the crest .. 0) at u = distance down a side / Peak width. sides: Peak
+    sides, -1 curving up into the point (hollow), 0 straight, 1 rounded (full). Eased level into the slope over
+    its last 40%, so the ridge meets the slope with no corner (the user, 2026-11-12: "another two pinches
+    either side ... vertical walls")."""
+    if u >= 1.0:
+        return 0.0
+    u = max(0.0, u)
+    f = 1.0 - u
+    if sides > 0.0:
+        f += sides * ((1.0 - u * u) - f)
+    elif sides < 0.0:
+        f += -sides * ((1.0 - u) ** 2 - f)
+    return f * (1.0 - _rl_smooth01((u - 0.6) / 0.4)) if u > 0.6 else f
+
+
+def _th_peak_glyph(height, width, sides, tip):
+    """A tiny ridge cross-section for a slider's end: [(x, y)] in 0..1, the roof's two slopes with the peak
+    on top (Peak height, width, sides, tip)."""
+    n = 33
+    xs = [-1.0 + 2.0 * i / (n - 1) for i in range(n)]
+    ys = [0.5 - 0.42 * abs(x) + 0.42 * height * _th_peak_shape(abs(x) / max(0.05, width), sides) for x in xs]
+    k = int(round((1.0 - tip) * 3))  # a rounded tip: the top smoothed over
+    for _ in range(k):
+        ys = [ys[0]] + [0.25 * ys[i - 1] + 0.5 * ys[i] + 0.25 * ys[i + 1] if abs(xs[i]) < 0.35 else ys[i]
+                        for i in range(1, n - 1)] + [ys[-1]]
+    lo, hi = min(ys), max(ys)
+    return [(0.5 + 0.5 * x, 0.08 + 0.84 * (y - lo) / max(1e-6, hi - lo)) for x, y in zip(xs, ys)]
+
+
 def _th_fronds_mesh(F, G, s):
     """Palm thatch (nipa / attap shingles, palapa, Pacific and beach-hut
     roofs) that is a whole roof on its own, seen from outside or inside:
@@ -22109,6 +22163,17 @@ def _th_fronds_mesh(F, G, s):
     # Pinch height: how high the pinch's peak stands
     r_sink = clamp(float(s.get("ridge_sink", 0.0)), 0.0, 1.0)
     r_peak = clamp(float(s.get("pinch_height", 1.0)), 0.0, 3.0)
+    # Ridge peak (the user, 2026-11-12, after pinch / sink / pinch height / profile: "I'm still struggling to
+    # control the ridge shape ... which direction they go and what they do"): the ridge cap laid along a set
+    # cross-section instead: a point Peak height (x the thatch's rise) above the slopes' thatch, Peak width
+    # (cap leaf lengths) down each side, Peak sides hollow / straight / full, Peak tip round .. knife. Replaces
+    # the pinch family (kept for old roofs: they apply with Peak height 0)
+    r_pk = clamp(float(s.get("peak_height", 0.0)), 0.0, 3.0)
+    r_pw = clamp(float(s.get("peak_width", 0.7)), 0.2, 2.0)
+    r_ps = clamp(float(s.get("peak_sides", 0.0)), -1.0, 1.0)
+    r_pt = clamp(float(s.get("peak_tip", 0.8)), 0.0, 1.0)
+    if r_pk:
+        r_pinch, r_sink, r_curve = 1.0, 0.0, 0.0
     r_cover = s.get("ridge_cover", "Leaves")
     if r_cover not in THATCH_RIDGE_COVERS:
         r_cover = "Leaves"
@@ -22996,6 +23061,124 @@ def _th_fronds_mesh(F, G, s):
             k_in += 1
         return rest
 
+    def peak_prep(lo, hi):
+        """Ridge peak, worked out in space across the ridge (heights off the roof misled on a steep pitch: the
+        cap floated ~2 units over the thatch in a hood). The slopes' thatch top near the ridge measured: in
+        bands across the ridge, a little way down past the peak, most of the leaves' highest points, a
+        straight line fitted down each side and carried up to the crest; the cap's top is that line plus a
+        leaf's clearance plus the peak (Peak height x rise, _th_peak_shape over Peak width). Everything
+        already laid in under it is pressed down below it (the under layer's top course and its sticks came
+        up through the cap: "underlayer fronds sticking out directly from the ridge"). Directions come from
+        the roof itself (the mesh's frame isn't the field's (x, z)). Returns surf(d): the cap's height off
+        the roof d down a side, for its leaves; None: no ridge to measure."""
+        kz = math.hypot(1.0, F.ms)
+        W = r_pw * Lc
+        xm = min(max(0.5 * (lo + hi), F.x0 + 1e-6), F.x1 - 1e-6)  # the ridge's middle (lo, hi: its ends)
+        dz = 0.25 * Lc / kz
+        cs = [_th_cell(G, F, xm, 0.0), _th_cell(G, F, xm, dz), _th_cell(G, F, min(F.x1 - 1e-6, xm + Lc), 0.0)]
+        if None in cs:
+            return None
+        C, up = _th_sample(G, *cs[0])[:2]
+        P1 = _th_sample(G, *cs[1])[0]
+        R1 = _th_sample(G, *cs[2])[0]
+        a = _rl_sub(P1, C)
+        a = _rl_norm(_rl_sub(a, _rl_mul(up, _rl_dot(a, up))))  # across the ridge, level
+        rd = _rl_sub(R1, C)
+        rd = _rl_norm(_rl_sub(rd, _rl_mul(up, _rl_dot(rd, up))))  # along it
+        half = 0.5 * (hi - lo)  # the ridge's half length along it (the field's x runs over the hips' too)
+
+        def frame(q):  # (along, across, up) from the crest's middle
+            v = _rl_sub(q, C)
+            return _rl_dot(v, rd), _rl_dot(v, a), _rl_dot(v, up)
+        z0, z1 = W / kz, (W + 0.7 * Lc) / kz  # the band measured (plan, off the crest line)
+        lim_al = max(0.25 * Lc, half - 0.5 * Lc)
+        nb = 8
+        bins = [[] for _ in range(nb)]
+        cx, cy, cz = C
+        ax, ay, az = a
+        rx, ry, rz = rd
+        ux, uy, uz = up
+        sc = nb / (z1 - z0)
+        for q in pts:  # frame() written out: every leaf point goes through here
+            vx, vy, vz = q[0] - cx, q[1] - cy, q[2] - cz
+            ac = abs(vx * ax + vy * ay + vz * az)
+            if z0 <= ac < z1 and abs(vx * rx + vy * ry + vz * rz) <= lim_al:
+                bins[min(nb - 1, int((ac - z0) * sc))].append(vx * ux + vy * uy + vz * uz)
+        xs_, ys_ = [], []
+        for k, b in enumerate(bins):
+            if len(b) > 8:
+                b.sort()
+                xs_.append(z0 + (k + 0.5) * (z1 - z0) / nb)
+                ys_.append(b[int(0.75 * (len(b) - 1))])
+        if len(xs_) < 3:
+            return None
+        mx, my = sum(xs_) / len(xs_), sum(ys_) / len(ys_)
+        sxx = sum((x_ - mx) ** 2 for x_ in xs_)
+        slope = sum((x_ - mx) * (y_ - my) for x_, y_ in zip(xs_, ys_)) / max(1e-9, sxx)
+        y0 = my - slope * mx  # the thatch top's line carried up to the crest line: y0 + slope |across|
+        clr = cap_step
+
+        def top_h(ac):  # the cap's top over plan distance ac off the crest line
+            return y0 + slope * ac + clr + r_pk * rise * _th_peak_shape(ac * kz / W, r_ps)
+        # the roof under the cap's leaves (they walk straight down the slope from the crest): where it is d
+        # down a side, so a cap leaf's height off the roof puts it on top_h
+        # (by distance walked over the roof, measured: d / pitch put the cap's outer half a unit and more
+        # too high, a flat ledge each side)
+        prof, s_ = [], [0.0]
+        step = 0.02 * Lc
+        k = 0
+        while s_[-1] < 1.6 * Lc and k < 400:
+            cell = _th_cell(G, F, xm, k * step)
+            sm = _th_sample(G, *cell)[:2] if cell else None
+            if not sm:
+                break
+            if prof:
+                s_.append(s_[-1] + _rl_len(_rl_sub(sm[0], prof[-1][0])))
+            prof.append(sm)
+            k += 1
+        if len(prof) < 2:
+            return None
+
+        def onto(Q, Nn, lift):
+            """A leaf walked over the roof (Q, Nn) set straight up (or down) onto the cap's top, plus lift(d)
+            d along it; its normals the top's. (Offsets along the roof's normal, which leans hard out at a
+            sharp crest, threw leaves sideways: a wide flat hood with upright sides.)"""
+            out, nout, acc = [], [], 0.0
+            e = 0.02 * Lc
+            for k, q in enumerate(Q):
+                if k:
+                    acc += _rl_len(_rl_sub(q, Q[k - 1]))
+                _, ac, h = frame(q)
+                aa = abs(ac)
+                out.append(_rl_add(q, _rl_mul(up, top_h(aa) + lift(acc) - h)))
+                g = (top_h(aa + e) - top_h(max(0.0, aa - e))) / (aa + e - max(0.0, aa - e))
+                nout.append(_rl_norm(_rl_sub(up, _rl_mul(a, g * (1.0 if ac >= 0.0 else -1.0)))))
+            return out, nout
+
+        def crest_h(Cq):  # the cap's top over a point on the crest line, off it along the up
+            return top_h(0.0) - frame(Cq)[2]
+        gap = 2.0 * rs + 0.5 * cap_step
+        reach = (W + 0.5 * Lc) / kz
+
+        hl = half + 1e-6
+
+        def press(q):  # frame() written out: every leaf point goes through here
+            vx, vy, vz = q[0] - cx, q[1] - cy, q[2] - cz
+            ac = abs(vx * ax + vy * ay + vz * az)
+            if ac > reach or abs(vx * rx + vy * ry + vz * rz) > hl:
+                return q
+            d = vx * ux + vy * uy + vz * uz - top_h(ac) + gap
+            return (q[0] - ux * d, q[1] - uy * d, q[2] - uz * d) if d > 0.0 else q
+        for i, q in enumerate(pts):
+            q2 = press(q)
+            if q2 is not q:
+                pts[i] = q2
+        for m in sticks_out + poles:
+            if m.get("path"):
+                m["path"] = [press(q) for q in m["path"]]
+        state["peak"] = onto
+        return onto, crest_h
+
     def saddle(lo, hi):
         """The ridge's cap (the user 2026-11-09: the ridge got really ugly, a sawtooth of folded leaf
         ends under a pole floating off them; then, poles off: too straight, a row of identical staples).
@@ -23020,6 +23203,8 @@ def _th_fronds_mesh(F, G, s):
         # with or without a pole)
         lam = 0.09 * span
         rest = []
+        pk = peak_prep(lo, hi) if r_pk else None
+        surf = pk is not None  # Ridge peak on (and measured)
         slots = []  # Ridge bundles: (x, bundle randoms, place across the bundle 0..1)
         if r_bund:
             sl = cap_gap * (1.0 - 0.3 * r_bund)  # leaves in a bundle lie close, side by side
@@ -23107,6 +23292,8 @@ def _th_fronds_mesh(F, G, s):
                 return r_sink * 0.85 * rise * (1.0 - _rl_smooth01(min(1.0, d / (0.85 * L_))))
 
             def layer_of(L_):  # off the roof down a side: the clump's lift fades over half the leaf
+                if surf:  # Ridge peak: walked on the roof, then set onto the peak (pk_lift)
+                    return lambda d: 0.0
                 if peak:
                     return lambda d: (top + extra * (1.0 - r_pinch * _rl_smooth01(min(1.0, d / (0.6 * L_)))) +
                                       hv * max(0.0, 1.0 - 2.0 * d / L_) - fall * d / L_ - dip(d, L_) +
@@ -23118,16 +23305,26 @@ def _th_fronds_mesh(F, G, s):
                     return f_(d) + k_ * max(0.0, d - 0.45 * L_)
             near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, lay_n,
                              droop * (0.06 + 0.08 * mess) * Lt * m_top * r[7], True, hd,
-                             stiff=0.4 + 0.6 * min(1.0, r_fringe))
+                             stiff=(0.4 + 0.6 * min(1.0, r_fringe)) * (0.25 if surf else 1.0))  # (peak: Shag stood its tips up in a hood)
             if near is None:
                 continue
             far = leaf_line(((xc, -side * zc), ox, 0.0), Lb, 0.0, layer_of(Lb), 0.0, True, (-hd[0], -hd[1]),
                             stiff=0.0)
             Qn, Nn_ = near
+            if surf:  # Ridge peak: onto the cap's top, with half the clump's lift (fading over 0.6 of the leaf)
+                def pk_lift(d, L_, lean_):
+                    return (0.5 * (extra * (1.0 - _rl_smooth01(min(1.0, d / (0.6 * L_)))) +
+                                   hv * max(0.0, 1.0 - 2.0 * d / L_)) + lean_ * max(0.0, d - 0.45 * L_))
+                Qn, Nn_ = pk[0](Qn, Nn_, lambda d: pk_lift(d, Lt, fr_lean))
+                if far:
+                    far = pk[0](far[0], far[1], lambda d: pk_lift(d, Lb, 0.0))
             Qf, Nf = far if far else ([], [])
             # how far down each side the bend reaches: its own, and more on one side (folded off the crest)
             rf = clamp(1.6 * lift, 0.05 * Lc, 0.2 * Lc) * (0.75 + 0.6 * r2[4]) * (1.0 - 0.7 * r_pinch)
             lop = (r2[5] - 0.5) * 0.7 * min(1.0, 0.3 + mess) * (1.0 - 0.6 * r_pinch)
+            if surf:  # the fold just over the point (its sides are the peak's own)
+                rf = 0.12 * r_pw * Lc * (0.75 + 0.6 * r2[4])
+                lop *= 0.5
 
             def cut(Q, reach):  # the first point at least reach down from the crest
                 acc = 0.0
@@ -23147,7 +23344,7 @@ def _th_fronds_mesh(F, G, s):
                 # a cubic from B up over the crest to A, tangent to both slopes; its reach k along them
                 # solved so its middle is at the leaf's height over the crest (bunched down: a third of
                 # its handful lift)
-                want = _rl_dot(_rl_sub(C, _rl_lerp(A, B, 0.5)), n_c) + top + 0.35 * extra + hv + peak - dip(0.0, 1.0)
+                want = _rl_dot(_rl_sub(C, _rl_lerp(A, B, 0.5)), n_c) + (pk[1](C) + 0.5 * (0.35 * extra + hv) if surf else top + 0.35 * extra + hv + peak - dip(0.0, 1.0))
                 rise_k = 0.375 * _rl_dot(_rl_add(ta, tb), n_c)
                 span_ab = _rl_len(_rl_sub(A, B))
                 k_ = clamp(want / rise_k if rise_k > 1e-6 else 0.4 * span_ab, 0.15 * span_ab, 0.9 * span_ab)
@@ -23162,7 +23359,7 @@ def _th_fronds_mesh(F, G, s):
                 # over the crest line (Ridge profile bows the legs: rounded out, straight, or curving up into
                 # the pinch), so the two sides meet in a crisp top line
                 P_ = _rl_add(C, _rl_mul(n_c, want + _rl_dot(_rl_sub(_rl_lerp(A, B, 0.5), C), n_c)))
-                bow = -0.35 * r_curve  # >0 bulges the legs out (rounded), <0 sags them (curving up)
+                bow = 0.0 if surf else -0.35 * r_curve  # >0 bulges the legs out (rounded), <0 sags them
 
                 def fold(t):
                     if t < 0.5:
@@ -23173,7 +23370,9 @@ def _th_fronds_mesh(F, G, s):
                     return _rl_add(q_, _rl_mul(n_c, bow * 0.6 * u_ * (1.0 - u_) * _rl_len(_rl_sub(E1, E0))))
 
                 def shape(t):
-                    return _rl_lerp(bez(t), fold(t), r_pinch) if r_pinch else bez(t)
+                    # Ridge peak: Peak tip sharp on top, eased back to the smooth bend at its ends (no corner)
+                    w_ = r_pt * (1.0 - abs(2.0 * t - 1.0)) ** 1.4 if surf else r_pinch
+                    return _rl_lerp(bez(t), fold(t), w_) if w_ else bez(t)
                 # rows every ~0.6 pole radius over the bend (a smooth crest, and one right under the pole)
                 arc_l = 0.5 * (k_ + _rl_len(_rl_sub(C2, C1)) + k_ + span_ab)
                 m_b = int(clamp(math.ceil(arc_l / (0.6 * rp)), 8, 24))
@@ -23260,6 +23459,9 @@ def _th_fronds_mesh(F, G, s):
                     dry = _th_leaf_dry(s, rd[0])
                     L *= 1.0 - 0.18 * dry
                 cap_h = top0 - 0.15 * rise * dd / Lc  # the cap's height where it starts
+                on_pk = state.get("peak") if key0 == 8891 else None  # Ridge peak: rooted in the peaked cap
+                if on_pk:
+                    cap_h = 0.0
                 hr = 0.35 * cap_h
                 hb = cap_h * (0.8 + 0.4 * r[4]) + cap_step * rt[3]  # in among the cap's leaves
                 lean = math.tan(min(1.2, r_spikes * math.radians(4.0 + 36.0 * r[5] ** 1.6)))
@@ -23270,6 +23472,9 @@ def _th_fronds_mesh(F, G, s):
                 line = leaf_line(((xc, z), x - xc, 0.0), L, 0.0, layer, droop * 0.12 * L * m_top * r[6], False, hd)
                 if line is None:
                     continue
+                if on_pk:  # down in the cap's leaves, up among them within 0.3 of its length, then its lean
+                    line = on_pk(line[0], line[1], lambda d, L=L, lean=lean, h0=-1.5 * cap_step, h1=cap_step * (
+                        0.5 + rt[3]): h0 + (h1 - h0) * _rl_smooth01(min(1.0, d / (0.3 * L))) + lean * d)
                 ws = (1.0 + (r[7] - 0.5) * 0.3 * m_top) * max(0.4, 1.0 - 0.3 * dry)
                 tw = (r[8] - 0.5) * 1.4 * m_top + ((rd[1] - 0.5) * 2.4 * dry if dry else 0.0)
                 pt = prof_top_of(r[9]) if (tip_s or tip_v) else prof_top
@@ -31761,16 +31966,24 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "root_var", "Start variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Each leaflet starts its own random way further in or out, so the starts don't line up along "
             "the course (a ruled line of roots reads as artificial).")
-        row(sec, "ridge_sink", "Ridge sink", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "Lowers the top of the ridge into the roof, so the leaves folded over it run out onto the slopes "
-            "in shallow lines instead of standing up on them with steep sides. 0 sits them on the roof's own "
-            "crest.")
-        row(sec, "pinch_height", "Pinch height", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
-            "How high the pinch at the very top of the ridge stands (with Ridge pinch on). 1 as made; lower "
-            "for a flatter top, higher for a sharp peak.")
-        row(sec, "ridge_curve", "Ridge profile", FloatField(-1.0, 1.0, -1.0, 1.0, decimals=2, step=0.05),
-            "The ridge's shape from the side, with Ridge pinch on: -1, its sides rounded up to the peak; 0, "
-            "straight (a plain triangle); 1, curving up into a sharp pinch.")
+        g_ = _th_peak_glyph  # a little ridge cross-section at each end of the slider: what that end looks like
+        row(sec, "peak_height", "Peak height", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05,
+                                                          ends=(g_(0.0, 0.7, 0.0, 0.8), g_(1.0, 0.7, 0.0, 0.8))),
+            "The ridge as a peak (pictured at each end of the slider). How high the point along the top of "
+            "the ridge stands above the thatch on the slopes. 0: off (a round ridge, as older roofs). "
+            "Shape it with Peak width, Peak sides and Peak tip.")
+        row(sec, "peak_width", "Peak width", FloatField(0.2, 2.0, 0.2, 1.5, decimals=2, step=0.05,
+                                                        ends=(g_(0.8, 0.3, 0.0, 0.8), g_(0.8, 1.0, 0.0, 0.8))),
+            "How far down each side the peak spreads before it runs into the slope, in ridge leaf lengths. "
+            "Left: a narrow spine; right: a broad triangle.")
+        row(sec, "peak_sides", "Peak sides", FloatField(-1.0, 1.0, -1.0, 1.0, decimals=2, step=0.05,
+                                                        ends=(g_(0.8, 0.7, -1.0, 0.8), g_(0.8, 0.7, 1.0, 0.8))),
+            "The shape of the peak's sides. Left (-1): hollow, curving up into a sharp point; middle (0): "
+            "straight, a plain triangle; right (1): full and rounded out.")
+        row(sec, "peak_tip", "Peak tip", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05,
+                                                    ends=(g_(0.8, 0.7, 0.0, 0.0), g_(0.8, 0.7, 0.0, 1.0))),
+            "The very top line. Left (0): the leaves bent round over it; right (1): creased into a crisp "
+            "knife edge.")
         row(sec, "ridge_cover", "Ridge cover", SegmentField(THATCH_RIDGE_COVERS),
             "What holds the ridge down. Leaves: the leaves folded over the ridge are all you see. Wood strip: short "
             "boards along the top, one each side meeting at the crest, the leaves pinched under them and spreading "
@@ -31779,9 +31992,6 @@ class ThatchRoofPanel(QtWidgets.QWidget):
             "Lay the leaves over the ridge in flat bundles, as thatchers do: a handful of leaves side by side, "
             "folded over the ridge pole and pressed down, then the next bundle lapping it. 0: single leaves; "
             "1: clear bundles, each thicker in its middle and a step over or under the next.")
-        row(sec, "ridge_pinch", "Ridge pinch", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
-            "How tight the ridge leaves fold over the top: 0, a soft round arch; 1, pressed down hard over the "
-            "pole, a sharp pinched ridge.")
         row(sec, "ridge_shag", "Ridge shag", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
             "Loose thin leaflets laid over the ridge and hip caps, roots down in the cap, tips standing off "
             "like the loose top fronds on the slopes, so the crest isn't combed smooth. 0: none; 1: about "
@@ -32071,7 +32281,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "ridge_cover", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
