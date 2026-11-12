@@ -2230,7 +2230,12 @@
       + lift. Cache key: the ground's signature; read back also needs
       `_sc_under_ids` (the debris layers under it) unchanged since it last
       grew (after Move Up it read back the old leaves). Panel: in Blades /
-      How they lie; Move Up / Down tips say it. Test
+      How they lie; Move Up / Down tips say it. **Add on top** (the user:
+      leaves added over a few grass layers went to the bottom and each
+      Move Up regrew): `sc_add_layer(top=True)` inserts first;
+      the Add Layer menu's checkable "New layers go on top" (`add_top`,
+      optionVar `SC_ADD_TOP_VAR` "unlokScatterAddTop", on unless turned
+      off) passes it. Duplicate still appends. Test
       `tests/test_layer_stack.py`; pictures `tests/run_gui_layer_stack_pics.mel`
       (`tests/_out/layer_stack_pics`).
     - **Shading data:** moss meshes' points are `_MiPts` (a list with

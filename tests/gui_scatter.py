@@ -268,6 +268,11 @@ def main():
         panel._apply_pending()
         return lid
 
+    var = ns["SC_ADD_TOP_VAR"]
+    had = cmds.optionVar(q=var) if cmds.optionVar(exists=var) else None
+    check("Add Layer's menu has New layers go on top, on unless turned off",
+          panel.add_top in panel.add_btn.menu().actions() and panel.add_top.isChecked() == (had is None or bool(had)))
+    panel.add_top.setChecked(False)  # these go to the bottom, as before
     moss = add("Moss", {"slope": 25.0, "coverage": 0.6, "capsules": 0.0})
     leaves = add("Leaves", {"leaves": 14.0, "coverage": 0.7})
     grass = add("Grass", {"grass": 1.2, "coverage": 0.5})
@@ -276,6 +281,23 @@ def main():
     check("four layers added through the panel", [l["type"] for l in data["layers"]] ==
           ["Leaf piles", "Moss", "Leaves", "Grass", "Moss"] and panel.layer_list.count() == 5,
           str([l["name"] for l in data["layers"]]))
+    panel.add_top.setChecked(True)
+    cmds.select(root)
+    panel.add_layer("Leaves")
+    pump()
+    top = panel._lid
+    check("with New layers go on top, Add Layer puts it first in the list (and picks it)",
+          [l["id"] for l in ns["sc_data"](root)["layers"]][0] == top and
+          panel.layer_list.item(0).data(QtCore.Qt.UserRole) == top and cmds.optionVar(q=var) == 1)
+    ns["sc_remove_layer"](root, top)
+    panel._lid = moss2
+    panel._refresh()
+    pump()
+    if had is None:
+        cmds.optionVar(remove=var)
+    else:
+        cmds.optionVar(intValue=(var, had))
+    panel.add_top.setChecked(had is None or bool(had))
     parts = dict((k, n) for k, n in ns["sc_parts"](root).items() if cmds.getAttr(n + ".visibility"))
     check("the flat moss and the sparse moss each have their own parts",
           any(k.startswith(moss + "/") for k in parts) and any(k.startswith(moss2 + "/") for k in parts) and

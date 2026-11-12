@@ -161,6 +161,18 @@ def main():
           "%d leaf points under blades vs %d" % (buried_bent, buried_on))
     tb["sc_update"](root, lj, {"bend_size": 0.0})
 
+    # --- Add Layer straight onto the top of the list (no Move Up, no second regrow)
+    top_root = tb["create_scatter_group"]([floor], "Grass", dict(GRASS, on_layers=True), select=False)["root"]
+    _, lt = tb["sc_add_layer"](top_root, "Jungle leaves", dict(JUNGLE, on_layers=True), top=True)
+    ids = [l["id"] for l in tb["sc_data"](top_root)["layers"]]
+    check("Add Layer with top=True puts it first in the list", ids[0] == lt and len(ids) == 2, str(ids))
+    tg = jungle_of(meshes(top_root), lt)
+    check("... where it lies on the grass just as after Move Up", [x[0] for x in tg] == [x[0] for x in jung_on],
+          "%d vs %d points" % (len(heights(tg)), len(heights(jung_on))))
+    _, lb = tb["sc_add_layer"](top_root, "Leaves", {}, top=False)
+    check("... and without it at the bottom, as before", tb["sc_data"](top_root)["layers"][-1]["id"] == lb)
+    cmds.delete(top_root)
+
     # --- Move Up: the grass on top now lies over the leaves
     tb["sc_move_layer"](root, lg, -1)
     got = meshes(root)

@@ -43675,14 +43675,18 @@ def _sc_change(root, label, fn):
     return sc_regrow(root)
 
 
+SC_ADD_TOP_VAR = "unlokScatterAddTop"  # optionVar: 0 when Add Layer puts new layers at the bottom of the list
+
+
 def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None, drawing=None,
-                 draw_of=None):
+                 draw_of=None, top=False):
     """Add a layer (one Ctrl+Z): a type's defaults (or settings), or a copy
     of another layer (copy_of: its id; a new seed); drawing: strokes it goes
     along (meshes they're on that the group doesn't scatter onto yet are
     added); draw_of: another layer's id, whose strokes it goes along too
     (Add Layer with a drawn layer picked: the user, 2026-11-12, "is that
-    other layer on the same strokes?"). Returns (report, id)."""
+    other layer on the same strokes?"); top: first in the list (on top of
+    the others, On layers below), else last. Returns (report, id)."""
     made = []
 
     def edit(data):
@@ -43708,7 +43712,10 @@ def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_
                 src = sc_layer(data, draw_of)
                 if src is not None and src.get("draw"):
                     layer["draw"] = json.loads(json.dumps(src["draw"]))
-        data["layers"].append(layer)
+        if top:
+            data["layers"].insert(0, layer)
+        else:
+            data["layers"].append(layer)
         made.append(layer["id"])
     rep = _sc_change(root, "Add scatter layer", edit)
     return rep, made[0]
@@ -45315,6 +45322,15 @@ class ScatterPanel(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(add_l)
         for t in SC_TYPES:
             menu.addAction(t).triggered.connect(lambda *_, t=t: self.add_layer(t))
+        menu.addSeparator()
+        # the user, 2026-11-12: leaves added over a few grass layers went to the bottom, and each Move Up regrew
+        self.add_top = menu.addAction("New layers go on top")
+        self.add_top.setCheckable(True)
+        self.add_top.setToolTip("On: a new layer goes to the top of the list, on top of the others (On layers "
+                                "below). Off: to the bottom. Remembered.")
+        menu.setToolTipsVisible(True)
+        self.add_top.setChecked(not cmds.optionVar(exists=SC_ADD_TOP_VAR) or bool(cmds.optionVar(q=SC_ADD_TOP_VAR)))
+        self.add_top.toggled.connect(lambda on: cmds.optionVar(intValue=(SC_ADD_TOP_VAR, int(bool(on)))))
         add_l.setMenu(menu)
         dup = secondary_button("Duplicate", "Copy the layer (a new seed): e.g. a second, sparser moss.")
         dup.clicked.connect(lambda *_: self.duplicate_layer())
@@ -46156,8 +46172,9 @@ class ScatterPanel(QtWidgets.QWidget):
         if n:
             verb = "Added %s along %s's %d stroke%s to" % (
                 typ.lower(), src.get("name", src["type"]), n, "" if n == 1 else "s")
+        top = self.add_top.isChecked()
         self._structural(verb, lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"],
-                                                    draw_of=self._lid if n else None))
+                                                    draw_of=self._lid if n else None, top=top))
 
     @ui_safe
     def duplicate_layer(self):
