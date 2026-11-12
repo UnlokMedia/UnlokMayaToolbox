@@ -20482,7 +20482,7 @@ THATCH_PRESETS = {
         "under_over_top": True, "ridge_fringe": 0.6, "ridge_shag": 0.8, "ridge_width": 0.5, "peak_height": 0.0,
         "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "ridge_bundles": 0.0, "ridge_height": 0.35,
         "ridge_lumps": 0.8, "root_tuck": 0.6, "ridge_layers": 3, "max_angle": 30.0, "edge_wind": 0.8,
-        "ridge_spikes": 0.3, "edge_length": 1.8},
+        "ridge_spikes": 0.3, "edge_length": 2.2},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
         "lumps": 0.6, "warp": 0.5, "ridge_sag": 0.5, "ragged": 0.4, "gaps": 0.0, "levels": 1, "lip": 0.0,

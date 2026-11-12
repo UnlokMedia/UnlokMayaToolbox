@@ -410,7 +410,7 @@
   packed down tight not fluffy, eave fringe slightly wind-swept, the ridge
   the same leaves as the rest, small tufts on the hips): short leaves
   0.12, Density 3, Top fronds 2.5, Volume 1.4, Lift 0.7, Shag 0, Max
-  angle 30, Lumps 1, crinkle 0.08, curl 0.1, Fringe length 1.8, Wind
+  angle 30, Lumps 1, crinkle 0.08, curl 0.1, Fringe length 2.2, Wind
   0.8, Edge droop 2.2 / limp 1, Pokes 0 (a clump left a dark hole), cap
   width 0.008 and Ridge width 0.5 (Cap leaf width 0 means the UNDER
   layer's width, ~2x the top fronds: the ridge read as different
