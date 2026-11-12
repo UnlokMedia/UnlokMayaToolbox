@@ -22301,8 +22301,8 @@ def _th_fronds_mesh(F, G, s):
     def tube(Q, Nn, radius, stack, kind="stick", wob=None):
         """A stick (a tile's spine), rachis, pole or a tie round the ridge pole: handed to the member
         mesher at the end (caps, Sub-D, a little natural variation, cut by blockers). Sticks and rachis
-        stay in the stacked UVs' strip; ridge / hip poles and their ties go to the frame's mesh when
-        there is one."""
+        stay in the stacked UVs' strip; ridge / hip / hold-down poles and their ties too (the sticks mesh,
+        never the frame's: the frame's part switches turn all of the frame off)."""
         if len(Q) < 2:
             return False
         if wob is None:
@@ -23439,12 +23439,14 @@ def _th_fronds_mesh(F, G, s):
     hold = int(s.get("hold_poles", 0))
     if hold > 0 and not F.cone and not state["capped"]:
         hold_down(hold)
-    # sticks and rachis (and the poles, without a frame mesh to go to): wood, not leaf, so a mesh of their own
-    # (F.stick_mesh, the roof's "sticks" part) with stacked UVs like the leaves': skins round u 0..0.8, caps at 0.9
-    F.frame_extra = poles if s["frame"] else []
+    # sticks, rachis and the poles on top: wood, not leaf, so a mesh of their own (F.stick_mesh, the roof's
+    # "sticks" part) with stacked UVs like the leaves': skins round u 0..0.8, caps at 0.9. The poles went in the
+    # frame's mesh when there was one, until the user (2026-11-12) found them still there with every frame part
+    # switched off ("confusing because they're part of the frame geo"): the frame is only the frame now
     F.stick_mesh = None
     F.stick_members = sticks_out  # kept for checks (which stick or rachis is where)
-    members = sticks_out + ([] if s["frame"] else poles)
+    F.pole_members = poles  # (and which pole or tie)
+    members = sticks_out + poles
     if members and not state["capped"]:
         geo = _th_frame_mesh(F, members, s, uv_strip=u_of, strip=(0.0, 0.8, 0.9, 0.08))
         if geo and len(geo[0]) <= THATCH_MAX_VERTS:
@@ -27433,7 +27435,7 @@ def thatch_build(frame, settings, blockers=None):
     if s["frame"] and level > 0:  # the roof's timber, under the thatch (and under an underlay or a shell)
         shelled = s["style"] == "Surface" or (s["underlay"] and s["style"] != "Surface")
         depth = 1.02 * F.T if shelled else 0.02 * F.T * (s["style"] != "Palm Fronds")
-        fm = _th_frame_mesh(F, _th_frame_members(F, G, s, depth) + getattr(F, "frame_extra", []), s)
+        fm = _th_frame_mesh(F, _th_frame_members(F, G, s, depth), s)
         out["frame"] = _th_to_world(frame, _th_flush_cut(F, fm)) if fm else None
     return _roof_udims(out, s["udim"])
 
@@ -29853,8 +29855,8 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sec.add_full(self.f["ridge_fronds"])
         self.f["ridge_poles"] = CheckField("Ridge pole (holds the leaf cap down)")
         self.f["ridge_poles"].setToolTip("A straight pole lying along the top of the roof on the leaf cap, "
-                                         "weighing it down, as on many palm roofs (in the frame's mesh when Frame "
-                                         "is on). Off: the cap leaves stay, the pole goes.")
+                                         "weighing it down, as on many palm roofs (in the sticks mesh, with the "
+                                         "fronds' wood). Off: the cap leaves stay, the pole goes.")
         sec.add_full(self.f["ridge_poles"])
         self.f["hip_poles"] = CheckField("Hip poles")
         self.f["hip_poles"].setToolTip("A pole down each hip edge (where a sloped end meets a side slope), "

@@ -535,9 +535,10 @@
       in the mesher (`wob` 0, true radius `rs` 1.0) with its own gentle
       crook (`frame_at`) so ties every ~0.18 span (4-6 turns of 0.12 rp,
       at 0.92 rp + rt: tight on the six-sided pole's faces, ends on down
-      into the cap) stay tight. Ties go with the poles (`poles`: the
-      frame's mesh, else sticks), so Ridge and hip poles off still leaves
-      the sticks mesh exactly as it was. Members of kind "tie" get a ring
+      into the cap) stay tight. Ties go with the poles (`poles`, kept as
+      `F.pole_members`: the sticks mesh; until 2026-11-12 the frame's
+      mesh when Frame was on), so Ridge and hip poles off takes only them
+      out of the sticks mesh. Members of kind "tie" get a ring
       at every path point and no run-on ends. `THATCH_VERSION` 8.
     - **Straight wood** (the user, 2026-11-10: sticks and poles "super
       bendy and weird", no structure, hip poles clipping through each
@@ -819,9 +820,10 @@
       gable-gable / cone, Ridge beam only on Ridge). The layout is always
       worked out in full; `add()` drops a switched-off kind but still
       numbers it (`rid`), and `_th_frame_mesh` draws each member's
-      randomness from `rid` (extras after the frame's own: palm poles,
+      randomness from `rid` (extras after the frame's own: metal / tile
       fascias, numbered on from `rids`), so the parts left on are exactly
-      unmoved (test "frame parts"). All off and no extras: no frame mesh.
+      unmoved (test "frame parts"). All off: no frame mesh (thatch; metal
+      and tiles keep their fascias).
     - **Straight members** (2026-11-11 check, `straight.py`-style bow =
       worst distance off the end-to-end line / length): `add()` cuts
       rafter / jack / hip / batten ends turning > 12 deg off the line of
@@ -848,7 +850,10 @@
     the lowest rafter they carry (centred on the wall line they sank into
     the house with no overhang). Fronds' `tube()` hands sticks / rachis /
     poles to `_th_frame_mesh(..., uv_strip=u_of)` (now their own mesh,
-    see Sticks mesh), poles to `F.frame_extra` -> the frame mesh. 3D Leaflets:
+    see Sticks mesh), poles too (`F.pole_members`; they went to the frame
+    mesh when Frame was on until 2026-11-12: the user, with every frame
+    part switched off, still had them in the frame and found it confusing,
+    so the frame mesh is only the frame now). 3D Leaflets:
     `leaf_thickness` makes each leaflet a closed solid in `emit` (underside
     mirrored on the same UVs, side / tip / base walls on u 0.86..0.87).
     **Upgrade** (`THATCH_VERSION`, `thatch_needs_upgrade`,

@@ -530,7 +530,7 @@ def run():
     # Each ridge leaf drapes over the crest now, and the pole lies on the leaves (pressed in a little), tied down.
     shack = dict(tb["thatch_preset"]("Palm: beach shack (makeshift)"), resolution=80, frame=True, lashings=True)
     sh = build(**shack)
-    members = sh["field"].frame_extra
+    members = sh["field"].pole_members
     rpole = max((m for m in members if m["kind"] == "pole"), key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
     ties = [m for m in members if m["kind"] == "tie"]
     rp = rpole["r0"]
@@ -551,7 +551,7 @@ def run():
     # straight wood (the user, 2026-11-10: sticks and poles "super bendy and weird", hips clipping through each
     # other at the ridge; lashings only as an option, off by default)
     plain = build(**dict(shack, lashings=False, hip_poles=True, end_a="Hip", end_b="Hip"))
-    wood = plain["field"].frame_extra + plain["field"].stick_members
+    wood = plain["field"].pole_members + plain["field"].stick_members
     check("Lashings off (the default): no ties", not any(m["kind"] == "tie" for m in wood) and
           tb["THATCH_DEFAULTS"]["lashings"] is False and "lashings" in tb["THATCH_LOOK_KEYS"])
 
@@ -564,7 +564,7 @@ def run():
     bows = sorted(plan_bow(m["path"]) for m in wood if m["kind"] in ("stick", "rachis", "pole") and len(m["path"]) > 2)
     check("sticks, rachis and poles run straight in plan (no wandering with the roof's lumps, none bent round a hip)",
           bows and bows[-1] < 0.02, "worst bow %.4f of its length (%d members)" % (bows[-1] if bows else -1, len(bows)))
-    rp_ = [m for m in plain["field"].frame_extra if m["kind"] == "pole" and m.get("rs") == 1.0]
+    rp_ = [m for m in plain["field"].pole_members if m["kind"] == "pole" and m.get("rs") == 1.0]
     ridge_ = max(rp_, key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
     hips_ = [m for m in rp_ if m is not ridge_]
     r_ = ridge_["r0"]
@@ -579,7 +579,7 @@ def run():
     # leaves, tops crossing over the ridge pole, straight, resting on the leaves with the leaves under them
     # pressed flat; off by default
     amz = build(**dict(tb["thatch_preset"]("Palm: Amazon jungle shack"), frame=True, resolution=80))
-    am_poles = [m for m in amz["field"].frame_extra if m["kind"] == "pole"]
+    am_poles = [m for m in amz["field"].pole_members if m["kind"] == "pole"]
     am_ridge = max(am_poles, key=lambda m: abs(m["path"][-1][0] - m["path"][0][0]))
     holds = [m for m in am_poles if abs(m["path"][-1][2] - m["path"][0][2]) > abs(m["path"][-1][0] - m["path"][0][0])]
     arp = am_ridge["r0"]
@@ -784,7 +784,7 @@ def run():
     jk = dict(tb["thatch_preset"]("Palm: jungle hut (tied bundles)"), frame=True, detail="Medium", stacks=3,
               lashings=True)
     jg = build(**jk)
-    kinds = [m["kind"] for m in jg["field"].frame_extra]
+    kinds = [m["kind"] for m in jg["field"].pole_members]
     n_pole, n_tie = kinds.count("pole"), kinds.count("tie")
     check("Bundles: a pole along every course, the bundles lashed to it, no loose rachis over them",
           n_pole >= 8 and n_tie > 2 * n_pole and not any(m["kind"] == "rachis" for m in jg["field"].stick_members) and
@@ -792,8 +792,8 @@ def run():
           "%d poles, %d tie turns" % (n_pole, n_tie))
     xmax = max(p[0] for p in jg["straw"][0])
     check("Bundles: the poles end just past the gable verge (not long stubs)",
-          max(q[0] for m in jg["field"].frame_extra for q in m["path"]) < xmax + 0.05,
-          "pole end %.2f, leaves %.2f" % (max(q[0] for m in jg["field"].frame_extra for q in m["path"]), xmax))
+          max(q[0] for m in jg["field"].pole_members for q in m["path"]) < xmax + 0.05,
+          "pole end %.2f, leaves %.2f" % (max(q[0] for m in jg["field"].pole_members for q in m["path"]), xmax))
     jh, jc = build(**dict(jk, end_a="Hip", end_b="Hip")), build(**dict(jk, frond_form="Cards"))
     gaps = (sky_mesh(jg["straw"]), sky_mesh(jh["straw"]), sky_mesh(jc["straw"]))
     check("Bundles on hips and as cards: they build and close the roof", jh["pieces"] > 100 and jc["pieces"] > 100
@@ -873,13 +873,8 @@ def run():
                 check("%s: light (6 sides), every member closed" % label, boundary_edges(fn) == 0 and
                       sizes <= {4, 6} and fn.numVertices < 60000, "%d verts, %s" % (fn.numVertices, sorted(sizes)))
             else:  # the ridge pole's ties are round vine: their two end caps the only non-quads
-                ties = 2 * sum(1 for m in tb["thatch_build"](tb["thatch_data"](root)["box_frame"],
-                                                             tb["thatch_data"](root))["field"].frame_extra
-                               if m["kind"] == "tie")
-                hexes = sum(1 for c in fn.getVertices()[0] if c == 6)
-                check("%s: hard-edged quads (and the round ties' end caps)" % label,
-                      sizes <= {4, 6} and hexes == ties, "faces %s, %d six-sided (%d tie caps)" % (
-                          sorted(sizes), hexes, ties))
+                check("%s: hard-edged quads (the poles and their round ties are in the sticks mesh)" % label,
+                      sizes == {4}, "faces %s" % sorted(sizes))
     tb["update_thatch_roofs"]({root: {"frame_subd": True}})
     fr = tb["thatch_parts"](root)["frame"]
     check("Sub-D on: the frame mesh is named _GES", fr.endswith("_GES"), fr)
@@ -971,9 +966,15 @@ def run():
     tb["update_thatch_roofs"]({root: {"frond_form": "Leaflets", "leaf_thickness": 0.0006}})
     with_frame = mesh_fn(tb, parts["sticks"]).numPolygons
     tb["update_thatch_roofs"]({root: {"frame": False}})
-    check("ridge / hip poles sit in the frame's mesh (with the sticks without a frame)",
-          mesh_fn(tb, parts["sticks"]).numPolygons > with_frame,
+    check("ridge / hip poles sit in the sticks mesh, frame or not (the frame is only the frame: 2026-11-12)",
+          mesh_fn(tb, parts["sticks"]).numPolygons == with_frame,
           "%d -> %d stick faces" % (with_frame, mesh_fn(tb, parts["sticks"]).numPolygons))
+    with_poles = with_frame
+    tb["update_thatch_roofs"]({root: {"ridge_poles": False}})
+    with_frame = mesh_fn(tb, parts["sticks"]).numPolygons  # (the sticks and rachis alone)
+    tb["update_thatch_roofs"]({root: {"ridge_poles": True}})
+    check("the poles are in the sticks mesh: Ridge pole off takes faces off it", with_frame < with_poles,
+          "%d -> %d stick faces" % (with_poles, with_frame))
     # the user, 2026-11-02: the poles look like they float on the cap; turning them off mustn't open the ridge
     capped = [tuple(q) for q in mesh_fn(tb, parts["straw"]).getPoints()]
     tb["update_thatch_roofs"]({root: {"ridge_poles": False}})
