@@ -355,6 +355,20 @@
   leaf sizes are fractions of the span, so a roof builds the same at any
   scale: the earlier preset tests at 4-6 units (a 0.5 m roof in dm) hold
   at 40-60.
+  **Ridge art direction** (same day; all look keys, palm only, defaults =
+  the old build): Ridge height / width / lumps scale the cap (`r_height`,
+  `Lc = 0.7 ll r_width`, saddle heave); Tuck roots / Frond starts in-out /
+  Start variation (`leaf_line(root=)`) sink and move top-frond and hip-cap
+  roots. **Drone view priority** (the user: roofs seen from above, the
+  ridge looked "wet hairy"; their refs: a real ridge is a band folded over
+  the crest, matte, with ragged spiky fringes on both edges; no tied knot
+  on Mexican palapas, no nets): Ridge fringe (`r_fringe`, in `saddle`, own
+  randoms 8804) gives the ridge leaves uneven tip lengths, a lift past
+  their middle, more turn and twist, less arch and their own heights;
+  Ridge shag (`crown()`, tufts of 3-7 fanned thin leaflets over ridge and
+  hip caps, roots in the cap) and Ridge spikes. One more layer on top of a
+  combed cap did little: the fix had to be in the cap leaves. Presets:
+  fringe 1.5, shag 1, width 0.85. Pictures: `arnold_pics.py` view "drone".
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

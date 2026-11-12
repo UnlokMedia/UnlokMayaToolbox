@@ -20286,7 +20286,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0,
+    "shag": 0.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0,
     "udim": 1001,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
@@ -20298,7 +20298,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -20371,7 +20371,7 @@ THATCH_PRESETS = {
         "crinkle": 0.25, "leaf_twist": 0.2, "width_var": 0.25, "width_wobble": 0.2, "bent_tips": 0.08},
     "Palm: palapa (hipped, messy top)": {
         "under_over_top": True, "ridge_height": 0.35, "ridge_lumps": 0.8, "root_tuck": 0.6, "root_var": 0.4,
-        "root_shift": 0.05,
+        "root_shift": 0.05, "ridge_shag": 1.0, "ridge_fringe": 1.5, "ridge_width": 0.85,
         "end_a": "Hip", "end_b": "Hip", "overhang": 0.0, "thickness": 0.04, "softness": 0.45, "sag": 0.15,
         "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds", "resolution": 150,
         "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.2, "leaf_width": 0.026, "top_leaf_width": 0.013,
@@ -20385,7 +20385,7 @@ THATCH_PRESETS = {
     # sticking right out; light and dry, not combed flat ("wet hair"); thin leaves over the hips
     "Palm: bushy palapa (shaggy)": {
         "under_over_top": True, "ridge_height": 0.35, "ridge_lumps": 0.8, "root_tuck": 0.6, "root_var": 0.4,
-        "root_shift": 0.05,
+        "root_shift": 0.05, "ridge_shag": 1.0, "ridge_fringe": 1.5, "ridge_width": 0.85,
         "end_a": "Hip", "end_b": "Hip", "hip_pitch": 1.0, "overhang": 0.0, "thickness": 0.04, "volume": 1.6,
         "softness": 0.7, "sag": 0.15, "lumps": 0.4, "levels": 1, "lip": 0.0, "top": 0.0, "style": "Palm Fronds",
         "resolution": 150, "frond_form": "Leaflets", "density": 1.3, "leaf_length": 0.15, "leaf_width": 0.026,
@@ -22070,6 +22070,18 @@ def _th_fronds_mesh(F, G, s):
     root_tuck = clamp(float(s.get("root_tuck", 0.0)), 0.0, 1.5)
     root_shift = clamp(float(s.get("root_shift", 0.0)), -0.5, 0.5)
     root_var = clamp(float(s.get("root_var", 0.0)), 0.0, 1.0)
+    # Ridge shag (the user, 2026-11-12, roofs seen from a drone: "the top of the ridge sort of starts to look a
+    # bit wet hairy, where the rest of it's nice and shaggy and sticky outy and spiky"): the cap leaves are wide,
+    # arched and draped smooth over the crest, and the loose top fronds stop short of it, so the crest read as
+    # combed. Thin loose leaflets laid over the cap along the ridge and hips, roots down in the cap, tips
+    # standing off at stiff angles (Ridge spikes) like the slopes' top fronds. 0: none (as before)
+    r_shag = clamp(float(s.get("ridge_shag", 0.0)), 0.0, 3.0)
+    r_spikes = clamp(float(s.get("ridge_spikes", 1.0)), 0.0, 3.0)
+    # Ridge fringe (same day, from the user's references seen from above: a real ridge IS a band, a strip of
+    # thatch folded over the crest, but matte and fibrous with ragged, spiky cut ends along both its edges; ours
+    # was a glossy tube of arched leaves all ending at one line): the ridge cap leaves' tips end at uneven
+    # lengths and stand off the slope like a cut fringe, the leaves arch less and twist and turn more. 0: as before
+    r_fringe = clamp(float(s.get("ridge_fringe", 0.0)), 0.0, 2.0)
     # Poking out (the user, 2026-11-11: "the odd frond poking out more, rarely ... or clumps poke up, like
     # one frond has lifted and brought a couple nearby ones with it ... like 4 in total across the whole
     # roof, nowhere near each other"): Pokes spots on the roof, spread out (each the farthest from the others
@@ -23008,13 +23020,29 @@ def _th_fronds_mesh(F, G, s):
             if r[11] < 0.05 * mess + 0.08 * dried:  # broken off
                 Lt *= 0.5 + 0.3 * r[2]
             Lb = Lc * (0.4 + 0.35 * r2[1]) * (1.0 + (r2[2] - 0.5) * 0.5 * mess)
+            fr_lean = 0.0
+            if r_fringe:  # Ridge fringe: a ragged edge, the cut ends standing off (own randoms: 0 is unchanged)
+                r3 = _rand12(seed, 8804, i, 0)
+                Lt *= 1.0 - 0.35 * min(1.0, r_fringe) + 0.9 * min(1.0, r_fringe) * r3[0] ** 1.5 * (
+                    1.0 + 0.5 * max(0.0, r_fringe - 1.0))
+                fr_lean = math.tan(min(1.0, r_fringe * math.radians(4.0 + 30.0 * r3[1] ** 1.8)))
+                a += (r3[2] - 0.5) * math.radians(14.0) * r_fringe
+                hd = (math.sin(a), side * math.cos(a))
+                # each rides at its own height: they shade each other (a band of one height read as one
+                # smooth bright strip from above)
+                extra += cap_step * r_fringe * 2.0 * r3[3] ** 2
             extra *= r_height
             lift, fall = top + extra, 0.15 * rise + 0.5 * extra
 
             def layer_of(L_):  # off the roof down a side: the clump's lift fades over half the leaf
                 return lambda d: lift + hv * max(0.0, 1.0 - 2.0 * d / L_) - fall * d / L_
-            near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, layer_of(Lt),
-                             droop * (0.06 + 0.08 * mess) * Lt * m_top * r[7], True, hd, stiff=0.4)
+            lay_n = layer_of(Lt)
+            if fr_lean:
+                def lay_n(d, f_=layer_of(Lt), L_=Lt, k_=fr_lean):  # past its middle the tip end lifts off
+                    return f_(d) + k_ * max(0.0, d - 0.45 * L_)
+            near = leaf_line(((xc, side * zc), ox, 0.0), Lt, 0.0, lay_n,
+                             droop * (0.06 + 0.08 * mess) * Lt * m_top * r[7], True, hd,
+                             stiff=0.4 + 0.6 * min(1.0, r_fringe))
             if near is None:
                 continue
             far = leaf_line(((xc, -side * zc), ox, 0.0), Lb, 0.0, layer_of(Lb), 0.0, True, (-hd[0], -hd[1]),
@@ -23085,7 +23113,7 @@ def _th_fronds_mesh(F, G, s):
             s_apex = cum[max(0, n_back - len(mid) + (len(mid) - 1) // 2)] if mid else 0.0
             ws = 0.5 * lwc * (1.0 - (0.1 + 0.08 * mess) * r[2]) * (1.0 - 0.15 * min(1.0, mess) * r2[6])  # narrower only: the UVs fill the leaf's width
             half, twist, flat = [], [], []
-            tw = (r[3] - 0.5) * (0.2 + 0.3 * mess)
+            tw = (r[3] - 0.5) * (0.2 + 0.3 * mess) * (1.0 + 1.5 * r_fringe)
             roll = (r2[7] - 0.5) * (0.15 + 0.25 * mess)  # lies a little skew over the bend
             base_l = 0.07 * total * (0.6 + 0.8 * r2[8])  # the cut end narrows (a leaf's base)
             for k, c_ in enumerate(cum):
@@ -23099,8 +23127,59 @@ def _th_fronds_mesh(F, G, s):
             dc = 0.35 * _th_leaf_dry(s, r[8]) if dried else 0.0
             emit(Q, Nn, half, twist, uk_tile, min(stacks - 1, int(r[4] * stacks)), mirror and r[5] < 0.5,
                  0.25 if three else 0.0, (dc, _rand12(seed, 8803, i, 0), False) if dc else None,
-                 [1.0 - c_ / total for c_ in cum], 0.3 + 0.1 * mess, flat, kind="cap")
+                 [1.0 - c_ / total for c_ in cum], (0.3 + 0.1 * mess) * (1.0 - 0.8 * min(1.0, r_fringe)), flat,
+                 kind="cap")
         return rest
+
+    def crown(pts, key0):
+        """Ridge shag: tufts of loose thin leaflets over the cap. pts [(x, z, plan heading)]: each tuft
+        starts a little down its own side from the crest (scattered, so no line of starts) and fans 3-7
+        leaflets out over up to +-55 degrees (2026-11-12: all running straight down the slope, side by side,
+        they still read as combed; the hips, whose leaves fan, read right). Each root is down inside the
+        cap leaves, rising in among them within a third of its length, then down with the cap and past its
+        edge (longer than the cap leaves: no line where the cap ends), its tip standing off at its own
+        stiff angle (most a little, the odd one a lot: Ridge spikes) plus Shag."""
+        top0 = 2.0 * rs + 1.15 * rise * r_height
+        for i, (x0, z0, hd0) in enumerate(pts):
+            if state["capped"]:
+                return
+            rt = _rand12(seed, key0, i, 2)
+            n_t = 3 + int(rt[0] * 5.0)
+            spread = math.radians(25.0 + 30.0 * rt[1])
+            dd0 = rt[2] * 0.45 * Lc  # the tuft's start, down the slope from the crest
+            for j in range(n_t):
+                r = _rand12(seed, key0, i, 10 + j)
+                a = (((j + 0.5) / n_t - 0.5) * 2.0 + (r[0] - 0.5) * 0.6) * spread
+                hd = (hd0[0] * math.cos(a) - hd0[1] * math.sin(a), hd0[0] * math.sin(a) + hd0[1] * math.cos(a))
+                L = ll * (0.5 + 0.6 * r[1] * (1.0 - 0.4 * abs(a) / max(1e-6, spread))) * (
+                    1.0 + (r[2] - 0.5) * 0.4 * min(1.5, m_top))
+                dd = dd0 + (r[3] - 0.5) * 0.08 * Lc
+                dp = dd / math.hypot(1.0, F.ms)
+                x, z = x0 + hd0[0] * dp + (r[11] - 0.5) * 0.3 * tlw, z0 + hd0[1] * dp
+                xc = min(max(x, F.x0 + 1e-6), F.x1 - 1e-6)
+                dry, rd = 0.0, None
+                if dried:
+                    rd = _rand12(seed, key0 + 1, i, 10 + j)
+                    dry = _th_leaf_dry(s, rd[0])
+                    L *= 1.0 - 0.18 * dry
+                cap_h = top0 - 0.15 * rise * dd / Lc  # the cap's height where it starts
+                hr = 0.35 * cap_h
+                hb = cap_h * (0.8 + 0.4 * r[4]) + cap_step * rt[3]  # in among the cap's leaves
+                lean = math.tan(min(1.2, r_spikes * math.radians(4.0 + 36.0 * r[5] ** 1.6)))
+
+                def layer(d, hr=hr, hb=hb, lean=lean, L=L):
+                    return (hr + (hb - hr) * _rl_smooth01(min(1.0, d / (0.3 * L))) + lean * d -
+                            0.15 * rise * d / Lc)
+                line = leaf_line(((xc, z), x - xc, 0.0), L, 0.0, layer, droop * 0.12 * L * m_top * r[6], False, hd)
+                if line is None:
+                    continue
+                ws = (1.0 + (r[7] - 0.5) * 0.3 * m_top) * max(0.4, 1.0 - 0.3 * dry)
+                tw = (r[8] - 0.5) * 1.4 * m_top + ((rd[1] - 0.5) * 2.4 * dry if dry else 0.0)
+                pt = prof_top_of(r[9]) if (tip_s or tip_v) else prof_top
+                if not emit(line[0], line[1], [p * 0.5 * tlw * ws for p in pt], [tw * v ** 1.2 for v in k_seg],
+                            uk_top, min(stacks - 1, int(r[10] * stacks)), mirror and rt[4] < 0.5,
+                            0.3 if three else 0.0, (dry, rd, True) if dry else None):
+                    return
 
     def pole(path, rest=None, ties=True, butt=None, on=None):
         """A pole along a crest, bedded into the top of the cap leaves: path [(x, z)]. rest: the leaves'
@@ -23376,6 +23455,7 @@ def _th_fronds_mesh(F, G, s):
             phi = hi + (2.05 * rp / F.ends[0][4] + 2.5 * rp if F.ends[0] and hip_poles else 0.0)
             ridge_pole = pole([(min(max(x, F.x0 + 1e-6), F.x1 - 1e-6), 0.0) for x in [plo] + xs + [phi]], rest)
             state["ridge"] = ridge_pole
+            hip_paths = []
             if F.shape == "Ridge":
                 for e, end in enumerate(F.ends):
                     if end is None or state["capped"]:
@@ -23409,6 +23489,7 @@ def _th_fronds_mesh(F, G, s):
                             hds_ = fan(zs, parts0)
                         hip_rest = crest([((p, 0.0, 0.0), None) for p in path], hds_,
                                          Lc, 8810 + e * 2 + int(zs > 0), hb_)
+                        hip_paths.append((path, zs, sign, 8894 + e * 2 + int(zs > 0)))
                         # the hip pole starts against the ridge pole's side (not at its axis: the two hip
                         # poles and the ridge pole met in one point and ran through each other)
                         zb = 2.05 * rp
@@ -23430,6 +23511,37 @@ def _th_fronds_mesh(F, G, s):
                         xj = sign * end[3]
                         dj = rS[0] + (xj - rQ[0][0]) if rQ[-1][0] > rQ[0][0] else rS[0] - (xj - rQ[0][0])
                         band(rS, rQ, rN, clamp(dj, rS[0], rS[-1]), 5, _rand12(seed, 8871, e, 0), ends=False)
+            if r_shag > 0.0 and F.shape == "Ridge" and not state["capped"]:  # Ridge shag over the caps
+                sp = 3.5 * cap_gap / r_shag  # a tuft every so often (5 leaflets each on average)
+                n = max(1, int(math.ceil((hi - lo) / sp)))
+                pts_r = []
+                for i in range(n):
+                    r = _rand12(seed, 8890, i, 1)
+                    side = 1.0 if r[1] < 0.5 else -1.0
+                    a = (r[2] - 0.5) * math.radians(20.0 + 30.0 * min(1.5, mess))
+                    pts_r.append((lo + (hi - lo) * (i + r[0]) / n, side * G["cell"],
+                                  (math.sin(a), side * math.cos(a))))
+                crown(pts_r, 8891)
+                for path, zs, sign, key in hip_paths:
+                    if len(path) < 2:
+                        continue
+                    cum = [0.0]
+                    for k in range(1, len(path)):
+                        cum.append(cum[-1] + math.hypot(path[k][0] - path[k - 1][0], path[k][1] - path[k - 1][1]))
+                    n = max(1, int(math.ceil(cum[-1] / sp)))
+                    pts_h = []
+                    for i in range(n):
+                        r = _rand12(seed, key, i, 1)
+                        c_ = cum[-1] * (i + r[0]) / n
+                        k = min(len(path) - 1, max(1, next((k for k in range(1, len(path)) if cum[k] >= c_),
+                                                            len(path) - 1)))
+                        f_ = (c_ - cum[k - 1]) / max(1e-9, cum[k] - cum[k - 1])
+                        px = path[k - 1][0] + (path[k][0] - path[k - 1][0]) * f_
+                        pz = path[k - 1][1] + (path[k][1] - path[k - 1][1]) * f_
+                        f = 0.5 + (r[1] - 0.5) * 1.2 * (1.0 - 0.6 * hb_)  # down the side .. down the end
+                        pts_h.append((px, pz, _th_unit2(sign * math.sin(f * math.pi / 2.0),
+                                                        zs * math.cos(f * math.pi / 2.0))))
+                    crown(pts_h, key + 10)
     # ---- a fringe of leaves tied along each gable verge, hanging down past the end
     if fringe > 0.0 and gables and not state["capped"]:
         for sign, edge in gables:
@@ -31505,6 +31617,17 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "root_var", "Start variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "Each leaflet starts its own random way further in or out, so the starts don't line up along "
             "the course (a ruled line of roots reads as artificial).")
+        row(sec, "ridge_shag", "Ridge shag", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
+            "Loose thin leaflets laid over the ridge and hip caps, roots down in the cap, tips standing off "
+            "like the loose top fronds on the slopes, so the crest isn't combed smooth. 0: none; 1: about "
+            "two for every cap leaf; higher: bushier.")
+        row(sec, "ridge_fringe", "Ridge fringe", FloatField(0.0, 2.0, 0.0, 2.0, decimals=2, step=0.05),
+            "The ridge cap's edges: the leaves over the ridge end at uneven lengths down each side and their cut "
+            "ends stand off the slope, a ragged fringe (as real ridge thatch looks from above) instead of a "
+            "smooth band with a clean edge. They also arch less and turn more. 0: as before.")
+        row(sec, "ridge_spikes", "Ridge spikes", FloatField(0.0, 3.0, 0.0, 3.0, decimals=2, step=0.05),
+            "How far the Ridge shag leaflets' tips stand up off the cap (most a little, the odd one a lot). "
+            "0: they lie along the cap; higher: spikier.")
         row(sec, "hold_poles", "Hold-down poles", IntField(0, 12, 0, 6),
             "Poles laid on top of the thatch straight down the slope, in pairs whose tops cross over the ridge, "
             "to keep the leaves on in wind and storms (common on makeshift and jungle roofs). How many pairs "
@@ -31783,7 +31906,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
