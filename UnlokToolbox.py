@@ -27943,7 +27943,7 @@ def thatch_build(frame, settings, blockers=None):
 ROOF_UDIM_ORDER = ("straw", "sheets", "tiles", "sticks", "underlay", "trim", "tile_trim", "tile_underlay", "fixings", "frame")
 
 
-def _roof_udims(out, start=1001, order=None):
+def _roof_udims(out, start=1001, order=None, taken=None):
     """No two of a roof's meshes share UV space: each part, in
     ROOF_UDIM_ORDER, moves into the UDIM tiles after the ones the parts
     before it use (a part's own stacked variations still share their
@@ -27951,7 +27951,8 @@ def _roof_udims(out, start=1001, order=None):
     the row's 10th tile goes on up a row (above every part so far, from the
     start's column if it fits there, else the first). out["udims"]: {part:
     [UDIM numbers]}. order: the parts in order (default ROOF_UDIM_ORDER; Moss and
-    Ivy pass its own)."""
+    Ivy pass its own). taken: UDIM numbers in use already (a scatter layer
+    with its own UDIM): a part moves on along the row past them."""
     d = max(0, int(start or 1001) - 1001)
     c0, r0 = d % 10, d // 10
     c, r, band = c0, r0, 1
@@ -27966,6 +27967,10 @@ def _roof_udims(out, start=1001, order=None):
         height = max(1, int(math.ceil(max(vs) - 1e-6)) - vlo)
         if c + width > 10:
             c, r, band = (c0 if c0 + width <= 10 else 0), r + band, 1
+        while taken and any(1001 + c + i + 10 * (r + j) in taken for j in range(height) for i in range(width)):
+            c += 1
+            if c + width > 10:
+                c, r, band = (c0 if c0 + width <= 10 else 0), r + band, 1
         if c != lo or r != vlo:
             out[part] = tuple(mesh[:3]) + ([u + (c - lo) for u in us], [v + (r - vlo) for v in vs]) + \
                 tuple(mesh[5:])
@@ -42239,6 +42244,40 @@ def _sc_under_ids(layers, lid):
                  sc_type(l.get("type")) != "Specks")
 
 
+def _sc_layer_core(layer):
+    """A layer as its growth sees it: without its name or its own UDIM (UV
+    placement only), so renaming it or moving it to other tiles never grows
+    it again."""
+    return dict((k, v) for k, v in layer.items() if k not in ("name", "udim"))
+
+
+def _sc_place_udims(layers, combined, order, start):
+    """Each part into its own UDIM tiles: layers with their own Start UDIM
+    ("udim" on the layer; the user, 2026-11-12: "move one layer to a
+    different UDIM than the rest of the group") first, in list order, from
+    theirs; then the rest from the group's start, in list order, past every
+    tile taken. No two parts share a tile. Returns _roof_udims' output."""
+    own = dict((l["id"], int(l["udim"])) for l in layers if l.get("udim") and l.get("on", True))
+    placed, tiles, used = {}, {}, set()
+    for layer in layers:
+        lid = layer["id"]
+        if lid not in own:
+            continue
+        o = [k for k in order if k.split("/")[0] == lid]
+        got = _roof_udims(dict((k, combined[k]) for k in o if k in combined), own[lid], order=o, taken=used)
+        for k, ts in got.pop("udims").items():
+            tiles[k] = ts
+            used.update(ts)
+        placed.update(got)
+    o = [k for k in order if k.split("/")[0] not in own]
+    got = _roof_udims(dict((k, m) for k, m in combined.items() if k.split("/")[0] not in own), start, order=o,
+                      taken=used)
+    tiles.update(got.pop("udims"))
+    placed.update(got)
+    placed["udims"] = tiles
+    return placed
+
+
 def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     """Every on layer's parts for a group, from the cache where a layer and
     its surfaces are unchanged (only: layer ids to rebuild regardless),
@@ -42290,13 +42329,14 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
         on_moss = typ in SC_DEBRIS_ITEMS and typ != "Grass" and bool(ls.get("on_moss")) and bool(rest)
         on_below = typ in SC_DEBRIS_ITEMS and bool(ls.get("on_layers")) and bool(below)
         ground = (list(rest) if on_moss else []) + (list(below) if on_below else [])
-        # (not its name: renaming a layer grew it again)
-        key = (root, lid, json.dumps(dict((k, v) for k, v in layer.items() if k != "name"), sort_keys=True), skey)
+        # (not its name: renaming a layer grew it again; nor its own UDIM, which only moves its UVs)
+        key = (root, lid, json.dumps(_sc_layer_core(layer), sort_keys=True), skey)
         if ground:  # leaves / grass that rest on what's under them rebuild when it changes
             key = key + (tuple((len(g[0][0]), len(g[0][1]), tuple(g[0][0][len(g[0][0]) // 2]) if g[0][0] else (),
                                 g[1]) for g in ground),)
         hit = _SC_BUILT.get(key) if not (only and lid in only) else None
-        if hit is None and grown.get(lid) == layer and not (only and lid in only) and \
+        if hit is None and lid in grown and _sc_layer_core(grown[lid]) == _sc_layer_core(layer) and \
+                not (only and lid in only) and \
                 not (on_moss and fresh) and not (on_below and fresh_below) and \
                 not (on_below and _sc_under_ids(list(grown.values()), lid) != _sc_under_ids(layers, lid)):
             hit = _sc_read_layer(root, layer, saved.get(lid))
@@ -42333,7 +42373,7 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             lone[strands] = key
             combined[strands] = combined.pop(key)
     before = dict((k, (min(m[3]), min(m[4]))) for k, m in combined.items() if k.endswith("/strands") and m[3])
-    placed = _roof_udims(dict(combined), int(data.get("udim") or 1001), order=order)
+    placed = _sc_place_udims(layers, combined, order, int(data.get("udim") or 1001))
     report["udims"] = placed.pop("udims")
     for strands, key in lone.items():
         placed[key] = placed.pop(strands)
@@ -43831,11 +43871,12 @@ def sc_set_surfaces(root, add=(), remove=()):
     return _sc_change(root, "Scatter surfaces", edit)
 
 
-def sc_update(root, lid=None, change=None, group_change=None, draft=None):
+def sc_update(root, lid=None, change=None, group_change=None, draft=None, layer_change=None):
     """Live edit (out of the undo queue, like the other tools' sliders): a
-    layer's settings (change) or the group's (group_change: udim), then the
-    regrow of that layer (while paused: saved, grown at Play; draft: as
-    sc_regrow's). Returns the report."""
+    layer's settings (change), keys on the layer itself (layer_change: udim,
+    its own Start UDIM, 0 / None = with the group) or the group's
+    (group_change: udim), then the regrow of that layer (while paused:
+    saved, grown at Play; draft: as sc_regrow's). Returns the report."""
     _sc_note(root)
     before = cmds.getAttr(root + "." + SC_ATTR) if _SC_HOLD["on"] else None
     data = sc_data(root)
@@ -43843,6 +43884,14 @@ def sc_update(root, lid=None, change=None, group_change=None, draft=None):
         layer = sc_layer(data, lid)
         if layer is not None:
             layer.setdefault("s", {}).update(change)
+    if lid and layer_change:
+        layer = sc_layer(data, lid)
+        if layer is not None:
+            for k, v in layer_change.items():
+                if v:
+                    layer[k] = v
+                else:
+                    layer.pop(k, None)
     if group_change:
         data.update(group_change)
     with NoUndo():
@@ -45449,6 +45498,17 @@ class ScatterPanel(QtWidgets.QWidget):
         self.udim.changed.connect(lambda: self._udim_changed())
         urow.add_row("Start UDIM", self.udim, "The group's first UDIM tile: every layer's parts take their own "
                                               "tiles from here, in layer order (no two share UV space).")
+        self.own_udim = CheckField("")
+        self.own_udim.changed.connect(lambda: self._layer_udim_changed())
+        self.own_udim_row = urow.add_row("Layer has own UDIM", self.own_udim,
+                                         "The picked layer starts at its own UDIM tile instead of following the "
+                                         "group's: e.g. one layer on its own texture set. The other layers skip "
+                                         "the tiles it takes.")
+        self.layer_udim = IntField(1001, 1999, 1001, 1100)
+        self.layer_udim.setValue(1011)
+        self.layer_udim.changed.connect(lambda: self._layer_udim_changed())
+        self.layer_udim_row = urow.add_row("Layer's UDIM", self.layer_udim,
+                                           "The picked layer's first UDIM tile (its parts go on from here).")
         card.add(urow)
         sel_all = secondary_button("Select All", "Select every scatter group in the scene.")
         sel_all.clicked.connect(lambda *_: self.select_all())
@@ -45592,6 +45652,7 @@ class ScatterPanel(QtWidgets.QWidget):
             self.preset_combo.blockSignals(False)
 
     def _show_layer(self):
+        self._show_layer_udim()
         typ = self._type()
         for t, box in self.box.items():
             box.setVisible(t == typ)
@@ -46044,6 +46105,31 @@ class ScatterPanel(QtWidgets.QWidget):
             return
         t0 = time.time()
         self._report("Updated", sc_update(self._root, group_change={"udim": self.udim.value()}), t0)
+
+    def _layer_udim_changed(self):
+        if self._filling or not self._alive() or not self._lid:
+            return
+        t0 = time.time()
+        u = self.layer_udim.value() if self.own_udim.value() else 0
+        self._show_layer_udim(sync=False)
+        self._report("Updated", sc_update(self._root, self._lid, layer_change={"udim": u}), t0)
+
+    def _show_layer_udim(self, sync=True):
+        """Layer has own UDIM / Layer's UDIM: shown with a layer picked, the
+        number only while it has its own (sync: read both from the layer;
+        a layer without one offers the row above the group's start)."""
+        if not hasattr(self, "layer_udim"):  # (still building the panel)
+            return
+        layer = sc_layer(sc_data(self._root), self._lid) if self._alive() and self._lid else None
+        if sync and layer is not None:
+            own = int(layer.get("udim") or 0)
+            self.own_udim.setValue(bool(own))
+            self.layer_udim.setValue(own or min(1999, self.udim.value() + 10))
+        on = layer is not None
+        for w in (self.own_udim_row, self.own_udim):
+            w.setVisible(on)
+        for w in (self.layer_udim_row, self.layer_udim):
+            w.setVisible(on and self.own_udim.value())
 
     def _structural(self, verb, fn):
         t0 = time.time()

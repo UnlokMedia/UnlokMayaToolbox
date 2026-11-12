@@ -2235,7 +2235,18 @@
       Move Up regrew): `sc_add_layer(top=True)` inserts first;
       the Add Layer menu's checkable "New layers go on top" (`add_top`,
       optionVar `SC_ADD_TOP_VAR` "unlokScatterAddTop", on unless turned
-      off) passes it. Duplicate still appends. Test
+      off) passes it. Duplicate still appends. **Own UDIM per layer**
+      (the user: "move one layer to a different UDIM than the rest of the
+      group"): `layer["udim"]` (on the layer, not in `s`; 0 / missing =
+      with the group), set live by `sc_update(layer_change={"udim": n})`.
+      `_sc_place_udims` places those layers first from their own start
+      (list order), then the rest from the group's, `_roof_udims(taken=)`
+      skipping tiles in use, so nothing shares a tile. `_sc_layer_core`
+      (no name, no udim) is the layer cache key and the readback compare,
+      so a UDIM change only moves UVs. Panel step 4: Layer has own UDIM /
+      Layer's UDIM (`own_udim`, `layer_udim`, `_show_layer_udim`; ticking
+      offers the row above the group's start).
+      `tests/test_scatter_udims.py`. Test
       `tests/test_layer_stack.py`; pictures `tests/run_gui_layer_stack_pics.mel`
       (`tests/_out/layer_stack_pics`).
     - **Shading data:** moss meshes' points are `_MiPts` (a list with

@@ -118,6 +118,18 @@ PART_COLOURS = {"moss": ("testMoss", (0.12, 0.22, 0.05)), "strands": ("testStran
                 "dirt": ("testDirt", (0.22, 0.15, 0.08))}
 
 
+def panel_udims(ns, root):
+    """{part key: [UDIMs]} from each part's UV bounds."""
+    import math
+    out = {}
+    for key, node in ns["sc_parts"](root).items():
+        (u0, u1), (v0, v1) = cmds.polyEvaluate(node, boundingBox2d=True)
+        a, b = int(math.floor(u0 + 1e-6)), int(math.floor(v0 + 1e-6))
+        out[key] = [1001 + i + 10 * j for i in range(a, max(a + 1, int(math.ceil(u1 - 1e-6))))
+                    for j in range(b, max(b + 1, int(math.ceil(v1 - 1e-6))))]
+    return out
+
+
 def shade_part(node, part):
     name, rgb = PART_COLOURS[part]
     shade(node, name, rgb)
@@ -298,6 +310,21 @@ def main():
     else:
         cmds.optionVar(intValue=(var, had))
     panel.add_top.setChecked(had is None or bool(had))
+
+    # --- a layer on its own UDIM tiles (Layer has own UDIM)
+    check("Layer has own UDIM shows for the picked layer, off; the number hidden",
+          not panel.own_udim.isHidden() and not panel.own_udim.isChecked() and panel.layer_udim.isHidden())
+    panel.own_udim.setChecked(True)  # a click: toggled -> changed
+    pump()
+    got = ns["sc_layer"](ns["sc_data"](root), moss2).get("udim")
+    check("ticking it gives the layer its own UDIM (the row above the group's start) and shows the number",
+          got == panel.udim.value() + 10 and not panel.layer_udim.isHidden() and
+          min(r for k, ts in panel_udims(ns, root).items() if k.startswith(moss2 + "/") for r in ts) == got,
+          "%s %s" % (got, panel.status.text()))
+    panel.own_udim.setChecked(False)
+    pump()
+    check("unticking puts it back with the group", not ns["sc_layer"](ns["sc_data"](root), moss2).get("udim") and
+          panel.layer_udim.isHidden())
     parts = dict((k, n) for k, n in ns["sc_parts"](root).items() if cmds.getAttr(n + ".visibility"))
     check("the flat moss and the sparse moss each have their own parts",
           any(k.startswith(moss + "/") for k in parts) and any(k.startswith(moss2 + "/") for k in parts) and
