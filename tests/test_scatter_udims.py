@@ -6,7 +6,8 @@ The user (2026-11-12): "control UDIMs individually on layers ... move one
 layer to a different UDIM than the rest of the group". A layer's "udim"
 (Layer has own UDIM) starts its parts there; the rest follow the group's
 Start UDIM in list order and skip the tiles it takes. Checked: the layer's
-parts move to their tiles, nobody shares a tile, nothing grows again (UVs
+parts move to their tiles, two given the same UDIM overlap there, the
+others never share a tile, nothing grows again (UVs
 only), switching it off puts every part back where it was, and pinning a
 layer onto the group's own start pushes the others along.
 """
@@ -98,6 +99,19 @@ def main():
     own = dict((k, v) for k, v in st.items() if k.startswith(mid + "/"))
     check("pinned onto the group's start: it takes 1001, the others move past it",
           min(t for v in own.values() for t in v[0]) == 1001 and not clash(st), str(sorted(st.items())))
+    # two layers given the same UDIM overlap there (the user: "I should just be able to overlap two of them")
+    last = lids[2]
+    tb["sc_update"](root, mid, layer_change={"udim": 1021})
+    tb["sc_update"](root, last, layer_change={"udim": 1021})
+    st = state()
+    a = [t for k, v in st.items() if k.startswith(mid + "/") for t in v[0]]
+    b = [t for k, v in st.items() if k.startswith(last + "/") for t in v[0]]
+    first = [t for k, v in st.items() if k.startswith(lids[0] + "/") for t in v[0]]
+    check("two layers on the same UDIM overlap there", min(a) == 1021 and min(b) == 1021 and set(a) & set(b),
+          "%s / %s" % (a, b))
+    check("... while the layer following the group stays clear of them", first and not set(first) & set(a + b),
+          str(first))
+    tb["sc_update"](root, last, layer_change={"udim": 0})
     tb["sc_update"](root, mid, layer_change={"udim": 0})
     st = state()
     check("off again: every part back on its old tiles",

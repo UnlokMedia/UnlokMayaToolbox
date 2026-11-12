@@ -2241,7 +2241,8 @@
       with the group), set live by `sc_update(layer_change={"udim": n})`.
       `_sc_place_udims` places those layers first from their own start
       (list order), then the rest from the group's, `_roof_udims(taken=)`
-      skipping tiles in use, so nothing shares a tile. `_sc_layer_core`
+      skipping their tiles; own-UDIM layers on the same tile overlap
+      (the user asked for that). `_sc_layer_core`
       (no name, no udim) is the layer cache key and the readback compare,
       so a UDIM change only moves UVs. Panel step 4: Layer has own UDIM /
       Layer's UDIM (`own_udim`, `layer_udim`, `_show_layer_udim`; ticking

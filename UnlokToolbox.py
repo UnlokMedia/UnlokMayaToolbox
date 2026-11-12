@@ -42255,8 +42255,11 @@ def _sc_place_udims(layers, combined, order, start):
     """Each part into its own UDIM tiles: layers with their own Start UDIM
     ("udim" on the layer; the user, 2026-11-12: "move one layer to a
     different UDIM than the rest of the group") first, in list order, from
-    theirs; then the rest from the group's start, in list order, past every
-    tile taken. No two parts share a tile. Returns _roof_udims' output."""
+    theirs, each on its own: two layers given the same UDIM overlap there
+    (the user: "I should just be able to overlap two of them"); then the
+    rest from the group's start, in list order, past every tile those take,
+    so a layer following the group never shares a tile. Returns
+    _roof_udims' output."""
     own = dict((l["id"], int(l["udim"])) for l in layers if l.get("udim") and l.get("on", True))
     placed, tiles, used = {}, {}, set()
     for layer in layers:
@@ -42264,7 +42267,7 @@ def _sc_place_udims(layers, combined, order, start):
         if lid not in own:
             continue
         o = [k for k in order if k.split("/")[0] == lid]
-        got = _roof_udims(dict((k, combined[k]) for k in o if k in combined), own[lid], order=o, taken=used)
+        got = _roof_udims(dict((k, combined[k]) for k in o if k in combined), own[lid], order=o)
         for k, ts in got.pop("udims").items():
             tiles[k] = ts
             used.update(ts)
@@ -45502,8 +45505,9 @@ class ScatterPanel(QtWidgets.QWidget):
         self.own_udim.changed.connect(lambda: self._layer_udim_changed())
         self.own_udim_row = urow.add_row("Layer has own UDIM", self.own_udim,
                                          "The picked layer starts at its own UDIM tile instead of following the "
-                                         "group's: e.g. one layer on its own texture set. The other layers skip "
-                                         "the tiles it takes.")
+                                         "group's: e.g. one layer on its own texture set. Layers given the same "
+                                         "UDIM overlap there (sharing a texture); layers following the group "
+                                         "skip the tiles they take.")
         self.layer_udim = IntField(1001, 1999, 1001, 1100)
         self.layer_udim.setValue(1011)
         self.layer_udim.changed.connect(lambda: self._layer_udim_changed())
