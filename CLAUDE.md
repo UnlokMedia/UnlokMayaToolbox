@@ -368,7 +368,21 @@
   Ridge shag (`crown()`, tufts of 3-7 fanned thin leaflets over ridge and
   hip caps, roots in the cap) and Ridge spikes. One more layer on top of a
   combed cap did little: the fix had to be in the cap leaves. Presets:
-  fringe 1.5, shag 1, width 0.85. Pictures: `arnold_pics.py` view "drone".
+  fringe 1.5, shag 1, width 0.7. Pictures: `arnold_pics.py` view "drone".
+  **Pinched ridge** (2026-11-12, the user's paintover: a triangle from the
+  side with a crisp top line, leaves in bundles clamped over the ridge):
+  Ridge bundles (`slots` in `saddle`, randoms 8860), Ridge pinch (the cap's
+  bend becomes a sharp fold, `fold()`; also takes `ThatchField.rr`
+  rounding off the ridge line), Ridge profile (`r_curve`, bows the fold's
+  legs), Ridge cover (Leaves / Wood strip boards `ridge_boards()` / Bamboo
+  pole), Ridge sink (`dip()`: lowers the cap's crest into the roof, none at
+  the leaf's end) and Pinch height. Measured with a slice through the ridge:
+  the slope courses stop short of the crest, so the roof's own crest stood
+  ~1 unit above their thatch and the cap rode on it as a hood with upright
+  sides ("sticking up too much"); sink fixes that. Sink past ~0.85 rise
+  pressed the cap leaves flat into one clipping sheet, so the slider tops
+  out below that. Presets: bundles 1, pinch 0.75, sink 0.78, cap width
+  0.008.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5
   (Lift 3 / Volume 2 / Top 1.7 let sky through where hips meet the ridge
   and took 9.5 s), Messiness 0.35 (0.25 opened that joint again), Slant 0.1,

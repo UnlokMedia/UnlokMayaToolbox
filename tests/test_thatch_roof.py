@@ -1144,12 +1144,14 @@ def run():
     s_old.pop("hip_blend")
     s_old.pop("flow")
     for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height",
-               "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes"):
+               "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes",
+               "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height"):
         s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
           dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0, under_over_top=False, ridge_height=1.0,
                     ridge_width=1.0, ridge_lumps=1.0, root_tuck=0.0, root_shift=0.0, root_var=0.0, ridge_shag=0.0,
-                    ridge_spikes=1.0)[0] ==
+                    ridge_spikes=1.0, ridge_fringe=0.0, ridge_bundles=0.0, ridge_pinch=0.0, ridge_curve=0.5, ridge_sink=0.0, pinch_height=1.0,
+                    ridge_cover="Leaves")[0] ==
           tb["thatch_build"](fr_, s_old)["straw"][0])
     art_ = ("ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var")
     check("Ridge and root art direction: look keys, as before by default, each changes the leaves",
@@ -1166,6 +1168,30 @@ def run():
           all(tb["thatch_preset"](n_).get("ridge_shag", 0.0) > 0.0 for n_ in ("Palm: palapa (hipped, messy top)",
                                                                              "Palm: bushy palapa (shaggy)")) and
           len(sh1_[0]) > len(sh0_[0]) and dry_build(ridge_shag=1.0, ridge_spikes=2.0)[0] != sh1_[0])
+    rk_ = ("ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height")
+    rb0_ = dry_build()[0]
+
+    def full_build(**over):
+        s = dict(tb["THATCH_DEFAULTS"], **tb["thatch_preset"]("Palm: palapa (hipped, messy top)"))
+        s.update(resolution=80, dried=0.0)
+        s.update(over)
+        return tb["thatch_build"](fr_, s)
+    sk0_ = full_build()["sticks"]
+    skw_ = full_build(ridge_cover="Wood strip")["sticks"]
+    skb_ = full_build(ridge_cover="Bamboo pole", ridge_poles=False)["sticks"]
+    skn_ = full_build(ridge_poles=False)["sticks"]
+    check("Ridge fringe, bundles, pinch, profile and cover: look keys, neutral by default, each changes the leaves",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in rk_) and tb["THATCH_DEFAULTS"]["ridge_fringe"] == 0.0 and
+          tb["THATCH_DEFAULTS"]["ridge_bundles"] == 0.0 and tb["THATCH_DEFAULTS"]["ridge_pinch"] == 0.0 and
+          tb["THATCH_DEFAULTS"]["ridge_cover"] == "Leaves" and
+          all(dry_build(**{k: v})[0] != rb0_ for k, v in (("ridge_fringe", 0.0), ("ridge_bundles", 0.0),
+                                                          ("ridge_pinch", 0.0), ("ridge_curve", -0.8), ("ridge_sink", 0.0), ("pinch_height", 0.4))))
+    check("Ridge cover: Wood strip adds boards to the sticks, Bamboo pole turns the ridge pole on",
+          skw_ and sk0_ is not None and len(skw_[0]) > len(sk0_[0] if sk0_ else []) and
+          skb_ and len(skb_[0]) > len(skn_[0] if skn_ else []),
+          "sticks verts %s -> wood %s; no pole %s -> bamboo %s" % (
+              len(sk0_[0]) if sk0_ else 0, len(skw_[0]) if skw_ else 0,
+              len(skn_[0]) if skn_ else 0, len(skb_[0]) if skb_ else 0))
     check("Under layer over the top: a look key, off by default, on in the ridged palapas, adds a course",
           "under_over_top" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["under_over_top"] is False and
           all(tb["thatch_preset"](n_).get("under_over_top") for n_ in ("Palm: palapa (hipped, messy top)",
