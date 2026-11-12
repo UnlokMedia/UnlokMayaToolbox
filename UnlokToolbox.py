@@ -32784,7 +32784,7 @@ DEBRIS_DEFAULTS = {
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
-    "on_moss": False,
+    "on_moss": False, "on_layers": False,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
@@ -38838,6 +38838,24 @@ class _MiDropStack(object):
                     if cells.get(key, MI_DROP_VOID) < y:
                         cells[key] = y
 
+    def lay_faces(self, mesh, lift=0.0):
+        """Adds a mesh's faces (a lower layer's grass or leaves: On layers
+        below) lifted by lift, sampled finer than a cell like a laid leaf, so
+        a thin grass blade is seen all along."""
+        pts, counts, conn = mesh[0], mesh[1], mesh[2]
+        if lift:
+            pts = [(p[0], p[1] + lift, p[2]) for p in pts]
+        k, quads = 0, []
+        for n in counts:
+            ids = conn[k:k + n]
+            k += n
+            if n == 4:
+                quads.extend(ids)
+                continue
+            for a in range(1, n - 1):
+                quads.extend((ids[0], ids[a], ids[a + 1], ids[a + 1]))
+        self.lay(pts, quads, 0)
+
     def lay_mesh(self, mesh, lift=0.0):
         """Adds a mesh (a moss bed) lifted by lift: its points, face middles
         and edge middles, so leaves rest on it (in among its shoots)."""
@@ -39212,6 +39230,7 @@ class _DebrisBuild(object):
             (None, {}, 1.0)
         self.piles_at = {}  # cell -> [(centre, radius)] of the piles so far
         self.drape = clamp(float(s.get("drape", 0.5)), 0.0, 1.0)
+        self.on_below = any(len(g) > 2 and g[2] for g in s.get("_rest_on") or ())  # lies on lower layers' debris
         self.fields = {}
         self.stack = None  # the leaves laid so far (_MiDropStack, made with the first field)
         self.tris = None  # ... as triangles (_MiLeafTris): the contact pass
@@ -39314,8 +39333,12 @@ class _DebrisBuild(object):
             if self.stack is None:
                 self.stack = _MiDropStack(0.01 / self.m)
                 self.tris = _MiLeafTris(0.02 / self.m)
-                for mesh, lift in self.s.get("_rest_on") or ():  # Rest on moss: the moss bed is ground too
-                    self.stack.lay_mesh(mesh, lift)
+                for got in self.s.get("_rest_on") or ():  # Rest on moss / On layers below: ground too
+                    mesh, lift = got[0], got[1]
+                    if len(got) > 2 and got[2]:  # a lower layer's debris: its faces
+                        self.stack.lay_faces(mesh, lift)
+                    else:
+                        self.stack.lay_mesh(mesh, lift)
                     self.tris.lay_mesh(mesh, lift)
             f.stack = self.stack
         return f
@@ -39349,6 +39372,13 @@ class _DebrisBuild(object):
         away; None: no room."""
         field = self._field(L)
         climb = max(min(L, 0.08 / self.m), 0.3 * L)  # lower than that it rests on (a lip, a rail, a gutter's rims)
+        if self.on_below:  # On layers below: a heap of a lower layer's grass under it is where it lands
+            Fh = _rl_norm((F[0], 0.0, F[2]), (0.0, 0.0, 0.0))
+            h = MI_DROP_VOID
+            for f in (0.0, 0.5 * L):  # at its base, and half way along it (a big leaf's base is its stalk)
+                h = max(h, self.stack.top(base[0] + Fh[0] * f, base[2] + Fh[2] * f, base[1] + 0.6 / self.m))
+            if MI_DROP_VOID < h and h > base[1] + 0.5 * climb:
+                base = (base[0], h, base[2])
         for ang in (0.0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05):
             got = _mi_drop_pose(field, base, n, _mi_rotate(X, n, ang) if ang else X,
                                 _mi_rotate(F, n, ang) if ang else F, samples, climb, self.lift, 0.15 / self.m)
@@ -39396,8 +39426,31 @@ class _DebrisBuild(object):
             self._tuft(p, n, r)
         for p, n, r, margin, ci in self._spots(float(s["specks"]), 6):
             self._specks(p, n, r)
+        if self.G[0] and self.s.get("_rest_on"):
+            self._grass_over()
         self.capped = self.capped or self.md.capped
         return self
+
+    def _grass_over(self):
+        """Grass over the layers below it (On layers below; the user,
+        2026-11-12: "fallen jungle leaves underneath grass, or if I move a
+        layer above grass ..."): every blade point under a lower layer's
+        leaves / grass (seen from above, 1 cm cells, up to 30 cm over the
+        point) is lifted onto them, so the blades lie over leaves and drape
+        over a heap. Moss beds don't count (grass grows up through moss)."""
+        under = None
+        for got in self.s.get("_rest_on") or ():
+            if len(got) > 2 and got[2]:
+                if under is None:
+                    under = _MiDropStack(0.01 / self.m)
+                under.lay_faces(got[0], got[1])
+        if under is None:
+            return
+        pts, lift, band, void = self.G[0], self.lift, 0.3 / self.m, MI_DROP_VOID
+        for i, p in enumerate(pts):
+            h = under.top(p[0], p[2], p[1] + band)
+            if h > void and h + lift > p[1]:
+                pts[i] = (p[0], h + lift, p[2])
 
     # -------------------------------------------------------------- specks
     def _specks(self, c, n, r):
@@ -40981,18 +41034,22 @@ SC_TYPES = collections.OrderedDict([
     ("Grass", {"parts": (("grass", "grassDry"),),
                "keys": SC_DEBRIS_COMMON + ("grass", "bunch_size", "grass_length", "fullness", "comb", "droop",
                                            "blade_width", "grass_pile", "grass_strays", "bunch_var",
-                                           "bunch_shape", "blade_scatter", "bunch_blades"),
-               "over": {"slope": 40.0, "grass": 1.5}, "new": {"grass_pile": 0.6}}),
+                                           "bunch_shape", "blade_scatter", "bunch_blades", "on_layers"),
+               "over": {"slope": 40.0, "grass": 1.5}, "new": {"grass_pile": 0.6, "on_layers": True}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
-                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "on_moss"),
-                "over": {"slope": 35.0, "leaves": 8.0}, "new": {"on_moss": True}}),
+                "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "on_moss", "on_layers"),
+                "over": {"slope": 35.0, "leaves": 8.0}, "new": {"on_moss": True, "on_layers": True}}),
     ("Leaf piles", {"parts": (("piles", "leafPile"),),
-                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape", "on_moss"),
-                    "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}, "new": {"on_moss": True}}),
+                    "keys": SC_DEBRIS_COMMON + ("piles", "pile_size", "leaf_size", "curl", "drape", "on_moss",
+                                                "on_layers"),
+                    "over": {"slope": 30.0, "piles": 0.6, "creases": 1.0}, "new": {"on_moss": True,
+                                                                                   "on_layers": True}}),
     ("Jungle leaves", {"parts": (("green", "leafJungle"), ("dry", "leafJungleDry")),
                        "keys": SC_DEBRIS_COMMON + ("jungle", "jungle_size", "jungle_cluster", "jungle_shape",
-                                                   "jungle_green", "jungle_tear", "curl", "drape", "on_moss"),
-                       "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}, "new": {"on_moss": True}}),
+                                                   "jungle_green", "jungle_tear", "curl", "drape", "on_moss",
+                                                   "on_layers"),
+                       "over": {"slope": 35.0, "jungle": 0.6, "creases": 0.8}, "new": {"on_moss": True,
+                                                                                       "on_layers": True}}),
     ("Moss tufts", {"parts": (("tufts", "mossTuft"),), "keys": SC_DEBRIS_COMMON + ("tufts", "tuft_size"),
                     "over": {"slope": 60.0, "tufts": 6.0}}),
     ("Specks", {"parts": (("specks", "mossSpeck"), ("dirt", "dirtSpeck")),
@@ -41714,9 +41771,10 @@ def _mi_drop_repeats(mesh):
 
 def _sc_build_layer(layer, surf, draft=False, rest_on=None, blocks=None):
     """A layer's parts {part: mesh} and counts, built on the surfaces (draft:
-    a moss layer grows its quick look, "draft" in its counts; rest_on: the
-    group's moss beds grown before it, [(mesh, lift)], for leaves that Rest
-    on moss; blocks: the group's blocker boxes, where nothing grows)."""
+    a moss layer grows its quick look, "draft" in its counts; rest_on: what
+    it lies on, [(mesh, lift, debris)]: the group's moss beds for leaves
+    that Rest on moss, the layers below's debris (debris True) for On
+    layers below (sc_build picks them); blocks: the group's blocker boxes, where nothing grows)."""
     typ = sc_type(layer.get("type"))
     s = sc_settings(layer)
     seeds = mi_seed_points(layer) or None
@@ -41755,7 +41813,7 @@ def _sc_build_layer(layer, surf, draft=False, rest_on=None, blocks=None):
         if typ != "Grass":
             ds["grass_strays"] = 0.0
         out = debris_build(surf.nodes, ds, surf=surf, seeds=seeds, faces=faces, draw=draw, paint=paint,
-                           rest_on=rest_on if s.get("on_moss") else None)
+                           rest_on=rest_on or None)
         parts = {part: out.get(src) for src, part in SC_DEBRIS_OUT[typ]}
         counts = {"bunches": out.get("bunches", 0), "leaves": out.get("leaves_n", 0), "piles": out.get("piles", 0),
                   "tufts": out.get("tufts_n", 0), "jungle": out.get("jungle_n", 0), "specks": out.get("specks_n", 0)}
@@ -41871,6 +41929,17 @@ def _sc_read_layer(root, layer, counts):
     return out, c
 
 
+def _sc_under_ids(layers, lid):
+    """The on debris layers under layer lid in a list (what it lies on with
+    On layers below): their ids, bottom up."""
+    ids = [l.get("id") for l in layers]
+    if lid not in ids:
+        return ()
+    return tuple(l.get("id") for l in reversed(layers[ids.index(lid) + 1:])
+                 if l.get("on", True) and sc_type(l.get("type")) in SC_DEBRIS_ITEMS and
+                 sc_type(l.get("type")) != "Specks")
+
+
 def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     """Every on layer's parts for a group, from the cache where a layer and
     its surfaces are unchanged (only: layer ids to rebuild regardless),
@@ -41902,29 +41971,44 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             saved = json.loads(cmds.getAttr(root + "." + SC_COUNTS) or "{}")
         except ValueError:
             saved = {}
+    layers = data.get("layers", [])
+    for layer in layers:
+        for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
+            order.append(layer["id"] + "/" + part)  # UDIM tiles in list order
+    # Grown bottom up (the user, 2026-11-12: "things higher up in the layer stack will appear on top"): moss
+    # first wherever it is in the list (it grows on the surface itself), then the rest from the bottom of the
+    # list to the top, so a debris layer that lies On layers below lands on what's under it in the list.
+    seq = [l for l in layers if sc_type(l.get("type")) == "Moss"] + \
+        [l for l in reversed(layers) if sc_type(l.get("type")) != "Moss"]
     rest, fresh = [], False  # the moss beds grown so far (Rest on moss), and whether one was grown just now
-    for layer in data.get("layers", []):
+    below, fresh_below = [], False  # the debris of the layers grown so far (On layers below), the same
+    for layer in seq:
         lid = layer["id"]
         typ = sc_type(layer.get("type"))
-        for part, _ in SC_TYPES[typ]["parts"]:
-            order.append(lid + "/" + part)
         if not layer.get("on", True):
             continue
-        on_moss = typ in SC_DEBRIS_ITEMS and bool(sc_settings(layer).get("on_moss")) and bool(rest)
+        ls = sc_settings(layer)
+        on_moss = typ in SC_DEBRIS_ITEMS and typ != "Grass" and bool(ls.get("on_moss")) and bool(rest)
+        on_below = typ in SC_DEBRIS_ITEMS and bool(ls.get("on_layers")) and bool(below)
+        ground = (list(rest) if on_moss else []) + (list(below) if on_below else [])
         # (not its name: renaming a layer grew it again)
         key = (root, lid, json.dumps(dict((k, v) for k, v in layer.items() if k != "name"), sort_keys=True), skey)
-        if on_moss:  # leaves that rest on the moss before them rebuild when it changes
-            key = key + (tuple((len(m[0]), len(m[1]), tuple(m[0][len(m[0]) // 2]) if m[0] else (), lift)
-                               for m, lift in rest),)
+        if ground:  # leaves / grass that rest on what's under them rebuild when it changes
+            key = key + (tuple((len(g[0][0]), len(g[0][1]), tuple(g[0][0][len(g[0][0]) // 2]) if g[0][0] else (),
+                                g[1]) for g in ground),)
         hit = _SC_BUILT.get(key) if not (only and lid in only) else None
-        if hit is None and grown.get(lid) == layer and not (only and lid in only) and not (on_moss and fresh):
+        if hit is None and grown.get(lid) == layer and not (only and lid in only) and \
+                not (on_moss and fresh) and not (on_below and fresh_below) and \
+                not (on_below and _sc_under_ids(list(grown.values()), lid) != _sc_under_ids(layers, lid)):
             hit = _sc_read_layer(root, layer, saved.get(lid))
         if hit is None:
-            kw = {"rest_on": list(rest)} if on_moss else {}
+            kw = {"rest_on": ground} if ground else {}
             hit = _sc_build_layer(layer, surf, draft, blocks=blocks, **kw) if surf.items else ({}, {})
             fresh = fresh or typ == "Moss"
+            fresh_below = fresh_below or typ in SC_DEBRIS_ITEMS
+        if typ in SC_DEBRIS_ITEMS and typ != "Specks":
+            below.extend((m, 0.0, True) for m in hit[0].values() if m and m[1])
         if typ == "Moss" and hit[0].get("moss") and hit[0]["moss"][1]:
-            ls = sc_settings(layer)
             tall = MOSS_DETAIL.get(ls.get("detail"), MOSS_DETAIL["Normal"])[1] and float(ls.get("strands", 0)) > 0
             rest.append((hit[0]["moss"], 0.4 * float(ls.get("strand_length", 0.0)) / scene_m_per_unit()
                          if tall else 0.0))
@@ -43889,8 +43973,12 @@ SC_FIELDS = {
                    "High and Hero shoots grown as instances: Star = a stem with a leaf star at its tip; Leafy = "
                    "small cupped leaves all the way up the stem, and more shoots."),
     "on_moss": ("Rest on moss", lambda: CheckField(""),
-                "Leaves dropped on this group's moss (layers above this one) rest on top of it, among its "
+                "Leaves dropped on this group's moss (any Moss layer) rest on top of it, among its "
                 "shoots, instead of sinking through to the surface under it."),
+    "on_layers": ("On layers below", lambda: CheckField(""),
+                  "Lies on top of the grass and leaves of the layers below this one in the list: leaves land "
+                  "on grass piles and lean against them, grass lies over fallen leaves. Move a layer up the "
+                  "list to put it on top. Off: it ignores the other layers."),
     "surface": ("Surface", lambda: SegmentField(MOSS_SURFACES),
                 "What the moss sits on. Auto: meshes named _GES, _GED or _GEV are subdivided at render time, so "
                 "moss sits on their smooth surface (where the render will put it, corners pulled in); _GEP "
@@ -44043,20 +44131,20 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                           "fullness", "grass_pile"]),
               ("Shape and scatter", True, ["bunch_var", "bunch_shape", "blade_scatter", "bunch_blades"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),
-              ("Blades", False, ["comb", "droop", "blade_width", "size_var"]),
+              ("Blades", False, ["on_layers", "comb", "droop", "blade_width", "size_var"]),
               ("UVs", False, ["stacks", "stack_layout"])],
     "Leaves": [("", True, ["detail", "coverage", "spread", "leaves", "leaf_size", "curl"]),
                ("Where it gathers", True, _SC_WHERE + ["mess"]),
-               ("How they lie", False, ["drape", "on_moss", "size_var"]),
+               ("How they lie", False, ["on_layers", "drape", "on_moss", "size_var"]),
                ("UVs", False, ["stacks", "stack_layout"])],
     "Leaf piles": [("", True, ["detail", "coverage", "spread", "piles", "pile_size", "leaf_size", "curl"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                   ("How they lie", False, ["drape", "on_moss", "size_var"]),
+                   ("How they lie", False, ["on_layers", "drape", "on_moss", "size_var"]),
                    ("UVs", False, ["stacks", "stack_layout"])],
     "Jungle leaves": [("", True, ["detail", "coverage", "spread", "jungle", "jungle_size", "jungle_cluster",
                                   "jungle_shape", "jungle_green"]),
                       ("Where it gathers", True, _SC_WHERE + ["mess"]),
-                      ("How they lie", False, ["curl", "jungle_tear", "drape", "on_moss", "size_var"]),
+                      ("How they lie", False, ["curl", "jungle_tear", "on_layers", "drape", "on_moss", "size_var"]),
                       ("UVs", False, ["stacks", "stack_layout"])],
     "Moss tufts": [("", True, ["detail", "coverage", "spread", "tufts", "tuft_size", "size_var"]),
                    ("Where it gathers", True, _SC_WHERE + ["mess"]),
@@ -44918,9 +45006,9 @@ class ScatterPanel(QtWidgets.QWidget):
         dup.clicked.connect(lambda *_: self.duplicate_layer())
         dele = secondary_button("Delete", "Remove the layer and its meshes (one Ctrl+Z).")
         dele.clicked.connect(lambda *_: self.delete_layer())
-        up = secondary_button("Move Up", "Move the layer up the list (its UDIM tiles come earlier).")
+        up = secondary_button("Move Up", "Move the layer up the list: on top of the layers under it (with On layers below), its UDIM tiles earlier.")
         up.clicked.connect(lambda *_: self.move_layer(-1))
-        down = secondary_button("Move Down", "Move the layer down the list.")
+        down = secondary_button("Move Down", "Move the layer down the list: under the layers above it.")
         down.clicked.connect(lambda *_: self.move_layer(1))
         card.add(button_row(add_l, dup, dele))
         card.add(button_row(up, down))

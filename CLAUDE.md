@@ -2182,7 +2182,35 @@
       (`debris_build` -> `s["_rest_on"]`) and `_DebrisBuild._field` lays
       them into the drop stack (`_MiDropStack.lay_mesh`: points, face
       and edge middles). Its cache key includes the beds; read back is
-      skipped when a moss layer was just grown.
+      skipped when a moss layer was just grown. Since the layer stack
+      (below) every Moss layer counts, wherever it is in the list (it was
+      only the moss listed before the leaves).
+    - **Layer stack / On layers below** (`on_layers`; the user,
+      2026-11-12: "fallen jungle leaves underneath grass, or if I move a
+      layer above grass ... things higher up in the layer stack will appear
+      on top of the other ones"). Higher in the panel's list = on top, like
+      Photoshop. `sc_build` grows Moss layers first (wherever they are),
+      then the rest from the bottom of the list up (`seq`); UDIM order
+      stays the list order. Each on debris layer but Specks adds its
+      meshes to `below` as (mesh, 0, True); a Grass / Leaves / Leaf piles /
+      Jungle leaves layer with `on_layers` gets them in `rest_on` (with the
+      moss beds when `on_moss`; Grass never takes moss: it grows up through
+      it). `on_layers` False in `DEBRIS_DEFAULTS` (old groups as before),
+      True on a new layer (`SC_TYPES` "new"). Leaves: `_field` lays
+      `debris` entries with `_MiDropStack.lay_faces` (faces sampled finer
+      than a cell, so a thin blade is seen all along) plus `_MiLeafTris`;
+      `_drop` with `on_below` starts a leaf from the stack's top under its
+      base when that's over half a climb up (a pile taller than climb was a
+      wall to every leaf, so they all went round it); a leaf whose end
+      reaches a pile still treats it as a wall and lies against it.
+      Grass: `_grass_over` after the build lifts every blade point under a
+      lower layer's faces (seen from above, up to 30 cm over it) onto them
+      + lift. Cache key: the ground's signature; read back also needs
+      `_sc_under_ids` (the debris layers under it) unchanged since it last
+      grew (after Move Up it read back the old leaves). Panel: in Blades /
+      How they lie; Move Up / Down tips say it. Test
+      `tests/test_layer_stack.py`; pictures `tests/run_gui_layer_stack_pics.mel`
+      (`tests/_out/layer_stack_pics`).
     - **Shading data:** moss meshes' points are `_MiPts` (a list with
       `.col`) and `_sc_write` writes them to the colour set
       `MOSS_COLOR_SET` "mossData" (`_mi_write_colors`, `aiExportColors`

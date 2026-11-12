@@ -184,6 +184,9 @@ def run():
     check("no two parts share a UDIM tile", not clash and len(seen) >= len(allp), str(clash or sorted(seen)))
 
     # --- live edits: out of the undo queue, only the edited layer rebuilds
+    # (the leaves rest on the moss and lie on the layers listed under them, so a moss edit or a new layer
+    # grows them again too: off for these timings)
+    tb["sc_update"](root, data["layers"][0]["id"], {"on_moss": False, "on_layers": False})
     q0 = cmds.undoInfo(q=True, undoName=True)
     t0 = time.time()
     rep = tb["sc_update"](root, moss2, {"coverage": 0.45})
