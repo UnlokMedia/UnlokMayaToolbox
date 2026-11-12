@@ -1142,11 +1142,20 @@ def run():
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
     s_old.pop("flow")
-    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top"):
+    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height",
+               "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var"):
         s_old.pop(k_)
     check("Shag, Cap leaf width and Hip blend 0 build exactly what a roof without them builds",
-          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0, under_over_top=False)[0] ==
+          dry_build(shag=0.0, cap_width=0.0, hip_blend=0.0, flow=0.0, under_over_top=False, ridge_height=1.0,
+                    ridge_width=1.0, ridge_lumps=1.0, root_tuck=0.0, root_shift=0.0, root_var=0.0)[0] ==
           tb["thatch_build"](fr_, s_old)["straw"][0])
+    art_ = ("ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var")
+    check("Ridge and root art direction: look keys, as before by default, each changes the leaves",
+          all(k in tb["THATCH_LOOK_KEYS"] for k in art_) and
+          [tb["THATCH_DEFAULTS"][k] for k in art_] == [1.0, 1.0, 1.0, 0.0, 0.0, 0.0] and
+          all(dry_build(**{k: v})[0] != b0_ for b0_ in [dry_build()[0]] for k, v in (("ridge_height", 0.2), ("ridge_width", 0.6),
+                                                              ("ridge_lumps", 0.0), ("root_tuck", 1.0),
+                                                              ("root_shift", -0.2), ("root_var", 1.0))))
     check("Under layer over the top: a look key, off by default, on in the ridged palapas, adds a course",
           "under_over_top" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["under_over_top"] is False and
           all(tb["thatch_preset"](n_).get("under_over_top") for n_ in ("Palm: palapa (hipped, messy top)",
