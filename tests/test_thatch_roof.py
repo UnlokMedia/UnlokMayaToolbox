@@ -1223,6 +1223,16 @@ def run():
           D_["edge_length"] == 1.0 and dry_build(edge_wind=0.0, edge_length=1.0)[0] == rb0_ and
           dry_build(edge_wind=0.8)[0] != rb0_ and fl_[0] != rb0_ and
           min(p[1] for p in fl_[0]) < min(p[1] for p in rb0_) - 1e-3)
+    med_ = full_build(detail="Medium")
+    cap0_ = tb["THATCH_MAX_VERTS"]
+    tb["THATCH_MAX_VERTS"] = int(1.3 * len(med_["straw"][0]))
+    try:
+        hi_e = full_build(detail="High")
+    finally:
+        tb["THATCH_MAX_VERTS"] = cap0_
+    check("High over the vertex cap: eased to fewer cuts per leaf, the whole roof (not capped, a bare top)",
+          hi_e.get("eased") and not hi_e["capped"] and hi_e["straw"][0] == med_["straw"][0] and
+          not med_.get("eased"), "%d verts, cap %d" % (len(hi_e["straw"][0]), int(1.3 * len(med_["straw"][0]))))
     dk_ = tb["thatch_preset"]("beach_dock_hut_001")
     check("Preset beach_dock_hut_001: palm fronds, hipped, 3 ridge layers, no peak",
           dk_ is not None and dk_["style"] == "Palm Fronds" and dk_["end_a"] == dk_["end_b"] == "Hip" and

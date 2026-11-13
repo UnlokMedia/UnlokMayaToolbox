@@ -418,9 +418,20 @@
   the combo (no "Palm:" head; palm style). Checked on an 80 x 30 x 52 dm
   box (posts 23 dm). Pictures: scratchpad `dock/dock_pics.py` (mayapy +
   Arnold, no GUI; argv variants.json, out folder, toolbox).
-  **Wind** (`edge_wind` -1..1) swings the hanging leaves on the long sides
-  (|z| F.L >= |x| F.W) one way along the eave (a bias on `edge_leaf`'s
-  swing). **Fringe length** (`edge_length` 0.3-4, 1 = as before) scales
+  Then (their pick, try t, Medium): Messiness 1.1, Wind 0.7, droop
+  variation 0.5 (clumpy fringe).
+  **Wind** (`edge_wind` -1..1) on the long sides (|z| F.L >= |x| F.W):
+  a bias on `edge_leaf`'s swing (turns stiff leaves) plus `sway()` in
+  `leaf_line`, which pushes the part hanging off the eave sideways along
+  the eave, growing down it (0.35 x wind x hanging length), clumped by
+  field noise (seed + 737). Turning the heading alone did nothing to a
+  leaf hanging straight down.
+  **High over the vertex cap** (`THATCH_MAX_VERTS`, 2.5M): leaves are
+  laid from the eaves up, so a capped High build left the top bare (the
+  neat under layer in regular rows, no ridge: the user's "upper fronds
+  becoming super uniform"; this preset at High was ~3.5M). `thatch_build`
+  now rebuilds a capped palm High / Hero with `_cross` 3, then Medium's
+  segments too (`eased` in the result, the report and the panel status). **Fringe length** (`edge_length` 0.3-4, 1 = as before) scales
   only the part of a leaf hanging off an edge (`edge_leaf`'s ls), so
   short fronds can still hang in a long curtain.
   Preset "Palm: bushy palapa (shaggy)": Lift 2.5, Volume 1.6, Top fronds 1.5

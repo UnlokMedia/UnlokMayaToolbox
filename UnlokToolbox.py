@@ -20481,8 +20481,9 @@ THATCH_PRESETS = {
         "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.3, "tip_var": 0.5, "end_a": "Hip", "end_b": "Hip",
         "under_over_top": True, "ridge_fringe": 0.6, "ridge_shag": 0.8, "ridge_width": 0.5, "peak_height": 0.0,
         "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "ridge_bundles": 0.0, "ridge_height": 0.35,
-        "ridge_lumps": 0.8, "root_tuck": 0.6, "ridge_layers": 3, "max_angle": 30.0, "edge_wind": 0.8,
-        "ridge_spikes": 0.3, "edge_length": 2.2},
+        "ridge_lumps": 0.8, "root_tuck": 0.6, "ridge_layers": 3, "max_angle": 30.0, "edge_wind": 0.7,
+        "ridge_spikes": 0.3, "edge_length": 2.2, "messy": 1.1,
+        "edge_hang_var": 0.5},
     "Palm: beach shack (makeshift)": {
         "end_a": "Gable", "end_b": "Gable", "overhang": 0.0, "thickness": 0.03, "softness": 0.2, "sag": 0.3,
         "lumps": 0.6, "warp": 0.5, "ridge_sag": 0.5, "ragged": 0.4, "gaps": 0.0, "levels": 1, "lip": 0.0,
@@ -22544,6 +22545,28 @@ def _th_fronds_mesh(F, G, s):
                 1.0 if z > 0.0 else -1.0)
         return fall, hk, ls, sw, limp
 
+    def sway(Q, L, on, x, z):
+        """Wind: a leaf hanging off a long side's eave pushed sideways along the eave, more the further down
+        its hanging part (turning its heading did nothing to a leaf hanging straight down), in clumps that
+        sway together (field noise) and a little each its own way."""
+        k0 = next((k for k in range(len(Q)) if k_seg[k] * L >= on), None)
+        if k0 is None or k0 < 1:
+            return Q
+        dx, dz = Q[k0][0] - Q[k0 - 1][0], Q[k0][2] - Q[k0 - 1][2]
+        h = math.hypot(dx, dz)
+        if h < 1e-9:
+            return Q
+        tx, tz = -dz / h, dx / h  # along the eave (the way a positive turn of the heading goes)
+        r = _rand12(seed, int(math.floor(x / span * 2e5)), int(math.floor(z / span * 2e5)), 7743)
+        amt = -e_wind * (1.0 if z > 0.0 else -1.0) * (0.6 + 0.8 * r[0]) * (
+            1.0 + 0.6 * _th_noise(x / e_cell + 4.1, z / e_cell, seed + 737))
+        out, acc = list(Q[:k0]), 0.0
+        for k in range(k0, len(Q)):
+            acc += _rl_len(_rl_sub(Q[k], Q[k - 1]))
+            s_ = 0.35 * amt * acc
+            out.append((Q[k][0] + tx * s_, Q[k][1], Q[k][2] + tz * s_))
+        return out
+
     def verge(q, n, d, ex0, limp, hk=1.0):
         """A leaf carried past a gable verge (its base ex0 past it): limp leaves (the under layer) turn
         down, more the further out; stiff ones (the top layer) only sag. hk: its own hang (Edges)."""
@@ -22616,12 +22639,14 @@ def _th_fronds_mesh(F, G, s):
             fall, hk, ls, sw, limp = edge_leaf(x + ox, z + oz, limp)
         else:
             fall, hk, ls, sw = fall_under if limp else fall_top, 1.0, 1.0, 0.0
-        info = {} if ls != 1.0 else None
+        info = {} if (ls != 1.0 or (e_wind and edge)) else None
         walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw, info)
+        on_len = None
         if info and 0 < info["off"] < seg:  # Edges: only the part hanging off the roof longer / shorter
-            on = L * info["off"] / float(seg)
-            L = on + (L - on) * ls  # the offsets below go by distance along the new length
-            walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw)
+            on = on_len = L * info["off"] / float(seg)
+            if ls != 1.0:
+                L = on + (L - on) * ls  # the offsets below go by distance along the new length
+                walk = _th_walk(F, G, x, z, pos, nrm, L, seg, yaw, fall, heading, sw)
         for k, (p, n) in enumerate(walk):
             v = k_seg[k]
             lay0 = layer(v * L)
@@ -22642,6 +22667,8 @@ def _th_fronds_mesh(F, G, s):
                 q, n = verge(q, n, v * L, ex0, limp, hk)
             Q.append(q)
             Nn.append(n)
+        if on_len is not None and e_wind and abs(z + oz) * F.L >= abs(x + ox) * F.W:
+            Q = sway(Q, L, on_len, x + ox, z + oz)
         if gables and not (ex0 and limp):  # past a gable verge (a slanted leaflet walked off its side, a
             Q, Nn = verge_bend(Q, Nn, limp)  # stiff one carried past): it bows down over the edge
         return _th_drape(F, Q, Nn, F.block_gap, drop)
@@ -27994,24 +28021,39 @@ def thatch_build(frame, settings, blockers=None):
         return _roof_udims(metal_build(frame, s, blockers), s["udim"])
     if s["covering"] == "Tiles":
         return _roof_udims(tile_build(frame, s, blockers), s["udim"])
+    seg_as_set = int(s["segments"])
     s, level, under_res = _th_detail(s)
     s = _th_variety(_th_messy(_th_volume(s)))
-    F = ThatchField(frame["L"], frame["W"], frame["H"], s)
-    F.blockers = _th_blockers_in_roof(frame, blockers)
-    span = F.span
-    if s["style"] == "Palm Fronds":  # leaves keep half their width off a blocker
-        F.block_gap = 0.5 * max(float(s["leaf_width"]), float(s["top_leaf_width"])) * span
-    elif s["style"] == "Leaf Panels":
-        F.block_gap = 0.01 * span
-    else:
-        F.block_gap = 0.5 * float(s["piece_width"]) * span
-    G = _th_grid(F, int(s["resolution"]))
+
+    def field(s):
+        F = ThatchField(frame["L"], frame["W"], frame["H"], s)
+        F.blockers = _th_blockers_in_roof(frame, blockers)
+        if s["style"] == "Palm Fronds":  # leaves keep half their width off a blocker
+            F.block_gap = 0.5 * max(float(s["leaf_width"]), float(s["top_leaf_width"])) * F.span
+        elif s["style"] == "Leaf Panels":
+            F.block_gap = 0.01 * F.span
+        else:
+            F.block_gap = 0.5 * float(s["piece_width"]) * F.span
+        return F, _th_grid(F, int(s["resolution"]))
+    F, G = field(s)
     out = {"pieces": 0, "capped": False, "field": F, "underlay": None, "level": level}
     straw = None
     if s["style"] in ("Planes", "3D Pieces", "Leaf Panels", "Palm Fronds"):
         if level > 0:
             build = {"Leaf Panels": _th_panels_mesh, "Palm Fronds": _th_fronds_mesh}.get(s["style"], _th_pieces_mesh)
             straw, out["pieces"], out["capped"] = build(F, G, s)
+            if out["capped"] and level >= 3 and s["style"] == "Palm Fronds":
+                # High / Hero over the vertex cap: leaves are laid from the eaves up, so the cap left the top
+                # bare (the neat under layer in rows, no ridge: the user, 2026-11-12, "the upper fronds
+                # becoming super uniform"). Built again with fewer cuts per leaf (Medium's columns, then
+                # Medium's segments too): the same layout, the whole roof
+                for over in ({"_cross": 3}, {"_cross": 3, "segments": seg_as_set}):
+                    F, G = field(dict(s, **over))
+                    out["field"] = F
+                    straw, out["pieces"], out["capped"] = build(F, G, dict(s, **over))
+                    out["eased"] = True
+                    if not out["capped"]:
+                        break
         if s["underlay"] or level == 0:
             if s["style"] == "Palm Fronds":
                 inset = 0.12 * _th_frond_rise(F, s)
@@ -29315,7 +29357,8 @@ def make_thatch_roof(box, settings=None, select=False):
         faces = _th_write(root, frame, s, built)
         for node in thatch_parts(root).values():
             cmds.xform(node, centerPivots=True)
-    return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "faces": faces,
+    return {"root": root, "pieces": built["pieces"], "capped": built["capped"], "eased": built.get("eased", False),
+            "faces": faces,
             "metal": built.get("metal"), "clay": built.get("clay")}
 
 
@@ -29377,6 +29420,7 @@ def update_thatch_roofs(changes, split=True):
             report["faces"] += _th_write(root, frame, s, built)
         report["pieces"] += built["pieces"]
         report["capped"] = report["capped"] or built["capped"]
+        report["eased"] = report.get("eased", False) or built.get("eased", False)
         if built.get("metal"):
             mt = report.setdefault("metal", {"sheets": 0, "fixings": 0, "tiles": 0})
             for key in mt:
@@ -32651,6 +32695,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         elif self.f["detail"].value() == "Proxy" and self.f["style"].value() != "Surface":
             msg += " Proxy: just the shell. Raise Detail for the thatch once the shape is right."
         level = "info"
+        if report.get("eased"):
+            msg += (" Detail eased (fewer cuts per leaf) to stay under %s vertices: the whole roof, "
+                    "not a bare top." % "{:,}".format(THATCH_MAX_VERTS))
         if report["capped"]:
             if metal:
                 msg += " Capped at %s vertices: lower Detail or raise Panel size." % "{:,}".format(METAL_MAX_VERTS)
