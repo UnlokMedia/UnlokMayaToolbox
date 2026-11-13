@@ -20480,7 +20480,7 @@ THATCH_PRESETS = {
         "flow": 1.0, "crinkle": 0.08, "leaf_twist": 0.05, "width_var": 0.4, "width_wobble": 0.05, "bent_tips": 0.0,
         "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.3, "tip_var": 0.5, "end_a": "Hip", "end_b": "Hip",
         "under_over_top": True, "ridge_fringe": 0.6, "ridge_shag": 0.8, "ridge_width": 0.5, "peak_height": 0.0,
-        "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "ridge_bundles": 0.0, "ridge_height": 0.35,
+        "peak_width": 0.7, "peak_sides": -0.3, "peak_tip": 0.9, "ridge_bundles": 0.0, "ridge_height": 1.0,
         "ridge_lumps": 0.8, "root_tuck": 0.6, "ridge_layers": 3, "max_angle": 30.0, "edge_wind": 0.7,
         "ridge_spikes": 0.3, "edge_length": 2.2, "messy": 1.1,
         "edge_hang_var": 0.5},

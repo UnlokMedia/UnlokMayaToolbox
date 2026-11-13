@@ -418,7 +418,9 @@
   the combo (no "Palm:" head; palm style). Checked on an 80 x 30 x 52 dm
   box (posts 23 dm). Pictures: scratchpad `dock/dock_pics.py` (mayapy +
   Arnold, no GUI; argv variants.json, out folder, toolbox).
-  Then (their pick, try t, Medium): Messiness 1.1, Wind 0.7, droop
+  Then (their pick, try t, Medium): Messiness 1.1, Wind 0.7, Ridge
+  height 1.0 (0.35 sank the ridge into a groove on their own shallower
+  box, 80 x 51-58 x 16, ~32 deg; checked on both), droop
   variation 0.5 (clumpy fringe).
   **Wind** (`edge_wind` -1..1) on the long sides (|z| F.L >= |x| F.W):
   a bias on `edge_leaf`'s swing (turns stiff leaves) plus `sway()` in
