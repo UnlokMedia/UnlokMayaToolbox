@@ -1143,7 +1143,7 @@ def run():
     s_old.pop("cap_width")
     s_old.pop("hip_blend")
     s_old.pop("flow")
-    for k_ in ("pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height",
+    for k_ in ("pokes", "poke_lift", "poke_clump", "poke_var", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height",
                "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes",
                "ridge_fringe", "ridge_bundles", "ridge_pinch", "ridge_curve", "ridge_cover", "ridge_sink", "pinch_height",
                "peak_height", "peak_width", "peak_sides", "peak_tip"):
@@ -1233,6 +1233,15 @@ def run():
     check("High over the vertex cap: eased to fewer cuts per leaf, the whole roof (not capped, a bare top)",
           hi_e.get("eased") and not hi_e["capped"] and hi_e["straw"][0] == med_["straw"][0] and
           not med_.get("eased"), "%d verts, cap %d" % (len(hi_e["straw"][0]), int(1.3 * len(med_["straw"][0]))))
+    lk_ = [k for k in tb["THATCH_LOOK_KEYS"] if k not in tb["THATCH_PRESET_SKIP"] and
+           k not in ("stacks", "stack_layout", "mirror")]  # (UV stacks stay yours)
+    cot_ = tb["thatch_preset"]("Cottage (hipped)")
+    check("A look preset sets every look setting (defaults where it names none: no earlier tweak lingers); a "
+          "shape preset leaves the look alone",
+          all(k in tb["thatch_preset"](n_) for n_ in ("beach_dock_hut_001", "Palm: palapa (hipped, messy top)",
+                                                      "Metal: clean corrugated (gable)") for k in lk_) and
+          tb["thatch_preset"]("beach_dock_hut_001")["ridge_pinch"] == D_["ridge_pinch"] and
+          "style" not in cot_ and "shag" not in cot_)
     dk_ = tb["thatch_preset"]("beach_dock_hut_001")
     check("Preset beach_dock_hut_001: palm fronds, hipped, 3 ridge layers, no peak",
           dk_ is not None and dk_["style"] == "Palm Fronds" and dk_["end_a"] == dk_["end_b"] == "Hip" and
@@ -1265,6 +1274,11 @@ def run():
     check("Fronds poking out: look keys, none by default, lift some top fronds",
           all(k in tb["THATCH_LOOK_KEYS"] for k in ("pokes", "poke_lift", "poke_clump")) and
           tb["THATCH_DEFAULTS"]["pokes"] == 0 and dry_build(pokes=4, poke_clump=1.0)[0] != base_[0])
+    pv0_ = dry_build(pokes=6, poke_clump=0.5)
+    check("Tuft variation: a look key, 0 by default (tufts as before), higher makes each spot its own kind",
+          "poke_var" in tb["THATCH_LOOK_KEYS"] and tb["THATCH_DEFAULTS"]["poke_var"] == 0.0 and
+          dry_build(pokes=6, poke_clump=0.5, poke_var=0.0)[0] == pv0_[0] and
+          dry_build(pokes=6, poke_clump=0.5, poke_var=1.0)[0] != pv0_[0])
     check("Messiness master: 1 by default builds exactly the same; 0 and 2 change it",
           tb["THATCH_DEFAULTS"]["messy"] == 1.0 and "messy" in tb["THATCH_LOOK_KEYS"] and
           dry_build(messy=1.0)[0] == base_[0] and dry_build(messy=0.0)[0] != base_[0] and

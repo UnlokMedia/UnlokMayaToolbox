@@ -20337,7 +20337,7 @@ THATCH_DEFAULTS = {
     "section_var": 0.4,
     # shaggy palm roofs (the user, 2026-11-11: a bushy palapa, light and shaggy, not "wet hair"): leaf tips
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
-    "shag": 0.0, "max_angle": 90.0, "variety": 1.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
+    "shag": 0.0, "max_angle": 90.0, "variety": 1.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "poke_var": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
     "peak_height": 0.0, "ridge_layers": 1, "peak_width": 0.7, "peak_sides": 0.0, "peak_tip": 0.8,
     "udim": 1001,
 }
@@ -20350,7 +20350,7 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "mess", "lift", "bend", "segments", "sides", "flatness", "underlay", "panel_width",
                     "panel_length", "stacks", "stack_layout", "mirror", "seed", "detail", "underlay_relief",
                     "frond_form", "frond_layout", "bundle_width", "frond_width", "leaf_length", "leaf_width", "slant", "droop", "neat", "top_layer",
-                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "max_angle", "variety", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_layers", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "edge_wind", "edge_length", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
+                    "end_reach", "end_fronds", "ridge_fronds", "top_leaf_width", "shag", "max_angle", "variety", "cap_width", "hip_blend", "flow", "pokes", "poke_lift", "poke_clump", "poke_var", "tip_shape", "tip_var", "messy", "under_over_top", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_layers", "ridge_pinch", "ridge_curve", "ridge_sink", "pinch_height", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "overlap", "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "edge_wind", "edge_length", "sticks", "ridge_poles", "hip_poles", "lashings", "hold_poles", "leaf_thickness",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
@@ -22262,9 +22262,35 @@ def _th_fronds_mesh(F, G, s):
         p_lift = clamp(float(s.get("poke_lift", 1.0)), 0.0, 3.0)
         p_rad = (0.5 + 0.7 * clamp(float(s.get("poke_clump", 0.0)), 0.0, 1.0)) * ll * (
             0.35 + 0.65 * clamp(float(s.get("poke_clump", 0.0)), 0.0, 1.0))
+        # Variation (the user, 2026-11-13: "tufts are too samey ... individual flyaways and tiny tufts, maybe
+        # one big tuft that doesn't lift much, a few smaller tufts"): each spot its own kind, size and lift;
+        # the first is the big low one (with 4 or more spots). Kinds: (radius, lift, share of leaves lifting)
+        p_var = clamp(float(s.get("poke_var", 0.0)), 0.0, 1.0)
+        kinds = []
+        for i in range(n_poke):
+            r_ = _rand12(int(s["seed"]), 9203, i, 0)
+            u = 1.0 if (i == 0 and n_poke >= 4) else r_[0]
+            if p_var <= 0.0:
+                kinds.append(None)
+                continue
+            if u >= 0.95:
+                k_r, k_l, k_g = 2.6, 0.35, 0.8  # big, wide, hardly lifts
+            elif u >= 0.72:
+                k_r, k_l, k_g = 1.0, 1.0, 1.0  # a small tuft
+            elif u >= 0.4:
+                k_r, k_l, k_g = 0.5, 1.1, 1.8  # tiny tuft
+            else:
+                k_r, k_l, k_g = 0.22, 1.4, 5.0  # a lone flyaway or two
+            kinds.append((k_r * (0.7 + 0.6 * r_[1]), k_l * (0.7 + 0.6 * r_[2]), k_g, k_r < 0.9))
+        # Spread: each spot the farthest of a few tries from those placed. A handful (the user's "nowhere near
+        # each other") get 12 tries; many get fewer (the user, 2026-11-13: 30 spots at 12 tries each fell in an
+        # even grid, "laid out in a pattern"), and loose flyaways and tiny tufts take the first try, falling
+        # anywhere, some by a tuft or each other
+        tries = max(1, min(12, int(round(72.0 / n_poke))))
         for i in range(n_poke):
             best = None
-            for j in range(12):
+            k_ = kinds[i]
+            for j in range(1 if (k_ and k_[3] and p_var >= 0.5) else tries):
                 r_ = _rand12(int(s["seed"]), 9101, i, j)
                 px, pz = F.x0 + (F.x1 - F.x0) * r_[0], F.z0 + (F.z1 - F.z0) * r_[1]
                 if _th_cell(G, F, px, pz) is None:
@@ -22272,8 +22298,20 @@ def _th_fronds_mesh(F, G, s):
                 d = min([math.hypot(px - q[0], pz - q[1]) for q in pokes] or [1e9])
                 if best is None or d > best[0]:
                     best = (d, px, pz, 0.6 + 0.8 * r_[2])
+            if best is None:  # the few tries all off the roof: take the next one on it
+                for j in range(12):
+                    r_ = _rand12(int(s["seed"]), 9101, i, j)
+                    px, pz = F.x0 + (F.x1 - F.x0) * r_[0], F.z0 + (F.z1 - F.z0) * r_[1]
+                    if _th_cell(G, F, px, pz) is not None:
+                        best = (0.0, px, pz, 0.6 + 0.8 * r_[2])
+                        break
             if best:
-                pokes.append((best[1], best[2], best[3] * p_lift))
+                pl, pr, pg = best[3] * p_lift, p_rad, 1.0
+                if k_:
+                    pl *= 1.0 + (k_[1] - 1.0) * p_var
+                    pr *= 1.0 + (k_[0] - 1.0) * p_var
+                    pg = 1.0 + (k_[2] - 1.0) * p_var
+                pokes.append((best[1], best[2], pl, pr, pg))
     tlw = max(1e-4, float(s["top_leaf_width"]) * span)  # top layer: thinner
     tile = max(3.0 * lw, float(s["frond_width"]) * span)
     form = s["frond_form"] if s["frond_form"] in THATCH_FROND_FORMS else "Leaflets"
@@ -22618,10 +22656,14 @@ def _th_fronds_mesh(F, G, s):
             hs = (math.sin((x + ox) * 91.731 + (z + oz) * 47.113 + seed * 0.731) * 24634.6345) % 1.0
             sh = shag * stiff * L * (0.04 + 0.16 * hs + 0.35 * hs ** 6)
         if poke and pokes:  # Poking out: near a poke spot it stands well off the roof
-            for px, pz, pl in pokes:
+            # only a few of the leaves there (a fifth at its middle, fewer out to its edge), the rest stay down
+            # over it (the user, 2026-11-13, tufts and flyaways: every leaf in the spot lifting peeled the
+            # thatch back, a dark bald patch under each)
+            hp = (math.sin((x + ox) * 63.917 + (z + oz) * 29.351 + seed * 1.177) * 43758.5453) % 1.0
+            for px, pz, pl, pr, pg in pokes:
                 d = math.hypot(x + ox - px, z + oz - pz)
-                if d < p_rad:
-                    sh += 0.6 * pl * L * (1.0 - d / p_rad) ** 1.5
+                if d < pr and hp < pg * (0.05 + 0.15 * (1.0 - d / pr)):
+                    sh += 0.6 * pl * L * (1.0 - d / pr) ** 1.5
         cell = _th_cell(G, F, x, z)
         if cell is None:
             return None
@@ -22651,7 +22693,9 @@ def _th_fronds_mesh(F, G, s):
             v = k_seg[k]
             lay0 = layer(v * L)
             off = lay0 + bend * 0.04 * L * math.sin(math.pi * v) + curl * v ** 2.5 + sh * v ** 1.15
-            if ang_t is not None and off - lay0 > 0.0:  # Max frond angle: a soft cap on the rise from its root
+            if ang_t is not None and not poke and off - lay0 > 0.0:  # Max frond angle: a soft cap on the rise
+                # from its root (not the odd ones poking out: they're meant to stick up, the user wanted tufts and
+                # flyaways on a roof packed down with Max angle 30)
                 cap = ang_t * v * L
                 ex = off - lay0
                 if ex > 0.5 * cap:  # eased into the cap (same slope at half of it, never past it)
@@ -29527,9 +29571,12 @@ def bake_thatch(roofs):
 
 def thatch_preset(name):
     """Settings a preset sets, or None: every shape setting (defaults where it
-    names none), plus the thatch settings it names (a look preset). One of
-    the user's sets everything but the seed, Ridge along and Detail
-    (settings added since it was saved get their defaults)."""
+    names none). A look preset (it names a style or covering) sets every
+    look setting too, defaults where it names none, so earlier tweaks can't
+    linger under it (the user, 2026-11-13: "what if there's other settings
+    overriding?"); a shape preset leaves the look alone. One of the user's
+    sets everything but the seed, Ridge along and Detail (settings added
+    since it was saved get their defaults)."""
     over = THATCH_PRESETS.get(name)
     if over is None:
         mine = thatch_user_presets().get(name)
@@ -29543,6 +29590,9 @@ def thatch_preset(name):
             s["hip_poles"] = bool(s["ridge_poles"])
         return s
     s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_LOOK_KEYS}
+    if "style" in over or "covering" in over:  # a whole look: every look setting, defaults where it names none
+        s.update((k, THATCH_DEFAULTS[k]) for k in THATCH_LOOK_KEYS
+                 if k not in THATCH_PRESET_SKIP and k not in ("stacks", "stack_layout", "mirror"))  # (UVs: yours)
     if over.get("covering") == "Corrugated":
         s.update(METAL_DEFAULTS)  # a metal look sets every metal setting
     elif over.get("covering") == "Tiles":
@@ -29918,7 +29968,7 @@ ROOF_WORDS = {
     "volume": ("thin", "puffed up"), "warp": ("straight", "crooked"), "ridge_sag": ("straight", "sagging"),
     "ragged": ("even", "ragged"), "gaps": ("none", "patchy"), "lip": ("flush", "proud"),
     "top_layer": ("none", "lots"), "shag": ("lying flat", "standing off"), "max_angle": ("flat", "no limit"),
-    "droop": ("straight", "curled up"), "poke_lift": ("a little", "a lot"), "poke_clump": ("one frond", "a clump"),
+    "droop": ("straight", "curled up"), "poke_lift": ("a little", "a lot"), "poke_clump": ("one frond", "a clump"), "poke_var": ("all alike", "all sorts"),
     "messy": ("neat", "wild"), "mess": ("neat", "random"), "slant": ("down the slope", "sideways"),
     "leaf_twist": ("flat", "twisted"), "crinkle": ("smooth", "wavy"), "width_wobble": ("clean", "chewed"),
     "bent_tips": ("none", "all"), "edge_mess": ("combed", "splayed"), "dried": ("fresh", "shrivelled"),
@@ -31654,8 +31704,12 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         delete.clicked.connect(lambda *_: self.delete_preset())
         pl.addWidget(plabel)
         pl.addWidget(self.preset_combo, 1)
+        reset = secondary_button("Reset", "Every setting back to its default (keeps each roof's Seed, Ridge "
+                                 "along, Detail and UDIM), on the selected roofs too: a clean start.")
+        reset.clicked.connect(lambda *_: self.reset_settings())
         pl.addWidget(save)
         pl.addWidget(delete)
+        pl.addWidget(reset)
         card.add(prow)
         self._fill_presets()
         self.f["shape"] = SegmentField(THATCH_SHAPES)
@@ -31915,8 +31969,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         sec.add_full(self.angle_sec)
         row(self.angle_sec, "max_angle", "Max angle", FloatField(0.0, 90.0, 0.0, 90.0, decimals=0, step=1.0),
             "The steepest any leaf may stand off the roof, measured from where it starts (degrees). Leaves that "
-            "would rise steeper (Frond angle, Tip curl, the odd ones poking out, Bend) are eased down to it, the "
-            "rest are untouched. 90: no limit. Dried leaves' coiled tips are their own shape and keep it.")
+            "would rise steeper (Frond angle, Tip curl, Bend) are eased down to it, the rest are untouched. The "
+            "odd ones poking out ignore it (tufts and flyaways on a packed-down roof). 90: no limit. Dried "
+            "leaves' coiled tips are their own shape and keep it.")
         row(self.angle_sec, "droop", "Tip curl", FloatField(0.0, 3.0, 0.0, 1.5, decimals=2, step=0.05),
             "Loose top fronds: how much their leaf tips curl up off the roof (the ridge cap a little too). 0: "
             "straight leaves (curled tips read as wet hair; Frond angle lifts them straight).")
@@ -31928,6 +31983,9 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(self.angle_sec, "poke_clump", "... in clumps", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
             "0: just the one frond. Higher: it brings the fronds round it up too, those further out less, "
             "as if one lifted and pulled its neighbours with it.")
+        row(self.angle_sec, "poke_var", "... variation", FloatField(0.0, 1.0, 0.0, 1.0, decimals=2, step=0.05),
+            "0: every spot alike. Higher: each its own kind - mostly lone flyaways and tiny tufts, a few "
+            "small tufts, and the odd big wide one that hardly lifts - each a different size and lift.")
         row(sec, "messy", "Messiness", FloatField(0.0, 3.0, 0.0, 2.0, decimals=2, step=0.05),
             "One slider for how messy the whole roof is: it scales every part in \"Messiness parts\" "
             "under it together (the pieces' random turn and size, and on palm roofs the leaflets' slant, twist, "
@@ -32498,7 +32556,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
                  "strands": surface, "strand_width": surface, "leaf_thickness": palm and s["frond_form"] == "3D Leaflets"}
         shown["bundle_width"] = palm and s.get("frond_layout") == "Bundles"
         shown["hold_poles"] = palm and not cone
-        for key in ("max_angle", "shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_layers", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "pokes", "poke_lift", "poke_clump", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
+        for key in ("max_angle", "shag", "cap_width", "hip_blend", "flow", "ridge_height", "ridge_width", "ridge_lumps", "root_tuck", "root_shift", "root_var", "ridge_shag", "ridge_spikes", "ridge_fringe", "ridge_bundles", "ridge_layers", "peak_height", "peak_width", "peak_sides", "peak_tip", "ridge_cover", "pokes", "poke_lift", "poke_clump", "poke_var", "tip_shape", "tip_var", "frond_form", "frond_layout", "leaf_length", "leaf_width", "top_layer", "neat", "overlap", "frond_width",
                     "edge_hang", "edge_hang_var", "edge_len_var", "edge_mess", "edge_limp", "edge_wind", "edge_length", "top_leaf_width",
                     "slant", "droop", "end_reach", "dried", "dried_var"):
             shown[key] = palm
@@ -32760,6 +32818,18 @@ class ThatchRoofPanel(QtWidgets.QWidget):
     def randomize(self):
         self.f["seed"].setValue(random.randint(1, 9999))
         self._queue("seed")
+
+    @ui_safe
+    def reset_settings(self):
+        """Reset: every setting to its default but each roof's own (THATCH_PRESET_SKIP); the selected roofs
+        rebuilt with them, as a preset is."""
+        s = {k: v for k, v in THATCH_DEFAULTS.items() if k not in THATCH_PRESET_SKIP}
+        self._show(dict(self._settings(), **s))
+        roofs = self._edit_roofs()
+        if roofs:
+            self._rebuild({r: dict(s) for r in roofs}, "Reset")
+        else:
+            self.set_status("Settings back to their defaults: Make Roof uses them.")
 
     @ui_safe
     def load_preset(self):

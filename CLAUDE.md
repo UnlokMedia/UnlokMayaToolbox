@@ -326,7 +326,17 @@
   top-frond leaflets (`leaf_line(poke=True)`, `frond_at` only) starting
   within `p_rad` (about 0.18 leaf for one frond, up to 1.2 leaf at Clump 1)
   add a straight lean `0.6 lift L (1 - d / p_rad)^1.5` to the Shag term.
-  Under layer untouched, so no new gaps. The same day the preset went
+  Under layer untouched, so no new gaps. 2026-11-13 (the user wanted tufts
+  and flyaways on beach_dock_hut_001): pokes ignore Max angle; only a
+  hashed share of the leaves in a spot lift (`hp < g (0.05 + 0.15 (1 - d/r))`)
+  because lifting the whole spot peeled the thatch back into a dark bald
+  hole; `poke_var` (... variation, 0 = all alike) gives each spot its own
+  kind: lone flyaways (r 0.22, many lift), tiny tufts, small tufts, and a
+  big wide low one (r 2.6, lift 0.35; spot 0 when 4 or more), each sized and
+  lifted with jitter. Spots are `(x, z, lift, radius, share)`. Spread
+  tries are `round(72 / pokes)` (12 for 6 or fewer): 12 tries for 30
+  spots made an even grid the user saw as "laid out in a pattern"; with
+  variation 0.5+ flyaways and tiny tufts take the first try (pure random). The same day the preset went
   straighter (the user: "too curved/bendy"): Bend 0.05, Dried 0.05, Bent
   tips 0.05, Crinkle 0.25; Pokes 5, lift 1, clump 0.3; Edge droop 0.3
   (0.9 hung heavy and wet at the eaves). **Tip shape** (`tip_shape` -1
@@ -428,6 +438,13 @@
   the eave, growing down it (0.35 x wind x hanging length), clumped by
   field noise (seed + 737). Turning the heading alone did nothing to a
   leaf hanging straight down.
+  **Look presets apply in full** (2026-11-13, the user: "what if there's
+  other settings overriding?"): `thatch_preset` for a preset naming a
+  style or covering now sets every look key (defaults where it names
+  none; not THATCH_PRESET_SKIP), so earlier tweaks can't linger under it.
+  Shape presets still leave the look alone. **Reset** button (preset row,
+  `reset_settings`): every setting to its default but Seed / Ridge along /
+  Detail / UDIM, and rebuilds the selected roofs.
   **High over the vertex cap** (`THATCH_MAX_VERTS`, 2.5M): leaves are
   laid from the eaves up, so a capped High build left the top bare (the
   neat under layer in regular rows, no ridge: the user's "upper fronds
