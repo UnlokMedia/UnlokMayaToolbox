@@ -1576,6 +1576,37 @@
     deletes only the tool's own boxes no other group uses. Panel: in
     `group_box` (Add Blocker / Use Selected / Remove / Select,
     `block_label`). `tests/test_scatter_blockers.py`.
+  - **Influence** (the user, 2026-11-17: painting influence works poorly on
+    low-res geo; wanted "sliders for influence ... attract it more to
+    corners ... to crevices like gutters ... or away from those things to
+    more towards the center of like open areas ... with like fall off",
+    the randomness still on): procedural influence from the surfaces' own
+    folds, every layer type, section "Influence" after Height fade
+    (`_SC_INFL`, folded; `infl_sec` opens for a layer with a strength set).
+    Keys `SC_INFL_DEFAULTS` (in `sc_defaults`): per term (`SC_INFL_TERMS`:
+    Edges `inf_edges`, Crevices `inf_crev`, Corners `inf_corner`) a
+    strength -1 (away: open middles) .. +1, a falloff in metres
+    (`*_dist`) and a curve (`*_curve`: profile smoothstep(1 - d/D)^e, e =
+    4^(1 - 2 curve): 0 hugs the fold, 0.5 even, 1 broad); `inf_angle`
+    (Fold angle, 30 deg), `inf_breakup` (noise on the distances, 0.3).
+    `_sc_features(node, angle)` (cached in `_SC_FEATS` by mesh key +
+    angle): per polygon edge (whole polygons, so a quad's diagonal is never
+    a fold) borders and folds sharper than the angle, convex = "edge",
+    concave = "crev" (sign of (c2 - c1).n1 + (c1 - c2).n2), corners = verts
+    where fold / border directions meet at an angle (some pair's dot >
+    -0.8). `_ScInfluence(paint, s, nodes)` wraps the layer's paint like
+    `_ScBlocked` (inside it): `at(p)` = paint + sum strength x weight,
+    clamped; weight from the straight-line distance to the nearest fold
+    segment / corner (a grid per term, cell = reach), so a 10-face box
+    still gives smooth gradients; `top` adds the positive strengths (grows
+    at Coverage 0), repr / key cover settings and mesh keys (moss cache).
+    So moss / debris margins (`_sc_paint_margin`: attraction only shows
+    below Coverage 1) and ivy follow it. All strengths 0 = no wrapper
+    (`sc_influence_on`): bit-identical. Gutter lips count as edges; a mesh
+    sitting on another (a box on a floor) shares no edge, so their join is
+    no crevice (Creases covers that). `tests/test_scatter_influence.py`
+    (a 10-face slab with a gutter; density pictures in
+    `tests/_out/scatter_influence`).
   - **Wall fix:** debris types set `_up_only` (`_debris_field`): Crevices
     and Creases only count where it faces up, and `_spots` hard-cuts past
     Slope limit + 15 degrees. Type defaults (`SC_TYPES` "over"): grass

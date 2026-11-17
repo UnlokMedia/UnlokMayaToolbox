@@ -41662,6 +41662,19 @@ SC_DEBRIS_OUT = {"Grass": (("grass", "grass"),), "Leaves": (("litter", "litter")
                  "Specks": (("specks", "specks"), ("dirt", "dirt"))}  # debris_build's mesh -> part
 SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
+# Influence (the user, 2026-11-17: "sliders for influence ... attract it more to corners, attract it more to
+# crevices like gutters ... or attract it away from those things to more towards the center of like open areas
+# ... with like fall off and nice control"): procedural influence from the surfaces' own folds, added to the
+# influence paint. Strength -1 (away: open middles) .. +1 (towards); falloff in metres; curve 0 hugs the
+# feature, 0.5 an even ramp, 1 broad. All strengths 0 = no influence object (builds exactly as before).
+SC_INFL_TERMS = (("edge", "inf_edges", "inf_edge_dist", "inf_edge_curve"),
+                 ("crev", "inf_crev", "inf_crev_dist", "inf_crev_curve"),
+                 ("corner", "inf_corner", "inf_corner_dist", "inf_corner_curve"))
+SC_INFL_DEFAULTS = {"inf_edges": 0.0, "inf_edge_dist": 0.5, "inf_edge_curve": 0.5,
+                    "inf_crev": 0.0, "inf_crev_dist": 0.5, "inf_crev_curve": 0.5,
+                    "inf_corner": 0.0, "inf_corner_dist": 0.5, "inf_corner_curve": 0.5,
+                    "inf_angle": 30.0, "inf_breakup": 0.3}
+_SC_FEATS = collections.OrderedDict()  # (mesh key, angle) -> a mesh's fold edges and corners (world)
 SC_DRAW_ON = ("Surfaces", "Selected", "Everything")  # what Draw on Surfaces draws on
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
 _SC_LAST = {}   # group -> (JSON, stamp) it was last built from
@@ -41693,6 +41706,7 @@ def sc_defaults(typ):
     out = {k: base[k] for k in SC_TYPES[typ]["keys"]}
     out.update(SC_TYPES[typ]["over"])
     out.update(SC_DRAW_DEFAULTS)
+    out.update(SC_INFL_DEFAULTS)
     return out
 
 
@@ -42313,6 +42327,189 @@ class _ScBlocked(object):
         return min(k, -(1.0 - d / self.gap) ** 2)
 
 
+def _sc_features(node, angle):
+    """A mesh's folds in world space (cached while the mesh is unchanged):
+    {"edge": [(a, b)], "crev": [(a, b)], "corner": [p]}. edge: open borders
+    (one face) and convex folds sharper than angle degrees; crev: concave
+    folds (gutters, inside corners, a wall's foot); corner: vertices where
+    folds or borders meet at an angle (not a straight run). Whole
+    polygons, not triangles: a quad's diagonal is never a fold."""
+    key = (_mi_mesh_key(node), round(float(angle), 3))
+    hit = _mi_cache_get(_SC_FEATS, key)
+    if hit is not None:
+        return hit
+    fn = om.MFnMesh(get_dag_path(key[0][0]))
+    P = [(q.x, q.y, q.z) for q in fn.getPoints(om.MSpace.kWorld)]
+    counts, ids = fn.getVertices()
+    norms, cents, edges = [], [], {}
+    k = 0
+    for f, c in enumerate(counts):
+        vs = ids[k:k + c]
+        k += c
+        nx = ny = nz = cx = cy = cz = 0.0
+        for i in range(c):
+            a, b = P[vs[i]], P[vs[(i + 1) % c]]
+            nx += (a[1] - b[1]) * (a[2] + b[2])
+            ny += (a[2] - b[2]) * (a[0] + b[0])
+            nz += (a[0] - b[0]) * (a[1] + b[1])
+            cx += a[0]
+            cy += a[1]
+            cz += a[2]
+            e = (vs[i], vs[(i + 1) % c]) if vs[i] < vs[(i + 1) % c] else (vs[(i + 1) % c], vs[i])
+            edges.setdefault(e, []).append(f)
+        ln = math.sqrt(nx * nx + ny * ny + nz * nz)
+        norms.append((nx / ln, ny / ln, nz / ln) if ln > 1e-20 else None)
+        cents.append((cx / c, cy / c, cz / c))
+    cos_t = math.cos(math.radians(clamp(float(angle), 1.0, 179.0)))
+    out = {"edge": [], "crev": [], "corner": []}
+    dirs = {}
+    for (va, vb), fs in edges.items():
+        if len(fs) == 1:
+            kind = "edge"
+        elif len(fs) == 2:
+            n1, n2 = norms[fs[0]], norms[fs[1]]
+            if n1 is None or n2 is None or _rl_dot(n1, n2) > cos_t:
+                continue
+            c1, c2 = cents[fs[0]], cents[fs[1]]
+            kind = "crev" if _rl_dot(_rl_sub(c2, c1), n1) + _rl_dot(_rl_sub(c1, c2), n2) > 0.0 else "edge"
+        else:
+            continue  # non-manifold: leave it out
+        a, b = P[va], P[vb]
+        d = _rl_sub(b, a)
+        ln = _rl_len(d)
+        if ln <= 1e-12:
+            continue
+        out[kind].append((a, b))
+        u = (d[0] / ln, d[1] / ln, d[2] / ln)
+        dirs.setdefault(va, []).append(u)
+        dirs.setdefault(vb, []).append((-u[0], -u[1], -u[2]))
+    for v, us in dirs.items():
+        if len(us) >= 2 and any(_rl_dot(us[i], us[j]) > -0.8 for i in range(len(us)) for j in range(i + 1, len(us))):
+            out["corner"].append(P[v])
+    _SC_FEATS[key] = out
+    _mi_trim(_SC_FEATS)
+    return out
+
+
+class _ScInfluence(object):
+    """A layer's procedural influence (Influence section) on top of its
+    paint (_MiPaint, or None): at(p) = the paint plus, per term (Edges,
+    Crevices, Corners), strength x a falloff of p's straight-line distance
+    to the nearest such fold of the surfaces (to their edges' segments, not
+    per vertex: a 4-face box still gives smooth gradients), clamped -1..1.
+    Breakup wobbles the distances with noise so the falloff isn't a clean
+    band. Used wherever paint is (moss / debris margins, ivy)."""
+
+    def __init__(self, paint, s, nodes):
+        self.paint = paint
+        self.base = paint.base if paint is not None else 0.0
+        m = scene_m_per_unit()
+        angle = float(s.get("inf_angle", 30.0))
+        self.breakup = clamp(float(s.get("inf_breakup", 0.0)), 0.0, 1.0)
+        self.seed = int(s.get("seed", 1) or 1)
+        feats = [_sc_features(n, angle) for n in nodes]
+        self.terms = []
+        tops = 0.0
+        for kind, ks, kd, kc in SC_INFL_TERMS:
+            w = clamp(float(s.get(ks, 0.0)), -1.0, 1.0)
+            if abs(w) < 1e-6:
+                continue
+            D = max(1e-4, float(s.get(kd, 0.5)) / m)
+            e = 4.0 ** (1.0 - 2.0 * clamp(float(s.get(kc, 0.5)), 0.0, 1.0))
+            reach = D * (1.0 + 0.6 * self.breakup)
+            items = [x for f in feats for x in f[kind]]
+            grid, big = {}, []
+            for it in items:
+                if kind == "corner":
+                    lo = hi = it
+                else:
+                    lo = [min(it[0][a], it[1][a]) for a in range(3)]
+                    hi = [max(it[0][a], it[1][a]) for a in range(3)]
+                a0 = [int(math.floor(lo[a] / reach)) for a in range(3)]
+                a1 = [int(math.floor(hi[a] / reach)) for a in range(3)]
+                if (a1[0] - a0[0] + 1) * (a1[1] - a0[1] + 1) * (a1[2] - a0[2] + 1) > 512:
+                    big.append(it)
+                    continue
+                for i in range(a0[0], a1[0] + 1):
+                    for j in range(a0[1], a1[1] + 1):
+                        for k in range(a0[2], a1[2] + 1):
+                            grid.setdefault((i, j, k), []).append(it)
+            self.terms.append((kind, w, D, e, reach, grid, big, len(items)))
+            tops += max(0.0, w)
+        top0 = paint.top if paint is not None else 0.0
+        self.top = clamp(top0 + tops, -1.0, 1.0) if tops else top0
+        self.key = hash((paint.key if paint is not None else 0,
+                         tuple((t[0], round(t[1], 6), round(t[2], 9), round(t[3], 6)) for t in self.terms),
+                         round(self.breakup, 6), round(angle, 6), self.seed,
+                         tuple(_mi_mesh_key(n) for n in nodes)))
+
+    def __repr__(self):
+        return "<influence %x>" % (self.key & 0xffffffffffff)
+
+    def counts(self):
+        """How many folds each term found: {kind: n}."""
+        return dict((t[0], t[7]) for t in self.terms)
+
+    def dist(self, kind, grid, big, reach, p):
+        """Distance from p to the nearest fold of a kind (reach when none is nearer)."""
+        x, y, z = p
+        ix, iy, iz = int(math.floor(x / reach)), int(math.floor(y / reach)), int(math.floor(z / reach))
+        best = reach * reach
+        seen = set()
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for dk in (-1, 0, 1):
+                    for it in grid.get((ix + di, iy + dj, iz + dk), ()):
+                        if id(it) in seen:
+                            continue
+                        seen.add(id(it))
+                        d2 = _sc_seg_d2(p, it, kind)
+                        if d2 < best:
+                            best = d2
+        for it in big:
+            d2 = _sc_seg_d2(p, it, kind)
+            if d2 < best:
+                best = d2
+        return math.sqrt(best)
+
+    def weight(self, p, kind, D, e, reach, grid, big):
+        """0..1: how near p is to a fold of a kind, through the falloff."""
+        d = self.dist(kind, grid, big, reach, p)
+        if self.breakup > 0.0:
+            d *= 1.0 + 0.6 * self.breakup * _mi_noise(p, 0.7 * D, self.seed + 811)
+        t = d / D
+        if t >= 1.0:
+            return 0.0
+        u = 1.0 - max(0.0, t)
+        u = u * u * (3.0 - 2.0 * u)
+        return u if e == 1.0 else u ** e
+
+    def at(self, p):
+        k = self.paint.at(p) if self.paint is not None else 0.0
+        for kind, w, D, e, reach, grid, big, _n in self.terms:
+            k += w * self.weight(p, kind, D, e, reach, grid, big)
+        return clamp(k, -1.0, 1.0)
+
+
+def _sc_seg_d2(p, it, kind):
+    """Squared distance from p to a corner point or an edge segment (a, b)."""
+    if kind == "corner":
+        return (p[0] - it[0]) ** 2 + (p[1] - it[1]) ** 2 + (p[2] - it[2]) ** 2
+    a, b = it
+    dx, dy, dz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    px, py, pz = p[0] - a[0], p[1] - a[1], p[2] - a[2]
+    ll = dx * dx + dy * dy + dz * dz
+    t = (px * dx + py * dy + pz * dz) / ll if ll > 0.0 else 0.0
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    qx, qy, qz = px - t * dx, py - t * dy, pz - t * dz
+    return qx * qx + qy * qy + qz * qz
+
+
+def sc_influence_on(s):
+    """Any Influence strength set in these settings."""
+    return any(abs(float((s or {}).get(term[1], 0.0) or 0.0)) >= 1e-6 for term in SC_INFL_TERMS)
+
+
 def _sc_paint_margin(margin, k, cov):
     """A spot's coverage margin with influence k painted on it (cov: the
     layer's Coverage): painted in, its coverage goes up by k of the way to
@@ -42379,6 +42576,8 @@ def _sc_build_layer(layer, surf, draft=False, rest_on=None, blocks=None):
     draw = _MiDrawing(strokes, float(s["draw_width"]) / scene_m_per_unit(), s["draw_falloff"], s["draw_follow"],
                       surf.nodes) if strokes else None
     paint = sc_paint_of(layer)
+    if sc_influence_on(s):  # Influence: corners, crevices, edges (none set: no object, built as before)
+        paint = _ScInfluence(paint, s, surf.nodes)
     if blocks:
         paint = _ScBlocked(paint, blocks)
     counts = {}
@@ -44776,6 +44975,35 @@ SC_FIELDS["bend_size"] = ("Bend size", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                           "about half its length, like a stiffer leaf. Drape is how far it sags; this is how wide "
                           "the bends are.")
 _SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
+_SC_INFL_CURVE = ("How it falls off: 0 = strong right at the %s, dropping fast; 0.5 = an even ramp; 1 = broad, "
+                  "staying strong most of the way out.")
+_SC_INFL_DIST = "How far from the %s the pull reaches, in metres (it eases out smoothly to nothing there)."
+SC_FIELDS.update({
+    "inf_edges": ("Edges", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
+                  "Pulls it towards the surfaces' outer edges (open borders and outward folds: a box's rim, a "
+                  "plank's sides), a smooth gradient coming in from them; below 0 pushes it away from them, "
+                  "towards the middle of open areas. 0 = off. The randomness and patchiness still apply."),
+    "inf_edge_dist": ("Edge falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "edges"),
+    "inf_edge_curve": ("Edge curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "edge"),
+    "inf_crev": ("Crevices", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
+                 "Pulls it into inward folds: gutters, grooves, inside corners, the foot of a wall where it's "
+                 "part of the same mesh; below 0 keeps it out of them. 0 = off."),
+    "inf_crev_dist": ("Crevice falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "crevices"),
+    "inf_crev_curve": ("Crevice curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "crevice"),
+    "inf_corner": ("Corners", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
+                   "Extra pull towards corners, where edges and crevices meet (a box's corners, a gutter's "
+                   "ends); below 0 keeps corners bare. Adds to Edges and Crevices. 0 = off."),
+    "inf_corner_dist": ("Corner falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "corners"),
+    "inf_corner_curve": ("Corner curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "corner"),
+    "inf_angle": ("Fold angle", _scf(1.0, 120.0, 5.0, 90.0, 0, 1.0),
+                  "How sharp a fold must be, in degrees, to count as an edge or crevice. Smooth, curved "
+                  "surfaces have none, so it only finds real folds of low-res geo."),
+    "inf_breakup": ("Breakup", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Wobbles the falloffs with noise, so the gradients aren't neat bands running along every edge."),
+})
+_SC_INFL = ("Influence", False, ["inf_edges", "inf_edge_dist", "inf_edge_curve", "inf_crev", "inf_crev_dist",
+                                 "inf_crev_curve", "inf_corner", "inf_corner_dist", "inf_corner_curve", "inf_angle",
+                                 "inf_breakup"])
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
 _SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
@@ -44824,6 +45052,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
 for _t in SC_LAYOUT:
     _at = [i + 1 for i, sec in enumerate(SC_LAYOUT[_t]) if sec[0].startswith("Where")]
     SC_LAYOUT[_t].insert(_at[0] if _at else len(SC_LAYOUT[_t]) - 2, _SC_FADE)  # after where it grows
+    SC_LAYOUT[_t].insert(SC_LAYOUT[_t].index(_SC_FADE) + 1, _SC_INFL)  # then Influence (folded)
     SC_LAYOUT[_t].insert(1, _SC_DRAWING)  # shown when the layer has a drawing
 
 
@@ -45477,6 +45706,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self.clump_sec = {}
         self.mat_sec = {}
         self.fade_sec = {}
+        self.infl_sec = {}
         self.row_lbl = {}
         self._build()
         self._install_jobs()
@@ -45844,6 +46074,8 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.mat_sec[typ] = sec
             if title == _SC_FADE[0]:
                 self.fade_sec[typ] = sec
+            if title == _SC_INFL[0]:
+                self.infl_sec[typ] = sec
             for key in keys:
                 label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
                 widget = make()
@@ -45961,6 +46193,8 @@ class ScatterPanel(QtWidgets.QWidget):
             self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
             if sc_settings(layer).get("fade", "Off") != "Off" and typ in self.fade_sec:
                 self.fade_sec[typ].header.setChecked(True)  # a faded layer shows its fade
+            if sc_influence_on(sc_settings(layer)) and typ in self.infl_sec:
+                self.infl_sec[typ].header.setChecked(True)  # and its Influence
         else:
             self._show(typ, self._next.get(typ) or sc_start_settings(typ))
             self.step_look.title.setText("Settings for the next group's first layer (%s)" % typ)
