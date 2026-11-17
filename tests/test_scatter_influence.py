@@ -1,15 +1,24 @@
-"""Headless tests for Scatter Influence (mayapy).
+"""Headless tests for Scatter's Where it gathers targets (mayapy).
 
     mayapy tests/test_scatter_influence.py
 
-A low-res block in decimetres (10 faces: a 4 x 3 m slab, 0.6 m high, with a
-0.4 m wide, 0.2 m deep gutter groove along its middle). Its folds are found
-(the gutter's two floor edges are crevices, the rim edges, corners where
-they meet); a Grass layer with every Influence strength at 0 grows exactly
-as before; Edges +1 gathers it at the rim in a smooth gradient inwards,
-Edges -1 pushes it to the open middles, Crevices +1 fills the gutter,
-Corners +1 the corners; a Moss layer follows too. Top-down density
-pictures go to tests/_out/scatter_influence.
+The user (2026-11-17): "if I max out walls, everything will literally just
+stick to walls. If I max out corners, things will stick to corners ... as
+soon as I make one value more than the other, it would influence that
+way", and it should move what grows, not add more.
+
+A low-res slab in decimetres (10 faces: 4 x 3 m, 0.6 m high, a 0.4 m wide,
+0.2 m deep gutter along its middle): its folds (gutter floor = crevices,
+rims, corners); all targets 0 grows exactly as before; Outer edges 1 puts
+it all along the rims (the same amount), Falloff hard vs soft, Open ground
+1 keeps it off them, Walls 1 fills the gutter, Corners 1 the corners, and
+Walls + Corners mixes by their values. Moss follows too.
+
+Then the user's yard: a one-face floor with a separate wall ring standing
+on its border, a blocker over the wall tops. Where the wall meets the floor
+is a wall foot (crevice), also where a wall sunk into the floor passes
+through it; Walls 1 / Corners 1 / both / Open ground 1, each keeping the
+total. Top-down density pictures go to tests/_out/scatter_influence.
 """
 
 import math
@@ -134,6 +143,22 @@ def _box(a, W, H, r):
     return res
 
 
+def _png(name, img, IW, IH, titles):
+    raw = b"".join(b"\x00" + bytes(img[r * IW * 3:(r + 1) * IW * 3]) for r in range(IH))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", IW, IH, 8, 2, 0, 0, 0)) + \
+        chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+    if not os.path.isdir(OUT):
+        os.makedirs(OUT)
+    path = os.path.join(OUT, name)
+    with open(path, "wb") as f:
+        f.write(png)
+    print("picture: %s  (%s)" % (path, ", ".join(titles)))
+
+
 def picture(name, panels, cols=3):
     """Top-down density pictures (x right, z down), one panel per build, as a PNG."""
     W, H, pad = 320, 240, 8
@@ -166,19 +191,7 @@ def picture(name, panels, cols=3):
                        int(base[2] + v * (120 - base[2])))
                 k = ((oy + j) * IW + ox + i) * 3
                 img[k:k + 3] = bytes(col)
-    raw = b"".join(b"\x00" + bytes(img[r * IW * 3:(r + 1) * IW * 3]) for r in range(IH))
-
-    def chunk(tag, data):
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-
-    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", IW, IH, 8, 2, 0, 0, 0)) + \
-        chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
-    if not os.path.isdir(OUT):
-        os.makedirs(OUT)
-    path = os.path.join(OUT, name)
-    with open(path, "wb") as f:
-        f.write(png)
-    print("picture: %s  (%s)" % (path, ", ".join(t for t, _ in panels)))
+    _png(name, img, IW, IH, [t for t, _ in panels])
 
 
 def run():
@@ -208,65 +221,79 @@ def run():
     root = rep["root"]
     lid = tb["sc_data"](root)["layers"][0]["id"]
     key = lid + "/grass"
-    t0 = time.time()
     tb["sc_regrow"](root, readback=False)
-    t_base = time.time() - t0
     base = part_points(tb, root, key)
     check("grass grows on the block", len(base) > 2000, "%d points" % len(base))
 
-    # all strengths 0 (falloffs and curves changed): no influence at all, exactly as before
-    tb["sc_update"](root, lid, {"inf_edge_dist": 1.3, "inf_crev_curve": 0.9, "inf_breakup": 0.8, "inf_angle": 50.0})
-    check("all strengths 0: grows exactly as before", part_points(tb, root, key) == base)
-    check("... and builds no influence object", not tb["sc_influence_on"](tb["sc_settings"](
+    # all targets 0 (reaches, falloff, breakup changed): exactly as before
+    tb["sc_update"](root, lid, {"to_walls_reach": 1.3, "to_soft": 0.9, "to_breakup": 0.8, "to_angle": 50.0})
+    check("all targets 0: grows exactly as before", part_points(tb, root, key) == base)
+    check("... and builds no gather object", not tb["sc_gather_on"](tb["sc_settings"](
         tb["sc_layer"](tb["sc_data"](root), lid))))
-    tb["sc_update"](root, lid, {"inf_edge_dist": 0.5, "inf_crev_curve": 0.5, "inf_breakup": 0.3, "inf_angle": 30.0})
+    tb["sc_update"](root, lid, dict((k, tb["SC_TO_DEFAULTS"][k]) for k in ("to_walls_reach", "to_soft", "to_breakup",
+                                                                           "to_angle")))
+    n0 = float(len(base))
 
     def grow(**kw):
-        ch = dict((k, 0.0) for k in ("inf_edges", "inf_crev", "inf_corner"))
+        ch = {"to_walls": 0.0, "to_corners": 0.0, "to_rims": 0.0, "to_open": 0.0}
         ch.update(kw)
         t0 = time.time()
         tb["sc_update"](root, lid, ch)
         return part_points(tb, root, key), time.time() - t0
 
-    b_edge, b_mid = band(base, 0.0, 3.0), band(base, 6.5, 99.0)
-    edges, t_edge = grow(inf_edges=1.0, inf_edge_dist=0.5)
-    e_edge, e_mid = band(edges, 0.0, 3.0), band(edges, 6.5, 99.0)
-    check("Edges +1: gathers at the rim (the middles as they were)", e_edge > 2.0 * b_edge and e_mid < 1.5 * b_mid,
-          "rim %.2f -> %.2f, middle %.2f -> %.2f /dm2" % (b_edge, e_edge, b_mid, e_mid))
-    bands = [band(edges, d, d + 1.5) for d in (0.0, 1.5, 3.0, 4.5, 6.5)]
+    def share(pts, test):
+        top = [q for q in pts if on_top(q)]
+        return sum(1 for q in top if test(q)) / float(max(1, len(top)))
+
+    rims, t_rims = grow(to_rims=1.0, to_rims_reach=0.5)
+    sh = share(rims, lambda q: edge_d(q) < 6.5)
+    check("Outer edges 1: it all goes along the rims (within the reach)", sh > 0.9,
+          "%.0f%% within the reach, %.0f%% before" % (100 * sh, 100 * share(base, lambda q: edge_d(q) < 6.5)))
+    check("... the same amount, moved", 0.7 < len(rims) / n0 < 1.3, "%d -> %d points" % (n0, len(rims)))
+    check("... and quick", t_rims < 3.0, "%.2fs" % t_rims)
+    soft, _ = grow(to_rims=1.0, to_rims_reach=0.6, to_soft=1.0, to_breakup=0.0)
+    bands = [band(soft, d, d + 1.5) for d in (0.0, 1.5, 3.0, 4.5)] + [band(soft, 7.0, 99.0)]
     # (blades right at the rim hang over it, below the top: the first band reads a little low)
-    check("... a smooth gradient inwards", bands[0] > 0.7 * bands[1] and bands[1] > bands[2] > bands[3] > bands[4],
+    check("Falloff 1: a soft fade in from the edges, nothing past the reach",
+          bands[0] > 0.7 * bands[1] and bands[1] > bands[2] > bands[3] and bands[4] < 0.05 * bands[1],
           " ".join("%.2f" % v for v in bands))
-    t_infl = t_edge
-    check("... and quick", t_infl < 3.0, "%.2fs (the first build %.2fs)" % (t_infl, t_base))
-    tight, _ = grow(inf_edges=1.0, inf_edge_dist=0.5, inf_edge_curve=0.0)
-    broad, _ = grow(inf_edges=1.0, inf_edge_dist=0.5, inf_edge_curve=1.0)
-    bt, bb = band(tight, 2.5, 4.5), band(broad, 2.5, 4.5)
-    check("Curve: 0 hugs the edge, 1 reaches further in", bb > 1.3 * bt, "2.5..4.5 dm in: %.2f vs %.2f" % (bt, bb))
+    hard, _ = grow(to_rims=1.0, to_rims_reach=0.6, to_soft=0.0, to_breakup=0.0)
+    hb = [band(hard, d, d + 1.5) for d in (1.5, 4.0)]
+    check("Falloff 0: a hard band, as full near its end as near the edge", hb[1] > 0.6 * hb[0] and
+          band(hard, 4.0, 5.5) > 1.5 * band(soft, 4.0, 5.5), "%.2f %.2f vs soft %.2f" % (
+              hb[0], hb[1], band(soft, 4.0, 5.5)))
 
-    away, _ = grow(inf_edges=-1.0, inf_edge_dist=0.5)
-    a_edge, a_mid = band(away, 0.0, 3.0), band(away, 6.5, 99.0)
-    check("Edges -1: away from the rim, to the open middles", a_edge < 0.3 * b_edge and a_mid > 0.7 * b_mid,
-          "rim %.2f -> %.2f, middle %.2f -> %.2f" % (b_edge, a_edge, b_mid, a_mid))
+    away, _ = grow(to_open=1.0, to_rims_reach=0.5)
+    sh = share(away, lambda q: edge_d(q) < 4.0)
+    check("Open ground 1: off the rims, the gutter and the corners", sh < 0.05 and not sum(map(in_gutter, away)),
+          "%.1f%% near the rims, %d in the gutter" % (100 * sh, sum(map(in_gutter, away))))
+    check("... the same amount", 0.7 < len(away) / n0 < 1.3, "%d -> %d" % (n0, len(away)))
 
-    b_gut = sum(map(in_gutter, base))
-    crev_pts, _ = grow(inf_crev=1.0, inf_crev_dist=0.3)
-    c_gut = sum(map(in_gutter, crev_pts))
-    check("Crevices +1: fills the gutter", c_gut > 1.8 * max(b_gut, 1) and c_gut > 150, "%d -> %d" % (b_gut, c_gut))
-    no_gut, _ = grow(inf_crev=-1.0, inf_crev_dist=0.3)
-    check("Crevices -1: keeps out of it", sum(map(in_gutter, no_gut)) < 0.3 * max(b_gut, 1),
-          "%d -> %d" % (b_gut, sum(map(in_gutter, no_gut))))
+    gut, _ = grow(to_walls=1.0, to_walls_reach=0.3)
+    sh = sum(1 for q in gut if abs(q[0]) < 5.5) / float(len(gut))
+    check("Walls 1: it all goes into the gutter (and just over its lips, in reach)", sh > 0.9 and
+          sum(map(in_gutter, gut)) > 3 * max(1, sum(map(in_gutter, base))),
+          "%.0f%% there, gutter %d -> %d" % (100 * sh, sum(map(in_gutter, base)), sum(map(in_gutter, gut))))
 
-    b_cor = sum(map(near_corner, base))
-    cor, _ = grow(inf_corner=1.0, inf_corner_dist=0.5)
-    k_cor = sum(map(near_corner, cor))
-    check("Corners +1: gathers in the corners", k_cor > 2.0 * max(b_cor, 1), "%d -> %d" % (b_cor, k_cor))
-    mix, _ = grow(inf_edges=0.6, inf_edge_dist=1.0, inf_corner=0.8, inf_corner_dist=0.6, inf_crev=0.7,
-                  inf_crev_dist=0.3)
+    corners = [q for q in tb["_sc_feature_set"]([blk], 30.0)["corner"]]
 
-    picture("grass_influence.png", [("no influence", base), ("Edges +1", edges), ("Edges -1", away),
-                                    ("Crevices +1", crev_pts), ("Corners +1", cor), ("mix", mix)])
+    def near_any_corner(q, r=6.5):
+        return min((q[0] - c[0]) ** 2 + (q[1] - c[1]) ** 2 + (q[2] - c[2]) ** 2 for c in corners) < r * r
 
+    cor, _ = grow(to_corners=1.0, to_corners_reach=0.5)
+    sh = sum(map(near_any_corner, cor)) / float(len(cor))
+    check("Corners 1: it all goes into the corners", sh > 0.9 and 0.6 < len(cor) / n0 < 1.4,
+          "%.0f%% there, %d -> %d points" % (100 * sh, n0, len(cor)))
+    w1, _ = grow(to_rims=1.0, to_rims_reach=0.5, to_corners=0.0)
+    wc1, _ = grow(to_rims=1.0, to_rims_reach=0.5, to_corners=1.0, to_corners_reach=0.5)
+    wch, _ = grow(to_rims=1.0, to_rims_reach=0.5, to_corners=0.5, to_corners_reach=0.5)
+    fr = [sum(map(near_corner, x)) / float(len(x)) for x in (w1, wch, wc1)]
+    check("Edges 1 + Corners: the more Corners, the more of it in the corners (same amount)",
+          fr[0] < fr[1] < fr[2] and 0.7 < len(wc1) / n0 < 1.3, "corner share %s" % " < ".join(
+              "%.0f%%" % (100 * v) for v in fr))
+
+    picture("grass_influence.png", [("as it starts", base), ("Outer edges 1", rims), ("Open ground 1", away),
+                                    ("Walls 1 (the gutter)", gut), ("Corners 1", cor), ("Edges 1 + Corners 1", wc1)])
     back, _ = grow()
     check("back to 0: as before", back == base)
 
@@ -274,16 +301,190 @@ def run():
     _, mid = tb["sc_add_layer"](root, "Moss", {"style": "Carpet", "coverage": 0.3, "detail": "Proxy"})
     mkey = mid + "/moss"
     m0 = part_points(tb, root, mkey)
-    tb["sc_update"](root, mid, {"inf_edges": 1.0, "inf_edge_dist": 0.8})
+    tb["sc_update"](root, mid, {"to_rims": 1.0, "to_rims_reach": 0.6})
     m1 = part_points(tb, root, mkey)
-    check("Moss: Edges +1 gathers at the rim too", band(m1, 0.0, 3.0) > 1.5 * max(band(m0, 0.0, 3.0), 0.01),
-          "%.2f -> %.2f" % (band(m0, 0.0, 3.0), band(m1, 0.0, 3.0)))
-    picture("moss_influence.png", [("moss: none", m0), ("moss: Edges +1", m1)], cols=2)
+    check("Moss: Outer edges 1 puts it along the rims, off the middles",
+          band(m1, 0.0, 3.0) > 1.5 * max(band(m0, 0.0, 3.0), 0.01) and band(m1, 8.0, 99.0) < 0.2 * band(m0, 8.0, 99.0),
+          "rim %.2f -> %.2f, middle %.2f -> %.2f" % (band(m0, 0.0, 3.0), band(m1, 0.0, 3.0), band(m0, 8.0, 99.0),
+                                                     band(m1, 8.0, 99.0)))
+    picture("moss_influence.png", [("moss: none", m0), ("moss: Outer edges 1", m1)], cols=2)
+    cmds.delete(root)
+
+
+def wall_ring(name, outer=20.0, inner=18.0, h=6.0, y0=0.0):
+    """A square wall ring (one mesh, 16 quads) standing from y0."""
+    O = [(-outer, -outer), (outer, -outer), (outer, outer), (-outer, outer)]
+    I = [(-inner, -inner), (inner, -inner), (inner, inner), (-inner, inner)]
+    pts = [om.MPoint(x, y, z) for y in (y0, y0 + h) for ring in (O, I) for x, z in ring]
+    ob, ib, ot, it = 0, 4, 8, 12
+    counts, conn = [], []
+    for k in range(4):
+        j = (k + 1) % 4
+        conn += [ot + k, it + k, it + j, ot + j]   # top
+        conn += [ob + k, ob + j, ib + j, ib + k]   # bottom
+        conn += [ob + k, ot + k, ot + j, ob + j]   # outer face
+        conn += [ib + k, ib + j, it + j, it + k]   # inner face
+        counts += [4, 4, 4, 4]
+    obj = om.MFnMesh().create(pts, counts, conn)
+    node = cmds.rename(om.MFnDagNode(obj).fullPathName(), name)
+    cmds.sets(node, edit=True, forceElement="initialShadingGroup")
+    fn = om.MFnMesh(om.MSelectionList().add(node).getDagPath(0))
+    tops = [f for f in range(fn.numPolygons) if all(abs(fn.getPoint(v).y - (y0 + h)) < 1e-6
+                                                    for v in fn.getPolygonVertices(f))]
+    if fn.getPolygonNormal(tops[0]).y < 0.0:  # wound inside out: turn every face round
+        cmds.polyNormal(node, normalMode=0, constructionHistory=False)
+    return node
+
+
+def wall_d(p):
+    """Distance in from the wall's inner face (on the floor)."""
+    return 18.0 - max(abs(p[0]), abs(p[2]))
+
+
+def yard_bands(pts):
+    fl = [p for p in pts if p[1] < 2.0 and wall_d(p) > -0.1]
+
+    def dens(lo, hi):
+        n = sum(1 for p in fl if lo <= wall_d(p) < hi)
+        return n / float((36 - 2 * lo) ** 2 - (36 - 2 * min(hi, 18.0)) ** 2)
+
+    corner = sum(1 for p in fl if 18 - abs(p[0]) < 4 and 18 - abs(p[2]) < 4) / 64.0
+    return [dens(0, 2), dens(2, 4), dens(4, 8), dens(8, 18)], corner
+
+
+def yard_picture(name, panels):
+    """Top-down density over the floor (the wall ring grey), one scale for all panels."""
+    W = H = 240
+    pad, cols = 8, 3
+    rows = (len(panels) + cols - 1) // cols
+    IW, IH = cols * (W + pad) + pad, rows * (H + pad) + pad
+    img = bytearray(b"\x18" * (IW * IH * 3))
+    accs = []
+    for _title, pts in panels:
+        acc = [0.0] * (W * H)
+        for p in pts:
+            if p[1] > 2.0:
+                continue
+            i = int((p[0] + 20.0) / 40.0 * (W - 1))
+            j = int((p[2] + 20.0) / 40.0 * (H - 1))
+            if 0 <= i < W and 0 <= j < H:
+                acc[j * W + i] += 1.0
+        for _ in range(2):
+            acc = _box(acc, W, H, 5)
+        accs.append(acc)
+    top = max(max(a) for a in accs) or 1.0
+    for idx, acc in enumerate(accs):
+        ox, oy = pad + (idx % cols) * (W + pad), pad + (idx // cols) * (H + pad)
+        for j in range(H):
+            for i in range(W):
+                x, z = -20.0 + 40.0 * i / (W - 1), -20.0 + 40.0 * j / (H - 1)
+                v = min(1.0, acc[j * W + i] / top) ** 0.6
+                base = (52, 46, 40) if max(abs(x), abs(z)) < 18 else (95, 95, 100)
+                col = (int(base[0] + v * (215 - base[0])), int(base[1] + v * (225 - base[1])),
+                       int(base[2] + v * (120 - base[2])))
+                k = ((oy + j) * IW + ox + i) * 3
+                img[k:k + 3] = bytes(col)
+    _png(name, img, IW, IH, [t for t, _ in panels])
+
+
+def walls():
+    tb = load_toolbox()
+    cmds.file(new=True, force=True)
+    floor = cmds.polyPlane(w=40, h=40, sx=1, sy=1, name="floor", constructionHistory=False)[0]
+    wall = wall_ring("wallRing")
+    grp = cmds.group(floor, wall, name="yard_GRP")
+    floor, wall = cmds.listRelatives(grp, children=True, fullPath=True)
+    blk = cmds.ls(cmds.polyCube(w=44, h=2, d=44, name="wallTopBlocker", constructionHistory=False)[0], long=True)[0]
+    cmds.move(0, 6.0, 0, blk)
+
+    fs = tb["_sc_feature_set"]([floor, wall], 30.0)
+    foot = [s for s in fs["crev"] if abs(s[0][1]) < 1e-6 and abs(s[1][1]) < 1e-6 and
+            abs(max(abs(s[0][0]), abs(s[0][2])) - 18.0) < 1e-6 and abs(max(abs(s[1][0]), abs(s[1][2])) - 18.0) < 1e-6]
+    check("separate meshes: the wall's foot on the floor is a crevice", len(foot) == 4,
+          "%d foot lines; %d crevices, %d edges, %d corners" % (len(foot), len(fs["crev"]), len(fs["edge"]),
+                                                               len(fs["corner"])))
+    cs = set((round(p[0]), round(p[1]), round(p[2])) for p in fs["corner"])
+    check("... the room's corners are corners", all((x, 0, z) in cs for x in (-18, 18) for z in (-18, 18)))
+    check("... and the floor's border under the wall is no open edge",
+          not [s for s in fs["edge"] if abs(s[0][1]) < 1e-6 and abs(s[1][1]) < 1e-6])
+    cmds.move(0, -1.0, 0, wall, relative=True)  # sunk into the floor: it passes through it
+    sunk = tb["_sc_feature_set"]([floor, wall], 30.0)
+    cut = [s for s in sunk["crev"] if abs(s[0][1]) < 1e-6 and abs(s[1][1]) < 1e-6]
+    check("a wall sunk into the floor: where it passes through is a crevice", len(cut) >= 8,
+          "%d crevice pieces on the floor" % len(cut))
+    cmds.move(0, 1.0, 0, wall, relative=True)
+
+    grass = {"grass": 25.0, "bunch_size": 0.08, "grass_length": 0.12, "detail": "Proxy", "seed": 3,
+             "patchiness": 0.3}
+    # the amount: bunches (a bunch against a wall loses the blades that would go into it, so points don't keep)
+    made = {"n": 0}
+    spots = tb["_DebrisBuild"]._spots
+
+    def counted(self, density, kind, reach=0.0):
+        got = spots(self, density, kind, reach)
+        if kind == 1 and density > 0.0:
+            made["n"] = len(got)
+        return got
+
+    tb["_DebrisBuild"]._spots = counted
+    rep = tb["create_scatter_group"]([grp], "Grass", grass, select=False)
+    root = rep["root"]
+    tb["sc_set_blockers"](root, add=[blk])
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+    key = lid + "/grass"
+
+    def grow(**kw):
+        ch = {"to_walls": 0.0, "to_corners": 0.0, "to_rims": 0.0, "to_open": 0.0, "to_walls_reach": 0.8,
+              "to_corners_reach": 0.8}
+        ch.update(kw)
+        tb["sc_update"](root, lid, ch)
+        grow.n = made["n"]  # bunches
+        return [q for q in part_points(tb, root, key) if q[1] < 2.0]  # on the floor
+
+    def at_corner(q, r=9.5):
+        return min((abs(q[0]) - 18.0) ** 2 + (abs(q[2]) - 18.0) ** 2, 1e9) < r * r
+
+    base = grow()
+    n0, b0 = float(len(base)), float(made["n"])
+    check("the yard grows, nothing on the blocked wall tops", n0 > 500 and not [
+        q for q in part_points(tb, root, key) if q[1] > 2.0], "%d points" % n0)
+    t0 = time.time()
+    walls_ = grow(to_walls=1.0)
+    dt = time.time() - t0
+    bw = grow.n
+    sh = sum(1 for q in walls_ if wall_d(q) < 9.5) / float(len(walls_))
+    check("Walls 1: it all sticks to the walls (within the 0.8 m reach), the same amount",
+          sh > 0.9 and 0.8 < bw / b0 < 1.2, "%.0f%% within reach (%.0f%% before), %d -> %d bunches, %.2fs" % (
+              100 * sh, 100 * sum(1 for q in base if wall_d(q) < 9.5) / n0, b0, bw, dt))
+    cor = grow(to_corners=1.0)
+    sh = sum(map(at_corner, cor)) / float(len(cor))
+    check("Corners 1: it all goes into the corners", sh > 0.9 and 0.8 < grow.n / b0 < 1.2,
+          "%.0f%% in the corners, %d -> %d bunches" % (100 * sh, b0, grow.n))
+    both = grow(to_walls=1.0, to_corners=1.0)
+    half = grow(to_walls=1.0, to_corners=0.5)
+    fr = [sum(map(at_corner, x)) / float(len(x)) for x in (walls_, half, both)]
+    on_walls = sum(1 for q in both if wall_d(q) < 9.5) / float(len(both))
+    check("Walls 1 + Corners: along the walls, and the more Corners the more in the corners",
+          fr[0] < fr[1] < fr[2] and on_walls > 0.9, "corner share %s; %.0f%% by the walls" % (
+              " < ".join("%.0f%%" % (100 * v) for v in fr), 100 * on_walls))
+    open_ = grow(to_open=1.0)
+    sh = sum(1 for q in open_ if wall_d(q) < 6.0) / float(len(open_))
+    check("Open ground 1: keeps clear of the walls, the same amount", sh < 0.05 and 0.8 < grow.n / b0 < 1.2,
+          "%.1f%% near the walls, %d -> %d bunches" % (100 * sh, b0, grow.n))
+    lean = grow(to_walls=0.5, to_walls_reach=0.4)
+    sh = sum(1 for q in lean if wall_d(q) < 5.5) / float(len(lean))
+    sh0 = sum(1 for q in base if wall_d(q) < 5.5) / n0
+    check("Walls 0.5: leans to the walls, some still in the open", sh0 + 0.1 < sh < 0.9,
+          "%.0f%% by the walls (%.0f%% before)" % (100 * sh, 100 * sh0))
+    yard_picture("yard_pulls.png", [("as it starts", base), ("Walls 1", walls_), ("Corners 1", cor),
+                                    ("Walls 1 + Corners 1", both), ("Walls 1 + Corners 0.5", half),
+                                    ("Open ground 1", open_)])
     cmds.delete(root)
 
 
 try:
     run()
+    walls()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

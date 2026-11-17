@@ -35281,6 +35281,7 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     spots, cands = _moss_field(surf, sampler, s, R)
     fade = _mi_fade(surf.nodes, s)
     paint = s.get("_paint")  # the layer's influence paint (_MiPaint), or None
+    note = getattr(paint, "note", None)  # Where it gathers (_ScGather)
     if fade is not None and not s.get("_up_only"):  # moss up a column's sides (the fade decides how high)
         s2 = dict(s, slope=max(float(s["slope"]), 90.0))
         scores = [moss_score(sp, s2) for sp in spots]
@@ -35331,6 +35332,9 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
             margin = margin + 0.3 * k - 0.6 * (1.0 - k) * (1.0 - k) if k > 0.0 else -1.0
         if paint is not None:  # influence paint: more coverage where it's painted in, less where out
             k = paint.at(p)
+            if note is not None:  # Where it gathers: what would grow without it (debris keeps that total)
+                k0 = paint.base_at(p)
+                note(p, -1.0 if thr >= 1.0 and k0 <= 0.0 else _sc_paint_margin(margin, k0, 1.0 - thr))
             margin = -1.0 if thr >= 1.0 and k <= 0.0 else _sc_paint_margin(margin, k, 1.0 - thr)  # (Coverage 0:
             # only where it's painted in)
         rows.append((margin, occ / tw, edge / tw))
@@ -39831,8 +39835,20 @@ class _DebrisBuild(object):
         self.per = sampler.total / max(1, tried)  # surface area each candidate stands for
         self.cover = 0.05 / m
         self.blocked = getattr(s.get("_paint"), "blocked", None)  # the group's blockers (_ScBlocked): no item in one
+        self.spread = getattr(s.get("_paint"), "spread", None)  # Where it gathers: moves items, keeps the total
+        self.margin_of = getattr(s.get("_paint"), "margin_of", None)
+        self.covered = {}  # candidate -> under something (Where it gathers counts only where things can grow)
 
     # ------------------------------------------------------------- placing
+    def _covered(self, i, cand):
+        """Candidate i under something resting on the surface (a wall
+        standing on the floor): nothing grows there (cached)."""
+        hit = self.covered.get(i)
+        if hit is None:
+            o = _moss_obstacle(self.surf, cand[0], cand[1], cand[5], self.R)
+            hit = self.covered[i] = o is not None and o < self.cover
+        return hit
+
     def _spots(self, density, kind, reach=0.0):
         """Where items of one kind go: [(point, normal, randoms, margin,
         candidate)], `density` per square metre inside the patches (ramping
@@ -39847,17 +39863,36 @@ class _DebrisBuild(object):
         lim = float(self.s["slope"])
         cut = math.cos(math.radians(min(90.0, lim + 15.0))) - 1e-6  # past Slope limit + 15 degrees: never
         blocked = self.blocked
-        for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
+
+        def weight(i, cand, margin):
+            w = clamp((margin + 0.05 + reach) / (0.25 + reach), 0.0, 1.0)
+            w *= clamp(1.0 - (math.degrees(math.acos(clamp(cand[1][1], -1.0, 1.0))) - lim) / 15.0, 0.0, 1.0)
+            if w > 0.0 and self.gat is not None:
+                gg = self.gat[i][0] * clamp((self.cands[i][1][1] - 0.3) / 0.4, 0.0, 1.0)
+                w *= max(0.15, 1.0 + self.creases * DEBRIS_GATHER[kind] * (gg - 0.2))
+            return w
+
+        ws = []
+        if self.spread is not None:  # Where it gathers: what would grow without it, moved to the targets
+            got = []  # (i, cand, row, pulled weight, weight without it)
+            for i, (cand, row) in enumerate(zip(self.cands, self.rows)):
+                _poll()
+                if row is None or cand[1][1] < cut:
+                    continue
+                m0 = self.margin_of(cand[0])
+                w, w0 = weight(i, cand, row[0]), weight(i, cand, row[0] if m0 is None else m0)
+                if (w > 0.0 or w0 > 0.0) and not self._covered(i, cand):  # (under a wall: nothing grows)
+                    got.append((i, cand, row, w, w0))
+            fin = self.spread([x[1][0] for x in got], [x[3] for x in got], [x[4] for x in got]) if got else []
+            ws = [(x[0], x[1], x[2], f) for x, f in zip(got, fin) if f > 0.0]
+        for i, (cand, row) in enumerate(zip(self.cands, self.rows)) if self.spread is None else ():
             _poll()  # a long build: the Working window, Esc / Cancel
             if row is None or cand[1][1] < cut:
                 continue
-            w = clamp((row[0] + 0.05 + reach) / (0.25 + reach), 0.0, 1.0)
-            w *= clamp(1.0 - (math.degrees(math.acos(clamp(cand[1][1], -1.0, 1.0))) - lim) / 15.0, 0.0, 1.0)
-            if w <= 0.0:
-                continue
-            if self.gat is not None:
-                gg = self.gat[i][0] * clamp((self.cands[i][1][1] - 0.3) / 0.4, 0.0, 1.0)
-                w *= max(0.15, 1.0 + self.creases * DEBRIS_GATHER[kind] * (gg - 0.2))
+            w = weight(i, cand, row[0])
+            if w > 0.0:
+                ws.append((i, cand, row, w))
+        for i, cand, row, w in ws:
             r = _rand12(self.seed, i, kind, 61)
             count = int(dens * self.per * w + r[0])
             if not count:
@@ -41662,19 +41697,25 @@ SC_DEBRIS_OUT = {"Grass": (("grass", "grass"),), "Leaves": (("litter", "litter")
                  "Specks": (("specks", "specks"), ("dirt", "dirt"))}  # debris_build's mesh -> part
 SC_DRAW_DEFAULTS = {"draw_width": 0.3, "draw_falloff": 0.5, "draw_follow": 0.5}  # metres, fractions
 SC_DRAW_MAX_POINTS = 6000  # stored per layer (thinned evenly past it)
-# Influence (the user, 2026-11-17: "sliders for influence ... attract it more to corners, attract it more to
-# crevices like gutters ... or attract it away from those things to more towards the center of like open areas
-# ... with like fall off and nice control"): procedural influence from the surfaces' own folds, added to the
-# influence paint. Strength -1 (away: open middles) .. +1 (towards); falloff in metres; curve 0 hugs the
-# feature, 0.5 an even ramp, 1 broad. All strengths 0 = no influence object (builds exactly as before).
-SC_INFL_TERMS = (("edge", "inf_edges", "inf_edge_dist", "inf_edge_curve"),
-                 ("crev", "inf_crev", "inf_crev_dist", "inf_crev_curve"),
-                 ("corner", "inf_corner", "inf_corner_dist", "inf_corner_curve"))
-SC_INFL_DEFAULTS = {"inf_edges": 0.0, "inf_edge_dist": 0.5, "inf_edge_curve": 0.5,
-                    "inf_crev": 0.0, "inf_crev_dist": 0.5, "inf_crev_curve": 0.5,
-                    "inf_corner": 0.0, "inf_corner_dist": 0.5, "inf_corner_curve": 0.5,
-                    "inf_angle": 30.0, "inf_breakup": 0.3}
+# Where it gathers: walls, corners, outer edges, open ground (the user, 2026-11-17: "if I max out walls,
+# everything will literally just stick to walls. If I max out corners, things will stick to corners ... as soon
+# as I make one value more than the other, it would influence that way"; "we create a max limit and then I can
+# influence where those things grow"). A mix that moves what grows, never adds to it: Coverage and the
+# density sliders say how much, these say where. Each target 0..1; the rest goes anywhere (1 - the largest);
+# a target's share = its value / the sum. Reach (metres) = how far from the wall / corner / edge it counts;
+# Falloff = a hard band .. a soft fade over that reach. All targets 0 = no object (builds exactly as before).
+SC_TO_TARGETS = (("walls", "to_walls", "to_walls_reach", "crev"),
+                 ("corners", "to_corners", "to_corners_reach", "corner"),
+                 ("rims", "to_rims", "to_rims_reach", "edge"),
+                 ("open", "to_open", None, None))
+SC_TO_DEFAULTS = {"to_walls": 0.0, "to_walls_reach": 0.8, "to_corners": 0.0, "to_corners_reach": 0.8,
+                  "to_rims": 0.0, "to_rims_reach": 0.5, "to_open": 0.0, "to_soft": 0.6, "to_breakup": 0.3,
+                  "to_angle": 30.0}
+SC_TO_MAX = 8.0  # most a spot's share is multiplied by (a thin band holding everything packs no tighter)
 _SC_FEATS = collections.OrderedDict()  # (mesh key, angle) -> a mesh's fold edges and corners (world)
+_SC_FEATS_ALL = collections.OrderedDict()  # (mesh keys, angle) -> every surface's folds, contacts and corners
+SC_CONTACT_TOL = 0.01  # metres: a fold of one mesh this close to another mesh's surface lies on it (a junction)
+SC_CONTACT_PAIRS = 400000  # most triangle pairs looked at for meshes passing through each other
 SC_DRAW_ON = ("Surfaces", "Selected", "Everything")  # what Draw on Surfaces draws on
 _SC_BUILT = collections.OrderedDict()  # (group, layer id, layer JSON, surfaces) -> the layer's parts, counts
 _SC_LAST = {}   # group -> (JSON, stamp) it was last built from
@@ -41706,7 +41747,7 @@ def sc_defaults(typ):
     out = {k: base[k] for k in SC_TYPES[typ]["keys"]}
     out.update(SC_TYPES[typ]["over"])
     out.update(SC_DRAW_DEFAULTS)
-    out.update(SC_INFL_DEFAULTS)
+    out.update(SC_TO_DEFAULTS)
     return out
 
 
@@ -42391,33 +42432,46 @@ def _sc_features(node, angle):
     return out
 
 
-class _ScInfluence(object):
-    """A layer's procedural influence (Influence section) on top of its
-    paint (_MiPaint, or None): at(p) = the paint plus, per term (Edges,
-    Crevices, Corners), strength x a falloff of p's straight-line distance
-    to the nearest such fold of the surfaces (to their edges' segments, not
-    per vertex: a 4-face box still gives smooth gradients), clamped -1..1.
-    Breakup wobbles the distances with noise so the falloff isn't a clean
-    band. Used wherever paint is (moss / debris margins, ivy)."""
+class _ScGather(object):
+    """Where it gathers (walls, corners, outer edges, open ground) for a
+    layer, on top of its paint (_MiPaint or None). Per point, nearness to
+    each target F 0..1 (1 within the reach's hard part, easing to 0 at the
+    reach): walls = `_sc_feature_set`'s crevices (inward folds and where
+    meshes meet: a wall's foot), corners, rims = outer edges; open =
+    1 - the nearest of the three. Weights w 0..1, W = the largest; 1 - W
+    goes anywhere.
+    - at(p): the coverage pull, W (2 near - 1) with near = max w / W x F
+      (+ the paint, clamped): maxed walls = full coverage along them and
+      none away from them; a weaker target only part way.
+    - spread(points, weights, base): how much each spot gets (debris), the
+      total kept at what grows without it (base; spots under a wall left
+      out): shares s = w / sum (anywhere's 1 - W too); anywhere's laid out
+      as base, a target's along it (the pulled weights x F); a target
+      nothing near can take gives its share back. Capped at SC_TO_MAX.
+    Distances are straight lines to the folds' segments (a 1-face floor
+    still gives smooth gradients). Breakup wobbles them with noise."""
 
     def __init__(self, paint, s, nodes):
-        self.paint = paint
+        self.paint = paint  # the layer's paint, inside the group's blockers (or None)
         self.base = paint.base if paint is not None else 0.0
+        self.blocked = getattr(paint, "blocked", None)
+        self.margins = {}  # candidate point -> its margin without the gather (debris keeps that total)
         m = scene_m_per_unit()
-        angle = float(s.get("inf_angle", 30.0))
-        self.breakup = clamp(float(s.get("inf_breakup", 0.0)), 0.0, 1.0)
+        angle = float(s.get("to_angle", 30.0))
+        self.breakup = clamp(float(s.get("to_breakup", 0.0)), 0.0, 1.0)
+        self.soft = clamp(float(s.get("to_soft", 0.6)), 0.0, 1.0)
         self.seed = int(s.get("seed", 1) or 1)
-        feats = [_sc_features(n, angle) for n in nodes]
-        self.terms = []
-        tops = 0.0
-        for kind, ks, kd, kc in SC_INFL_TERMS:
-            w = clamp(float(s.get(ks, 0.0)), -1.0, 1.0)
-            if abs(w) < 1e-6:
+        self.w = dict((name, clamp(float(s.get(key, 0.0) or 0.0), 0.0, 1.0)) for name, key, _r, _k in SC_TO_TARGETS)
+        self.W = max(self.w.values())
+        need = set(name for name, _k, _r, kind in SC_TO_TARGETS if kind and (self.w[name] > 0.0 or self.w["open"] > 0.0))
+        feats = _sc_feature_set(nodes, angle) if need else {"edge": [], "crev": [], "corner": []}
+        self.terms = []  # (name, kind, reach R, grid reach, grid, big, count)
+        for name, _key, rkey, kind in SC_TO_TARGETS:
+            if name not in need:
                 continue
-            D = max(1e-4, float(s.get(kd, 0.5)) / m)
-            e = 4.0 ** (1.0 - 2.0 * clamp(float(s.get(kc, 0.5)), 0.0, 1.0))
-            reach = D * (1.0 + 0.6 * self.breakup)
-            items = [x for f in feats for x in f[kind]]
+            R = max(1e-4, float(s.get(rkey, 0.5)) / m)
+            reach = R * (1.0 + 0.6 * self.breakup)
+            items = feats[kind]
             grid, big = {}, []
             for it in items:
                 if kind == "corner":
@@ -42434,24 +42488,22 @@ class _ScInfluence(object):
                     for j in range(a0[1], a1[1] + 1):
                         for k in range(a0[2], a1[2] + 1):
                             grid.setdefault((i, j, k), []).append(it)
-            self.terms.append((kind, w, D, e, reach, grid, big, len(items)))
-            tops += max(0.0, w)
+            self.terms.append((name, kind, R, reach, grid, big, len(items)))
         top0 = paint.top if paint is not None else 0.0
-        self.top = clamp(top0 + tops, -1.0, 1.0) if tops else top0
-        self.key = hash((paint.key if paint is not None else 0,
-                         tuple((t[0], round(t[1], 6), round(t[2], 9), round(t[3], 6)) for t in self.terms),
-                         round(self.breakup, 6), round(angle, 6), self.seed,
-                         tuple(_mi_mesh_key(n) for n in nodes)))
+        self.top = clamp(top0 + self.W, -1.0, 1.0)  # the most it pulls in: grows at Coverage 0 too
+        self.memo = {}
+        self.key = hash((paint.key if paint is not None else 0, tuple(sorted(self.w.items())),
+                         tuple((t[0], round(t[2], 9)) for t in self.terms), round(self.breakup, 6),
+                         round(self.soft, 6), round(angle, 6), self.seed, tuple(_mi_mesh_key(n) for n in nodes)))
 
     def __repr__(self):
-        return "<influence %x>" % (self.key & 0xffffffffffff)
+        return "<gather %x>" % (self.key & 0xffffffffffff)
 
     def counts(self):
-        """How many folds each term found: {kind: n}."""
-        return dict((t[0], t[7]) for t in self.terms)
+        """How many folds each target found: {name: n}."""
+        return dict((t[0], t[6]) for t in self.terms)
 
-    def dist(self, kind, grid, big, reach, p):
-        """Distance from p to the nearest fold of a kind (reach when none is nearer)."""
+    def _dist(self, kind, grid, big, reach, p):
         x, y, z = p
         ix, iy, iz = int(math.floor(x / reach)), int(math.floor(y / reach)), int(math.floor(z / reach))
         best = reach * reach
@@ -42472,23 +42524,242 @@ class _ScInfluence(object):
                 best = d2
         return math.sqrt(best)
 
-    def weight(self, p, kind, D, e, reach, grid, big):
-        """0..1: how near p is to a fold of a kind, through the falloff."""
-        d = self.dist(kind, grid, big, reach, p)
-        if self.breakup > 0.0:
-            d *= 1.0 + 0.6 * self.breakup * _mi_noise(p, 0.7 * D, self.seed + 811)
-        t = d / D
-        if t >= 1.0:
+    def fields(self, p):
+        """{target: nearness 0..1} at p (open included when it's used)."""
+        key = (p[0], p[1], p[2])
+        hit = self.memo.get(key)
+        if hit is not None:
+            return hit
+        out = {}
+        hard = (1.0 - self.soft) * 0.95  # the part of the reach at full strength
+        wob = 1.0 + 0.6 * self.breakup * _mi_noise(p, 0.7 * max(t[2] for t in self.terms), self.seed + 811) \
+            if self.breakup > 0.0 and self.terms else 1.0
+        for name, kind, R, reach, grid, big, _n in self.terms:
+            tt = self._dist(kind, grid, big, reach, p) * wob / R
+            if tt >= 1.0:
+                f = 0.0
+            elif tt <= hard:
+                f = 1.0
+            else:
+                u = (1.0 - tt) / (1.0 - hard)
+                f = u * u * (3.0 - 2.0 * u)
+            out[name] = f
+        if self.w["open"] > 0.0:
+            out["open"] = 1.0 - max([out.get(n, 0.0) for n in ("walls", "corners", "rims")] or [0.0])
+        if len(self.memo) > 400000:
+            self.memo.clear()
+        self.memo[key] = out
+        return out
+
+    def pull(self, p):
+        """The coverage pull at p, -W .. W."""
+        if self.W <= 0.0:
             return 0.0
-        u = 1.0 - max(0.0, t)
-        u = u * u * (3.0 - 2.0 * u)
-        return u if e == 1.0 else u ** e
+        F = self.fields(p)
+        near = max((self.w[n] / self.W) * F.get(n, 0.0) for n in self.w)
+        return self.W * (2.0 * near - 1.0)
 
     def at(self, p):
         k = self.paint.at(p) if self.paint is not None else 0.0
-        for kind, w, D, e, reach, grid, big, _n in self.terms:
-            k += w * self.weight(p, kind, D, e, reach, grid, big)
-        return clamp(k, -1.0, 1.0)
+        return clamp(k + self.pull(p), -1.0, 1.0)
+
+    def base_at(self, p):
+        """The paint (and blockers) alone at p: what grows without the gather."""
+        return self.paint.at(p) if self.paint is not None else 0.0
+
+    def note(self, p, margin):
+        self.margins[(p[0], p[1], p[2])] = margin
+
+    def margin_of(self, p):
+        return self.margins.get((p[0], p[1], p[2]))
+
+    def spread(self, points, weights, base):
+        """How much grows at each spot (debris): weights = with the coverage
+        pull, base = without the gather. The total stays base's: anywhere's
+        share (1 - W) laid out as base, each target's share along it (pulled
+        weights x its nearness)."""
+        tot = float(sum(base))
+        if tot <= 0.0 or self.W <= 0.0:
+            return list(base)
+        Fs = [self.fields(q) for q in points]
+        share = {"any": 1.0 - self.W}
+        for n, v in self.w.items():
+            if v > 0.0:
+                share[n] = v
+        sums = {}
+        for n in list(share):
+            if n == "any":
+                continue
+            a = sum(w * F.get(n, 0.0) for w, F in zip(weights, Fs))
+            if a < 1e-6 * tot:
+                share.pop(n)  # nothing near it can grow: its share goes back
+            else:
+                sums[n] = a
+        S = sum(share.values())
+        if S <= 0.0 or len(share) == 1 and "any" in share:
+            return list(base)
+        a0 = share.get("any", 0.0)
+        return [min(SC_TO_MAX, (a0 * b + tot * sum(share[n] * w * F.get(n, 0.0) / sums[n] for n in sums)) / S)
+                for b, w, F in zip(base, weights, Fs)]
+
+
+def _sc_feature_set(nodes, angle):
+    """Every surface's folds together (cached by their mesh keys): each
+    mesh's own (`_sc_features`), plus where meshes meet (the user,
+    2026-11-17: a floor with a separate wall standing round it): a fold or
+    border of one mesh lying on another's surface (within SC_CONTACT_TOL)
+    is a crevice, not an edge (a wall's bottom edge on the floor, the
+    floor's border under the wall), and so is the line where one mesh
+    passes through another (a wall sunk into the floor). Corners: where
+    folds meet at an angle, across meshes too (by position)."""
+    nodes = list(nodes)
+    key = (tuple(_mi_mesh_key(n) for n in nodes), round(float(angle), 3))
+    hit = _mi_cache_get(_SC_FEATS_ALL, key)
+    if hit is not None:
+        return hit
+    tol = SC_CONTACT_TOL / scene_m_per_unit()
+    feats = [_sc_features(n, angle) for n in nodes]
+    out = {"edge": [], "crev": [], "corner": []}
+    if len(nodes) > 1:
+        boxes = []
+        queries = []
+        for n in nodes:
+            bb = cmds.exactWorldBoundingBox(n)
+            boxes.append((bb[0] - tol, bb[1] - tol, bb[2] - tol, bb[3] + tol, bb[4] + tol, bb[5] + tol))
+            shape = _log_shape(n)
+            queries.append(_SurfaceQuery(get_dag_path(shape)) if shape else None)
+
+        def on_other(a, b, mine):
+            """A segment lying on another mesh's surface (its ends, middle and quarters)."""
+            lo = [min(a[i], b[i]) for i in range(3)]
+            hi = [max(a[i], b[i]) for i in range(3)]
+            for j, q in enumerate(queries):
+                bx = boxes[j]
+                if j == mine or q is None or hi[0] < bx[0] or hi[1] < bx[1] or hi[2] < bx[2] or \
+                        lo[0] > bx[3] or lo[1] > bx[4] or lo[2] > bx[5]:
+                    continue
+                if all(q.closest(om.MPoint(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f,
+                                           a[2] + (b[2] - a[2]) * f), tol) is not None
+                       for f in (0.0, 1.0, 0.5, 0.25, 0.75)):
+                    return True
+            return False
+
+        for i, f in enumerate(feats):
+            for a, b in f["edge"]:
+                out["crev" if on_other(a, b, i) else "edge"].append((a, b))
+            out["crev"].extend(f["crev"])
+        out["crev"].extend(_sc_crossings(nodes, boxes))
+    else:
+        for f in feats:
+            out["edge"].extend(f["edge"])
+            out["crev"].extend(f["crev"])
+    # corners: where two folds meet at an angle (shared ends, by position), the meshes' own corners too
+    q = max(tol, 1e-6)
+    ends = {}
+    for kind in ("edge", "crev"):
+        for a, b in out[kind]:
+            d = _rl_sub(b, a)
+            ln = _rl_len(d)
+            if ln <= 1e-12:
+                continue
+            u = (d[0] / ln, d[1] / ln, d[2] / ln)
+            for p, v in ((a, u), (b, (-u[0], -u[1], -u[2]))):
+                kq = (int(round(p[0] / q)), int(round(p[1] / q)), int(round(p[2] / q)))
+                ends.setdefault(kq, [p, []])[1].append(v)
+    seen = set()
+    for kq, (p, us) in ends.items():
+        if len(us) >= 2 and any(_rl_dot(us[i], us[j]) > -0.8 for i in range(len(us)) for j in range(i + 1, len(us))):
+            out["corner"].append(p)
+            seen.add(kq)
+    for f in feats:
+        for p in f["corner"]:
+            kq = (int(round(p[0] / q)), int(round(p[1] / q)), int(round(p[2] / q)))
+            if kq not in seen:
+                seen.add(kq)
+                out["corner"].append(p)
+    _SC_FEATS_ALL[key] = out
+    while len(_SC_FEATS_ALL) > 8:
+        _SC_FEATS_ALL.popitem(last=False)
+    return out
+
+
+def _sc_crossings(nodes, boxes):
+    """Segments where one mesh's triangles pass through another's (a wall
+    sunk into a floor): triangle against triangle, for meshes whose boxes
+    overlap; at most SC_CONTACT_PAIRS pairs in all (a dense pair of meshes
+    is left to the touching test)."""
+    out = []
+    budget = [SC_CONTACT_PAIRS]
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            A, B = boxes[i], boxes[j]
+            if A[3] < B[0] or B[3] < A[0] or A[4] < B[1] or B[4] < A[1] or A[5] < B[2] or B[5] < A[2]:
+                continue
+            ta = _mi_triangles(nodes[i])[1]
+            tb = _mi_triangles(nodes[j])[1]
+            lo = [max(A[k], B[k]) for k in range(3)]
+            hi = [min(A[k + 3], B[k + 3]) for k in range(3)]
+
+            def inside(tri):
+                return not any(max(tri[0][k], tri[1][k], tri[2][k]) < lo[k] or
+                               min(tri[0][k], tri[1][k], tri[2][k]) > hi[k] for k in range(3))
+
+            ta = [x for x in ta if inside(x)]
+            tb = [x for x in tb if inside(x)]
+            if len(ta) * len(tb) > budget[0]:
+                continue
+            budget[0] -= len(ta) * len(tb)
+            for x in ta:
+                for y in tb:
+                    seg = _sc_tri_cut(x, y)
+                    if seg is not None:
+                        out.append(seg)
+    return out
+
+
+def _sc_tri_cut(t1, t2):
+    """The segment where triangle t2 passes through triangle t1 (each (a, b,
+    c, unit normal, face)), or None (apart, touching, or in one plane)."""
+    a, b, c, n = t1[0], t1[1], t1[2], t1[3]
+    ln = max(_rl_len(_rl_sub(b, a)), _rl_len(_rl_sub(c, a)), 1e-12)
+    eps = 1e-6 * ln
+    P = (t2[0], t2[1], t2[2])
+    d = [_rl_dot(_rl_sub(q, a), n) for q in P]
+    if all(x > -eps for x in d) or all(x < eps for x in d):
+        return None  # all on one side (touching counts as not through: the touch test has those)
+    pts = []
+    for k in range(3):
+        q0, q1, d0, d1 = P[k], P[(k + 1) % 3], d[k], d[(k + 1) % 3]
+        if (d0 < 0.0) != (d1 < 0.0):
+            f = d0 / (d0 - d1)
+            pts.append((q0[0] + (q1[0] - q0[0]) * f, q0[1] + (q1[1] - q0[1]) * f, q0[2] + (q1[2] - q0[2]) * f))
+    if len(pts) < 2:
+        return None
+    s0, s1 = pts[0], pts[1]
+    t0, t1_ = 0.0, 1.0
+    dv = _rl_sub(s1, s0)
+    for u, v, w in ((a, b, c), (b, c, a), (c, a, b)):
+        m = _rl_cross(n, _rl_sub(v, u))  # in the plane, across the edge
+        if _rl_dot(_rl_sub(w, u), m) < 0.0:
+            m = (-m[0], -m[1], -m[2])  # pointing in
+        f0 = _rl_dot(_rl_sub(s0, u), m)
+        fd = _rl_dot(dv, m)
+        if abs(fd) < 1e-18:
+            if f0 < 0.0:
+                return None
+            continue
+        tt = -f0 / fd
+        if fd > 0.0:
+            t0 = max(t0, tt)
+        else:
+            t1_ = min(t1_, tt)
+        if t0 >= t1_:
+            return None
+    p0 = (s0[0] + dv[0] * t0, s0[1] + dv[1] * t0, s0[2] + dv[2] * t0)
+    p1 = (s0[0] + dv[0] * t1_, s0[1] + dv[1] * t1_, s0[2] + dv[2] * t1_)
+    if _rl_len(_rl_sub(p1, p0)) <= eps:
+        return None
+    return (p0, p1)
 
 
 def _sc_seg_d2(p, it, kind):
@@ -42505,9 +42776,9 @@ def _sc_seg_d2(p, it, kind):
     return qx * qx + qy * qy + qz * qz
 
 
-def sc_influence_on(s):
-    """Any Influence strength set in these settings."""
-    return any(abs(float((s or {}).get(term[1], 0.0) or 0.0)) >= 1e-6 for term in SC_INFL_TERMS)
+def sc_gather_on(s):
+    """Any Where it gathers target (walls, corners, edges, open) set in these settings."""
+    return any(float((s or {}).get(t[1], 0.0) or 0.0) > 1e-6 for t in SC_TO_TARGETS)
 
 
 def _sc_paint_margin(margin, k, cov):
@@ -42576,10 +42847,10 @@ def _sc_build_layer(layer, surf, draft=False, rest_on=None, blocks=None):
     draw = _MiDrawing(strokes, float(s["draw_width"]) / scene_m_per_unit(), s["draw_falloff"], s["draw_follow"],
                       surf.nodes) if strokes else None
     paint = sc_paint_of(layer)
-    if sc_influence_on(s):  # Influence: corners, crevices, edges (none set: no object, built as before)
-        paint = _ScInfluence(paint, s, surf.nodes)
     if blocks:
         paint = _ScBlocked(paint, blocks)
+    if sc_gather_on(s):  # walls / corners / edges / open (none set: no object, built as before)
+        paint = _ScGather(paint, s, surf.nodes)
     counts = {}
     if typ == "Moss":
         ms = dict(MOSS_DEFAULTS)
@@ -44730,8 +45001,13 @@ def _scf(lo, hi, slo, shi, dec, step):
     return lambda: FloatField(lo, hi, slo, shi, decimals=dec, step=step)
 
 
-_SC_COVER_TIP = "How much of the surface gets it: low = only the best spots (sheltered corners, crevices, creases), " \
-                "high = most surfaces it may grow on. With a picked area: how full it is round the picks."
+_SC_COVER_TIP = "How much of the ground gets patches (the area, not how packed): low = patches only in the best " \
+                "spots (sheltered corners, crevices, creases) with bare ground between, high = it covers " \
+                "most surfaces it may grow on. The per-square-metre sliders (Bunches, Leaves, ...) say how " \
+                "packed each patch is; the amount is the two together. Where it gathers then moves that " \
+                "amount to walls, corners, edges or open ground, never adding more. With a picked area: how " \
+                "full it is round the picks."
+_SC_DENS_TIP = " Packing only: Coverage says how much ground gets patches, this how full each patch is (the amount = the two together). Where it gathers moves it, never adds more."
 # key -> (label, widget factory, tip); (type, key) overrides it for one type
 SC_FIELDS = {
     "coverage": ("Coverage", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_COVER_TIP),
@@ -44741,11 +45017,13 @@ SC_FIELDS = {
               "Steepest slope (degrees) it sits on; it fades out over the next 15 degrees. Leaves and grass never "
               "go past it (nothing on walls with a low limit); moss still creeps up sheltered walls."),
     "crevices": ("Crevices", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
-                 "How strongly it gathers in sheltered corners, gaps and crevices."),
+                 "How strongly it gathers in sheltered corners, gaps and crevices, read from the shape right "
+                 "round each spot (a short reach: best on detailed geo). To send it to wall feet, gutters and "
+                 "corners by a reach you set, use Walls / Corners above."),
     "creases": ("Creases", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05),
                 "How strongly it collects where things wash down and get caught: gutters, corners, the foot of "
                 "walls and frames, the bottom of slopes. Piles stretch out along them, leaves and grass lie "
-                "along them."),
+                "along them. A narrow band; Walls / Corners above reach as far as you set."),
     "edges": ("Avoid edges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
               "Keeps it off exposed spots: ridges, convex edges, thin rails (0 = edges like anywhere else)."),
     "patchiness": ("Patchiness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), "Breaks it into patches (0 = even)."),
@@ -44854,7 +45132,7 @@ SC_FIELDS = {
     "uv_tile": ("Tile size", _scf(0.05, 20.0, 0.1, 2.0, 2, 0.05),
                 "How many metres of moss one UV tile holds (use a tiling moss texture)."),
     # grass
-    "grass": ("Bunches", _scf(0.0, 500.0, 0.0, 20.0, 2, 0.1), "Bunches of dry grass per square metre where it gathers."),
+    "grass": ("Bunches / m2", _scf(0.0, 500.0, 0.0, 20.0, 2, 0.1), "Bunches of dry grass per square metre where it gathers." + _SC_DENS_TIP),
     "grass_strays": ("Stray blades", _scf(0.0, 2000.0, 0.0, 100.0, 1, 1.0),
                      "Single blades lying on their own per square metre (now and then two or three crossed), "
                      "reaching a little past the patches: bits of grass here and there. Bunches 0 = only these."),
@@ -44883,18 +45161,20 @@ SC_FIELDS = {
     "droop": ("Droop", _scf(0.0, 4.0, 0.0, 2.0, 2, 0.05), "How steeply blades hang once they're over an edge."),
     "blade_width": ("Blade width", _scf(0.0005, 0.05, 0.001, 0.02, 4, 0.0005), "Grass blade width, in metres."),
     # leaves, piles, tufts
-    "leaves": ("Leaves", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Dead leaves per square metre where it gathers."),
-    "piles": ("Piles", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
-              "Leaf piles per square metre (drifts along gutters and wall feet, round heaps in the open)."),
+    "leaves": ("Leaves / m2", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Dead leaves per square metre where it gathers." + _SC_DENS_TIP),
+    "piles": ("Piles / m2", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
+              "Leaf piles per square metre (drifts along gutters and wall feet, round heaps in the open)."
+              + _SC_DENS_TIP),
     "pile_size": ("Pile size", _scf(0.02, 5.0, 0.05, 1.0, 2, 0.01), "How wide a pile is, in metres."),
     "leaf_size": ("Leaf size", _scf(0.005, 1.0, 0.02, 0.2, 3, 0.005), "Leaf length, in metres."),
     "curl": ("Leaf curl", _scf(0.0, 2.0, 0.0, 2.0, 2, 0.05),
              "How dried the leaves are: edges curled up, ends lifted, folded, crumpled."),
-    "tufts": ("Tufts", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Tiny moss cushions per square metre."),
+    "tufts": ("Tufts / m2", _scf(0.0, 200.0, 0.0, 40.0, 1, 0.5), "Tiny moss cushions per square metre." + _SC_DENS_TIP),
     "tuft_size": ("Tuft size", _scf(0.005, 0.5, 0.01, 0.1, 3, 0.005), "How wide a moss tuft is, in metres."),
     # specks
-    "specks": ("Specks", _scf(0.0, 2000.0, 0.0, 200.0, 1, 1.0),
-               "Little clusters of specks per square metre: tiny moss bits and dirt stuck to the surface."),
+    "specks": ("Specks / m2", _scf(0.0, 2000.0, 0.0, 200.0, 1, 1.0),
+               "Little clusters of specks per square metre: tiny moss bits and dirt stuck to the surface."
+               + _SC_DENS_TIP),
     "speck_size": ("Speck size", _scf(0.0005, 0.1, 0.001, 0.02, 4, 0.0005), "How big a speck is, in metres."),
     "speck_dirt": ("Dirt", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                    "How many are bits of dirt (flat flakes, their own part); the rest are tiny moss stars."),
@@ -44902,8 +45182,8 @@ SC_FIELDS = {
     "speck_spread": ("Cluster spread", _scf(0.0, 0.5, 0.0, 0.05, 3, 0.001),
                      "How far a cluster's specks spread, in metres."),
     # jungle leaves
-    "jungle": ("Clusters", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
-               "Clusters of big leaves per square metre where they gather."),
+    "jungle": ("Clusters / m2", _scf(0.0, 20.0, 0.0, 3.0, 2, 0.05),
+               "Clusters of big leaves per square metre where they gather." + _SC_DENS_TIP),
     "jungle_size": ("Leaf length", _scf(0.05, 5.0, 0.1, 1.5, 2, 0.01),
                     "How long a big leaf is, in metres (about a small leaf pile's size)."),
     "jungle_cluster": ("Per cluster", lambda: IntField(1, 6, 1, 6),
@@ -44975,37 +45255,81 @@ SC_FIELDS["bend_size"] = ("Bend size", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                           "about half its length, like a stiffer leaf. Drape is how far it sags; this is how wide "
                           "the bends are.")
 _SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
-_SC_INFL_CURVE = ("How it falls off: 0 = strong right at the %s, dropping fast; 0.5 = an even ramp; 1 = broad, "
-                  "staying strong most of the way out.")
-_SC_INFL_DIST = "How far from the %s the pull reaches, in metres (it eases out smoothly to nothing there)."
+_SC_TO_REACH = ("How far from the %s it counts, in metres. Falloff says how it fades over that distance; past "
+                "it, the %s pull nothing.")
 SC_FIELDS.update({
-    "inf_edges": ("Edges", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
-                  "Pulls it towards the surfaces' outer edges (open borders and outward folds: a box's rim, a "
-                  "plank's sides), a smooth gradient coming in from them; below 0 pushes it away from them, "
-                  "towards the middle of open areas. 0 = off. The randomness and patchiness still apply."),
-    "inf_edge_dist": ("Edge falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "edges"),
-    "inf_edge_curve": ("Edge curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "edge"),
-    "inf_crev": ("Crevices", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
-                 "Pulls it into inward folds: gutters, grooves, inside corners, the foot of a wall where it's "
-                 "part of the same mesh; below 0 keeps it out of them. 0 = off."),
-    "inf_crev_dist": ("Crevice falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "crevices"),
-    "inf_crev_curve": ("Crevice curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "crevice"),
-    "inf_corner": ("Corners", _scf(-1.0, 1.0, -1.0, 1.0, 2, 0.05),
-                   "Extra pull towards corners, where edges and crevices meet (a box's corners, a gutter's "
-                   "ends); below 0 keeps corners bare. Adds to Edges and Crevices. 0 = off."),
-    "inf_corner_dist": ("Corner falloff", _scf(0.005, 50.0, 0.02, 3.0, 2, 0.01), _SC_INFL_DIST % "corners"),
-    "inf_corner_curve": ("Corner curve", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05), _SC_INFL_CURVE % "corner"),
-    "inf_angle": ("Fold angle", _scf(1.0, 120.0, 5.0, 90.0, 0, 1.0),
-                  "How sharp a fold must be, in degrees, to count as an edge or crevice. Smooth, curved "
-                  "surfaces have none, so it only finds real folds of low-res geo."),
-    "inf_breakup": ("Breakup", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
-                    "Wobbles the falloffs with noise, so the gradients aren't neat bands running along every edge."),
+    "to_walls": ("Walls", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                 "How much of it goes along the foot of walls and into crevices: where a wall stands on the "
+                 "floor (separate meshes count), gutters, grooves, inside corners. 1 with the rest at 0 = it all "
+                 "sits along them, none in the open. Coverage and the amount sliders still say how much grows; "
+                 "this only moves it. Next to another target, the bigger one gets more."),
+    "to_walls_reach": ("Wall reach", _scf(0.01, 50.0, 0.05, 3.0, 2, 0.05), _SC_TO_REACH % ("walls", "walls")),
+    "to_corners": ("Corners", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                   "How much of it goes into corners: where walls, crevices and edges meet (a room's corners, a "
+                   "gutter's ends, a box's corners). 1 with the rest at 0 = only in corners. Walls 1 and Corners 1 "
+                   "= along the walls and in the corners, half each."),
+    "to_corners_reach": ("Corner reach", _scf(0.01, 50.0, 0.05, 3.0, 2, 0.05),
+                         _SC_TO_REACH % ("corners", "corners")),
+    "to_rims": ("Outer edges", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "How much of it goes along outer edges: open borders and outward folds (a slab's rim, a step's "
+                "nose, a gutter's lips). Not the foot of a wall: that's Walls."),
+    "to_rims_reach": ("Edge reach", _scf(0.01, 50.0, 0.05, 3.0, 2, 0.05), _SC_TO_REACH % ("edges", "edges")),
+    "to_open": ("Open ground", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "How much of it goes out in the open, away from walls, corners and edges (past their reaches). "
+                "1 with the rest at 0 = it all keeps clear of them."),
+    "to_soft": ("Falloff", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "How it fades over each reach: 0 = a hard-edged band (full right up to the reach, then nothing), "
+                "1 = a soft fade from the wall / corner / edge out to the reach."),
+    "to_breakup": ("Breakup", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                   "Wobbles the reaches with noise, so the bands aren't neat strips along every wall."),
+    "to_angle": ("Fold angle", _scf(1.0, 120.0, 5.0, 90.0, 0, 1.0),
+                 "How sharp a fold must be, in degrees, to count as a wall, crevice or edge. Smooth, curved "
+                 "surfaces have none."),
 })
-_SC_INFL = ("Influence", False, ["inf_edges", "inf_edge_dist", "inf_edge_curve", "inf_crev", "inf_crev_dist",
-                                 "inf_crev_curve", "inf_corner", "inf_corner_dist", "inf_corner_curve", "inf_angle",
-                                 "inf_breakup"])
+_SC_TO_KEYS = ["to_walls", "to_walls_reach", "to_corners", "to_corners_reach", "to_rims", "to_rims_reach",
+               "to_open", "to_soft", "to_breakup", "to_angle"]
+# the older sliders read the shape right round each spot (sheltered nooks, where water runs, exposed ridges):
+# fine detail on detailed geo, folded under Where it gathers so the targets above are the main controls
+_SC_SHAPE = ("Fine detail: shelter, creases, ridges", False, ["crevices", "creases", "edges"])
+SC_WORDS = {  # key (or (type, key)) -> the words under the slider's two ends
+    "coverage": ("a few patches", "covers everything"), "spread": ("tight", "spread out"),
+    "slope": ("flat only", "walls too"), "crevices": ("ignores shelter", "sheltered spots"),
+    "creases": ("ignores", "collects in creases"), "edges": ("on ridges too", "off ridges"),
+    "patchiness": ("even", "patchy"), "patch_size": ("small patches", "big patches"), "mess": ("neat", "ragged"),
+    "size_var": ("all alike", "varied"), "to_walls": ("off", "all along walls"),
+    "to_walls_reach": ("hugging", "wide"), "to_corners": ("off", "all in corners"),
+    "to_corners_reach": ("hugging", "wide"), "to_rims": ("off", "all along edges"),
+    "to_rims_reach": ("hugging", "wide"), "to_open": ("off", "all in the open"),
+    "to_soft": ("hard band", "soft fade"), "to_breakup": ("clean bands", "broken up"),
+    "to_angle": ("soft folds count", "only sharp folds"),
+    "disp_height": ("flat", "deep"), "edge_roll": ("flat edge", "rolled under"), "cage_detail": ("light", "dense"),
+    "bumps": ("smooth", "bumpy"), "growths": ("none", "lots"), "clump_group": ("even", "grouped"),
+    "clump_group_size": ("small groups", "big groups"), "clump_pack": ("loose", "packed"),
+    "clump_hvar": ("all alike", "varied"), "clump_mounds": ("none", "lots"), "clump_ghvar": ("all alike", "varied"),
+    "clump_size": ("small", "big"), "thickness": ("thin", "thick"), "lumps": ("smooth", "lumpy"),
+    "exposure": ("ridges too", "bare ridges"), "spill": ("none", "far out"), "feather": ("crisp", "soft"),
+    "ragged": ("smooth", "ragged"), "strays": ("none", "lots"), "clump_merge": ("apart", "merged"),
+    "surface_detail": ("bridges gaps", "every detail"), "strands": ("none", "lots"), "capsules": ("none", "lots"),
+    "strand_length": ("short", "long"), ("Moss", "droop"): ("upright", "hanging"), "uv_tile": ("small", "big"),
+    "grass": ("sparse", "packed"), "grass_strays": ("none", "lots"), "bunch_size": ("small", "wide"),
+    "grass_length": ("short", "long"), "fullness": ("sparse", "full"), "bunch_var": ("all alike", "varied"),
+    "bunch_shape": ("round", "irregular"), "blade_scatter": ("tight", "scattered"), "grass_pile": ("flat", "piled"),
+    "comb": ("every way", "combed"), "droop": ("upright", "drooping"), "blade_width": ("thin", "wide"),
+    "leaves": ("sparse", "packed"), "piles": ("sparse", "packed"), "pile_size": ("small", "big"), "leaf_size": ("small", "big"),
+    "curl": ("flat", "curled"), "tufts": ("sparse", "packed"), "tuft_size": ("small", "big"), "specks": ("sparse", "packed"),
+    "speck_size": ("tiny", "big"), "speck_dirt": ("all moss", "all dirt"), "speck_spread": ("tight", "spread"),
+    "jungle": ("sparse", "packed"), "jungle_size": ("small", "big"), "jungle_green": ("all dry", "all green"),
+    "jungle_tear": ("whole", "torn"), "vine_spacing": ("anywhere", "far apart"), "length": ("short", "long"),
+    "climb": ("creeping", "climbing"), "climb_var": ("all alike", "varied"), "wander": ("straight", "meandering"),
+    "branching": ("none", "bushy"), ("Ivy", "leaf_size"): ("small", "big"), "leaf_density": ("few", "many"),
+    "gravity": ("clinging", "hanging"), "stem_width": ("thin", "thick"), "leaf_var": ("all alike", "varied"),
+    "draw_width": ("narrow", "wide"), "draw_falloff": ("hard edge", "fading"),
+    "draw_follow": ("evenly along", "where it would grow"), "fade_part": ("low", "high"),
+    "fade_height": ("low", "high"), "fade_soft": ("hard line", "fading all the way"),
+    "drape": ("stiff", "soft"), "bend_size": ("small bumps", "broad bends"),
+}
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
-_SC_WHERE = ["slope", "crevices", "creases", "edges", "patchiness", "patch_size"]
+_SC_WHERE = ["slope"] + _SC_TO_KEYS + ["patchiness", "patch_size"]
 SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys)]
     "Moss": [("", True, ["style", "detail", "coverage", "spread", "clump_size", "thickness", "lumps", "mess",
                          "strands", "capsules"]),
@@ -45049,10 +45373,13 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
                         "branching", "leaf_size", "leaf_density"]),
             ("Stems and leaves", False, ["gravity", "stem_width", "leaf_var"]),
             ("UVs", False, ["stem_tiles", "stacks", "stack_layout"])]}
+SC_LAYOUT["Ivy"].insert(1, ("Where it grows", True, list(_SC_TO_KEYS)))
 for _t in SC_LAYOUT:
     _at = [i + 1 for i, sec in enumerate(SC_LAYOUT[_t]) if sec[0].startswith("Where")]
     SC_LAYOUT[_t].insert(_at[0] if _at else len(SC_LAYOUT[_t]) - 2, _SC_FADE)  # after where it grows
-    SC_LAYOUT[_t].insert(SC_LAYOUT[_t].index(_SC_FADE) + 1, _SC_INFL)  # then Influence (folded)
+    _wi = [i for i, sec in enumerate(SC_LAYOUT[_t]) if sec[0].startswith("Where")]
+    if _wi and _t != "Ivy":  # (ivy has no shelter sliders: it climbs)
+        SC_LAYOUT[_t].insert(_wi[0] + 1, _SC_SHAPE)  # (nested in Where)
     SC_LAYOUT[_t].insert(1, _SC_DRAWING)  # shown when the layer has a drawing
 
 
@@ -45706,7 +46033,6 @@ class ScatterPanel(QtWidgets.QWidget):
         self.clump_sec = {}
         self.mat_sec = {}
         self.fade_sec = {}
-        self.infl_sec = {}
         self.row_lbl = {}
         self._build()
         self._install_jobs()
@@ -46064,8 +46390,12 @@ class ScatterPanel(QtWidgets.QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
         self.f[typ] = {}
+        where = None
         for title, expanded, keys in SC_LAYOUT[typ]:
-            sec = Section(title, expanded=expanded, header=bool(title))
+            nested = title == _SC_SHAPE[0] and where is not None  # fine detail: inside Where it grows / gathers
+            sec = Section(title, expanded=expanded, header=bool(title), sub=nested)
+            if title.startswith("Where"):
+                where = sec
             if title == _SC_DRAWING[0]:
                 self.draw_sec[typ] = sec
             if title == "Clumps":
@@ -46074,14 +46404,18 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.mat_sec[typ] = sec
             if title == _SC_FADE[0]:
                 self.fade_sec[typ] = sec
-            if title == _SC_INFL[0]:
-                self.infl_sec[typ] = sec
             for key in keys:
                 label, make, tip = SC_FIELDS.get((typ, key)) or SC_FIELDS[key]
                 widget = make()
                 self.f[typ][key] = widget
+                words = SC_WORDS.get((typ, key)) or SC_WORDS.get(key)
+                if words and hasattr(widget, "set_words"):
+                    widget.set_words(*words)  # what each end does, like the Roof panel
                 self.row_lbl[(typ, key)] = sec.add_row(label, widget, tip)
-            lay.addWidget(sec)
+            if nested:
+                where.add_full(sec)
+            else:
+                lay.addWidget(sec)
         w = QtWidgets.QWidget()
         sl = QtWidgets.QHBoxLayout(w)
         sl.setContentsMargins(0, 0, 0, 0)
@@ -46193,8 +46527,6 @@ class ScatterPanel(QtWidgets.QWidget):
             self.step_look.title.setText("Layer settings: %s" % layer.get("name", typ))
             if sc_settings(layer).get("fade", "Off") != "Off" and typ in self.fade_sec:
                 self.fade_sec[typ].header.setChecked(True)  # a faded layer shows its fade
-            if sc_influence_on(sc_settings(layer)) and typ in self.infl_sec:
-                self.infl_sec[typ].header.setChecked(True)  # and its Influence
         else:
             self._show(typ, self._next.get(typ) or sc_start_settings(typ))
             self.step_look.title.setText("Settings for the next group's first layer (%s)" % typ)
