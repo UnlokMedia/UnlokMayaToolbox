@@ -25,6 +25,16 @@ that holds a pasted copy of the toolbox) and saves the shelves. The button
 runs `UnlokToolbox.py` from the repo each time, so it's always the current
 version. `tools/make_shelf_icon.py` redraws the icons (Pillow).
 
+**Another PC (the whole AM_Custom shelf):** `mayapy tools/build_am_custom_folder.py`
+writes `MENTORING/Students/RESOURCES/MAYA/CUSTOM PREFS/PREFS - Andy - <month year>`
+on Drive: `prefs/shelves/shelf_AM_Custom.mel` (icons by file name, no machine
+paths), `prefs/icons`, and `scripts` (the shelf's tools plus `UnlokToolbox.py`).
+On the other PC, with Maya closed, copy `prefs` and `scripts` into
+`Documents/maya/<version>/` (merge, replace). The toolbox button runs the repo's
+file where the repo is, else `scripts/UnlokToolbox.py`. Run the builder again
+after an update. `tests/test_am_custom_folder.py` checks a build in a throwaway
+Maya prefs folder.
+
 **Opening is quick:** only the first tab's first tool is built when the
 window opens; every other tool is built the first time you open it (a
 fraction of a second). A paste opens the window in about 1 s (it was about 1.5 s).

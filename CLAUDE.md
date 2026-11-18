@@ -3275,6 +3275,23 @@
   tab style: 403 x 128 pill, coloured block + white symbol, Poppins Bold).
   Never edit `shelf_AM_Custom.mel` while the user's Maya is open: Maya
   rewrites shelves on exit.
+  **Other PCs** (the user, 2026-11-18: "upload it to drive > download on
+  my work PC > set it up in Maya ... just a folder I can drag and drop
+  into prefs", kept in Drive `MENTORING/Students/RESOURCES/MAYA/CUSTOM
+  PREFS`, one `PREFS - Andy - <month year>` folder each, like May 2022):
+  `tools/build_am_custom_folder.py` (mayapy) reads Maya 2024's
+  `shelf_AM_Custom.mel`, `scripts` and `prefs/scripts`, writes `prefs/
+  shelves` (`-image` paths cut to file names: Maya finds icons in
+  prefs/icons by name), `prefs/icons`, and top-level `scripts` (Maya's
+  userScriptDir is `<version>/scripts`, beside prefs, not inside it),
+  skipping `__pycache__`, the unused `modelChecker-main` /
+  `osbTools-master`, and `RS_Renamer.pyc` (Python 3.7 bytecode). The
+  UNLOK - Toolbox button is rewritten to run the repo file if present,
+  else `userScriptDir/UnlokToolbox.py`. `tests/test_am_custom_folder.py`
+  copies a build into a throwaway MAYA_APP_DIR and checks icons, paths,
+  tools found (`find_spec`: importing some opens UI and kills mayapy)
+  and the button. Known dead buttons: RS Renamer (.pyc) and renamer_tool
+  (script not on this PC).
 
 ## Speed on big assets
 - `expand_members` (MFnSet.getMembers) and `SmartUdimAsset.meshes()`
