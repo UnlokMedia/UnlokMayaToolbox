@@ -46942,6 +46942,8 @@ class ScatterPanel(QtWidgets.QWidget):
         if not keys:
             if self._drag_draft and not sc_drafting():  # let go after a draft drag: the layer in full
                 self._drag_draft = False
+                if sc_paused():  # (paused: saved, it grows at Play; the user: sliders still loaded in pause)
+                    return
                 t0 = time.time()
                 QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
                 try:

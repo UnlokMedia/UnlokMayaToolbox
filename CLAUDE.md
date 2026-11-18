@@ -3615,6 +3615,8 @@ Corrugated metal: `tests/test_corrugated_roof.py`. Clay tiles: `tests/test_tile_
 Moss and Ivy: `tests/test_moss_ivy.py`. Scatter: `tests/test_scatter.py`, GUI `tests/run_gui_scatter.mel`.
 Scatter influence paint: `tests/test_scatter_paint.py`, GUI `tests/run_gui_scatter_paint.mel` (its
 pictures read the viewport back instead of playblasting, which empties the undo queue its Ctrl+Z checks need).
+Scatter Pause, panel side (every field of every layer type while paused, a moss slider dragged and let go: nothing
+builds until Play): `tests/test_scatter_pause_panel.py` (`UNLOK_TOOLBOX` an older copy to see it fail before).
 Dropped leaves touching what they lie on: `tests/test_leaf_contact.py` (`--measure` prints the gaps per scene
 and layer); low close-up pictures from GUI `tests/run_gui_leaf_pics.mel` (`UNLOK_TOOLBOX` an older copy for
 "before", `UNLOK_PIC_TAG` a file name prefix; `tests/_out/leaf_pics`).
