@@ -11,6 +11,7 @@ keep it off the wall's sides (the wall top is flat: moss there is fine),
 tests/_out/moss_slope (UNLOK_TOOLBOX: an older copy, to see "before").
 """
 
+import math
 import os
 import struct
 import sys
@@ -144,8 +145,120 @@ def run():
                                                      ("Both ends", fe[2])])
 
 
+def wall_ring(tb, name, outer=20.0, inner=18.0, h=6.0):
+    """A square wall ring, ONE connected mesh (the user's yard wall)."""
+    O = [(-outer, -outer), (outer, -outer), (outer, outer), (-outer, outer)]
+    I = [(-inner, -inner), (inner, -inner), (inner, inner), (-inner, inner)]
+    pts = [om.MPoint(x, y, z) for y in (0.0, h) for ring in (O, I) for x, z in ring]
+    ob, ib, ot, it = 0, 4, 8, 12
+    counts, conn = [], []
+    for k in range(4):
+        j = (k + 1) % 4
+        conn += [ot + k, ot + j, it + j, it + k]   # top (facing up)
+        conn += [ob + k, ib + k, ib + j, ob + j]   # bottom
+        conn += [ob + k, ob + j, ot + j, ot + k]   # outer face
+        conn += [ib + k, it + k, it + j, ib + j]   # inner face
+        counts += [4, 4, 4, 4]
+    obj = om.MFnMesh().create(pts, counts, conn)
+    node = cmds.rename(om.MFnDagNode(obj).fullPathName(), name)
+    cmds.sets(node, edit=True, forceElement="initialShadingGroup")
+    fn = om.MFnMesh(om.MSelectionList().add(node).getDagPath(0))
+    tops = [f for f in range(fn.numPolygons) if all(abs(fn.getPoint(v).y - h) < 1e-6
+                                                    for v in fn.getPolygonVertices(f))]
+    if fn.getPolygonNormal(tops[0]).y < 0.0:
+        cmds.polyNormal(node, normalMode=0, constructionHistory=False)
+    return node
+
+
+def face_png(path, panels, W=420, H=150):
+    """Looking at the north wall's inside face (x -19..19, y 0..7), moss on it (and the floor in front) green."""
+    IW = W * len(panels)
+    img = bytearray(b"\x26\x24\x22" * IW * H)
+    sx, sy = (W - 20) / 38.0, (H - 20) / 7.0
+
+    def put(x, y, col):
+        if 0 <= x < IW and 0 <= y < H:
+            i = 3 * (y * IW + x)
+            img[i:i + 3] = col
+    for k, (title, pts) in enumerate(panels):
+        x0 = k * W
+        for x in range(10, W - 10):  # the wall face
+            for y in range(int(H - 10 - 6.0 * sy), H - 10):
+                put(x0 + x, y, b"\x50\x4c\x48")
+        for p in pts:
+            if p[2] > -17.0 and p[1] > 0.4:
+                continue  # only the north wall's inside face, and the floor
+            put(x0 + int(10 + (p[0] + 19.0) * sx), int(H - 10 - p[1] * sy), b"\x9c\xd0\x5a")
+        for y in range(H):
+            put(x0, y, b"\x10\x10\x10")
+    raw = b"".join(b"\x00" + bytes(img[3 * IW * y:3 * IW * (y + 1)]) for y in range(H))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", IW, H, 8, 2, 0, 0, 0)) +
+                chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    print("picture: %s  (%s)" % (path, ", ".join(t for t, _ in panels)))
+
+
+def yard():
+    """The user's yard (2026-11-18, "the height fade just doesn't seem to work at all"): a 40 x 40 floor, a one-
+    piece wall ring (2 thick, 6 tall) on its border. It used to read as one flat object with the floor (the
+    same footprint, a low box), so the fade did nothing and moss covered the walls. Moss From top, Fade by
+    Metres 0.25 (2.5 dm down the 6 dm wall); Runs 0 vs 0.7."""
+    tb = {"__name__": "unlok_test", "__file__": TOOLBOX}
+    with open(TOOLBOX) as f:
+        exec(compile(f.read(), TOOLBOX, "exec"), tb)
+    cmds.file(new=True, force=True)
+    floor = cmds.polyPlane(w=40, h=40, sx=4, sy=4, name="floor", constructionHistory=False)[0]
+    ring = wall_ring(tb, "wallRing")
+    grp = cmds.group(floor, ring, name="yard_GRP")
+    rep = tb["create_scatter_group"]([grp], "Moss", {"detail": "Normal", "coverage": 0.7, "seed": 5,
+                                                     "fade": "From top", "fade_by": "Metres", "fade_height": 0.25},
+                                     select=False)
+    root = rep["root"]
+    lid = tb["sc_data"](root)["layers"][0]["id"]
+
+    def bed():
+        node = tb["sc_parts"](root).get(lid + "/moss")
+        return points(node) if node and cmds.getAttr(node + ".visibility") else []
+
+    def face(pts):  # on the north wall's inside face, off the floor and below its top
+        return [p for p in pts if abs(p[2] + 18.0) < 0.8 and abs(p[0]) < 17.5 and 0.4 < p[1] < 5.9]
+
+    even = bed()
+    fe = face(even)
+    lowest = min([p[1] for p in fe] or [99.0])
+    yard_floor = [p for p in even if p[1] < 0.4 and abs(p[0]) < 16.0 and abs(p[2]) < 16.0]
+    check("yard: From top 0.25 m: moss down the wall's top part, nothing lower", fe and lowest > 6.0 - 2.5 - 0.6,
+          "%d on the face, lowest at %.1f dm (top 6)" % (len(fe), lowest))
+    check("yard: ... the floor inside the ring still grows", len(yard_floor) > 1000, "%d" % len(yard_floor))
+    tb["sc_update"](root, lid, {"fade_runs": 0.7})
+    runs = bed()
+    fr = face(runs)
+
+    def reach(face_pts):  # per 1 dm along the wall: how far down it comes
+        cols = {}
+        for p in face_pts:
+            c = int(math.floor(p[0]))
+            cols[c] = min(cols.get(c, 99.0), p[1])
+        return [6.0 - v for v in cols.values()]
+
+    r0, r1 = reach(fe), reach(fr)
+    spread = (lambda r: (max(r) - min(r)) if r else 0.0)
+    check("yard: Runs 0.7: further down in some places, short in others (never past Fade height)",
+          r1 and spread(r1) > spread(r0) + 0.6 and max(r1) <= 2.5 + 0.6,
+          "reach %.1f..%.1f dm (Runs 0: %.1f..%.1f)" % (min(r1 or [0]), max(r1 or [0]), min(r0 or [0]),
+                                                      max(r0 or [0])))
+    if not os.path.isdir(OUT):
+        os.makedirs(OUT)
+    face_png(os.path.join(OUT, TAG + "yard_wall_face.png"), [("From top, Runs 0", even), ("Runs 0.7", runs)])
+
+
 try:
     run()
+    yard()
 except Exception:
     traceback.print_exc()
     RESULTS.append(("crashed", False, ""))

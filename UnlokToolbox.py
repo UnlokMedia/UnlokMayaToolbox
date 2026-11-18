@@ -33299,7 +33299,8 @@ DEBRIS_DEFAULTS = {
 MI_FADES = ("Off", "From base", "From top", "Both ends")
 MI_FADE_BY = ("Object height", "Metres")
 MI_FADE_DEFAULTS = {"fade": "Off", "fade_by": "Object height", "fade_height": 1.0, "fade_part": 0.5,
-                    "fade_soft": 0.6}
+                    "fade_soft": 0.6, "fade_runs": 0.0}
+MI_FADE_RUN_W = 0.12  # Runs: a streak's width, metres (noise along the wall, the same all the way down)
 for _d in (MOSS_DEFAULTS, IVY_DEFAULTS, DEBRIS_DEFAULTS):
     _d.update(MI_FADE_DEFAULTS)
 MI_DEFAULTS = {"Moss": MOSS_DEFAULTS, "Ivy": IVY_DEFAULTS, "Debris": DEBRIS_DEFAULTS}
@@ -33667,8 +33668,10 @@ MI_FADE_RATIO = 6.0  # ...unless one's footprint is this many times the other's 
 
 
 def _mi_pieces(node):
-    """A mesh's connected pieces as world boxes [(x0, y0, z0, x1, y1, z1)]
-    (cached while the mesh is unchanged): one mesh of six columns is six."""
+    """A mesh's connected pieces as world boxes [(x0, y0, z0, x1, y1, z1,
+    up-facing area, side area)] (cached while the mesh is unchanged): one
+    mesh of six columns is six. The areas tell a floor or plinth (mostly
+    top) from a wall ring of the same box (mostly sides)."""
     key = _mi_mesh_key(node)
     hit = _mi_cache_get(_MI_PIECES, key)
     if hit is not None:
@@ -33694,6 +33697,24 @@ def _mi_pieces(node):
             if r != r0:
                 parent[r] = r0
         k += c
+    faces = {}  # piece -> [up area, side area] (Newell area vectors)
+    k = 0
+    for c in counts:
+        nx = ny = nz = 0.0
+        for j in range(c):
+            a, b = P[ids[k + j]], P[ids[k + (j + 1) % c]]
+            nx += (a.y - b.y) * (a.z + b.z)
+            ny += (a.z - b.z) * (a.x + b.x)
+            nz += (a.x - b.x) * (a.y + b.y)
+        ar = 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+        if ar > 0.0:
+            f = faces.setdefault(find(ids[k]), [0.0, 0.0])
+            up = 0.5 * ny / ar
+            if up > 0.5:
+                f[0] += ar
+            elif abs(up) <= 0.5:
+                f[1] += ar
+        k += c
     boxes = {}
     for v in set(ids):
         p = P[v]
@@ -33714,7 +33735,7 @@ def _mi_pieces(node):
             b[2] = z
         elif z > b[5]:
             b[5] = z
-    out = [tuple(b) for b in boxes.values()]
+    out = [tuple(b) + tuple(faces.get(r, (0.0, 0.0))) for r, b in boxes.items()]
     _MI_PIECES[key] = out
     _mi_trim(_MI_PIECES)
     return out
@@ -33724,8 +33745,13 @@ def _mi_fade_groups(nodes):
     """The objects heights are measured on: pieces (of any of the meshes)
     standing on each other (footprints overlapping) are one, so a column of
     base, shaft and capital fades as one and a floor under it stays apart.
-    ([(x0, y0, z0, x1, y1, z1, footprint area)], grid cell, {cell: [group]},
-    groups always looked at)."""
+    ([(x0, y0, z0, x1, y1, z1, footprint area, flat)], grid cell, {cell:
+    [group]}, groups always looked at). flat: every piece in it mostly top
+    (up-facing area over twice its sides: a floor, a plinth), so the fade
+    leaves it full; a wall ring (the user's yard, 2026-11-18) is mostly
+    sides, so it fades however low and wide its box is. A floor (flat and
+    lower than a tenth of its narrower side) never joins what stands on it:
+    a ring on a floor of the same footprint stays a ring."""
     key = tuple(_mi_mesh_key(n) for n in nodes)
     hit = _mi_cache_get(_MI_FADE_GROUPS, key)
     if hit is not None:
@@ -33740,6 +33766,8 @@ def _mi_fade_groups(nodes):
         return a
 
     area = [max(1e-12, (b[3] - b[0]) * (b[5] - b[2])) for b in boxes]
+    flat = [b[6] >= 2.0 * b[7] for b in boxes]
+    floor = [f and (b[4] - b[1]) < 0.1 * min(b[3] - b[0], b[5] - b[2]) for f, b in zip(flat, boxes)]
     active = []
     for i in sorted(range(len(boxes)), key=lambda i: boxes[i][0]):  # sweep along x
         bi = boxes[i]
@@ -33748,7 +33776,7 @@ def _mi_fade_groups(nodes):
             bj = boxes[j]
             ox = min(bi[3], bj[3]) - max(bi[0], bj[0])
             oz = min(bi[5], bj[5]) - max(bi[2], bj[2])
-            if ox <= 0.0 or oz <= 0.0:
+            if ox <= 0.0 or oz <= 0.0 or floor[i] != floor[j]:
                 continue
             small, big = min(area[i], area[j]), max(area[i], area[j])
             if big <= MI_FADE_RATIO * small and ox * oz >= MI_FADE_JOIN * small:
@@ -33756,13 +33784,15 @@ def _mi_fade_groups(nodes):
                 if a != b:
                     parent[a] = b
         active.append(i)
-    merged = {}
+    merged, gflat = {}, {}
     for i, b in enumerate(boxes):
-        g = merged.setdefault(find(i), list(b))
+        r = find(i)
+        g = merged.setdefault(r, list(b[:6]))
         for k in range(3):
             g[k] = min(g[k], b[k])
             g[k + 3] = max(g[k + 3], b[k + 3])
-    groups = [tuple(g) + (max(1e-12, (g[3] - g[0]) * (g[5] - g[2])),) for g in merged.values()]
+        gflat[r] = gflat.get(r, True) and flat[i]
+    groups = [tuple(g) + (max(1e-12, (g[3] - g[0]) * (g[5] - g[2])), gflat[r]) for r, g in merged.items()]
     sizes = sorted(max(g[3] - g[0], g[5] - g[2]) for g in groups) or [1.0]
     cell = max(sizes[len(sizes) // 2], 1e-6 * max(sizes[-1], 1e-9), 1e-9)
     grid, big = {}, []
@@ -33798,6 +33828,12 @@ class _MiFade(object):
         # way down, as well as up from the foot: "I need to be able to do both. Or either"): either end's fade
         self.both = s.get("fade") == MI_FADES[3]
         self.H = max(0.0, float(s.get("fade_height", 1.0))) / m if s.get("fade_by") == MI_FADE_BY[1] else None
+        # Runs (the user, 2026-11-18: "little bits of moss growing down in sections, but not everywhere, just
+        # from the top of the wall, and like limit how far it comes down"): from the top, how far it reaches
+        # varies along the wall in vertical streaks (never past Fade height); 0 = an even line
+        self.runs = clamp(float(s.get("fade_runs", 0.0) or 0.0), 0.0, 1.0) if (self.top or self.both) else 0.0
+        self.run_w = MI_FADE_RUN_W / m
+        self.seed = int(s.get("seed", 1) or 1) + 977
         self.part = clamp(float(s.get("fade_part", 0.5)), 0.0, 1.0)
         self.soft = clamp(float(s.get("fade_soft", 0.6)), 0.0, 1.0)
         self.pad = 0.01 / m  # a point on an object's side is on its box: this much leeway
@@ -33806,12 +33842,16 @@ class _MiFade(object):
     def group(self, p):
         x, y, z = p
         c, pad = self.cell, self.pad
-        best = None
+        best = flat = None
         for gs in (self.grid.get((int(math.floor(x / c)), int(math.floor(z / c))), ()), self.big):
             for g in gs:
-                if (g[0] - pad <= x <= g[3] + pad and g[2] - pad <= z <= g[5] + pad and
-                        g[1] - pad <= y <= g[4] + pad and (best is None or g[6] < best[6])):
-                    best = g
+                if g[0] - pad <= x <= g[3] + pad and g[2] - pad <= z <= g[5] + pad and g[1] - pad <= y <= g[4] + pad:
+                    if best is None or g[6] < best[6]:
+                        best = g
+                    if g[7] and (flat is None or g[6] < flat[6]):
+                        flat = g
+        if flat is not None:  # in a floor's (or plinth's) box: on it (not the wall ring round it, whose box holds it)
+            return flat
         if best is None:  # (off every box: the nearest)
             best = min(self.groups, key=lambda g: (max(0.0, g[0] - x, x - g[3]) ** 2 + max(0.0, g[1] - y, y - g[4]) ** 2 +
                                                    max(0.0, g[2] - z, z - g[5]) ** 2))
@@ -33823,21 +33863,35 @@ class _MiFade(object):
             return None
         g = self.group(p)
         lo, hi = g[1], g[4]
-        if hi - lo < 0.5 * min(g[3] - g[0], g[5] - g[2]):
+        if g[7]:  # mostly top (a floor, a plinth): full
             return None
         H = self.H if self.H is not None else self.part * (hi - lo)
         H = max(H, self.least)
-        a = H * (1.0 - self.soft)
         out = []
-        for h in (p[1] - lo, hi - p[1]):
+        for end, h in enumerate((p[1] - lo, hi - p[1])):
+            Hk = H
+            if end and self.runs > 0.0:  # streaks: the same all the way down, varying along the wall
+                w = self.run_w
+                n = 0.65 * _th_noise(p[0] / w, p[2] / w, self.seed) + 0.35 * _th_noise(p[0] / (0.37 * w) + 3.1,
+                                                                                      p[2] / (0.37 * w) - 7.7,
+                                                                                      self.seed + 1)
+                k = clamp(0.5 + 2.4 * n, 0.0, 1.0)  # 1: runs all the way, 0: stops at the top (mostly one or the
+                k = k * k * (3.0 - 2.0 * k)  # other, soft between: streaks)
+                Hk = max(self.least, H * (1.0 - self.runs * (1.0 - k)))
+            a = Hk * (1.0 - self.soft)
+            H_ = Hk
             if h <= a:
                 out.append(1.0)
-            elif h >= H:
+            elif h >= H_:
                 out.append(0.0)
             else:
-                t = (h - a) / (H - a)
+                t = (h - a) / (H_ - a)
                 out.append(1.0 - t * t * (3.0 - 2.0 * t))
         return out
+
+    def flat(self, p):
+        """p is on a flat object (a floor, a plinth): the fade leaves it be."""
+        return not self.groups or bool(self.group(p)[7])
 
     def at(self, p):
         e = self._ends(p)
@@ -35317,7 +35371,8 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
     # flat only. It still grows up the side of walls"); debris cuts its own (_spots); a Height fade decides
     # how high moss goes up a column instead
     hard = None
-    if not s.get("_up_only") and fade is None and draw is None and not seeds:  # (drawn / picked: placed by hand)
+    if not s.get("_up_only") and draw is None and not seeds:  # (drawn / picked: placed by hand; a fade: off flat
+        # objects it decides, on them (a floor, the slopes of a plinth) the Slope limit still does)
         lim = clamp(float(s["slope"]), 0.0, 90.0)
         hard = (lim, math.cos(math.radians(lim)) - 1e-9) if lim < 90.0 else None
     creases = clamp(float(s.get("creases", 0.0)), 0.0, 2.0)
@@ -35368,7 +35423,7 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
                 note(p, -1.0 if thr >= 1.0 and k0 <= 0.0 else _sc_paint_margin(margin, k0, 1.0 - thr))
             margin = -1.0 if thr >= 1.0 and k <= 0.0 else _sc_paint_margin(margin, k, 1.0 - thr)  # (Coverage 0:
             # only where it's painted in)
-        if hard is not None and n[1] < hard[1]:  # past Slope limit: thinning over 15 degrees, then none
+        if hard is not None and n[1] < hard[1] and (fade is None or fade.flat(p)):  # past Slope limit: thinning
             a = math.degrees(math.acos(clamp(n[1], -1.0, 1.0)))
             g = clamp((a - hard[0]) / 15.0, 0.0, 1.0)
             margin = -1.0 if g >= 1.0 else margin - g * (abs(margin) + 0.3)
@@ -45280,6 +45335,10 @@ SC_FIELDS.update({
     "fade_height": ("Fade height", _scf(0.0, 100.0, 0.05, 5.0, 2, 0.05),
                     "How far up each object it reaches, in metres from its foot (From top: down from its top; Both "
                     "ends: from each end)."),
+    "fade_runs": ("Runs", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                  "From top / Both ends: how unevenly it comes down from the top. 0 = an even line at Fade height; "
+                  "higher = runs of moss down the wall in some places (never past Fade height) and stopping short "
+                  "of it in others, like rain streaks. Patchiness and Shoots break the runs into little bits."),
     "fade_soft": ("Softness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                   "0 = full right up to the fade height, then a hard line; 1 = thinning out all the way from the "
                   "foot."),
@@ -45293,7 +45352,7 @@ SC_FIELDS["bend_size"] = ("Bend size", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                           "round each grass blade). 1: it rests on the highest bits and bends in broad curves over "
                           "about half its length, like a stiffer leaf. Drape is how far it sags; this is how wide "
                           "the bends are.")
-_SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft"])
+_SC_FADE = ("Height fade", False, ["fade", "fade_by", "fade_part", "fade_height", "fade_soft", "fade_runs"])
 _SC_TO_REACH = ("How far from the %s it counts, in metres. Falloff says how it fades over that distance; past "
                 "it, the %s pull nothing.")
 SC_FIELDS.update({
@@ -45365,6 +45424,7 @@ SC_WORDS = {  # key (or (type, key)) -> the words under the slider's two ends
     "draw_width": ("narrow", "wide"), "draw_falloff": ("hard edge", "fading"),
     "draw_follow": ("evenly along", "where it would grow"), "fade_part": ("low", "high"),
     "fade_height": ("low", "high"), "fade_soft": ("hard line", "fading all the way"),
+    "fade_runs": ("an even line", "streaky runs"),
     "drape": ("stiff", "soft"), "bend_size": ("small bumps", "broad bends"),
 }
 _SC_DRAWING = ("Drawing", True, ["draw_width", "draw_falloff", "draw_follow"])
@@ -46675,8 +46735,9 @@ class ScatterPanel(QtWidgets.QWidget):
         if "fade" in self.f[typ]:
             on = self.f[typ]["fade"].value() != MI_FADES[0]
             metres = self.f[typ]["fade_by"].value() == MI_FADE_BY[1]
+            top = self.f[typ]["fade"].value() in MI_FADES[2:]
             for key, show in (("fade_by", on), ("fade_part", on and not metres), ("fade_height", on and metres),
-                              ("fade_soft", on)):
+                              ("fade_soft", on), ("fade_runs", top)):
                 self.f[typ][key].setVisible(show)
                 self.row_lbl[(typ, key)].setVisible(show)
 

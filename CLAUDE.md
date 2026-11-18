@@ -1520,6 +1520,22 @@
     by hand; debris has its own cut in `_spots`).
     `tests/test_moss_slope.py` (a wall block on a floor: 0 / 45 / 90, the
     three fades; side-view pictures in `tests/_out/moss_slope`).
+    **Wall ring and Runs** (2026-11-18, the user's yard: 40 x 40 dm floor,
+    a one-piece wall ring 2 thick 6 tall; "the height fade just doesn't
+    seem to work at all"): the ring's box is low and wide, so it read as
+    flat (full moss) and merged with the floor. Now `_mi_pieces` also
+    returns each piece's up-facing and side area (Newell); a piece is flat
+    when up >= 2 x side, a floor (flat and lower than 0.1 of its narrower
+    side) never merges with non-floor pieces, a group is flat only if all
+    its pieces are (`g[7]`), and `_MiFade.group` prefers the smallest flat
+    group holding p (floor inside the ring stays floor). With a fade on,
+    moss Slope limit still cuts on flat objects (`fade.flat(p)`). **Runs**
+    (`fade_runs`, From top / Both ends only, 0 = an even line): the top
+    end's depth varies along the wall, `_th_noise(x/w, z/w)` (no y:
+    vertical streaks, w = `MI_FADE_RUN_W` 0.12 m), k = smoothstep(0.5 +
+    2.4 n), Hk = max(least, H (1 - runs (1 - k))), never past Fade height.
+    Test `yard()` in `test_moss_slope.py`; Arnold before / after renders
+    `yard_render_before / runs0 / runs07.png` in `tests/_out/moss_slope`.
     `ivy_walk`: a per-vine cut (rand 55),
     the vine stops on a clinging step whose f < cut; branch chance x f;
     `vine["fade"]` per point; `ivy_leaf_mesh` skips a leaf when rand 62 >=
