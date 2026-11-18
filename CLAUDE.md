@@ -1486,8 +1486,13 @@
     draft=False)` (paused: at Play, via later). `bake_scatter` grows
     pending and drafted layers with draft=False first and skips a group
     whose growing was cancelled. Panel: `draft_btn` / `full_btn` /
-    `draft_label` under Pause, `(draft)` rows (`DRAFT_RGB`), Draft off with
-    drafts left = Full detail.
+    `draft_label` under Pause, `(DRAFT: no shoots)` rows (`DRAFT_RGB`),
+    Draft off with drafts left = Full detail. Made obvious (the user,
+    2026-11-18, grew drawn moss with Draft on unknowingly and missed the
+    shoots): "Draft: ON" button text, "Full detail (n)" lit (unlokPrimary)
+    while drafts are left, the label spells out "no shoots, strands or
+    capsules", and a DRAFT `next_banner` (tone warn) after painting /
+    drawing / paused, before the others.
   - **Height fade** (the user: "moss and ivy growing up columns from the
     bottom fading out towards the top"): `MI_FADE_DEFAULTS` (fade, fade_by,
     fade_height, fade_part, fade_soft) in all three defaults and
@@ -1498,9 +1503,24 @@
     and neither is `MI_FADE_RATIO`x the other (so a floor stays apart).
     `_MiFade.at(p)`: the smallest object box holding p (1 cm leeway; else
     the nearest), flat ones (lower than half their narrower side) 1, else
-    smoothstep from 1 at H(1 - soft) to 0 at H. `_moss_margins`: margin -=
+    smoothstep from 1 at H(1 - soft) to 0 at H (`_ends(p)`: from the foot
+    and from the top). `MI_FADES` "Both ends" (the user, 2026-11-18: rain
+    on a wall's top, moss growing there and edging down, as well as up
+    from the foot, "both. Or either"): the max of the two ends.
+    `wet(p)` (From top / Both ends: the top end's value) adds margin
+    0.45 wet coverage + 0.25 wet in `_moss_margins`, so the top gathers a
+    band (even on its exposed edge) instead of patches below it.
+    `_moss_margins`: margin -=
     (1 - f) coverage + 0.6 (1 - f)^3 (patches thinning out over the whole fade), -1 at f = 0; moss (not `_up_only`) scores with
-    slope >= 90 while a fade is on. `ivy_walk`: a per-vine cut (rand 55),
+    slope >= 90 while a fade is on. Otherwise moss Slope limit is a hard
+    limit (the user: "slope limit all the way to 0 ... still grows up the
+    side of walls"; shelter / noise / Creases / gathers lifted wall spots
+    back over): past it the margin thins over 15 degrees, -1 past that,
+    after paint and gathers (`hard`; not for a drawn or picked layer: placed
+    by hand; debris has its own cut in `_spots`).
+    `tests/test_moss_slope.py` (a wall block on a floor: 0 / 45 / 90, the
+    three fades; side-view pictures in `tests/_out/moss_slope`).
+    `ivy_walk`: a per-vine cut (rand 55),
     the vine stops on a clinging step whose f < cut; branch chance x f;
     `vine["fade"]` per point; `ivy_leaf_mesh` skips a leaf when rand 62 >=
     f. Off = no fade object: same randoms, same meshes. Panel: section

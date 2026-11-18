@@ -33296,7 +33296,7 @@ DEBRIS_DEFAULTS = {
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
 # a part of the object's height or metres; Softness 0 = a hard line, 1 = thinning out all the way.
-MI_FADES = ("Off", "From base", "From top")
+MI_FADES = ("Off", "From base", "From top", "Both ends")
 MI_FADE_BY = ("Object height", "Metres")
 MI_FADE_DEFAULTS = {"fade": "Off", "fade_by": "Object height", "fade_height": 1.0, "fade_part": 0.5,
                     "fade_soft": 0.6}
@@ -33794,6 +33794,9 @@ class _MiFade(object):
         m = scene_m_per_unit()
         self.groups, self.cell, self.grid, self.big = _mi_fade_groups(nodes)
         self.top = s.get("fade") == MI_FADES[2]
+        # Both ends (the user, 2026-11-18: rain collecting on a wall's top, moss growing there and edging its
+        # way down, as well as up from the foot: "I need to be able to do both. Or either"): either end's fade
+        self.both = s.get("fade") == MI_FADES[3]
         self.H = max(0.0, float(s.get("fade_height", 1.0))) / m if s.get("fade_by") == MI_FADE_BY[1] else None
         self.part = clamp(float(s.get("fade_part", 0.5)), 0.0, 1.0)
         self.soft = clamp(float(s.get("fade_soft", 0.6)), 0.0, 1.0)
@@ -33814,23 +33817,41 @@ class _MiFade(object):
                                                    max(0.0, g[2] - z, z - g[5]) ** 2))
         return best
 
-    def at(self, p):
+    def _ends(self, p):
+        """(the fade from the foot, from the top) at p, each 1 .. 0; None on a flat object (full)."""
         if not self.groups:
-            return 1.0
+            return None
         g = self.group(p)
         lo, hi = g[1], g[4]
         if hi - lo < 0.5 * min(g[3] - g[0], g[5] - g[2]):
-            return 1.0
-        h = hi - p[1] if self.top else p[1] - lo
+            return None
         H = self.H if self.H is not None else self.part * (hi - lo)
         H = max(H, self.least)
         a = H * (1.0 - self.soft)
-        if h <= a:
+        out = []
+        for h in (p[1] - lo, hi - p[1]):
+            if h <= a:
+                out.append(1.0)
+            elif h >= H:
+                out.append(0.0)
+            else:
+                t = (h - a) / (H - a)
+                out.append(1.0 - t * t * (3.0 - 2.0 * t))
+        return out
+
+    def at(self, p):
+        e = self._ends(p)
+        if e is None:
             return 1.0
-        if h >= H:
+        return max(e) if self.both else (e[1] if self.top else e[0])
+
+    def wet(self, p):
+        """From top / Both ends: how near the top end p is (1 .. 0): rain
+        collects along a wall's top, so moss gathers there and edges down."""
+        if not (self.top or self.both):
             return 0.0
-        t = (h - a) / (H - a)
-        return 1.0 - t * t * (3.0 - 2.0 * t)
+        e = self._ends(p)
+        return 0.0 if e is None else e[1]
 
 
 def _mi_fade(nodes, s):
@@ -35292,6 +35313,13 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
         ex = _moss_exposure(surf, sampler, s, R, spots)
         scores = [v - ew * 0.9 * e * (0.7 + 0.3 * sp[5]) for v, e, sp in zip(scores, ex, spots)]
     spill = _moss_spill(surf, s, cands)  # Floor spill: per candidate on a floor, its distance to the rest
+    # moss: Slope limit is a hard limit (the user, 2026-11-18: "slope limit all the way to 0, which it says is
+    # flat only. It still grows up the side of walls"); debris cuts its own (_spots); a Height fade decides
+    # how high moss goes up a column instead
+    hard = None
+    if not s.get("_up_only") and fade is None and draw is None and not seeds:  # (drawn / picked: placed by hand)
+        lim = clamp(float(s["slope"]), 0.0, 90.0)
+        hard = (lim, math.cos(math.radians(lim)) - 1e-9) if lim < 90.0 else None
     creases = clamp(float(s.get("creases", 0.0)), 0.0, 2.0)
     gat = _mi_gather(surf, sampler, s, R, cands)[0] if creases > 0.0 else None
     spread = max(1e-4, float(s["spread"]) / m)
@@ -35323,6 +35351,9 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
             upf = clamp((n[1] - 0.3) / 0.4, 0.0, 1.0)
             margin += creases * 0.5 * gat[idx][0] * upf  # where it faces up (moss climbs walls by Crevices)
         if fade is not None:  # Height fade: less coverage higher up, none past it
+            wet = fade.wet(p)
+            if wet > 0.0:  # From top: gathers along the top (rain), even on its exposed edge, and edges down
+                margin += 0.45 * wet * (1.0 - thr) + 0.25 * wet
             f = fade.at(p)
             if f < 1.0:
                 g = 1.0 - f  # coverage x f, and the best spots too near the top: patches thinning out
@@ -35337,6 +35368,10 @@ def _moss_margins(surf, sampler, s, seeds=None, faces=None, draw=None):
                 note(p, -1.0 if thr >= 1.0 and k0 <= 0.0 else _sc_paint_margin(margin, k0, 1.0 - thr))
             margin = -1.0 if thr >= 1.0 and k <= 0.0 else _sc_paint_margin(margin, k, 1.0 - thr)  # (Coverage 0:
             # only where it's painted in)
+        if hard is not None and n[1] < hard[1]:  # past Slope limit: thinning over 15 degrees, then none
+            a = math.degrees(math.acos(clamp(n[1], -1.0, 1.0)))
+            g = clamp((a - hard[0]) / 15.0, 0.0, 1.0)
+            margin = -1.0 if g >= 1.0 else margin - g * (abs(margin) + 0.3)
         rows.append((margin, occ / tw, edge / tw))
     return spots, cands, rows
 
@@ -45014,8 +45049,9 @@ SC_FIELDS = {
     "spread": ("Spread", _scf(0.01, 20.0, 0.05, 1.5, 2, 0.05),
                "With picked points: how far it reaches from each point, in metres."),
     "slope": ("Slope limit", _scf(0.0, 90.0, 0.0, 90.0, 1, 1.0),
-              "Steepest slope (degrees) it sits on; it fades out over the next 15 degrees. Leaves and grass never "
-              "go past it (nothing on walls with a low limit); moss still creeps up sheltered walls."),
+              "Steepest slope (degrees) it sits on; it fades out over the next 15 degrees and never goes past "
+              "that (0 = flat ground only, 90 = walls too). Moss drawn or picked onto a wall, or with a "
+              "Height fade on, is the exception: the strokes or the fade decide there."),
     "crevices": ("Crevices", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                  "How strongly it gathers in sheltered corners, gaps and crevices, read from the shape right "
                  "round each spot (a short reach: best on detailed geo). To send it to wall feet, gutters and "
@@ -45232,15 +45268,18 @@ SC_FIELDS = {
 SC_FIELDS.update({
     "fade": ("Height fade", lambda: SegmentField(MI_FADES),
              "Thins it out with height on each object (a column, a post, a wall): From base = densest at its foot, "
-             "fading out going up; From top = hanging from its top. Moss then climbs the object's sides too, up "
-             "to the fade (the Slope limit still rules the rest)."),
+             "fading out going up; From top = along its top (where rain collects), edging its way down the "
+             "sides; Both ends = both, bare in the middle. Moss then grows on the object's sides too, as far "
+             "as the fade (the fade decides there, not the Slope limit)."),
     "fade_by": ("Fade by", lambda: SegmentField(MI_FADE_BY),
                 "Object height: the fade's height is a part of each object's own height (tall and short columns "
                 "alike). Metres: the same height on every object."),
     "fade_part": ("Fade height", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
-                  "How far up each object it reaches, as a part of its height (0.5 = halfway)."),
+                  "How far up each object it reaches, as a part of its height (0.5 = halfway); From top: how far "
+                  "down; Both ends: how far from each end."),
     "fade_height": ("Fade height", _scf(0.0, 100.0, 0.05, 5.0, 2, 0.05),
-                    "How far up each object it reaches, in metres from its foot (or down from its top)."),
+                    "How far up each object it reaches, in metres from its foot (From top: down from its top; Both "
+                    "ends: from each end)."),
     "fade_soft": ("Softness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                   "0 = full right up to the fade height, then a hard line; 1 = thinning out all the way from the "
                   "foot."),
@@ -46698,7 +46737,7 @@ class ScatterPanel(QtWidgets.QWidget):
         if layer.get("paint"):
             extra += "  (painted)"
         return layer.get("name", layer["type"]) + extra + ("  (changed)" if changed else
-                                                           ("  (draft)" if draft else ""))
+                                                           ("  (DRAFT: no shoots)" if draft else ""))
 
     @staticmethod
     def _draft_count():
@@ -46770,15 +46809,22 @@ class ScatterPanel(QtWidgets.QWidget):
             self.draft_btn.setProperty("unlokPrimary", drafting)
             repolish(self.draft_btn)
         self.full_btn.setEnabled(bool(nd))
+        self.draft_btn.setText("Draft: ON" if drafting else "Draft")
+        self.full_btn.setText("Full detail (%d)" % nd if nd else "Full detail")
+        if bool(self.full_btn.property("unlokPrimary")) != bool(nd):  # drafts to finish: the button to press
+            self.full_btn.setProperty("unlokPrimary", bool(nd))
+            repolish(self.full_btn)
         rough = "%d moss layer%s rough" % (nd, "" if nd == 1 else "s")
         if drafting:
-            self.draft_label.setText("<b>Draft</b> - moss edits grow a quick rough look. %s" % (
-                ("%s: Full detail grows %s properly." % (rough, "it" if nd == 1 else "them")) if nd else
-                "Full detail (or Draft off) grows them properly."))
+            self.draft_label.setText("<b>Draft is ON</b> - new and edited moss grows a rough bed only: <b>no shoots, "
+                                     "strands or capsules</b>. %s" % (
+                                         ("%s: press Full detail to grow %s properly." % (
+                                             rough, "it" if nd == 1 else "them")) if nd else
+                                         "Full detail (or Draft off) grows them properly."))
         else:
-            self.draft_label.setText(("%s (drafts): Full detail grows %s properly." % (
-                rough, "it" if nd == 1 else "them")) if nd else
-                "Draft: edit moss fast with a rough look, then grow it in full.")
+            self.draft_label.setText(("<b>%s</b> (drafts, no shoots or strands): press Full detail to grow %s "
+                                      "properly." % (rough, "it" if nd == 1 else "them")) if nd else
+                                     "Draft: edit moss fast with a rough look, then grow it in full.")
         try:
             sel = self._sel_now or sc_selection()
         except Exception:
@@ -46821,6 +46867,12 @@ class ScatterPanel(QtWidgets.QWidget):
                                       "to grow the changes." % (self._paused_text(counts), (
                                           ". Editing <b>%s</b>" % short_name(root)) if root else ""),
                                       tag="PAUSED", tone="warn")
+        elif nd:  # drafts are easy to miss (the user grew drawn moss with Draft on and wondered where the shoots were)
+            self.next_banner.set_text("%s %s a <b>draft</b>: a rough bed with no shoots, strands or capsules%s. "
+                                      "Press <b>Full detail</b> to grow %s properly." % (
+                                          nd, "moss layer is" if nd == 1 else "moss layers are",
+                                          " (Draft is on: new moss grows as a draft too)" if drafting else "",
+                                          "it" if nd == 1 else "them"), tag="DRAFT", tone="warn")
         elif n and not root:
             self.next_banner.set_text("Press <b>Scatter on Drawing</b>: a %s group along the %d stroke%s." %
                                       (self.start_type.currentText().lower(), n, "" if n == 1 else "s"))

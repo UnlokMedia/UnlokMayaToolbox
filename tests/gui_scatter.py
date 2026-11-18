@@ -552,12 +552,12 @@ def draft_mode(ns, panel, window):
     panel.draft_btn.click()
     pump()
     check("Draft on: the button lights, the line says what it does", panel.draft_btn.isChecked() and
-          ns["sc_drafting"]() and "quick rough look" in panel.draft_label.text(), panel.draft_label.text())
+          ns["sc_drafting"]() and "no shoots" in panel.draft_label.text(), panel.draft_label.text())
     edit(0.52)  # the first draft lays its coarse grid out
     t_draft = edit(0.53)  # (not 0.55: the group grew in full at that when made, so that comes from the cache)
     d = (verts("moss"), verts("strands"))
-    check("a moss edit in Draft: quick, rough, the layer marked (draft)", d[1] == 0 and 0 < d[0] < full[0] and
-          "(draft)" in row() and panel.full_btn.isEnabled() and "Full detail" in panel.status.text() and
+    check("a moss edit in Draft: quick, rough, the layer marked DRAFT", d[1] == 0 and 0 < d[0] < full[0] and
+          "DRAFT" in row() and panel.full_btn.isEnabled() and "Full detail" in panel.status.text() and
           t_draft < t_full, "%.2fs (full %.2fs), %s vs %s | %s | %s" % (t_draft, t_full, d, full, row(),
                                                                         panel.status.text()))
     window.grab().save(os.path.join(OUT, "15_panel_draft.png"))
@@ -569,7 +569,7 @@ def draft_mode(ns, panel, window):
     panel.full_btn.click()
     pump()
     f = (verts("moss"), verts("strands"))
-    check("Full detail grows it properly, the mark goes", f[0] > d[0] and f[1] > 0 and "(draft)" not in row() and
+    check("Full detail grows it properly, the mark goes", f[0] > d[0] and f[1] > 0 and "DRAFT" not in row() and
           not panel.full_btn.isEnabled() and "grew 1 draft layer" in panel.status.text(),
           "%s -> %s | %s" % (d, f, panel.status.text()))
     window.grab().save(os.path.join(OUT, "15_panel_full_detail.png"))
@@ -582,7 +582,7 @@ def draft_mode(ns, panel, window):
     panel.draft_btn.click()  # Draft off with a draft: grows it in full
     pump()
     check("Draft off grows the drafts in full", not ns["sc_drafting"]() and not panel.draft_btn.isChecked() and
-          verts("strands") > 0 and "(draft)" not in row(), panel.status.text())
+          verts("strands") > 0 and "DRAFT" not in row(), panel.status.text())
 
     def saved():
         layer = [lay for lay in ns["sc_data"](root)["layers"] if lay["id"] == moss][0]
@@ -606,7 +606,7 @@ def draft_mode(ns, panel, window):
     panel._edit_timer.stop()
     panel._apply_pending()
     pump()
-    let_go = (moss not in ns["sc_drafted"](root), verts("strands") > 0, "(draft)" not in row())
+    let_go = (moss not in ns["sc_drafted"](root), verts("strands") > 0, "DRAFT" not in row())
     check("a slow moss layer: a held slider grows the draft look, let go it grows in full",
           all(held) and all(let_go), "held %s, let go %s | %s" % (held, let_go, panel.status.text()))
 
