@@ -19322,6 +19322,111 @@ def _rope_fill(shape, mesh):
     return len(pts)
 
 
+# ------------------------------------------------- strands as curves
+# Grass and roof straw as curves instead of a mesh (the user, 2026-11-19: "an option to be curves instead ...
+# a straight swap ... so they can be used in a sim setup or something in houdini or rendered differently
+# there"): each blade / piece / leaflet the builders lay as a strip of rows becomes one linear curve through
+# its rows' middles, with a per-point width (Alembic exports it as the curves' width). Read straight off the
+# built arrays: no geometry conversion.
+STRAND_TAG = "unlokStrands"  # on a curves group: the part it stands in for ("<layer id>/grass", "straw")
+
+
+def strand_spines(mesh):
+    """The strands in a mesh of strips (grass blades, straw planes and
+    bundles, leaf panels, palm leaflets): each laid out as rows of w points
+    one after another (w from its first quad), maybe a tip point (a fan of
+    triangles) and an underside after it. [(points, widths)]: each row's
+    middle and twice its farthest point from it (0 at a tip). A piece that
+    isn't such a strip gives nothing."""
+    pts, counts, conn = mesh[0], mesh[1], mesh[2]
+    out = []
+    nf = len(counts)
+    f = i = 0
+    while f < nf:
+        c = counts[f]
+        q = conn[i:i + c]
+        i += c
+        f += 1
+        if c != 4:
+            continue
+        lo, hi = min(q), max(q)
+        w = hi - lo - 1  # its first quad spans a row and the next: (a, a + 1, a + w + 1, a + w)
+        tip = None
+        while f < nf:  # the piece's other faces: none below its first point, none past what it has so far
+            c = counts[f]
+            q = conn[i:i + c]
+            low = min(q)
+            if low < lo or low > hi:
+                break
+            top = max(q)
+            if c == 3 and (tip is None or top < tip):
+                tip = top
+            hi = max(hi, top)
+            i += c
+            f += 1
+        end = tip if tip is not None else hi + 1
+        if w < 1 or (end - lo) % w or (end - lo) // w < 2:
+            continue
+        line, wide = [], []
+        for a in range(lo, end, w):
+            row = pts[a:a + w]
+            cx = sum(p[0] for p in row) / w
+            cy = sum(p[1] for p in row) / w
+            cz = sum(p[2] for p in row) / w
+            line.append((cx, cy, cz))
+            wide.append(2.0 * math.sqrt(max((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2 for p in row)))
+        if tip is not None:
+            line.append(tuple(pts[tip]))
+            wide.append(0.0)
+        out.append((line, wide))
+    return out
+
+
+def strand_groups(parent):
+    """{tag: curves group} under parent."""
+    out = {}
+    for child in cmds.listRelatives(parent, children=True, type="transform", fullPath=True) or []:
+        if cmds.attributeQuery(STRAND_TAG, node=child, exists=True):
+            out[cmds.getAttr(child + "." + STRAND_TAG)] = child
+    return out
+
+
+def strand_curves(parent, name, strands, tag, old=None):
+    """A curves group under parent (in place of old): one linear curve
+    shape per strand (world points), each with a "width" per point, the
+    group tagged (STRAND_TAG). API, outside the undo queue like the meshes.
+    Returns the group."""
+    if old and cmds.objExists(old):
+        cmds.delete(old)
+    pdag = get_dag_path(parent)
+    inv = pdag.inclusiveMatrixInverse()
+    same = inv.isEquivalent(om.MMatrix())
+    mod = om.MDagModifier()
+    xf = mod.createNode("transform", pdag.node())
+    mod.renameNode(xf, name)
+    mod.doIt()
+    dn = om.MFnDependencyNode(xf)
+    ta = om.MFnTypedAttribute()
+    a = ta.create(STRAND_TAG, STRAND_TAG, om.MFnData.kString)
+    dn.addAttribute(a)
+    dn.findPlug(a, False).setString(tag)
+    group = om.MFnDagNode(xf).fullPathName()
+    stem = dn.name() + "Shape"
+    fn = om.MFnNurbsCurve()
+    dad = om.MFnDoubleArrayData()
+    for k, (line, wide) in enumerate(strands):
+        n = len(line)
+        pa = om.MPointArray(line) if same else om.MPointArray([om.MPoint(p[0], p[1], p[2]) * inv for p in line])
+        obj = fn.create(pa, om.MDoubleArray([float(x) for x in range(n)]), 1, om.MFnNurbsCurve.kOpen, False, False,
+                        xf)
+        dn.setObject(obj)
+        dn.setName("%s%d" % (stem, k + 1))
+        wa = ta.create("width", "width", om.MFnData.kDoubleArray)
+        dn.addAttribute(wa)
+        dn.findPlug(wa, False).setMObject(dad.create(om.MDoubleArray(wide)))
+    return group
+
+
 def _rope_poles(data):
     nodes = []
     for uid in data.get("poles") or []:
@@ -20339,7 +20444,7 @@ THATCH_DEFAULTS = {
     # standing off the roof at stiff angles, and the ridge / hip cap leaves' own width (0: Leaf width)
     "shag": 0.0, "max_angle": 90.0, "variety": 1.0, "cap_width": 0.0, "hip_blend": 0.0, "flow": 0.0, "pokes": 0, "poke_lift": 1.0, "poke_clump": 0.0, "poke_var": 0.0, "tip_shape": 0.0, "tip_var": 0.0, "messy": 1.0, "under_over_top": False, "ridge_height": 1.0, "ridge_width": 1.0, "ridge_lumps": 1.0, "root_tuck": 0.0, "root_shift": 0.0, "root_var": 0.0, "ridge_shag": 0.0, "ridge_spikes": 1.0, "ridge_fringe": 0.0, "ridge_bundles": 0.0, "ridge_pinch": 0.0, "ridge_curve": 0.5, "ridge_sink": 0.0, "pinch_height": 1.0, "ridge_cover": "Leaves",
     "peak_height": 0.0, "ridge_layers": 1, "peak_width": 0.7, "peak_sides": 0.0, "peak_tip": 0.8,
-    "udim": 1001,
+    "udim": 1001, "curves": False,
 }
 THATCH_DEFAULTS.update(METAL_DEFAULTS)
 THATCH_DEFAULTS.update(TILE_DEFAULTS)
@@ -20354,7 +20459,8 @@ THATCH_LOOK_KEYS = ("style", "resolution", "strands", "strand_width", "density",
                     "frame", "frame_style", "rafter_spacing", "rafter_size", "batten_size", "frame_wobble",
                     "wall_plates", "frame_rafters", "frame_hips", "frame_beam", "frame_battens", "frame_subd", "battens", "curl", "curl_var", "dried",
                     "dried_var", "crinkle", "crinkle_var", "leaf_twist", "leaf_twist_var", "width_var",
-                    "width_wobble", "bent_tips", "bent_var", "leaf_section", "section_amount", "section_var", "covering", "udim", "volume") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
+                    "width_wobble", "bent_tips", "bent_var", "leaf_section", "section_amount", "section_var", "covering", "udim", "volume",
+                    "curves") + tuple(sorted(METAL_DEFAULTS)) + tuple(sorted(TILE_DEFAULTS))
 THATCH_PRESETS = {
     "Cottage (hipped)": {"levels": 1, "lip": 0.3, "softness": 0.65, "pattern": "Scallops"},
     "Gabled cottage": {"end_a": "Gable", "end_b": "Gable", "levels": 1, "lip": 0.3, "pattern": "Points"},
@@ -20528,7 +20634,8 @@ THATCH_PRESETS = {
         "crinkle": 0.3, "leaf_twist": 0.25, "width_var": 0.3, "width_wobble": 0.25, "bent_tips": 0.1},
 }
 THATCH_PRESET_VAR = "unlokThatchPresets"  # optionVar (Maya's own prefs): the user's presets as JSON
-THATCH_PRESET_SKIP = ("seed", "ridge", "detail", "udim")  # each roof's own: a saved preset leaves them out
+THATCH_PRESET_SKIP = ("seed", "ridge", "detail", "udim", "curves")  # each roof's own: a saved preset leaves
+# them out (Curves: an output choice, kept through presets)
 # Linked roofs share every setting but these (each keeps its own shape, ends, overhang and seed).
 THATCH_OWN_KEYS = ("shape", "ridge", "end_a", "end_b", "verge_a", "verge_b", "udim", "hip_pitch", "half_hip", "overhang", "seed")
 THATCH_LINKED_KEYS = tuple(k for k in THATCH_KEYS if k not in THATCH_OWN_KEYS)
@@ -29209,6 +29316,7 @@ def _th_write(root, frame, s, built):
         built = dict(built, straw=_th_join(built["straw"], built["sticks"]))  # part (Upgrade adds it)
     if "tile_underlay" in parts:
         _tl_underlay_name(parts["tile_underlay"], s["t_underlay"])
+    built = _th_strands(root, s, built, parts)
     tiles = s["covering"] == "Tiles"
     for part, node in thatch_parts(root).items():  # again: the frame may have been renamed
         shape = _log_shape(node)
@@ -29234,6 +29342,23 @@ def _th_write(root, frame, s, built):
         if used:
             faces += len(mesh[1])
     return faces
+
+
+def _th_strands(root, s, built, parts):
+    """Curves (the user: "an option to be curves instead"): a thatch roof's straw as a curves group
+    (strand_curves; the Surface style's shell has no strands) and its straw mesh empty (a hidden
+    placeholder, like any part a roof doesn't use). Off: the curves group goes. Returns built."""
+    old = strand_groups(root).get("straw")
+    straw = built.get("straw")
+    strands = strand_spines(straw) if s.get("curves") and s["covering"] == "Thatch" and \
+        s["style"] != "Surface" and straw and straw[1] else None
+    if not strands:
+        if old:
+            cmds.delete(old)
+        return built
+    name = re.sub(r"_GE[PS](\d*)$", r"_CRV\1", short_name(parts["straw"])) if "straw" in parts else "straw_CRV"
+    strand_curves(root, name, strands, "straw", old)
+    return dict(built, straw=None)
 
 
 def _th_join(a, b):
@@ -32309,6 +32434,13 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         row(sec, "sides", "Sides", IntField(3, 16, 3, 12), "3D pieces: sides round each bundle.")
         row(sec, "flatness", "Flatness", FloatField(0.05, 1.0, 0.05, 1.0, decimals=2, step=0.05),
             "3D pieces: thickness of a bundle across its width (1 = round).")
+        self.f["curves"] = CheckField("Curves instead of mesh")
+        self.f["curves"].setToolTip("The straw as curves: one linear curve through the middle of each piece / "
+                                    "leaflet / panel, with a width per point (Alembic exports it), in a group "
+                                    "of its own (..._CRV) for a sim or a hair / curve render in Houdini. The "
+                                    "straw mesh is left empty. Underlay, sticks and frame stay meshes. Not for "
+                                    "the Surface style (a shell). Kept when you load a preset.")
+        sec.add_full(self.f["curves"])
         card.add(sec)
         sec = self.under_sec = Section("Underlay", expanded=False)
         self.f["underlay"] = CheckField("Underlay under the pieces")
@@ -32592,6 +32724,7 @@ class ThatchRoofPanel(QtWidgets.QWidget):
         self.f["t_hip"].setVisible(tiles and not cone and ends != ("Gable", "Gable"))
         self.f["style"].setVisible(thatch)
         self.f["mirror"].setVisible(thatch)
+        self.f["curves"].setVisible(thatch and s["style"] != "Surface")
         surface = s["style"] == "Surface"
         self.under_sec.setVisible(thatch and not surface)
         self.stack_sec.setVisible(True)
@@ -33296,7 +33429,7 @@ DEBRIS_DEFAULTS = {
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
-    "bend_size": 0.0, "on_moss": False, "on_layers": False,
+    "bend_size": 0.0, "on_moss": False, "on_layers": False, "curves": False,
     "detail": "Normal", "seed": 1, "udim": 1001, "stacks": 1, "stack_layout": "UDIM tiles"}
 # Height fade (the user: "moss and ivy growing up columns from the bottom fading out towards the top"): every
 # kind thins out with height on each object, From base (densest at its foot) or From top; the fade's height is
@@ -42342,7 +42475,8 @@ SC_TYPES = collections.OrderedDict([
                                            "blade_width", "grass_pile", "grass_strays", "bunch_var",
                                            "bunch_shape", "blade_scatter", "bunch_blades", "on_layers",
                                            "stray_clump", "stray_clump_size", "stray_buildup", "stray_heaps",
-                                           "pile_var", "blade_straight", "blade_broken", "pile_mat", "chaff"),
+                                           "pile_var", "blade_straight", "blade_broken", "pile_mat", "chaff",
+                                           "curves"),
                "over": {"slope": 40.0, "grass": 1.5},
                "new": {"grass_pile": 0.6, "on_layers": True, "blade_straight": 0.6, "blade_broken": 0.2}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
@@ -43646,6 +43780,8 @@ def _sc_read_part(node):
 def _sc_read_layer(root, layer, counts):
     """An unchanged layer's parts read back from the scene (instead of
     growing it again), noted as written. Returns (parts, counts) or None."""
+    if sc_settings(layer).get("curves"):
+        return None  # its grass is curves now: grown again
     parts = sc_parts(root)
     out, wrote = {}, {}
     for part, _ in SC_TYPES[sc_type(layer.get("type"))]["parts"]:
@@ -43689,7 +43825,10 @@ def _sc_layer_core(layer):
     """A layer as its growth sees it: without its name or its own UDIM (UV
     placement only), so renaming it or moving it to other tiles never grows
     it again."""
-    return dict((k, v) for k, v in layer.items() if k not in ("name", "udim"))
+    out = dict((k, v) for k, v in layer.items() if k not in ("name", "udim"))
+    if "curves" in (out.get("s") or {}):  # Curves: how it's written, not grown
+        out["s"] = dict((k, v) for k, v in out["s"].items() if k != "curves")
+    return out
 
 
 def _sc_place_udims(layers, combined, order, start):
@@ -44543,6 +44682,7 @@ def _sc_write(root, data, placed, meshes):
     the face count."""
     parts = sc_parts(root)
     shoots = sc_shoots(root)
+    curves = strand_groups(root)
     faces = 0
     sel = cmds.ls(selection=True, long=True) or []  # making parts / instancers selects them: put it back after
     for layer in data.get("layers", []):
@@ -44550,6 +44690,8 @@ def _sc_write(root, data, placed, meshes):
             key = layer["id"] + "/" + part
             mesh = placed.get(key)
             node = parts.get(key)
+            if mesh and part == "grass" and _sc_strands(root, layer, key, material, mesh, curves.pop(key, None)):
+                mesh = None  # Curves: the curves group instead of the mesh
             if not mesh:
                 if node:
                     cmds.delete(node)
@@ -44570,6 +44712,10 @@ def _sc_write(root, data, placed, meshes):
             faces += len(mesh[1])
         if sc_type(layer.get("type")) == "Moss":
             faces += _sc_write_layer_shoots(root, layer, placed, shoots, parts)
+    for key, node in curves.items():  # Curves off, or the layer gone
+        if cmds.objExists(node):
+            cmds.delete(node)
+        _SC_WROTE.pop((root, key + "#curves"), None)
     known = set(l["id"] for l in data.get("layers", []))
     for key, node in list(parts.items()) + list(shoots.items()):  # a layer that's gone (a safety net)
         if key.split("/")[0] not in known and cmds.objExists(node):
@@ -44584,6 +44730,31 @@ def _sc_write(root, data, placed, meshes):
         else:
             cmds.select(clear=True)
     return faces
+
+
+def _sc_strands(root, layer, key, material, mesh, old):
+    """A Grass layer with Curves on: its blades as a curves group
+    (strand_curves), named like its mesh with _CRV, rewritten only when the
+    grass changed. Returns True when the curves stand in for the mesh."""
+    wrote = (root, key + "#curves")
+    if not sc_settings(layer).get("curves"):
+        if old and cmds.objExists(old):
+            cmds.delete(old)
+        _SC_WROTE.pop(wrote, None)
+        return False
+    sig = (id(mesh[0]), len(mesh[0]), len(mesh[1]))
+    if old and cmds.objExists(old) and _SC_WROTE.get(wrote) == sig:
+        return True
+    strands = strand_spines(mesh)
+    if not strands:
+        if old and cmds.objExists(old):
+            cmds.delete(old)
+        _SC_WROTE.pop(wrote, None)
+        return False
+    num =short_name(root)[len(SC_STEM):len(SC_STEM) + 4]
+    strand_curves(root, "%s%s_C_%s%s_CRV" % (material, layer.get("tag", ""), SC_STEM, num), strands, key, old)
+    _SC_WROTE[wrote] = sig
+    return True
 
 
 MOSS_LOOK_PARTS = {"moss": "mossGreen", "strands": "mossStrand", "capsules": "mossSpore"}
@@ -45891,6 +46062,11 @@ SC_FIELDS = {
     "on_moss": ("Rest on moss", lambda: CheckField(""),
                 "Leaves dropped on this group's moss (any Moss layer) rest on top of it, among its "
                 "shoots, instead of sinking through to the surface under it."),
+    "curves": ("Curves", lambda: CheckField("instead of mesh"),
+               "The grass as curves: one linear curve through the middle of each blade, with a width per point "
+               "(Alembic exports it), in a group of its own (grassDry..._CRV) for a sim or a hair / curve "
+               "render in Houdini. The grass mesh goes. Switching it is quick: the blades aren't grown "
+               "again. Kept when you load a preset."),
     "on_layers": ("On layers below", lambda: CheckField(""),
                   "Lies on top of the grass and leaves of the layers below this one in the list: leaves land "
                   "on grass piles and lean against them, grass lies over fallen leaves. Move a layer up the "
@@ -46172,7 +46348,7 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
              ("Shoots and strands", False, ["strand_length", "droop", "shoot_form", "shoots", "size_var"]),
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
     "Grass": [("", True, ["detail", "coverage", "spread", "grass", "grass_strays", "bunch_size", "grass_length",
-                          "fullness", "grass_pile"]),
+                          "fullness", "grass_pile", "curves"]),
               ("Blades and bits", True, ["blade_straight", "blade_broken", "chaff"]),
               ("Shape and scatter", True, ["bunch_var", "pile_var", "pile_mat", "bunch_shape", "blade_scatter",
                                            "bunch_blades"]),
@@ -48439,6 +48615,8 @@ class ScatterPanel(QtWidgets.QWidget):
         if s is None:
             return
         s["seed"] = self.f[typ]["seed"].value()
+        if "curves" in s:  # an output choice: kept
+            s["curves"] = self.f[typ]["curves"].value()
         self._filling = True
         try:
             self._show(typ, s)

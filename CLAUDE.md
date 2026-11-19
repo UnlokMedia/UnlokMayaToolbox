@@ -2702,6 +2702,28 @@
       (`self.ribs`: first point and rows per blade). Bends p99 72 vs 61
       alone, stretch 1.28, no extra twisted rows (`test_grass_clump`);
       pictures `UNLOK_PIC_EXTRA` `up.<key>` = a second Grass layer on top.
+    - **Curves** (Grass `curves`, roofs `curves`; the user, 2026-11-19:
+      "an option to be curves instead ... a straight swap ... for a sim
+      setup or something in houdini"). No geometry conversion:
+      `strand_spines` reads the built strip arrays (a piece = faces whose
+      vertices stay in one contiguous block; row width w from its first
+      quad, `max - min - 1`; a triangle fan's smallest top = a tip point;
+      an underside after it ignored) -> per row the middle and 2 x the
+      farthest point (width). `strand_curves` makes one transform
+      (`STRAND_TAG` = the part key, name `..._CRV`) with a linear
+      nurbsCurve shape per strand and a doubleArray `width` per CV
+      (AbcExport writes it), all API (~90 us a curve: 20k blades ~2 s).
+      Scatter: `_sc_strands` in `_sc_write` (the mesh part is deleted,
+      rewritten only when the grass changed, `_SC_WROTE` key + "#curves");
+      `_sc_layer_core` drops `curves`, so switching never regrows;
+      `_sc_read_layer` won't read back a curves layer (it regrows on scene
+      open). Roofs: `_th_strands` in `_th_write`, thatch only, not Surface
+      (its shell parses as strips); straw goes to the usual hidden
+      placeholder. `curves` is in `THATCH_LOOK_KEYS` + `THATCH_PRESET_SKIP`
+      and the scatter panel's load_preset keeps it (an output choice).
+      Parse: grass, Planes, 3D Pieces (caps skipped), Leaf Panels, palm
+      leaflets (each its own curve; a frond's rachis is in sticks); sticks / underlay / frame stay mesh.
+      `tests/test_strand_curves.py`.
     - **Grass inside boxes** (the user asked, 2026-11-06): the floor under a
       box standing on it is sampled like any other, so bunches grew inside
       the box (test_grass_pile's yard: ~2k points in the step), and blades
