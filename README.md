@@ -7,6 +7,9 @@ locked-down / secure Maya setups.
 
 Built for **Maya 2023** (Python 3.9, PySide2); also runs on 2024 and 2025.
 
+**New here? Start with the [artist guide](docs/wiki/Home.md)** (set-up, Roof,
+Scatter, tips). This README is the full reference for every setting.
+
 ## Run it
 
 1. Open `UnlokToolbox.py`, select all, copy.
