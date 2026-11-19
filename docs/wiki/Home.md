@@ -29,6 +29,10 @@ The two are connected, but they can sit in different places in the Outliner. The
 
 There will probably also be quite a few wireframe `_CTL` boxes (`scatteredObjects####_CTL`). Each one belongs to the scatter group with the same number. Select a `_CTL` box to select and control its scatter group without having to pick the output geometry.
 
+![A scene with several scatter groups, each with its yellow _CTL box](images/scene_ctl_boxes.png)
+
+*Five scatter groups, each in its own `_CTL` box (yellow): moss on the path slabs, tufts on the wall, grass, and leaves on the crate and step.*
+
 ## 3. Editing a scatter
 
 1. Select a `_CTL` box, or the scatter group itself.
@@ -37,6 +41,10 @@ There will probably also be quite a few wireframe `_CTL` boxes (`scatteredObject
    - Tick a layer to turn it on or off.
    - Use **Pause** to make several changes before it regrows.
    - **Regrow** grows it again on the meshes as they are now, e.g. after the ground was edited.
+
+**Layers stack up.** One scatter group can hold several layers, each grown on top of the ones below. Here a single group has a moss layer, then a grass layer on the moss, then a leaves layer over both:
+
+![One scatter group: moss, then grass added on the moss, then leaves on top](images/scatter_layers.png)
 
 **If a scatter doesn't respond**, check that it hasn't been **baked**. Baking turns a scatter group into plain meshes. That is sometimes needed for more manual edits, and once baked it no longer has layers to edit.
 
