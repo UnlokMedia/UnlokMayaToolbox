@@ -2072,6 +2072,45 @@
       the last bits by call order (~1e-7 dm), whichever toolbox runs first.
     - A dense triangulated scan whose triangles don't all pair is split
       whole (4x its faces): the mat then follows that density.
+    - **Outline detail and Breakup** (the user, 2026-11-19: "the edges end
+      up like smooth rounded areas and its hard to make it higher-res and
+      more jagged ... a carpet with clumps fading from it. Like falloff noise
+      breakup"; then "control of the scale of the breakup, for different
+      scene sizes" and height control). Why the outline was a blob: each
+      grid point's margin is a weighted mean of candidates within 1.3 R
+      (candidates ~0.85 R apart), so every noise finer than Clump size was
+      averaged away; the cells are ~0.7 R; then 3 relax passes. Panel
+      section "Outline and breakup" (`brk_sec`, Mat only). Keys (all in
+      `MOSS_DEFAULTS`; 0 = the Mat exactly as before, checked against the
+      older toolbox): `edge_detail` (Outline detail: cells x (1 - 0.45 od),
+      ~3x faces at 1; `_edge` adds warped `_moss_noise3` at 2.2 and 4.4
+      cells to the coverage after the averaging, amp od (0.2 + 0.15
+      Ragged), height rescaled by `_prof`; relax passes 3 - 2 od; hot blocks
+      extended by 0.3 od), `breakup` (amount), `breakup_width` (m),
+      `breakup_size` (cushion spacing, m, >= 4 cells), `breakup_var`,
+      `breakup_height` (x the cushions' heights), `breakup_scale` (noise,
+      m), `breakup_mult` (Breakup scale: x width, size and noise together).
+      `_breakup` runs in `_finish` on all active points: a signed distance
+      from the field's outline walked along the cage (Dijkstra, metres,
+      out to 1.2 W), so it works the same for any falloff (patch edge,
+      fade, paint, Where it gathers: a margin-units band was a few cm wide
+      on a steep gather and showed nothing). The carpet's edge is pulled in
+      by B 0.45 W (1 + 0.8 noise), its height eased to it over max(3 cells,
+      0.2 W); cushions from a jittered world grid (`_cushions`, one per
+      cell, a column along the point's lift direction), density B
+      (u + 0.3 noise)^0.9 across the band (u 0 at 0.65 W out .. 1 at the
+      new edge) plus a 0.14 tail of single ones further out, radius smaller
+      outward, lumpy outlines, dome (1 - q^4)^2 heights <= 0.75 r; hot
+      buckets dilated 1.2 W. Presets "Carpet to cushions", "Thick roof
+      carpet". Tests `tests/test_moss_breakup.py`; renders
+      `tests/render_moss_breakup.py` + `.sh` (Arnold, cameras camTop1 /
+      camView1) into `tests/_out/moss_breakup`. Cost on the 5 x 3.5 m roof:
+      ~4-10 s cold either way (the field's analysis); faces 4.4k plain,
+      12.5k Outline detail 1, 7-10k Carpet to cushions. Not done (the
+      user asked, noted for next time): Thickness / Cushion height
+      previewing live while dragging (needs a points-only update: keep each
+      top point's base and lift direction, move points in the existing
+      mesh instead of rebuilding).
   - **Specks** (the user, same day: "tiny bits of moss that I could toggle
     on and off ... panels of glass ... bits of dirt or tiny bits of moss
     that have fallen down and stuck to a window"): layer type "Specks",

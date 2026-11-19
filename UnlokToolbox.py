@@ -33267,7 +33267,9 @@ MOSS_DEFAULTS = {
     "clump_hvar": 0.3, "clump_mounds": 0.15, "clump_ghvar": 0.3, "surface": "Auto", "surface_detail": 0.5,
     "exposure": 0.0, "feather": 0.0, "strays": 0.0, "ragged": 0.0, "clump_merge": 0.0, "shoot_form": "Star",
     "spill": 0.0, "render_as": "GED", "disp_height": 0.01, "edge_roll": 0.5, "cage_detail": 0.5,
-    "bumps": 0.5, "growths": 0.35}
+    "bumps": 0.5, "growths": 0.35, "edge_detail": 0.0, "breakup": 0.0, "breakup_width": 0.3,
+    "breakup_size": 0.08, "breakup_var": 0.6, "breakup_scale": 0.4, "breakup_mult": 1.0,
+    "breakup_height": 1.0}
 # the realism pass (2026-11-05): these start at what moss did before (old groups grow as they did); a new
 # Scatter Moss layer gets MOSS_NEW_LOOK (SC_TYPES "new"). Since 2026-11-09 that is the Mat (the user: make the
 # "more optimized ones with better geo" the default); MOSS_DEFAULTS keeps Carpet so older layers that never
@@ -37888,7 +37890,37 @@ class _MossMat(_MossBed):
         cd = clamp(float(s.get("cage_detail", 0.5)), 0.0, 1.0)
         self.bumps = clamp(float(s.get("bumps", 0.5)), 0.0, 1.0)
         self.growths = clamp(float(s.get("growths", 0.35)), 0.0, 1.0)
+        # Outline detail and Breakup (the user, 2026-11-19: "the edges end up like smooth rounded areas ... hard
+        # to make it higher-res and more jagged"; "a carpet with clumps fading from it ... falloff noise breakup").
+        # Both 0: the mat exactly as before (none of this runs)
+        self.od = clamp(float(s.get("edge_detail", 0.0)), 0.0, 1.0)
+        self.brk = clamp(float(s.get("breakup", 0.0)), 0.0, 1.0)
+        # Breakup scale (the user: "control of the scale of the breakup, for different scene sizes"): one
+        # factor on the band, the cushions and the noise together
+        self.bmul = clamp(float(s.get("breakup_mult", 1.0)), 0.01, 100.0)
+        self.bw = max(1e-3, float(s.get("breakup_width", 0.3))) * self.bmul / m if self.brk else 0.0  # the band
+        if self.od or self.brk:  # moss now reaches further out than the field's edge: more blocks can show it
+            lo = -0.04 - self.rn - 0.3 * self.od
+            mgs = self.mg
+            hot = set(key for key, v in self.buckets.items() if any(mgs[i] > lo for i in v))
+            if self.brk:  # cushions out to ~0.7 Breakup width past the outline: the buckets that far round
+                front, rk = set(hot), self.rk
+                for _ in range(int(math.ceil(1.2 * self.bw / rk))):
+                    nxt = set()
+                    for a, b, c in front:
+                        for da in (-1, 0, 1):
+                            for db in (-1, 0, 1):
+                                for dc in (-1, 0, 1):
+                                    key = (a + da, b + db, c + dc)
+                                    if key not in hot and key in self.buckets:
+                                        nxt.add(key)
+                    hot |= nxt
+                    front = nxt
+                    if not front:
+                        break
+            self.hot = hot
         et = self.R * (1.0 - 0.75 * cd) * MOSS_MAT_CELL[self.render] * (2.0 if draft else 1.0)
+        et *= 1.0 - 0.45 * self.od  # Outline detail: finer cells (1: ~3.3x the faces)
         # shapes want a few more cells (none: as simple); in steps, so a Bumps / Growths edit keeps the cached
         # layout (a factor that followed the sliders laid the whole cage out again on every change)
         sm = max(self.bumps, self.growths)
@@ -37901,6 +37933,19 @@ class _MossMat(_MossBed):
         if _MI_BUDGET["on"] and self.est > MOSS_WARN_CELLS:
             raise ScatterTooBig("about %s moss mat cells" % format(int(self.est), ","))
         self.et = et
+        # Outline detail: noise added after the field's averaging (which blurs anything finer than ~Clump size),
+        # as fine as the cells hold (about two cells), warped into bays and spits; fewer relax passes
+        self.oamp = self.od * (0.2 + 0.15 * clamp(float(s.get("ragged", 0.0)), 0.0, 1.0))
+        self.os = 1.0 / (2.2 * et)
+        self.relax = 3 - int(round(2.0 * self.od))
+        if self.brk:  # Breakup: where the field falls off, the carpet breaks into cushions, smaller and sparser out
+            self.bsz = max(float(s.get("breakup_size", 0.08)) * self.bmul / m, 4.0 * et)  # cushion spacing (>= a
+            # few cells)
+            self.bvar = clamp(float(s.get("breakup_var", 0.6)), 0.0, 1.0)
+            self.bsc = 1.0 / max(1e-4, float(s.get("breakup_scale", 0.4)) * self.bmul / m)
+            self.rmin = 1.1 * et  # a cushion smaller than this would be a speck of a cell or two: none
+            self.bh = clamp(float(s.get("breakup_height", 1.0)), 0.0, 5.0)  # Cushion height (x their own)
+            self.bnear = {}
         self.rim = roll * (0.35 * self.H + 0.5 * self.D)  # the edge's thickness before it rolls under
         self.wroll = max(0.5 * et, 1.5 * self.rim)  # how far out it rolls
         self.depth = 1.25 * self.D + 0.003 / m  # how far under the surface it tucks
@@ -38086,7 +38131,180 @@ class _MossMat(_MossBed):
         room = 1e30 if rec[12] is None else rec[12]
         if idx:
             room = min(room, min(map(self.ob2.__getitem__, idx)))
+        if self.oamp and mg > -1.0:
+            hf, c, mg = self._edge(rec, hf, c, mg)
         return hf, c, mg + 0.03, room
+
+    def _prof(self, mg):
+        """_value's height profile across the edge (x Thickness, shelter,
+        lumps): 0 outside .. 1 well inside."""
+        fe = self.feather
+        c = clamp(mg / (0.3 * (1.0 + 0.5 * fe)), 0.0, 1.0)
+        c = c * c * (3.0 - 2.0 * c)
+        pr = clamp((mg + 0.03) / (0.3 * (1.0 + fe)), 0.0, 1.0)
+        if pr <= 0.0:
+            return 0.0, c
+        pr = pr * pr * (3.0 - 2.0 * pr)
+        pr = math.sqrt(pr) if not fe else (1.0 - 0.6 * fe) * math.sqrt(pr) + 0.6 * fe * pr ** 1.2
+        return pr * (0.5 + 0.5 * c), c
+
+    def _edge(self, rec, hf, c, mg):
+        """Outline detail at a grid point: (lift, core, coverage before the
+        + 0.03), fine warped noise added to the coverage (its height follows
+        _value's profile across the edge)."""
+        x, y, z = rec[0], rec[1], rec[2]
+        if len(rec) < 14:
+            rec.append(None)
+        m0 = mg
+        if mg > -0.35:
+            v = rec[13]
+            if v is None:
+                s = self.os
+                h = 0.5 * s
+                sd = self.seed + 83
+                w = 0.9 / s  # warped by about two cells: bays and spits, not a wobble
+                wx = x + w * _moss_noise3(x * h, y * h, z * h, sd)
+                wy = y + w * _moss_noise3(x * h + 5.3, y * h, z * h, sd + 1)
+                wz = z + w * _moss_noise3(x * h, y * h, z * h - 7.1, sd + 2)
+                v = rec[13] = 0.6 * _moss_noise3(wx * s, wy * s, wz * s, sd + 3) + \
+                    0.55 * _moss_noise3(wx * h, wy * h, wz * h, sd + 4)
+            mg += self.oamp * v
+        if mg == m0:
+            return hf, c, mg
+        p0 = self._prof(m0)[0]
+        p1, c1 = self._prof(mg)
+        hf = (hf + self.tuck) * p1 / p0 - self.tuck if p0 > 1e-6 else -self.tuck
+        return hf, c1, mg
+
+    def _breakup(self, BP, RC, HF, C, F, quads):
+        """Breakup over the active cells' points (in place): each point's
+        distance from the outline the field gives (walked along the cage, in
+        metres, + inside, - outside), the solid carpet pulled in from it by a
+        noisy amount (Breakup noise) and cushions over a band out to ~0.65
+        Breakup width past it: one per cell of a jittered world grid, fewer
+        and smaller further out, each a dome with a lumpy outline. Any
+        falloff (a patch's edge, Height fade, paint, Where it gathers) breaks
+        up the same way, however steep it is in the field."""
+        W, B = self.bw, self.brk
+        nb = {}
+        for vs in quads:
+            for i in range(4):
+                a, b = vs[i], vs[(i + 1) % 4]
+                nb.setdefault(a, set()).add(b)
+                nb.setdefault(b, set()).add(a)
+        # signed distance from the outline: seeded where an edge crosses zero, walked out both ways
+        lim = 1.2 * W
+        dist = {}
+        heap = []
+        for a, ns in nb.items():
+            fa = F[a]
+            for b in ns:
+                fb = F[b]
+                if (fa > 0.0) != (fb > 0.0):
+                    pa, pb = BP[a], BP[b]
+                    t = fa / (fa - fb)
+                    d = t * math.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2)
+                    if d < dist.get(a, 1e30):
+                        dist[a] = d
+        heap = [(d, a) for a, d in dist.items()]
+        heapq.heapify(heap)
+        while heap:
+            d, a = heapq.heappop(heap)
+            if d > dist.get(a, 1e30) or d >= lim:
+                continue
+            ina = F[a] > 0.0
+            pa = BP[a]
+            for b in nb.get(a, ()):
+                if (F[b] > 0.0) != ina:
+                    continue
+                pb = BP[b]
+                nd = d + math.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2)
+                if nd < dist.get(b, 1e30):
+                    dist[b] = nd
+                    heapq.heappush(heap, (nd, b))
+        s, sd0, gs, H, tuck = self.bsc, self.seed + 89, self.bsz, self.H, self.tuck
+        ramp = max(3.0 * self.et, 0.2 * W)
+        for a in nb:
+            f0 = F[a]
+            if f0 <= -0.95:  # pressed under something, painted out, past the Slope limit: none
+                continue
+            sdist = dist.get(a, lim)
+            sdist = sdist if f0 > 0.0 else -sdist
+            if sdist >= lim:
+                continue  # well inside: as it was
+            x, y, z = BP[a]
+            nz = clamp(0.75 * _moss_noise3(x * s, y * s, z * s, sd0) +
+                       0.4 * _moss_noise3(x * s * 2.3, y * s * 2.3, z * s * 2.3, sd0 + 1), -1.0, 1.0)
+            pull = B * 0.45 * W * (1.0 + 0.8 * nz)  # the solid carpet's edge, pulled in by a noisy amount
+            fc = min(f0, 0.3 * (sdist - pull) / W)
+            hc = HF[a]
+            cc = C[a]
+            if sdist - pull < ramp:  # its thickness eases down to the new edge
+                k = clamp((sdist - pull) / ramp, 0.0, 1.0)
+                k = k * k * (3.0 - 2.0 * k)
+                hc = (hc + tuck) * k - tuck
+                cc *= k
+            u = (sdist + 0.65 * W) / (0.65 * W + pull)  # 0 where the cushions end .. 1 at the carpet's edge
+            dens = clamp(u + 0.3 * nz, -0.5, 1.0)  # past the band: a thin tail of single small cushions
+            dens = B * (dens ** 0.9 if dens > 0.0 else 0.14 * (1.0 + 2.0 * dens))
+            fk = hk = ck = -1.0
+            if dens > 0.0:
+                uu = min(1.0, max(0.0, u))
+                rc = RC[a]
+                dx, dy, dz = rc[3], rc[4], rc[5]
+                for cx, cy, cz, r0, kc, hr, csd in self._cushions(int(math.floor(x / gs)), int(math.floor(y / gs)),
+                                                                   int(math.floor(z / gs))):
+                    e = (dens - kc) / 0.2
+                    if e <= 0.0:
+                        continue
+                    ex, ey, ez = x - cx, y - cy, z - cz
+                    al = ex * dx + ey * dy + ez * dz
+                    if al > 0.5 * gs or al < -0.5 * gs:  # one cushion a column across the surface
+                        continue
+                    rad = r0 * (0.55 + 0.45 * uu) * (0.75 + 0.25 * min(1.0, e))  # smaller further out
+                    if rad < self.rmin:
+                        continue
+                    d2 = ex * ex + ey * ey + ez * ez - al * al
+                    if d2 >= 1.6 * rad * rad:
+                        continue
+                    kk = 1.3 / r0
+                    rr = rad * (1.0 + 0.24 * _moss_noise3(x * kk, y * kk, z * kk, csd))  # lumpy, not a circle
+                    if d2 >= rr * rr:
+                        continue
+                    q = math.sqrt(d2) / rr
+                    if 0.3 * (1.0 - q) > fk:
+                        fk = 0.3 * (1.0 - q)
+                    q2 = q * q
+                    hh = self.bh * min(0.75 * rr, H * (1.0 + 0.9 * hr) * (0.6 + 0.4 * uu)) * (1.0 - q2 * q2) ** 2
+                    if hh > hk:
+                        hk = hh
+                    if 2.0 * (1.0 - q) > ck:
+                        ck = min(1.0, 2.0 * (1.0 - q))
+            if fk > 0.0:
+                F[a] = max(fc, fk)
+                HF[a] = max(hc, hk - tuck)
+                C[a] = max(cc, 0.8 * ck)
+            else:
+                F[a], HF[a], C[a] = fc, hc, cc
+
+    def _cushions(self, ci, cj, ck):
+        """Breakup's cushions in grid cell (ci, cj, ck) and its 26
+        neighbours: (x, y, z, radius, threshold, height random, noise seed),
+        one per cell (a jittered world grid), cached per cell."""
+        key = (ci, cj, ck)
+        got = self.bnear.get(key)
+        if got is None:
+            gs, var, sd = self.bsz, self.bvar, self.seed + 97
+            got = []
+            for i in (ci - 1, ci, ci + 1):
+                for j in (cj - 1, cj, cj + 1):
+                    for k in (ck - 1, ck, ck + 1):
+                        r = _rand12(sd, i, j, k)
+                        got.append(((i + 0.1 + 0.8 * r[1]) * gs, (j + 0.1 + 0.8 * r[2]) * gs,
+                                    (k + 0.1 + 0.8 * r[3]) * gs, 0.6 * gs * (1.0 - 0.7 * var * r[4] ** 0.8),
+                                    r[5], r[6], sd + int(r[7] * 1000)))
+            got = self.bnear[key] = tuple(got)
+        return got
 
     def _dome(self, layer, i, j, k):
         """The dome in grid cell (i, j, k) of a layer (0: bumps, 1: growths):
@@ -38197,7 +38415,7 @@ class _MossMat(_MossBed):
         """Keep the cells inside the moss, round its outline, lift it, roll
         its edge under and lay out its UVs."""
         # every active cell's points, numbered over all the meshes
-        BP, BN, HF, C, F, RM, VQ = [], [], [], [], [], [], []
+        BP, BN, HF, C, F, RM, VQ, RC = [], [], [], [], [], [], [], []
         quads, fkeys = [], []
         seen = {}
         for g, cells in self.active:
@@ -38219,12 +38437,15 @@ class _MossMat(_MossBed):
                         F.append(f)
                         RM.append(room)
                         VQ.append(query)
+                        RC.append(recs[v])
                     row.append(o)
                 quads.append(row)
                 fkeys.append(cell[4])
         nq = len(quads)
         if not nq:
             return
+        if self.brk:
+            self._breakup(BP, RC, HF, C, F, quads)
         # edges -> cells (each edge twice at most on a manifold surface)
         emap = {}
         for q, vs in enumerate(quads):
@@ -38345,7 +38566,7 @@ class _MossMat(_MossBed):
                 moved[v] = (sx / cnt, sy / cnt, sz / cnt)
         for v, p in moved.items():
             BP[v] = p
-        for _ in range(3):
+        for _ in range(self.relax):  # (3; fewer with Outline detail, which wants its jags kept)
             new = {}
             for lp in loops:
                 cnt = len(lp)
@@ -42013,6 +42234,15 @@ MI_PRESETS = {
                         "growths": 0.0}),
         ("Lumpy mat", {"style": "Mat", "coverage": 0.7, "render_as": "GED", "lumps": 0.7, "bumps": 0.85,
                        "growths": 0.7, "thickness": 0.03}),
+        # the user, 2026-11-19: "a carpet with clumps fading from it" (a flat roof: a dense carpet breaking up into
+        # cushions, then single small ones on the bare roof) and a thick soft carpet over a whole roof
+        ("Carpet to cushions", {"style": "Mat", "coverage": 0.6, "render_as": "GED", "lumps": 0.5, "bumps": 0.7,
+                                "growths": 0.35, "thickness": 0.03, "edge_detail": 0.6, "ragged": 0.8,
+                                "breakup": 0.85, "breakup_width": 0.6, "breakup_size": 0.08, "breakup_var": 0.7,
+                                "breakup_scale": 0.5}),
+        ("Thick roof carpet", {"style": "Mat", "coverage": 0.92, "render_as": "GED", "lumps": 0.5, "bumps": 0.6,
+                               "growths": 0.2, "thickness": 0.04, "patchiness": 0.3, "edge_detail": 0.5,
+                               "breakup": 0.5, "breakup_width": 0.3, "breakup_size": 0.08}),
         ("Jungle roof", {}),
         ("Crevices only", {"coverage": 0.35, "crevices": 1.0, "patchiness": 0.3, "clump_size": 0.035,
                            "thickness": 0.015, "edges": 0.8, "lumps": 0.5}),
@@ -45593,6 +45823,34 @@ SC_FIELDS = {
                 "Mat: inflated, steep-sided bulges rising out of the mat, running together where they meet "
                 "(0 = none; 1 = many, taller). A finer Cage detail makes them smaller. Bumps 0 and Growths 0: "
                 "the simplest mat."),
+    "edge_detail": ("Outline detail", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Mat: a finer, jagged outline instead of smooth rounded edges: smaller cells (1 = about 3x "
+                    "the faces, about 2x the build time) and fine warped noise on the edge, more with Ragged "
+                    "outline. 0 = as before."),
+    "breakup": ("Breakup", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                "Mat: where the moss falls off (a patch's edge, Height fade, paint, Where it gathers), the solid "
+                "carpet breaks up into separate cushions, smaller and fewer further out (0 = off: the carpet "
+                "just thins)."),
+    "breakup_width": ("Breakup width", _scf(0.01, 5.0, 0.05, 1.0, 2, 0.01),
+                      "Mat Breakup: how wide the falloff is, in metres: the solid carpet's edge pulls in by up "
+                      "to about half of this and its cushions run out about two thirds of it past where the "
+                      "edge was."),
+    "breakup_size": ("Cushion size", _scf(0.005, 1.0, 0.01, 0.2, 3, 0.005),
+                     "Mat Breakup: how far apart the cushions are, in metres (the biggest are about this "
+                     "across). Never finer than a few cells: raise Outline detail or Cage detail for small "
+                     "cushions."),
+    "breakup_mult": ("Breakup scale", _scf(0.01, 100.0, 0.1, 10.0, 2, 0.05),
+                     "Mat Breakup: scales Breakup width, Cushion size and Breakup noise together, for a bigger "
+                     "or smaller scene (2 = everything twice as big). Cushions are never finer than a few mat "
+                     "cells: for small ones raise Outline detail or Cage detail."),
+    "breakup_height": ("Cushion height", _scf(0.0, 5.0, 0.0, 3.0, 2, 0.05),
+                       "Mat Breakup: how tall the cushions stand, as a share of their own height (from "
+                       "Thickness, never taller than three quarters of their radius before this). 0 = flat."),
+    "breakup_var": ("Cushion sizes", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                    "Mat Breakup: how much the cushions' sizes differ (0 = all alike; 1 = from small to big)."),
+    "breakup_scale": ("Breakup noise", _scf(0.01, 5.0, 0.05, 1.5, 3, 0.01),
+                      "Mat Breakup: the size of the noise that makes the carpet's edge and the cushions gather "
+                      "in some places and thin out in others, in metres."),
     "clump_group": ("Grouping", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
                     "Clumps: how much the cushions gather into groups, with bare gaps between the groups "
                     "(0 = evenly spaced)."),
@@ -45864,6 +46122,10 @@ SC_WORDS = {  # key (or (type, key)) -> the words under the slider's two ends
     "to_angle": ("soft folds count", "only sharp folds"),
     "disp_height": ("flat", "deep"), "edge_roll": ("flat edge", "rolled under"), "cage_detail": ("light", "dense"),
     "bumps": ("smooth", "bumpy"), "growths": ("none", "lots"), "clump_group": ("even", "grouped"),
+    "edge_detail": ("smooth", "fine, jagged"), "breakup": ("off", "all cushions"), "breakup_width": ("narrow", "wide"),
+    "breakup_size": ("small", "big"), "breakup_var": ("all alike", "varied"),
+    "breakup_scale": ("fine", "broad"), "breakup_mult": ("smaller", "bigger"),
+    "breakup_height": ("flat", "tall"),
     "clump_group_size": ("small groups", "big groups"), "clump_pack": ("loose", "packed"),
     "clump_hvar": ("all alike", "varied"), "clump_mounds": ("none", "lots"), "clump_ghvar": ("all alike", "varied"),
     "clump_size": ("small", "big"), "thickness": ("thin", "thick"), "lumps": ("smooth", "lumpy"),
@@ -45901,6 +46163,9 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
              ("Clumps", True, ["clump_group", "clump_group_size", "clump_pack", "clump_merge", "clump_hvar",
                                "clump_mounds", "clump_ghvar"]),
              ("Mat", True, ["render_as", "disp_height", "edge_roll", "cage_detail", "bumps", "growths"]),
+             ("Outline and breakup", True, ["edge_detail", "breakup", "breakup_mult", "breakup_width",
+                                            "breakup_size", "breakup_var", "breakup_height",
+                                            "breakup_scale"]),
              ("Where it grows", True, _SC_WHERE + ["exposure", "spill"]),
              ("Edges", False, ["feather", "ragged", "strays"]),
              ("Surface", False, ["surface", "surface_detail"]),
@@ -46600,6 +46865,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self.draw_sec = {}
         self.clump_sec = {}
         self.mat_sec = {}
+        self.brk_sec = {}  # Outline and breakup (Mat only)
         self.fade_sec = {}
         self.row_lbl = {}
         self._build()
@@ -46991,6 +47257,8 @@ class ScatterPanel(QtWidgets.QWidget):
                 self.clump_sec[typ] = sec
             if title == "Mat":
                 self.mat_sec[typ] = sec
+            if title == "Outline and breakup":
+                self.brk_sec[typ] = sec
             if title == _SC_FADE[0]:
                 self.fade_sec[typ] = sec
             for key in keys:
@@ -47222,6 +47490,9 @@ class ScatterPanel(QtWidgets.QWidget):
             sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[2])
             self.f[typ]["disp_height"].setVisible(self.f[typ]["render_as"].value() == "GED")
             self.row_lbl[(typ, "disp_height")].setVisible(self.f[typ]["render_as"].value() == "GED")
+        sec = self.brk_sec.get(typ)
+        if sec is not None:
+            sec.setVisible(self.f[typ]["style"].value() == MOSS_STYLES[2])
         if "fade" in self.f[typ]:
             on = self.f[typ]["fade"].value() != MI_FADES[0]
             metres = self.f[typ]["fade_by"].value() == MI_FADE_BY[1]
