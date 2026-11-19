@@ -1517,6 +1517,21 @@
     while drafts are left, the label spells out "no shoots, strands or
     capsules", and a DRAFT `next_banner` (tone warn) after painting /
     drawing / paused, before the others.
+  - **Settle later** (2026-11-19; the user: "feels very heavy when you
+    start getting like 3 or 4 layers"; measured in
+    `docs/responsiveness-plan.md`, `tests/bench_scatter_layers.py`): an
+    edit's fixed cost is ~30 ms, the weight was new leaves / grass layers
+    resting on moss and On layers below, so an edit low in the stack grew
+    every layer on it. `sc_build(settle=False)` (from `sc_update` /
+    `sc_regrow`) keeps a layer whose key missed only by its ground (same
+    core JSON + surfaces as `_SC_PREV`) as it was, `report["stale"]`;
+    `_SC_STALE[root]` ids are never read back (filtered from grown, left
+    out of `unlokScatterGrown`) nor cached under the new ground. `sc_stale`,
+    `sc_settle` (not while paused); Play and Bake settle first. Panel: live
+    edits pass settle=False, `_settle_later` -> `_settle_timer` (350 ms,
+    waits while a slider is held / an edit is queued) -> `sc_settle`.
+    `tests/test_scatter_settle.py`. Moss edit 2.4 -> 1.6 s live (+0.8 s
+    settle on release), leaves 0.8 -> 0.4 s.
   - **Height fade** (the user: "moss and ivy growing up columns from the
     bottom fading out towards the top"): `MI_FADE_DEFAULTS` (fade, fade_by,
     fade_height, fade_part, fade_soft) in all three defaults and

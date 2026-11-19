@@ -42567,6 +42567,13 @@ _SC_HOLD = {"on": False, "base": {}, "seen": {}, "force": set()}
 # Full detail grows the drafts properly. later: groups Full detail was
 # pressed for while paused (grown at Play).
 _SC_DRAFT = {"on": False, "later": set()}
+# Settle later (the user, 2026-11-19: "feels very heavy when you start getting like 3 or 4 layers"): new leaves /
+# grass layers rest on moss and on the layers below, so a live edit low in the stack grew every layer resting on
+# it again, in the same edit. A live edit (settle=False) grows only what changed itself and keeps a resting
+# layer as it was last grown (_SC_PREV); the group is noted in _SC_STALE and grows them (sc_settle) once the
+# slider is let go.
+_SC_PREV = collections.OrderedDict()  # (group, layer id) -> ((layer core JSON, surface key), its last parts)
+_SC_STALE = {}  # group -> ids of layers shown as last grown, on what lay under them then
 
 
 def sc_type(name):
@@ -43881,16 +43888,18 @@ def _sc_place_udims(layers, combined, order, start):
     return placed
 
 
-def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
+def sc_build(root, data, surf=None, only=None, readback=True, draft=None, settle=True):
     """Every on layer's parts for a group, from the cache where a layer and
     its surfaces are unchanged (only: layer ids to rebuild regardless),
     else, when the parts in the scene show it as it is (a scene just
     opened), read back from them (readback=False: Regrow, grow them all),
     each part in its own UDIM tiles from the group's Start UDIM, in layer
     order. A layer that grows is a draft when Draft is on (draft: True /
-    False overrides it); one that doesn't keeps what it is. Returns
-    ({"<id>/<part>": mesh}, {"udims", counts..., "layers": {id: counts}},
-    meshes)."""
+    False overrides it); one that doesn't keeps what it is. settle=False
+    (a live edit): a layer that would grow again only because what it
+    rests on changed keeps its last parts (report "stale": their ids).
+    Returns ({"<id>/<part>": mesh}, {"udims", counts..., "layers": {id:
+    counts}, "stale"}, meshes)."""
     if draft is None:
         draft = _SC_DRAFT["on"]
     meshes = sc_surfaces(data)
@@ -43906,6 +43915,9 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
     skey = skey + _sc_blocker_keys(blocks)  # a blocker moved or resized grows the layers again, like a surface
     report["skey"] = skey
     grown = _sc_grown_layers(root, data, skey) if readback else {}
+    was_stale = _SC_STALE.get(root) or set()
+    grown = dict((k, v) for k, v in grown.items() if k not in was_stale)  # their parts lag: never read back
+    stale = []
     saved = {}
     if grown and cmds.attributeQuery(SC_COUNTS, node=root, exists=True):
         try:
@@ -43943,6 +43955,12 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
                 not (on_moss and fresh) and not (on_below and fresh_below) and \
                 not (on_below and _sc_under_ids(list(grown.values()), lid) != _sc_under_ids(layers, lid)):
             hit = _sc_read_layer(root, layer, saved.get(lid))
+        held = False
+        if hit is None and ground and not settle and not (only and lid in only):
+            prev = _SC_PREV.get((root, lid))  # only what it rests on changed: as it was, grown at sc_settle
+            if prev is not None and prev[0] == key[2:4]:
+                hit, held = prev[1], True
+                stale.append(lid)
         if hit is None:
             kw = {"rest_on": ground} if ground else {}
             hit = _sc_build_layer(layer, surf, draft, blocks=blocks, **kw) if surf.items else ({}, {})
@@ -43954,10 +43972,15 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             tall = MOSS_DETAIL.get(ls.get("detail"), MOSS_DETAIL["Normal"])[1] and float(ls.get("strands", 0)) > 0
             rest.append((hit[0]["moss"], 0.4 * float(ls.get("strand_length", 0.0)) / scene_m_per_unit()
                          if tall else 0.0))
-        if hit is not _SC_BUILT.get(key):
-            _SC_BUILT[key] = hit
-            while len(_SC_BUILT) > 32:
-                _SC_BUILT.popitem(last=False)
+        if not held:  # (a held layer's parts never go in the cache under what it rests on now)
+            _SC_PREV.pop((root, lid), None)
+            _SC_PREV[(root, lid)] = (key[2:4], hit)
+            while len(_SC_PREV) > 32:
+                _SC_PREV.popitem(last=False)
+            if hit is not _SC_BUILT.get(key):
+                _SC_BUILT[key] = hit
+                while len(_SC_BUILT) > 32:
+                    _SC_BUILT.popitem(last=False)
         parts, counts = hit
         report["layers"][lid] = dict((k, v) for k, v in counts.items() if k != "read")
         report["read"] += 1 if counts.get("read") else 0
@@ -43989,6 +44012,7 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             if du or dv:
                 m = placed[key]
                 placed[key] = tuple(m[:3]) + ([u + du for u in m[3]], [v + dv for v in m[4]]) + tuple(m[5:])
+    report["stale"] = stale
     return placed, report, meshes
 
 
@@ -45052,13 +45076,15 @@ def _sc_write_layer_shoots(root, layer, placed, shoots, parts):
     return sum(per[i] for i in mesh[7]["index"])
 
 
-def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
+def sc_regrow(root, only=None, readback=True, budget=True, draft=None, settle=True):
     """Grow a group again from its JSON (outside the undo queue), in the
     Working window (Esc / Cancel stops it). budget: a build that would take
     a minute or more isn't started (live edits: the user changed one
     setting on a big scatter and Maya seemed frozen). Stopped, nothing
-    changes and it pauses (the edits are kept: Play grows them). Returns
-    its report ("held" and "stopped" when stopped)."""
+    changes and it pauses (the edits are kept: Play grows them).
+    settle=False: layers resting on one that changed stay as they were
+    (sc_build; report "stale", sc_settle grows them). Returns its report
+    ("held" and "stopped" when stopped)."""
     sc_fix_box(root)
     _sc_note(root)
     data = sc_data(root)
@@ -45067,19 +45093,30 @@ def sc_regrow(root, only=None, readback=True, budget=True, draft=None):
         with Progress("Scatter: growing %s" % short_name(root), [("grow", 1)]) as pr:
             pr.stage("grow", 1, "Growing")
             with NoUndo(), GcPaused():
-                placed, report, meshes = sc_build(root, data, only=only, readback=readback, draft=draft)
+                placed, report, meshes = sc_build(root, data, only=only, readback=readback, draft=draft,
+                                                  settle=settle)
     except (Cancelled, ScatterTooBig) as exc:
         return _sc_stopped(root, data, exc)
     finally:
         _MI_BUDGET["on"] = False
     layers = report.pop("layers", {})
     skey = report.pop("skey", None)
+    stale = set(report.get("stale") or ())
+    if stale:
+        _SC_STALE[root] = stale
+    else:
+        _SC_STALE.pop(root, None)
     with NoUndo():
         report["faces"] = _sc_write(root, data, placed, meshes)
         stamp = "%d" % random.randint(1, 1 << 30)
         cmds.setAttr(root + "." + SC_STAMP, stamp, type="string")
         now = cmds.getAttr(root + "." + SC_ATTR)
-        _sc_set_text(root, SC_GROWN, now)
+        grown = now
+        if stale:  # (saved like this, a scene opened again grows them, never reads them back)
+            grown = dict(data)
+            grown["layers"] = [l for l in data.get("layers", []) if l.get("id") not in stale]
+            grown = json.dumps(grown)
+        _sc_set_text(root, SC_GROWN, grown)
         _sc_set_text(root, SC_COUNTS, json.dumps(layers, sort_keys=True))
         if skey is not None:
             _sc_set_text(root, SC_SURF, json.dumps(skey))
@@ -45254,7 +45291,7 @@ def sc_play():
     for k, root in enumerate(roots):
         last = _SC_LAST.get(root)
         now = (cmds.getAttr(root + "." + SC_ATTR), cmds.getAttr(root + "." + SC_STAMP) or "")
-        if root in hold["force"] or (last is not None and last != now):
+        if root in hold["force"] or (last is not None and last != now) or _SC_STALE.get(root):
             rep = sc_regrow(root, readback=root not in hold["force"], budget=False)
             reps.append(rep)
             if rep.get("stopped"):  # cancelled: paused again, the rest wait too
@@ -45510,12 +45547,13 @@ def sc_set_surfaces(root, add=(), remove=()):
     return _sc_change(root, "Scatter surfaces", edit)
 
 
-def sc_update(root, lid=None, change=None, group_change=None, draft=None, layer_change=None):
+def sc_update(root, lid=None, change=None, group_change=None, draft=None, layer_change=None, settle=True):
     """Live edit (out of the undo queue, like the other tools' sliders): a
     layer's settings (change), keys on the layer itself (layer_change: udim,
     its own Start UDIM, 0 / None = with the group) or the group's
     (group_change: udim), then the regrow of that layer (while paused:
-    saved, grown at Play; draft: as sc_regrow's). Returns the report."""
+    saved, grown at Play; draft, settle: as sc_regrow's). Returns the
+    report."""
     _sc_note(root)
     before = cmds.getAttr(root + "." + SC_ATTR) if _SC_HOLD["on"] else None
     data = sc_data(root)
@@ -45537,7 +45575,26 @@ def sc_update(root, lid=None, change=None, group_change=None, draft=None, layer_
         _sc_set(root, data)
     if _SC_HOLD["on"]:
         return _sc_held(root, before)
-    return sc_regrow(root, draft=draft)
+    return sc_regrow(root, draft=draft, settle=settle)
+
+
+def sc_stale(root):
+    """Ids of a group's layers still shown as grown on what lay under them
+    before a live edit (settle=False), waiting for sc_settle."""
+    return set(_SC_STALE.get(root) or ())
+
+
+def sc_settle(root):
+    """Grow the layers a live edit left resting on what was under them
+    (only those, and what rests on them: the rest come from the cache).
+    Returns the report, or None when there's nothing to settle or it's
+    paused (Play grows them)."""
+    if not _SC_STALE.get(root) or _SC_HOLD["on"]:
+        return None
+    if not is_scatter(root):
+        _SC_STALE.pop(root, None)
+        return None
+    return sc_regrow(root)
 
 
 def sc_surface_names(data):
@@ -45672,7 +45729,7 @@ def bake_scatter(roots):
     groups baked."""
     stopped = set()
     for root in roots:
-        if _SC_HOLD["on"] and sc_pending(root):
+        if (_SC_HOLD["on"] and sc_pending(root)) or _SC_STALE.get(root):  # (resting layers settle first too)
             if sc_regrow(root, budget=False, draft=False).get("stopped"):
                 stopped.add(root)
                 continue
@@ -47042,6 +47099,13 @@ class ScatterPanel(QtWidgets.QWidget):
         self._edit_timer.setSingleShot(True)
         self._edit_timer.setInterval(60)
         self._edit_timer.timeout.connect(_guarded(self._edit_timer, self._apply_pending))
+        # layers resting on the one a live edit grew stay as they were (sc_update settle=False) until the
+        # edits stop: then this grows them (sc_settle)
+        self._settle_timer = QtCore.QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(350)
+        self._settle_timer.timeout.connect(_guarded(self._settle_timer, self._settle))
+        self._unsettled = []  # groups with layers waiting to settle
         self._slow = False  # the last update took a while: a slider drag updates once, on release
         # each layer's last update time: a drag on a layer known to be slow drafts from its first tick (it
         # used to grow one full update first, a freeze of seconds on a big moss layer, before drafting)
@@ -48004,9 +48068,10 @@ class ScatterPanel(QtWidgets.QWidget):
                 keys, self._pending = self._pending, set()
                 values = self._settings()
                 t0 = time.time()
-                rep = sc_update(self._root, self._lid, {k: values[k] for k in keys}, draft=True)
+                rep = sc_update(self._root, self._lid, {k: values[k] for k in keys}, draft=True, settle=False)
                 self._drag_draft = True
                 self._report("Draft (let go for full detail)", rep, t0)
+                self._settle_later(rep)
             self._edit_timer.start()
             return
         keys, self._pending = self._pending, set()
@@ -48029,13 +48094,44 @@ class ScatterPanel(QtWidgets.QWidget):
         t0 = time.time()
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            rep = sc_update(self._root, self._lid, {k: values[k] for k in keys})
+            rep = sc_update(self._root, self._lid, {k: values[k] for k in keys}, settle=False)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._drag_draft = False
         self._took[(self._root, self._lid)] = took = time.time() - t0
         self._slow = took > 0.3
         self._report("Updated", rep, t0)
+        self._settle_later(rep)
+
+    def _settle_later(self, rep):
+        """After a live edit that left resting layers as they were: grow
+        them once the edits stop."""
+        root = (rep or {}).get("root")
+        if root and sc_stale(root):
+            if root not in self._unsettled:
+                self._unsettled.append(root)
+            self._settle_timer.start()
+
+    @ui_safe
+    def _settle(self):
+        """Grow the layers live edits left resting on what was under them,
+        unless an edit is still coming (a slider held, an edit queued): then
+        later."""
+        if self._pending or self._edit_timer.isActive() or self._dragging():
+            self._settle_timer.start()
+            return
+        roots, self._unsettled = self._unsettled, []
+        for root in roots:
+            if not is_scatter(root) or not sc_stale(root) or sc_paused():
+                continue  # (paused: Play grows them)
+            t0 = time.time()
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            try:
+                rep = sc_settle(root)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            if rep is not None and root == self._root:
+                self._report("Settled the resting layers of", rep, t0)
 
     def _udim_changed(self):
         if self._filling or not self._alive():
@@ -48698,8 +48794,11 @@ class ScatterPanel(QtWidgets.QWidget):
         _registry()["jobs"].extend(self._jobs)
 
     def shutdown(self):
-        for timer in (self._sel_timer, self._edit_timer, self._undo_timer):
+        for timer in (self._sel_timer, self._edit_timer, self._undo_timer, self._settle_timer):
             timer.stop()
+        # (closed mid-wait: no growing while closing; the group stays in _SC_STALE, so Play / Bake / the next
+        # regrow settle it, and a scene saved like this grows those layers when it's next grown)
+        self._unsettled = []
         try:
             self.drawer.shutdown()
         except Exception:
