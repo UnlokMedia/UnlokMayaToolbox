@@ -29,7 +29,7 @@ The two are connected, but they can sit in different places in the Outliner. The
 
 There will probably also be quite a few wireframe `_CTL` boxes (`scatteredObjects####_CTL`). Each one belongs to the scatter group with the same number. Select a `_CTL` box to select and control its scatter group without having to pick the output geometry.
 
-![A scene with several scatter groups, each with its yellow _CTL box](images/scene_ctl_boxes.png)
+![A scene with several scatter groups, each with its _CTL box](images/scene_ctl_boxes.png)
 
 *The Maya viewport with three scatter groups, each in its own `_CTL` box (thin blue lines):*
 - *Moss, grass and leaves on four ground tiles that were selected together, so one big box holds all four. It's selected here, so it shows green.*
