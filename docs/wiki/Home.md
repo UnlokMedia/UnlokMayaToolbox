@@ -1,6 +1,7 @@
 # Unlok Maya Toolbox: artist guide
 
-A quick guide for artists picking up Unlok scenes. The full reference for every
+A quick guide for artists working on any scenes using scatters, roofs or other
+procedurals from the Unlok Toolbox plugin for Maya. The full reference for every
 setting is in the [README](../../README.md); this guide covers getting set up and
 the tools you'll use most.
 
@@ -23,4 +24,4 @@ the tools you'll use most.
 
 The toolbox needs Maya 2023 or newer (also runs on 2024 and 2025). It has no installer and no extra files or plug-ins, so it works on locked-down machines.
 
-**Scenes are in decimetres.** Unlok scenes are set to "cm" in Maya, but the toolbox reads them as 1 unit = 10 cm. Don't change the scene unit.
+**Scenes are in decimetres.** Any scenes using scatters, roofs or other procedurals from the Unlok Toolbox plugin for Maya are set to "cm" in Maya, but the toolbox reads them as 1 unit = 10 cm. Don't change the scene unit.

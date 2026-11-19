@@ -33,7 +33,8 @@ button with an icon that always runs the repo's current `UnlokToolbox.py`.
 
 ## Scale: decimetres
 
-Unlok scenes use 1 scene unit = 10 cm. Maya has no decimetre setting, so the
+Any scenes using scatters, roofs or other procedurals from the Unlok Toolbox
+plugin for Maya use 1 scene unit = 10 cm. Maya has no decimetre setting, so the
 scenes say "cm" and the toolbox reads a "cm" scene as decimetres. Sizes in the
 tools are shown in metres where it matters (patch sizes, leaf lengths, fade
 heights). A scene in any other unit (m, mm, in) is taken at its word.
