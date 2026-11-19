@@ -1,6 +1,6 @@
 # Getting started
 
-[Back to Home](Home.md)
+[Back to Quickstart](Home.md)
 
 ## Run it (any machine)
 

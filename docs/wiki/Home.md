@@ -31,7 +31,12 @@ There will probably also be quite a few wireframe `_CTL` boxes (`scatteredObject
 
 ![A scene with several scatter groups, each with its yellow _CTL box](images/scene_ctl_boxes.png)
 
-*Five scatter groups, each in its own `_CTL` box (yellow): moss on the path slabs, tufts on the wall, grass, and leaves on the crate and step.*
+*The Maya viewport with three scatter groups, each in its own `_CTL` box (thin blue lines):*
+- *Moss, grass and leaves on four ground tiles that were selected together, so one big box holds all four. It's selected here, so it shows green.*
+- *Ivy on the columns.*
+- *Moss on the wall.*
+
+*Boxes can overlap. Click a box's edge to select that group.*
 
 ## 3. Editing a scatter
 

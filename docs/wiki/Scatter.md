@@ -1,6 +1,6 @@
 # Scatter (Modeling > Scatter)
 
-[Back to Home](Home.md) | Full reference: [README, Scatter](../../README.md#modeling--scatter)
+[Back to Quickstart](Home.md) | Full reference: [README, Scatter](../../README.md#modeling--scatter)
 
 Grows moss, dry grass, dead leaves, leaf piles, moss tufts, dirt specks and ivy
 on any geometry. A **scatter group** holds the meshes it grows on plus a stack

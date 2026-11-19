@@ -1,35 +1,44 @@
 # Roof (Modeling > Roof)
 
-[Back to Home](Home.md) | Full reference: [README, Roof](../../README.md#modeling--roof)
+[Back to Quickstart](Home.md) | Full reference: [README, Roof](../../README.md#modeling--roof)
 
-Builds a whole roof (palm thatch, straw, corrugated metal, tiles) from a simple
-box. You shape the box; the tool covers it.
+Builds a whole roof from a simple box: palm thatch, straw thatch, corrugated
+metal or clay tiles. You shape the box; the tool covers it.
 
 ![Palapa roof](images/roof_palapa_close.png)
 
-## Basic flow
+## In a scene you've been handed
 
-1. **Create a roof box** in the panel, or select an existing roof box. Move, scale or reshape its vertices to match your building: the roof follows the box, including boxes reshaped with modelling tools.
-2. Pick a **preset** from the Preset list, e.g. `beach_dock_hut_001` (palm palapa, hipped, dried fronds).
-3. Set the **Detail** level. Work in **Low** or **Medium**; switch to **High** only for final renders. High is heavy, and if it would go over the vertex limit the tool eases the detail itself and says so in the status bar.
-4. Adjust settings. The roof rebuilds as you go. Use **Pause** to make several changes at once.
+- Each roof has a **roof box**: a wireframe box around it that never renders. Select the box, or the roof, and the Roof panel shows that roof's settings.
+- **Move, scale or reshape the box** (vertices too) and the roof rebuilds to fit, as long as *The roof follows its box* is on.
+- Lost the box? **Make Box Again** (under *Copies and links*) makes a new one for the selected roof.
+
+## Making a new roof
+
+1. Press **Create Box**. With the building selected, the box sits on top of it. Fit it to the roof: footprint = the wall tops, bottom = the eave line, top = the ridge.
+2. Pick a **preset**, e.g. `beach_dock_hut_001` (palm palapa, hipped, dried fronds).
+3. Press **Make Roof**.
+4. Work rough to fine with **Detail**:
+   - **Proxy**: just the shell, instant.
+   - **Rough** and **Medium**: for working.
+   - **High** and **Hero**: only for final renders. If a build would go over the vertex limit, the tool eases the detail itself and says "Detail eased" in the status bar.
 
 ## Presets
 
 - A **look preset** (palm, straw, etc.) sets every look setting. Anything it doesn't name goes back to default, so leftover tweaks from earlier don't carry over. Your Detail, seed and UV settings stay as they are.
-- **Reset** (next to Save and Delete) puts every setting back to default.
+- **Reset** (next to Save and Delete) puts every setting back to default. Try this first if a preset doesn't look like its pictures.
 - **Save** stores the current settings as your own preset.
 
 ## Settings artists use most
 
 | Want | Use |
 | --- | --- |
-| Longer or shorter eave fringe | Edges: **Fringe length**, **Edge hang** |
+| Longer or shorter eave fringe | **Fringe length**, **Edge droop** |
 | Wind-swept fringe | **Wind** (-1 to 1) |
-| Packed down, less fluffy | **Max angle** (lower = flatter), **Neat** |
+| Packed down, less fluffy | **Max angle** (lower = flatter), **Neatness** |
 | Messier overall | **Messiness** |
-| Ridge sits too low or looks sunken | Ridge: **Ridge height** (1.0 works for shallow roofs) |
-| Fuller ridge | Ridge: **Ridge layers** (1 to 4) |
-| Tufts and flyaways | Look: **Odd ones poking out**, **... lift**, **... in clumps**, **... variation** |
+| Ridge sits too low or looks sunken | **Ridge lift** (1.0 works for shallow roofs) |
+| Fuller ridge | **Ridge layers** (1 to 4) |
+| Tufts and flyaways | **Odd ones poking out**, then **... lift**, **... in clumps**, **... variation** |
 
-Tip: for tufts, try Pokes 20 to 30, lift 1.3, clump 0.5 and variation 1.0. This gives lone flyaways, tiny and small tufts, and one wide, low tuft.
+Tip: for tufts, try Odd ones poking out 20 to 30, lift 1.3, clumps 0.5 and variation 1.0. This gives lone flyaways, tiny and small tufts, and one wide, low tuft.

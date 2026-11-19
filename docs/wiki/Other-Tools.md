@@ -1,6 +1,6 @@
 # Other tools
 
-[Back to Home](Home.md). Each tool has a full section in the [README](../../README.md).
+[Back to Quickstart](Home.md). Each tool has a full section in the [README](../../README.md).
 
 | Tool | Tab | What it's for |
 | --- | --- | --- |
