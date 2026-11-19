@@ -47,9 +47,15 @@ There will probably also be quite a few wireframe `_CTL` boxes (`scatteredObject
    - Use **Pause** to make several changes before it regrows.
    - **Regrow** grows it again on the meshes as they are now, e.g. after the ground was edited.
 
-**Layers stack up.** One scatter group can hold several layers, each grown on top of the ones below. Here a single group has a moss layer, then a grass layer on the moss, then a leaves layer over both:
+**Layers stack up.** One scatter group can hold several layers, each grown on top of the ones below. The ground tiles' group above has three: moss, then grass on the moss, then leaves over both.
 
-![One scatter group: moss, then grass added on the moss, then leaves on top](images/scatter_layers.png)
+Each layer is its own mesh. Click a layer in the panel's **Layers** list, or click its mesh in the viewport, and the other one follows: the mesh is highlighted and the list shows the layer you're editing.
+
+![Moss layer selected](images/stack_1_moss.png)
+
+![Grass layer selected: the grass blades highlight, and Grass is picked in the Layers list](images/stack_2_grass.png)
+
+![Leaves layer selected](images/stack_3_leaves.png)
 
 **If a scatter doesn't respond**, check that it hasn't been **baked**. Baking turns a scatter group into plain meshes. That is sometimes needed for more manual edits, and once baked it no longer has layers to edit.
 
