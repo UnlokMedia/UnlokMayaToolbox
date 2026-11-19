@@ -10,6 +10,7 @@ from the Unlok Toolbox plugin for Maya.
 1. Get [`UnlokToolbox.py`](https://github.com/UnlokMedia/UnlokMayaToolbox/blob/main/UnlokToolbox.py).
 2. In Maya, open **Windows > General Editors > Script Editor** and a **Python** tab.
 3. Paste the whole file and run it with Ctrl+Enter. The **Unlok Toolbox** window opens.
+4. **Optional shelf button:** paste the file into the Python tab again, press **Ctrl+A** to select it all, then **middle-mouse-drag** it onto a shelf. To give the button an icon, download [UnlokToolbox_32.png](https://raw.githubusercontent.com/UnlokMedia/UnlokMayaToolbox/main/shelf/UnlokToolbox_32.png) (or the [64 px version](https://raw.githubusercontent.com/UnlokMedia/UnlokMayaToolbox/main/shelf/UnlokToolbox_64.png)). Then right-click the button > **Edit**, and pick the image under **Icon Name**.
 
 More detail, including shelf buttons and scene scale, is in [Getting started](Getting-Started.md).
 
