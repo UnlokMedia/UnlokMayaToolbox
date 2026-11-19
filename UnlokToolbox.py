@@ -45812,17 +45812,23 @@ def _under_any(node, roots):
 def sc_selection():
     """{"root", "layer", "surfaces", "points", "faces"} from the selection:
     the scatter group (and layer, from a part) picked, meshes and groups
-    that could be scattered onto, picked points and faces."""
-    out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}}
+    that could be scattered onto, picked points and faces; "baked": a baked
+    group picked (nothing to edit), "any": anything selected at all."""
+    out = {"root": None, "layer": None, "surfaces": [], "points": [], "faces": {}, "baked": None, "any": False,
+           "first": None}
     # Groups are found once; a node is only asked about if it's under one (a
     # 200-mesh pick asked every mesh, on every click, with the toolbox open).
     sc_roots = _tagged_roots((SC_ATTR, SC_BAKED, SC_BOX_ATTR, SC_CTL))  # boxes / control groups sit beside groups
     mi_roots = _tagged_roots((MI_SETTINGS, MI_BAKED))
     for node in cmds.ls(selection=True, objectsOnly=True, long=True) or []:
+        out["any"] = True
+        out["first"] = out["first"] or node
         if _under_any(node, sc_roots):
             root, lid = sc_owner(node)
             if root:
-                if out["root"] is None:
+                if not is_scatter(root):  # baked: plain meshes now, nothing to edit (it used to keep the last group)
+                    out["baked"] = out["baked"] or root
+                elif out["root"] is None:
                     out["root"], out["layer"] = root, lid
                 continue
         if cmds.objectType(node, isAType="shape"):
@@ -47089,6 +47095,8 @@ class ScatterPanel(QtWidgets.QWidget):
         self._root = None   # the group being edited (stays while you select meshes to add)
         self._root_uid = None  # its uuid: followed when it's moved (into a publish group, say)
         self._lid = None    # the layer being edited
+        self._prev = None   # the group last let go of (Continue editing brings it back)
+        self._unlocked = False  # Continue editing pressed: steps 2 / 3 open while other meshes are picked
         self._filling = False
         self._sel_now = None  # the selection read by _sync_from_selection, while it refreshes
         self._sel_timer = QtCore.QTimer(self)
@@ -47244,7 +47252,25 @@ class ScatterPanel(QtWidgets.QWidget):
         don.add_full(self.draw_label)
         card.add(don)
         self.group_label = hint_label("")
-        card.add(self.group_label)
+        self.release_btn = secondary_button("Release", "Stop editing this group, so nothing in step 3 can change "
+                                                       "it by mistake (clicking empty space or baked scatter "
+                                                       "does the same).")
+        self.release_btn.clicked.connect(lambda *_: self.release())
+        self.resume_btn = secondary_button("Continue editing", "The selection can't be edited with Scatter (baked, "
+                                                               "or not made with it): open the last group's "
+                                                               "layers and settings again anyway.")
+        self.resume_btn.clicked.connect(lambda *_: self.resume())
+        grow = QtWidgets.QHBoxLayout()
+        grow.setContentsMargins(0, 0, 0, 0)
+        grow.addWidget(self.group_label, 1)
+        grow.addWidget(self.release_btn)
+        holder = QtWidgets.QWidget()
+        hv = QtWidgets.QVBoxLayout(holder)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(4)
+        hv.addLayout(grow)
+        hv.addWidget(self.resume_btn, 0, QtCore.Qt.AlignLeft)
+        card.add(holder)
         # what the edited group grows on, and copies of it: only shown while a group is being edited
         self.group_box = QtWidgets.QWidget()
         gl = QtWidgets.QVBoxLayout(self.group_box)
@@ -47923,6 +47949,21 @@ class ScatterPanel(QtWidgets.QWidget):
                                 else "")
         self.box_btn.setVisible(bool(root) and sc_box(root) is None)
         self.group_box.setVisible(bool(root))
+        locked = self._locked(root, sel)
+        held = not locked and self._held(root, sel) and not self._unlocked
+        self.release_btn.setVisible(bool(root))
+        self.step_layers.setEnabled(not locked)
+        self.step_look.setEnabled(not locked)
+        prev = self._prev if self._prev and is_scatter(self._prev) and self._prev != root else None
+        resume = root if locked else (prev if not root and sel.get("any") and not sel.get("root") else None)
+        self.resume_btn.setVisible(bool(resume))
+        if resume:
+            self.resume_btn.setText("Continue editing %s" % short_name(resume))
+        if root:
+            self.group_label.setText(("Editing <b>%s</b> <span style=\"color:#f0c870\">(%s)</span>." % (
+                short_name(root), "not selected: steps 2 and 3 locked" if locked else
+                "not selected: kept for Add Selected / Use Picked Area")) if locked or held else
+                "Editing <b>%s</b>." % short_name(root))
         if root:
             names = [short_name(n) for n in sc_blockers(sc_data(root))]
             self.block_label.setText(("Blocked by: %s." % ", ".join(names[:5]) + (
@@ -47944,6 +47985,15 @@ class ScatterPanel(QtWidgets.QWidget):
         elif drawing:
             self.next_banner.set_text("Drag over any surfaces to draw (click for a spot). Ctrl+Z takes the last "
                                       "stroke back. Then <b>Scatter on Drawing</b>.", tag="DRAWING", tone="active")
+        elif locked:
+            self.next_banner.set_text("%s Steps 2 and 3 are locked so they don't change <b>%s</b> (open, but not "
+                                      "selected). <b>Continue editing</b> opens them anyway; Add Selected grows "
+                                      "the group on the selection; Release (or click empty space) lets it go." % (
+                                          self._why_text(sel), short_name(root)), tag="CAN'T EDIT", tone="warn")
+        elif sel.get("baked") and not root:
+            self.next_banner.set_text("%s%s" % (self._why_text(sel), (
+                " <b>Continue editing</b> goes back to <b>%s</b>." % short_name(prev)) if prev else ""),
+                tag="CAN'T EDIT", tone="warn")
         elif paused:
             self.next_banner.set_text("Live updates paused: edits are saved, nothing grows (%s)%s. Press <b>Play</b> "
                                       "to grow the changes." % (self._paused_text(counts), (
@@ -47983,11 +48033,18 @@ class ScatterPanel(QtWidgets.QWidget):
             if self._pick_stroke_lines():
                 return
             sel = sc_selection()
+            self._unlocked = False  # (Continue editing lasts until the selection changes)
             if sel["root"]:
                 if sel["root"] != self._root:
-                    self._root, self._lid = sel["root"], None
+                    self._root, self._lid, self._root_uid = sel["root"], None, None
                 if sel["layer"]:
                     self._lid = sel["layer"]
+            elif self._root and not (self.drawer.is_active() or self.painter.is_active()) and not (
+                    sel["any"] or sel["points"] or sel["faces"]):
+                # nothing picked (clicked empty space): let the group go. Picking other meshes keeps it open
+                # but locks its layers and settings (_locked). The user, 2026-11-19: clicked a mesh they'd
+                # baked, edited layers, and it was changing the last group they'd had selected
+                self._release()
             self._sel_now = sel  # _update_states reuses it (a 200-mesh pick read it twice)
             try:
                 root = self._alive()
@@ -47999,6 +48056,53 @@ class ScatterPanel(QtWidgets.QWidget):
                 self._sel_now = None
         except Exception:
             traceback.print_exc()
+
+    def _release(self):
+        """Stop editing the group (the panel waits for the next one picked; Continue editing brings it back)."""
+        if self._root:
+            self._prev = self._root
+            self.set_status("Let go of %s. Select a scatter group (its box or any part) to edit it." %
+                            short_name(self._root))
+        self._root = self._lid = self._root_uid = None
+        self._pending = set()
+        self._unlocked = False
+
+    @ui_safe
+    def release(self):
+        self._release()
+        self._refresh()
+
+    @ui_safe
+    def resume(self):
+        """Continue editing: the group open (or the last one let go of) with its steps unlocked."""
+        if not self._alive() and self._prev and is_scatter(self._prev):
+            self._root, self._lid, self._root_uid = self._prev, None, None
+        if self._alive():
+            self._unlocked = True
+            self.set_status("Editing %s again (it isn't selected: the selection is left as it is)." %
+                            short_name(self._root))
+        self._refresh()
+
+    def _held(self, root, sel):
+        """The group being edited isn't in the selection (other meshes picked)."""
+        return bool(root) and sel.get("root") != root and not (self.drawer.is_active() or
+                                                                self.painter.is_active())
+
+    def _locked(self, root, sel):
+        """Whole meshes that aren't this group picked (baked scatter, or anything not made with Scatter):
+        steps 2 and 3 locked so an edit can't change a group that isn't selected. Picked faces / points
+        don't lock (Use Picked Area needs them), nor does Continue editing."""
+        return (self._held(root, sel) and not self._unlocked and bool(sel.get("any"))
+                and not (sel.get("points") or sel.get("faces")))
+
+    @staticmethod
+    def _why_text(sel):
+        """Why the selection can't be edited with Scatter."""
+        name = short_name(sel.get("first") or "") or "The selection"
+        if sel.get("baked"):
+            return "<b>%s</b> is baked scatter (from <b>%s</b>): plain meshes now, so Scatter can't edit it." % (
+                name, short_name(sel["baked"]))
+        return "<b>%s</b> wasn't made with Scatter, so there's nothing on it to edit." % name
 
     # ============================================================= actions
     def _counts(self, rep):

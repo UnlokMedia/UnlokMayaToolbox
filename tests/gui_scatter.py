@@ -376,7 +376,8 @@ def main():
     panel._lid = piles
     panel.duplicate_layer()
     check("Duplicate copies the layer", panel.layer_list.count() == 5 and
-          ns["sc_data"](root)["layers"][-1]["type"] == "Leaf piles", panel.status.text())
+          [la["type"] for la in ns["sc_data"](root)["layers"]].count("Leaf piles") == 2,  # (right above its source)
+          panel.status.text())
     panel.delete_layer()
 
     # --- blockers: Add Blocker, moving it regrows round it, Select, Remove
@@ -395,7 +396,7 @@ def main():
     pump()
     check("moved, the next selection change regrows round it", cmds.getAttr(root + "." + ns["SC_STAMP"]) != stamp and
           not ns["sc_blockers_moved"](root), panel.status.text())
-    cmds.select(clear=True)
+    cmds.select(root)  # (clicking empty space would let the group go)
     panel._sync_from_selection()
     panel.select_blockers()
     check("Select picks the group's blockers", cmds.ls(selection=True, long=True) == [blk])
@@ -778,8 +779,12 @@ def moss_and_specks(ns, panel, window):
         for key, node in ns["sc_parts"](root).items():
             shade_part(node, key.split("/")[1])
         cmds.undoInfo(stateWithoutFlush=False)
+        lid = panel._lid
         cmds.select(clear=True)
         cmds.undoInfo(stateWithoutFlush=True)
+        pump()
+        panel._root, panel._lid = root, lid  # (the cleared selection let the group go)
+        panel._refresh()
         return root, time.time() - t0
 
     roof = (0, 22, -5), (10, 40, 18)
@@ -948,7 +953,7 @@ def drawing(ns, panel, window):
     def strokes_now():
         return ns["sc_area"](ns["sc_layer"](ns["sc_data"](root), leaves))[2]
 
-    panel._lid = leaves
+    panel._root, panel._lid = root, leaves  # (the cleared selection let the group go)
     panel._refresh()
     pump()
     rows = [panel.stroke_list.item(i).text() for i in range(panel.stroke_list.count())]
@@ -1025,8 +1030,12 @@ def jungle_leaves(ns, panel, window):
         for key, node in ns["sc_parts"](root).items():
             shade_part(node, key.split("/")[1])
         cmds.undoInfo(stateWithoutFlush=False)  # (quiet() would put the selection back)
+        lid = panel._lid
         cmds.select(clear=True)
         cmds.undoInfo(stateWithoutFlush=True)
+        pump()
+        panel._root, panel._lid = root, lid  # (the cleared selection let the group go)
+        panel._refresh()
         return root, time.time() - t0
 
     def close_ups(root, prefix):

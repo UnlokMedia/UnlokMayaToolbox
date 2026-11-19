@@ -1379,6 +1379,21 @@
     added under layers with On layers below makes them grow again on it.
     `tests/test_scatter_add_layers.py` (timings and menu pictures in
     `tests/_out/scatter_add`).
+  - **Which group the panel edits (2026-11-19;** the user clicked a mesh
+    they'd baked, edited layers, and it changed the last group they'd had
+    selected; asked for a deselect and a warning with a way to carry on).
+    `sc_selection` now reports `baked` (a baked group picked: it used to
+    come back as `root`, and `_alive` then followed the old group's uuid
+    back to it), `any` and `first`. Picking a group (box, part, control)
+    edits it (`_root_uid` reset). Clicking empty space lets it go
+    (`_release`, remembered in `_prev`; not while drawing / painting); so
+    does the Release button. Whole objects that aren't the group (baked
+    scatter or anything not made with Scatter) keep it open for Add
+    Selected / Use Selected, but `_locked` disables steps 2 and 3, with a
+    CAN'T EDIT banner (`_why_text`) and a "Continue editing <group>" button
+    (`resume`: unlocks until the selection changes, or brings `_prev`
+    back). Picked faces / points never lock (Use Picked Area).
+    `tests/run_gui_scatter_release.mel`.
   - **Scene:** `scatteredObjects####_GRP` (transforms free: `_rope_fill`
     writes parts through their inclusive matrix, so they sit on the
     surfaces under any parent; locked, Maya's parent couldn't compensate
