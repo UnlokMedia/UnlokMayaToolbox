@@ -47137,7 +47137,83 @@ class ScatterPanel(QtWidgets.QWidget):
         self.fade_sec = {}
         self.row_lbl = {}
         self._build()
+        self._build_block()
         self._install_jobs()
+
+    def _build_block(self):
+        """CAN'T EDIT: a cover over the whole panel while the selection can't be edited with Scatter and a
+        group is still open (the user, 2026-11-19: a banner was easy to miss; make them choose)."""
+        self.block = QtWidgets.QFrame(self)
+        self.block.setObjectName("unlokScBlock")
+        self.block.setStyleSheet("#unlokScBlock { background: rgba(22, 22, 22, 250); }")
+        self.block.setAutoFillBackground(True)
+        bl = QtWidgets.QVBoxLayout(self.block)
+        bl.setContentsMargins(22, 22, 22, 22)
+        bl.setSpacing(12)
+        bl.addStretch(1)
+        tag = QtWidgets.QLabel("CAN'T EDIT")
+        tag.setStyleSheet("color: #f0c870; font-weight: bold; letter-spacing: 1px;")
+        bl.addWidget(tag)
+        self.block_title = QtWidgets.QLabel()
+        self.block_title.setWordWrap(True)
+        self.block_title.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        bl.addWidget(self.block_title)
+        self.block_text = QtWidgets.QLabel()
+        self.block_text.setWordWrap(True)
+        self.block_text.setStyleSheet("color: #d0d0d0;")
+        bl.addWidget(self.block_text)
+        bl.addSpacing(6)
+        self.block_dismiss = primary_button("Dismiss")
+        self.block_dismiss.setToolTip("Stop editing the group. Your Maya selection stays as it is (to start a "
+                                      "new scatter group on it, say).")
+        self.block_dismiss.clicked.connect(lambda *_: self.dismiss_block())
+        self.block_resume = secondary_button("Edit previous group", "Keep editing the group you had open. You "
+                                                                    "won't be asked again until the selection "
+                                                                    "changes.")
+        self.block_resume.clicked.connect(lambda *_: self.resume())
+        bl.addWidget(self.block_dismiss)
+        bl.addWidget(self.block_resume)
+        self.block_hint = hint_label("")
+        bl.addWidget(self.block_hint)
+        bl.addStretch(2)
+        self.block.hide()
+
+    def resizeEvent(self, event):
+        super(ScatterPanel, self).resizeEvent(event)
+        if getattr(self, "block", None) is not None:
+            self.block.setGeometry(self.rect())
+
+    def _show_block(self, root, sel):
+        """The cover up while locked (else down), worded for what's picked."""
+        if getattr(self, "block", None) is None:  # (states are shown while the panel is still being built)
+            return
+        if not root:
+            self.block.hide()
+            return
+        name = short_name(sel.get("first") or "") or "The selection"
+        group = short_name(root)
+        if sel.get("baked"):
+            self.block_title.setText("%s is baked scatter" % name)
+            why = "It was baked from <b>%s</b>: plain meshes now, so Scatter can't change it." % short_name(
+                sel["baked"])
+        else:
+            self.block_title.setText("%s wasn't made with Scatter" % name)
+            why = "There's no scatter group on it, so there's nothing here to edit."
+        self.block_text.setText("%s<br><br>The panel was still open on <b>%s</b>, which isn't selected. Edits "
+                                "here would change that group, so it's locked until you choose." % (why, group))
+        self.block_resume.setText("Edit previous group (%s)" % group)
+        self.block_hint.setText("<b>Dismiss</b> lets go of %s and keeps your Maya selection, so you can start "
+                                "a new scatter group on it. <b>Edit previous group</b> carries on with %s until "
+                                "you select something else." % (group, group))
+        self.block.setGeometry(self.rect())
+        self.block.raise_()
+        self.block.show()
+
+    @ui_safe
+    def dismiss_block(self):
+        """Let go of the group; the Maya selection is left alone."""
+        self._release()
+        self._refresh()
 
     def showEvent(self, event):
         super(ScatterPanel, self).showEvent(event)
@@ -47954,6 +48030,7 @@ class ScatterPanel(QtWidgets.QWidget):
         self.release_btn.setVisible(bool(root))
         self.step_layers.setEnabled(not locked)
         self.step_look.setEnabled(not locked)
+        self._show_block(root if locked else None, sel)
         prev = self._prev if self._prev and is_scatter(self._prev) and self._prev != root else None
         resume = root if locked else (prev if not root and sel.get("any") and not sel.get("root") else None)
         self.resume_btn.setVisible(bool(resume))

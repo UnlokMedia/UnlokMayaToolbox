@@ -87,16 +87,37 @@ def main():
     check("... but locks its layers and settings", locked())
     check("... says the mesh wasn't made with Scatter", "wasn't made with Scatter" in banner() and
           "CAN'T EDIT" in panel.next_banner.tag.text(), banner())
-    check("... and offers Continue editing", panel.resume_btn.isVisible() and
-          "scatteredObjects0001_GRP" in panel.resume_btn.text(), panel.resume_btn.text())
-    panel.resume()
+    check("... and covers the whole panel with CAN'T EDIT", panel.block.isVisible() and
+          panel.block.geometry() == panel.rect() and "wasn't made with Scatter" in panel.block_title.text(),
+          panel.block_title.text())
+    window.grab().save(os.path.join(OUT, "block_plain.png"))
+    panel.block_resume.click()
     pump()
-    check("Continue editing unlocks it, selection left alone", not locked() and panel._root == live and
+    check("Edit previous group unlocks it, selection left alone, cover gone", not locked() and
+          panel._root == live and not panel.block.isVisible() and
           cmds.ls(selection=True, long=True) == [planes[2]], banner())
+    panel._update_states()
+    pump()
+    check("... and doesn't come back while the selection is the same", not panel.block.isVisible())
 
     check("picking baked scatter keeps the group open but locked", pick(baked_part[:1], "baked") == live and
           locked())
-    check("... and says it's baked", "baked scatter" in banner(), banner())
+    check("... and the cover says it's baked", panel.block.isVisible() and
+          "baked scatter" in panel.block_title.text(), panel.block_title.text())
+    window.grab().save(os.path.join(OUT, "block_baked.png"))
+    panel.block_dismiss.click()
+    pump()
+    check("Dismiss lets the group go and keeps the Maya selection", panel._root is None and
+          not panel.block.isVisible() and cmds.ls(selection=True, long=True) == baked_part[:1],
+          cmds.ls(selection=True, long=True))
+    pick([ns["sc_box"](live)], "box")
+    pick([planes[2]], "mesh")
+    panel.block_dismiss.click()
+    pump()
+    check("after Dismiss on a plain mesh, New Scatter Group is offered on it", panel._root is None and
+          "New Scatter Group" in banner(), banner())
+    pick([ns["sc_box"](live)], "box")
+    pick(baked_part[:1], "baked")
 
     cmds.select(planes[2] + ".f[0:3]", replace=True)
     panel._sync_from_selection()

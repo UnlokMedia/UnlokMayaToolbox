@@ -783,6 +783,7 @@ def moss_and_specks(ns, panel, window):
         cmds.select(clear=True)
         cmds.undoInfo(stateWithoutFlush=True)
         pump()
+        panel._sel_timer.stop()  # (its 80 ms wait could let the group go after the line below)
         panel._root, panel._lid = root, lid  # (the cleared selection let the group go)
         panel._refresh()
         return root, time.time() - t0
@@ -1034,6 +1035,7 @@ def jungle_leaves(ns, panel, window):
         cmds.select(clear=True)
         cmds.undoInfo(stateWithoutFlush=True)
         pump()
+        panel._sel_timer.stop()  # (its 80 ms wait could let the group go after the line below)
         panel._root, panel._lid = root, lid  # (the cleared selection let the group go)
         panel._refresh()
         return root, time.time() - t0

@@ -1389,10 +1389,14 @@
     (`_release`, remembered in `_prev`; not while drawing / painting); so
     does the Release button. Whole objects that aren't the group (baked
     scatter or anything not made with Scatter) keep it open for Add
-    Selected / Use Selected, but `_locked` disables steps 2 and 3, with a
-    CAN'T EDIT banner (`_why_text`) and a "Continue editing <group>" button
-    (`resume`: unlocks until the selection changes, or brings `_prev`
-    back). Picked faces / points never lock (Use Picked Area).
+    Selected / Use Selected, but `_locked` disables steps 2 and 3 and
+    puts up `block`, a cover over the whole panel (the user: a banner was
+    easy to miss, make them choose): what's picked and why it can't be
+    edited, **Dismiss** (`dismiss_block`: lets the group go, the Maya
+    selection stays, so New Scatter Group is offered on it) or **Edit
+    previous group** (`resume`: unlocked until the selection changes).
+    With no group open a baked pick gets a CAN'T EDIT banner and a small
+    "Continue editing <group>" button (`resume` brings `_prev` back). Picked faces / points never lock (Use Picked Area).
     `tests/run_gui_scatter_release.mel`.
   - **Scene:** `scatteredObjects####_GRP` (transforms free: `_rope_fill`
     writes parts through their inclusive matrix, so they sit on the
