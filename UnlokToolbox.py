@@ -33288,7 +33288,9 @@ DEBRIS_DEFAULTS = {
     "patch_size": 0.8, "creases": 0.7, "mess": 0.8, "grass": 1.5, "bunch_size": 0.3, "grass_length": 0.25, "fullness": 1.0,
     "comb": 0.4, "droop": 0.6, "blade_width": 0.003, "grass_pile": 0.0, "grass_strays": 0.0, "bunch_var": 0.0,
     "bunch_shape": 0.0, "blade_scatter": 0.0, "bunch_blades": 0, "stray_clump": 0.0, "stray_clump_size": 1.0,
-    "stray_buildup": 0.5, "stray_heaps": 0.0, "pile_var": 0.0, "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
+    "stray_buildup": 0.5, "stray_heaps": 0.0, "pile_var": 0.0,
+    "blade_straight": 0.0, "blade_broken": 0.0, "pile_mat": 0.0, "chaff": 0.0,
+    "leaves": 8.0, "piles": 0.3, "pile_size": 0.3,
     "leaf_size": 0.06, "curl": 0.6, "tufts": 6.0, "tuft_size": 0.035, "size_var": 0.5, "jungle": 0.0,
     "jungle_size": 0.45, "jungle_cluster": 3, "jungle_shape": "Mixed", "jungle_green": 0.5, "jungle_tear": 0.4,
     "specks": 0.0, "speck_size": 0.004, "speck_dirt": 0.4, "speck_cluster": 4, "speck_spread": 0.012, "drape": 0.5,
@@ -39139,8 +39141,8 @@ DEBRIS_STALK = 0.12  # the leaf's stalk, as a fraction of its length (the first 
 DEBRIS_FIELD_R = 0.06  # metres: the coverage field's scale (moss's default clump size)
 LEAF_DROP_SAMPLES = tuple((x, f) for f in (-0.4, -0.07, 0.27, 0.6) for x in (-0.3, 0.0, 0.3))  # leaf lengths, to its edges
 DEBRIS_PILE_LEAVES = 400  # most leaves in one round pile (a drift along a crease: twice that)
-DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0, 6: 0.6, 7: 0.3}  # grass, leaves, piles, tufts, big leaves,
-# specks, stray grass blades
+# grass, leaves, piles, tufts, big leaves, specks, stray grass blades, chaff
+DEBRIS_GATHER = {1: 0.5, 2: 1.5, 3: 3.0, 4: 1.0, 5: 2.0, 6: 0.6, 7: 0.3, 8: 0.6}
 # crowd into creases
 # Big jungle leaves (the user, 2026-11-04: "instead of piles of small leaves ... large jungle leaves, like one or
 # two or three of them at a time ... the size of a whole small leaf pile"). Detail: blade rows, columns, frond
@@ -39906,10 +39908,15 @@ class _DebrisBuild(object):
             self.md.kind = "tuft"
         self.jungle_grid = JUNGLE_DETAIL[detail]
         self.jungle_at = {}  # cell -> [(centre, radius)] of the big leaf clusters so far
-        self.counts = {"bunches": 0, "strays": 0, "leaves": 0, "piles": 0, "tufts": 0, "jungle": 0, "specks": 0}
+        self.counts = {"bunches": 0, "strays": 0, "leaves": 0, "piles": 0, "tufts": 0, "jungle": 0, "specks": 0,
+                       "chaff": 0}
         self.clumps = {}  # stray clumps: cell -> (centre, normal, frame, reach, strength, stretch) or None
         self.clump_use = {}  # cell -> strays pulled into it
         self._heap_scatter = None  # Scatter while heaping a clump (None: the layer's own)
+        self.ribs = []  # each grass blade's (first point in G, rows): On layers below lifts them whole
+        self.straight = clamp(float(s.get("blade_straight", 0.0)), 0.0, 1.0)  # Straightness: less curl
+        self.broken = clamp(float(s.get("blade_broken", 0.0)), 0.0, 1.0)  # Broken bits: share snapped short
+        self.mat = clamp(float(s.get("pile_mat", 0.0)), 0.0, 1.0)  # Matted: piles dense, flat-lying, fine
         self.capped = False
         fs = _debris_field(s)
         self.R = DEBRIS_FIELD_R / m
@@ -40137,6 +40144,8 @@ class _DebrisBuild(object):
             self._strays(p, n, r, ci)
         if self.clump_use and float(s.get("stray_heaps", 0.0)) > 0.0:
             self._clump_heaps()
+        for p, n, r, margin, ci in self._spots(float(s.get("chaff", 0.0)) / 3.0, 8, 0.25):  # ~3 bits a spot
+            self._chaff(p, n, r, ci)
         for p, n, r, margin, ci in self._spots(float(s["piles"]), 3):
             self._pile(p, n, r, ci)
         for p, n, r, margin, ci in self._spots(float(s["leaves"]), 2):
@@ -40160,23 +40169,152 @@ class _DebrisBuild(object):
     def _grass_over(self):
         """Grass over the layers below it (On layers below; the user,
         2026-11-12: "fallen jungle leaves underneath grass, or if I move a
-        layer above grass ..."): every blade point under a lower layer's
-        leaves / grass (seen from above, 1 cm cells, up to 30 cm over the
-        point) is lifted onto them, so the blades lie over leaves and drape
-        over a heap. Moss beds don't count (grass grows up through moss)."""
-        under = None
+        layer above grass ..."). Moss beds don't count (grass grows up
+        through moss). The layers below are new ground for this one
+        (2026-11-19, the user: "the top layer warps over the bottom in weird
+        ways"; each blade point was lifted on its own to the highest lower
+        point in its 1 cm cell, tips of lower blades standing up included:
+        spikes, ribbons twisted on edge, stretched steps). Now, for lower
+        grass:
+        `_mat_thickness` is the lower layers' body (their faces seen from
+        above in 2 cm cells, opened: a lone blade sticking up or a single
+        stray is gone, a heap or a leaf stays) as a thickness over the
+        ground under it; every row of a blade standing over that ground (a
+        ray down: not a blade up on a step over a mat on the floor) rises by
+        it (bilinear), plus up to 1.2 cm onto a lower blade it crosses; lower
+        leaves (any part but grass, `_rest_on` entries carry the part) are
+        sheets: a row rises right onto one (up to 30 cm over it: both its
+        edges and its middle). Each blade's rises are then eased along it (never more than 0.7 of the
+        length between rows steeper: it ramps up a heap's side, doesn't
+        step) and both ribbon edges of a row move together, straight up."""
+        under = sheets = None  # the lower grass (a body to lie on); leaves and the like (sheets: lies right on)
         for got in self.s.get("_rest_on") or ():
             if len(got) > 2 and got[2]:
+                if len(got) > 3 and got[3] != "grass":
+                    if sheets is None:
+                        sheets = _MiDropStack(0.01 / self.m)
+                    sheets.lay_faces(got[0], got[1])
+                    continue
                 if under is None:
                     under = _MiDropStack(0.01 / self.m)
                 under.lay_faces(got[0], got[1])
-        if under is None:
+        if (under is None and sheets is None) or not self.ribs:
             return
-        pts, lift, band, void = self.G[0], self.lift, 0.3 / self.m, MI_DROP_VOID
-        for i, p in enumerate(pts):
-            h = under.top(p[0], p[2], p[1] + band)
-            if h > void and h + lift > p[1]:
-                pts[i] = (p[0], h + lift, p[2])
+        m = self.m
+        lift, void = self.lift, MI_DROP_VOID
+        thick, gnd, c2 = self._mat_thickness(under) if under is not None else ({}, {}, 0.02 / m)
+        band = 0.3 / m  # a leaf up to this far over a blade point counts
+        floor = math.floor
+        cross = 0.012 / m  # onto a lower blade it crosses (not in the mat's body): at most this
+
+        def at(x, z):
+            """Bilinear (thickness, ground) round (x, z) over the cells that have them (None: none)."""
+            fx, fz = x / c2 - 0.5, z / c2 - 0.5
+            i, k = int(floor(fx)), int(floor(fz))
+            tx, tz = fx - i, fz - k
+            tw = gw = tg = 0.0
+            for di, dk, w in ((0, 0, (1 - tx) * (1 - tz)), (1, 0, tx * (1 - tz)), (0, 1, (1 - tx) * tz),
+                              (1, 1, tx * tz)):
+                key = (i + di, k + dk)
+                t = thick.get(key)
+                if t is not None:
+                    tw += w * t
+                    tg += w * gnd[key]
+                    gw += w
+            return (tw, tg / gw) if gw > 1e-9 else None
+
+        pts = self.G[0]
+        down, far = (0.0, -1.0, 0.0), 0.8 / m
+        for b, rows in self.ribs:
+            rise = [0.0] * rows
+            mids = []
+            for k in range(rows):
+                p, q = pts[b + 2 * k], pts[b + 2 * k + 1]
+                x, y, z = 0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]), 0.5 * (p[2] + q[2])
+                mids.append((x, y, z))
+                r = 0.0
+                tg = at(x, z)
+                if tg is not None and tg[0] > 0.0:
+                    hit = self.surf.ray((x, y + lift, z), down, far)
+                    if hit is not None and abs((y + lift - hit[0]) - tg[1]) < 0.03 / m:
+                        r = tg[0]  # over the ground the mat lies on: it rises by the mat
+                if under is not None:
+                    h = under.top(x, z, y + cross)
+                    if h > void:
+                        r = max(r, min(cross, h + lift - y))
+                if sheets is not None:  # a leaf under it: both edges and the middle over it
+                    for e in (p, q, (x, y, z)):
+                        h = sheets.top(e[0], e[2], e[1] + band)
+                        if h > void:
+                            r = max(r, h + lift - e[1])
+                rise[k] = r
+            if not any(rise):
+                continue
+            arc = [0.0]
+            for k in range(1, rows):
+                a, e = mids[k - 1], mids[k]
+                arc.append(arc[-1] + math.sqrt((e[0] - a[0]) ** 2 + (e[1] - a[1]) ** 2 + (e[2] - a[2]) ** 2))
+            eased = [max(rise[j] - 0.7 * abs(arc[k] - arc[j]) for j in range(rows)) for k in range(rows)]
+            for k in range(rows):
+                e = eased[k]
+                if e > 0.0:
+                    for i in (b + 2 * k, b + 2 * k + 1):
+                        p = pts[i]
+                        pts[i] = (p[0], p[1] + e, p[2])
+
+    def _mat_thickness(self, under):
+        """The lower layers' body as a thickness field: ({cell: thickness},
+        {cell: ground height}, cell) on 2 cm cells. Their highest point per
+        cell, opened (the least of each 3 x 3, then the most of that: what's
+        thinner than ~3 cells, a blade standing up or one lying alone, goes),
+        smoothed over 3 x 3, over the ground straight under it (a ray down),
+        capped at 60 cm."""
+        m = self.m
+        c1, c2 = under.c, 0.02 / m
+        f = c1 / c2
+        floor = math.floor
+        top = {}
+        for (i, k), y in under.cells.items():
+            key = (int(floor(i * f)), int(floor(k * f)))
+            if top.get(key, MI_DROP_VOID) < y:
+                top[key] = y
+        nb = [(a, e) for a in (-1, 0, 1) for e in (-1, 0, 1)]
+        ero = {}
+        for (i, k), y in top.items():
+            lo = y
+            for a, e in nb:
+                v = top.get((i + a, k + e))
+                if v is None:
+                    lo = None
+                    break
+                if v < lo:
+                    lo = v
+            if lo is not None:
+                ero[(i, k)] = lo
+        dil = {}
+        for (i, k), y in ero.items():
+            for a, e in nb:
+                key = (i + a, k + e)
+                if dil.get(key, MI_DROP_VOID) < y:
+                    dil[key] = y
+        thick, gnd = {}, {}
+        down, far, cap = (0.0, -1.0, 0.0), 0.8 / m, 0.6 / m
+        for (i, k) in dil:
+            s = n = 0.0
+            for a, e in nb:
+                v = dil.get((i + a, k + e))
+                if v is not None:
+                    s += v
+                    n += 1.0
+            y = s / n
+            x, z = (i + 0.5) * c2, (k + 0.5) * c2
+            hit = self.surf.ray((x, y + self.lift, z), down, far)
+            if hit is None:
+                continue
+            g = y + self.lift - hit[0]
+            thick[(i, k)] = clamp(y - g, 0.0, cap)
+            gnd[(i, k)] = g
+        return thick, gnd, c2
 
     # -------------------------------------------------------------- specks
     def _specks(self, c, n, r):
@@ -40318,6 +40456,16 @@ class _DebrisBuild(object):
         u = _rand12(self.seed, key, 18, 131)[0]
         return min(4.0, pile * 2.0 ** (1.6 * v * (2.0 * u - 1.0)))
 
+    def _snap(self, L, key):
+        """Broken bits (blade_broken; the user, 2026-11-19, after reference
+        photos of hay and clippings: real strewn grass is mostly snapped
+        pieces): that share of blades are a piece 15-45% of their length
+        (own randoms 19 / 137; 0 = every blade whole)."""
+        if self.broken <= 0.0:
+            return L
+        rb = _rand12(self.seed, key, 19, 137)
+        return L * (0.15 + 0.3 * rb[1]) if rb[0] < self.broken else L
+
     def _blade_count(self, count, r, j):
         """Blades per bunch (bunch_blades > 0): about that many (half to one
         and a half times), whatever the bunch's size; 0 = by size."""
@@ -40357,7 +40505,7 @@ class _DebrisBuild(object):
         for k in range(count):
             rr = _rand12(self.seed, base + k, 5, 71)
             ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
-            L = Lg * (0.6 + 0.8 * rr[1])
+            L = self._snap(Lg * (0.6 + 0.8 * rr[1]), base + k)
             rad = Rb * 0.85 * math.sqrt(rr[2])
             a = rr[3] * 6.2832
             far = self._thrown(_rand12(self.seed, base + k, 8, 79), Rb)
@@ -40398,7 +40546,7 @@ class _DebrisBuild(object):
         for q in range(k):
             rr = _rand12(self.seed, int(r[5] * 1e6) + q, 12, 101)
             ang = main + (rr[0] - 0.5) * 6.2832 * (1.0 - 0.75 * comb)
-            L = Lg * (0.5 + 1.0 * rr[1]) * (1.0 + self.var * (r[3] - 0.5))
+            L = self._snap(Lg * (0.5 + 1.0 * rr[1]) * (1.0 + self.var * (r[3] - 0.5)), int(r[5] * 1e6) + q)
             x, y = (rr[2] - 0.5) * 0.3 * L, (rr[3] - 0.5) * 0.3 * L
             d = _rl_add(_rl_mul(t1, math.cos(ang)), _rl_mul(t2, math.sin(ang)))
             start = _rl_add(_rl_add(c, _rl_add(_rl_mul(t1, x), _rl_mul(t2, y))), _rl_mul(d, -0.5 * L))
@@ -40412,6 +40560,46 @@ class _DebrisBuild(object):
                              min(self.stacks - 1, int(rr[10] * self.stacks)))
         if grew:
             self.counts["strays"] += 1
+
+    def _chaff(self, c, n, r, ci):
+        """Chaff (chaff per square metre; the user, 2026-11-19, after
+        reference photos: real strewn grass has a fine layer of broken bits
+        under the long blades, which is what makes a clump's edge soft): two
+        to four tiny straight bits, 6-20% of Grass length, two segments,
+        drawn into the stray clumps like the strays (not counted towards
+        Heaps on clumps), lying on their mound."""
+        if self._full(self.G, 4 * 6) or self._in_solid(c, n, 0.02 / self.m):
+            return
+        mound = None
+        if float(self.s.get("stray_clump", 0.0)) > 0.0:
+            got = self._clump_pull(c, n, r, count=False)
+            if got is None:
+                return
+            c, n, mound = got
+        Lg = float(self.s["grass_length"]) / self.m
+        width = 0.5 * float(self.s["blade_width"]) / self.m * self.fib_wide
+        t1, t2 = _mi_frame(n)
+        k = 2 + int(r[6] * 2.999)
+        grew = False
+        for q in range(k):
+            rr = _rand12(self.seed, int(r[5] * 1e6) + q, 20, 139)
+            L = Lg * (0.06 + 0.14 * rr[1])
+            ang = rr[0] * 6.2832
+            x, y = (rr[2] - 0.5) * 2.0 * Lg * 0.15, (rr[3] - 0.5) * 2.0 * Lg * 0.15
+            d = _rl_add(_rl_mul(t1, math.cos(ang)), _rl_mul(t2, math.sin(ang)))
+            start = _rl_add(_rl_add(c, _rl_add(_rl_mul(t1, x), _rl_mul(t2, y))), _rl_mul(d, -0.5 * L))
+            rr = list(rr)
+            rr[6] = 0.5  # no curl: a short bit is straight
+            if mound is None:
+                spine, nrms = self._blade(start, n, d, L, 2, c, L, 0.0, rr, 0.3)
+            else:
+                spine, nrms = self._blade(start, n, d, L, 2, mound[0], mound[1], mound[2], rr, 0.3)
+            if len(spine) > 1:
+                grew = True
+                self._ribbon(spine, nrms, width * (0.5 + 0.6 * rr[8]), (rr[9] - 0.5) * 1.4,
+                             min(self.stacks - 1, int(rr[10] * self.stacks)))
+        if grew:
+            self.counts["chaff"] += 1
 
     def _clump_at(self, key):
         """A stray clump's centre in a cell of Clump size (a 3D grid, so
@@ -40435,7 +40623,7 @@ class _DebrisBuild(object):
         self.clumps[key] = got
         return got
 
-    def _clump_pull(self, c, n, r):
+    def _clump_pull(self, c, n, r, count=True):
         """Clumping (stray_clump; the user, 2026-11-19: "a broad coverage of
         stray blades and then controlling how much they clump together and
         attract to each other ... a lot of stray blades building up to a
@@ -40483,7 +40671,8 @@ class _DebrisBuild(object):
             return None  # a wall between: it stays out of this clump (and doesn't grow behind it)
         if self.blocked is not None and self.blocked(hit[1]):
             return None
-        self.clump_use[key] = self.clump_use.get(key, 0) + 1
+        if count:
+            self.clump_use[key] = self.clump_use.get(key, 0) + 1
         build = clamp(float(self.s.get("stray_buildup", 0.5)), 0.0, 3.0)
         R = cl[3] * cl[5] * 0.9
         return hit[1], hit[2], (cl[0], R, build * 0.12 * R * min(1.0, pull * 1.5) * (0.6 + 0.4 * cl[4]))
@@ -40577,7 +40766,8 @@ class _DebrisBuild(object):
         s = self.s
         Hp = pile * Rb
         shell = math.pi * (Rb * Rb + Hp * Hp) * self.m * self.m  # the heap's outside, square metres
-        count = self._blade_count(int(self.fib_rate * full * 1.2 * shell / 0.01 + 0.5), r, j)
+        mat = self.mat  # Matted: more, finer, shorter blades lying in the heap's surface
+        count = self._blade_count(int(self.fib_rate * full * 1.2 * (1.0 + 1.2 * mat) * shell / 0.01 + 0.5), r, j)
         segs = self.segs
         if not count or self._full(self.G, count * 2 * (segs + 1)):
             return
@@ -40587,6 +40777,9 @@ class _DebrisBuild(object):
         main = self._grass_heading(n, r, ci)
         sag = 0.04 + 0.1 * clamp(float(s["droop"]), 0.0, 4.0)  # radians a step towards down: stiff, dry
         loose = 0.2 + 0.3 * self.mess  # how far a blade tips off the heap's surface
+        if mat:
+            width *= 1.0 - 0.35 * mat
+            loose *= 1.0 - 0.85 * mat
         lump = 0.12 + 0.12 * min(1.0, self.mess)
         p1, p2, p3 = r[7] * 6.2832, r[8] * 6.2832, r[9] * 6.2832
         t1, t2 = _mi_frame(n)
@@ -40601,7 +40794,7 @@ class _DebrisBuild(object):
             far = self._thrown(_rand12(self.seed, b0 + k, 13, 103), Rb)
             if far:  # Scatter: thrown off the heap, it lies on the ground round it
                 ang = rr[11] * 6.2832
-                L = Lg * (0.6 + 0.8 * rr[1])
+                L = self._snap(Lg * (0.6 + 0.8 * rr[1]), b0 + k)
                 x, y = self._shape_xy(far * math.cos(a), far * math.sin(a), shape)
                 d = _rl_add(_rl_mul(t1, math.cos(ang)), _rl_mul(t2, math.sin(ang)))
                 start = _rl_add(_rl_add(c, _rl_add(_rl_mul(t1, x), _rl_mul(t2, y))), _rl_mul(d, -0.5 * L))
@@ -40616,6 +40809,8 @@ class _DebrisBuild(object):
             hs = Hp * sc * (1.0 + 0.5 * lump * math.sin(5.0 * a + p3))
             q = max(1e-3, 1.0 - rho * rho)
             frac = 1.0 - 0.85 * rq[0] * rq[0]  # most blades near the top, where they show
+            if mat:  # matted: nearly all of them in the heap's skin
+                frac = 1.0 - 0.85 * rq[0] ** (2.0 + 6.0 * mat)
             radial = _rl_add(_rl_mul(t1, math.cos(a)), _rl_mul(t2, math.sin(a)))
             if shape is None:
                 want = _rl_add(_rl_add(c, _rl_mul(radial, R * rho)), _rl_mul(n, hs * q ** 0.6 * frac + lift))
@@ -40638,11 +40833,19 @@ class _DebrisBuild(object):
             d = _rl_norm(_rl_sub(d, _rl_mul(nd, _rl_dot(d, nd))), d)
             d = _mi_rotate(d, _rl_norm(_rl_cross(nd, d), t1), (rq[1] - 0.5) * 2.0 * loose)
             L = Lg * (0.6 + 0.8 * rr[1])
+            if mat:
+                L *= 1.0 - 0.35 * mat
+            L = self._snap(L, b0 + k)
             step = L / segs
             curl = (rr[6] - 0.5) * 0.5 * (0.4 + self.mess)
+            if self.straight:
+                curl *= 1.0 - 0.9 * self.straight
             half = segs // 2  # steps back to the blade's base; the rest on to its tip
-            back = self._grass_walk(mid, _rl_mul(d, -1.0), nd, half, step, sag, -curl)
-            fwd = self._grass_walk(mid, d, nd, segs - half, step, sag, curl)
+            sg = sag
+            if mat:  # matted: it bends round the heap's curve instead of sticking out past it
+                sg = sag + mat * 1.5 * step / max(Rb * (1.0 + pile), step)
+            back = self._grass_walk(mid, _rl_mul(d, -1.0), nd, half, step, sg, -curl)
+            fwd = self._grass_walk(mid, d, nd, segs - half, step, sg, curl)
             pts = back[::-1] + [(mid, nd)] + fwd
             if len(pts) > 1:
                 self._ribbon([p for p, _ in pts], [m for _, m in pts], width * (0.7 + 0.6 * rr[8]),
@@ -40720,6 +40923,8 @@ class _DebrisBuild(object):
         arch = (0.3 + 0.7 * rr[5]) * 0.08 * L * (0.4 + 0.6 * layer)
         step = L / segs
         curl = (rr[6] - 0.5) * 0.5 * (0.4 + self.mess)
+        if self.straight:  # Straightness: dry stems are stiff, nearly straight (curl down to a tenth)
+            curl *= 1.0 - 0.9 * self.straight
 
         def lift(p, t):
             q = _rl_sub(p, c)
@@ -40775,6 +40980,7 @@ class _DebrisBuild(object):
         pts, counts, conn, us, vs, uvi = self.G
         b = len(pts)
         last = len(spine) - 1
+        self.ribs.append((b, last + 1))
         for k, p in enumerate(spine):
             d = _rl_sub(spine[min(last, k + 1)], spine[max(0, k - 1)])
             d = _rl_norm(d, (1.0, 0.0, 0.0))
@@ -41375,7 +41581,8 @@ def debris_build(nodes, s, surf=None, seeds=None, faces=None, draw=None, paint=N
     b = _DebrisBuild(surf, sampler, s, seeds, faces, draw).build()
     return {"grass": tuple(b.G), "litter": tuple(b.L), "tufts": tuple(b.T), "jungle": tuple(b.J),
             "jungle_dry": tuple(b.JD), "specks": tuple(b.md.S), "dirt": tuple(b.DT), "bunches": b.counts["bunches"],
-            "strays": b.counts["strays"], "leaves_n": b.counts["leaves"], "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
+            "strays": b.counts["strays"], "chaff": b.counts["chaff"], "leaves_n": b.counts["leaves"],
+            "piles": b.counts["piles"], "tufts_n": b.counts["tufts"],
             "jungle_n": b.counts["jungle"], "specks_n": b.counts["specks"], "capped": b.capped,
             "contact": dict(b.contact)}
 
@@ -41905,8 +42112,9 @@ SC_TYPES = collections.OrderedDict([
                                            "blade_width", "grass_pile", "grass_strays", "bunch_var",
                                            "bunch_shape", "blade_scatter", "bunch_blades", "on_layers",
                                            "stray_clump", "stray_clump_size", "stray_buildup", "stray_heaps",
-                                           "pile_var"),
-               "over": {"slope": 40.0, "grass": 1.5}, "new": {"grass_pile": 0.6, "on_layers": True}}),
+                                           "pile_var", "blade_straight", "blade_broken", "pile_mat", "chaff"),
+               "over": {"slope": 40.0, "grass": 1.5},
+               "new": {"grass_pile": 0.6, "on_layers": True, "blade_straight": 0.6, "blade_broken": 0.2}}),
     ("Leaves", {"parts": (("litter", "leafDry"),),
                 "keys": SC_DEBRIS_COMMON + ("leaves", "leaf_size", "curl", "drape", "bend_size", "on_moss",
                                              "on_layers"),
@@ -43352,7 +43560,7 @@ def sc_build(root, data, surf=None, only=None, readback=True, draft=None):
             fresh = fresh or typ == "Moss"
             fresh_below = fresh_below or typ in SC_DEBRIS_ITEMS
         if typ in SC_DEBRIS_ITEMS and typ != "Specks":
-            below.extend((m, 0.0, True) for m in hit[0].values() if m and m[1])
+            below.extend((m, 0.0, True, part) for part, m in hit[0].items() if m and m[1])  # part: grass or not
         if typ == "Moss" and hit[0].get("moss") and hit[0]["moss"][1]:
             tall = MOSS_DETAIL.get(ls.get("detail"), MOSS_DETAIL["Normal"])[1] and float(ls.get("strands", 0)) > 0
             rest.append((hit[0]["moss"], 0.4 * float(ls.get("strand_length", 0.0)) / scene_m_per_unit()
@@ -45161,7 +45369,9 @@ SC_PRESETS = {
                                     + list(MI_PRESETS["Moss"].items())),
     "Ivy": MI_PRESETS["Ivy"],
     "Grass": collections.OrderedDict([
-        ("Dry grass", {"grass_pile": 0.6}),  # what a new Grass layer gets
+        # what a new Grass layer gets (stiff, part broken since 2026-11-19: after reference photos; Matted costs
+        # blades, so it is left to the heap presets)
+        ("Dry grass", {"grass_pile": 0.6, "blade_straight": 0.6, "blade_broken": 0.2}),
         ("Loose piles", {"grass": 1.2, "bunch_size": 0.4, "grass_length": 0.3, "fullness": 1.2, "comb": 0.15,
                          "grass_pile": 0.9, "mess": 1.0}),
         ("Grass mat", {"coverage": 0.9, "grass": 6.0, "bunch_size": 0.5, "grass_length": 0.35, "fullness": 1.4,
@@ -45170,7 +45380,7 @@ SC_PRESETS = {
         # the user, 2026-11-11: "individual bits of grass here and there, or smaller piles, instead of neat round
         # bunches, more random"
         ("Scattered blades", {"coverage": 0.75, "grass": 0.0, "grass_strays": 60.0, "patchiness": 0.5,
-                              "grass_pile": 0.0}),
+                              "grass_pile": 0.0, "blade_straight": 0.7, "blade_broken": 0.35}),
         ("Loose wisps", {"coverage": 0.7, "grass": 4.0, "bunch_size": 0.3, "bunch_var": 0.5, "bunch_shape": 0.8,
                          "blade_scatter": 0.6, "bunch_blades": 8, "grass_strays": 10.0, "comb": 0.2,
                          "grass_pile": 0.0}),
@@ -45180,10 +45390,24 @@ SC_PRESETS = {
         # the user, 2026-11-19: "a broad coverage of stray blades and then controlling how much they clump together
         # ... a lot of stray blades building up to a pile that a few bundles might be piled onto"
         ("Gathered strays", {"coverage": 0.9, "grass": 0.0, "grass_strays": 150.0, "patchiness": 0.3,
-                             "grass_pile": 0.0, "stray_clump": 0.8, "stray_clump_size": 1.2, "stray_buildup": 0.8}),
+                             "grass_pile": 0.0, "stray_clump": 0.8, "stray_clump_size": 1.2, "stray_buildup": 0.8,
+                             "blade_straight": 0.7, "blade_broken": 0.3}),
         ("Strays into heaps", {"coverage": 0.9, "grass": 0.0, "grass_strays": 220.0, "patchiness": 0.3,
                                "grass_pile": 0.8, "stray_clump": 1.3, "stray_clump_size": 2.0, "stray_buildup": 1.6,
-                               "stray_heaps": 0.7})]),
+                               "stray_heaps": 0.7, "blade_straight": 0.7, "blade_broken": 0.3, "chaff": 1200.0,
+                               "pile_mat": 0.7}),
+        # the user, 2026-11-19: "Improve controls and logic to achieve more realistic scattered looks easier",
+        # matched to photos of raked hay, mown clippings and straw spilled on barn floors: straight stiff stems,
+        # many snapped bits, a fine chaff layer, matted (not bristly) heaps of different heights
+        ("Strewn hay", {"coverage": 0.9, "grass": 0.0, "grass_strays": 220.0, "patchiness": 0.3, "grass_pile": 0.8,
+                        "stray_clump": 1.3, "stray_clump_size": 2.0, "stray_buildup": 1.6, "stray_heaps": 0.7,
+                        "blade_straight": 0.8, "blade_broken": 0.35, "chaff": 2000.0, "pile_mat": 0.8,
+                        "pile_var": 0.6}),
+        ("Mown clippings", {"coverage": 0.9, "grass": 0.0, "grass_strays": 300.0, "patchiness": 0.3,
+                            "grass_pile": 0.0, "stray_clump": 1.2, "stray_clump_size": 1.0, "stray_buildup": 1.2,
+                            "blade_straight": 0.7, "blade_broken": 0.4, "chaff": 3000.0}),
+        ("Matted heaps", {"grass": 1.2, "grass_pile": 0.8, "pile_mat": 1.0, "pile_var": 0.8, "grass_strays": 60.0,
+                          "blade_straight": 0.8, "blade_broken": 0.3, "chaff": 1200.0})]),
     "Leaves": collections.OrderedDict([
         ("Dead leaves", {}),
         ("Autumn carpet", {"coverage": 0.7, "leaves": 30.0, "curl": 0.8}),
@@ -45221,6 +45445,7 @@ SC_QUICK = (
     ("Grass: scattered blades", "Grass", "Scattered blades", "Loose wisps"),
     ("Grass: bunches", "Grass", "Sparse tufts", "Dry grass"),
     ("Grass: small messy piles", "Grass", "Small messy piles", "Loose piles"),
+    ("Grass: strays gathering into heaps", "Grass", "Gathered strays", "Strewn hay"),
     None,
     ("Leaves", "Leaves", "Dead leaves", "Autumn carpet"),
     ("Leaf piles", "Leaf piles", "Leaf piles", "Gutters and wall bases"),
@@ -45468,6 +45693,19 @@ SC_FIELDS = {
     "grass_pile": ("Pile height", _scf(0.0, 3.0, 0.0, 1.5, 2, 0.05),
                    "How high a bunch heaps up, as a share of its radius: 0 = a flat mat of blades on the surface, "
                    "higher = a loose pile with blades all through it, ends splaying out and drooping."),
+    "blade_straight": ("Straightness", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                       "How straight the blades lie: 0 = soft curves, 1 = stiff, nearly straight stems (dry "
+                       "hay and straw)."),
+    "blade_broken": ("Broken bits", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                     "The share of blades snapped into short pieces (15-45% of their length), in the bunches, "
+                     "piles and strays: 0 = all whole."),
+    "pile_mat": ("Matted", _scf(0.0, 1.0, 0.0, 1.0, 2, 0.05),
+                 "How matted the piles are: 0 = loose, blades poking out every way; 1 = a dense skin of finer, "
+                 "shorter blades lying along the heap, only a few sticking out (raked hay, clippings). Only "
+                 "with Pile height above 0."),
+    "chaff": ("Chaff / m2", _scf(0.0, 20000.0, 0.0, 3000.0, 0, 50.0),
+              "Tiny broken bits (a few centimetres) per square metre, under the blades: a fine layer that "
+              "softens the edges. Follows Clumping."),
     "pile_var": ("Height variation", _scf(0.0, 2.0, 0.0, 1.0, 2, 0.05),
                  "Piles of different heights: 0 = every pile Pile height, higher = some low and spread, some tall "
                  "(from a third to three times at 1). Only with Pile height above 0."),
@@ -45638,6 +45876,8 @@ SC_WORDS = {  # key (or (type, key)) -> the words under the slider's two ends
     "bunch_shape": ("round", "irregular"), "blade_scatter": ("tight", "scattered"), "grass_pile": ("flat", "piled"),
     "stray_clump": ("even", "clumped"), "stray_clump_size": ("small", "big"), "stray_buildup": ("flat", "piled up"),
     "stray_heaps": ("none", "all"), "pile_var": ("all alike", "varied"),
+    "blade_straight": ("curvy", "straight"), "blade_broken": ("whole", "snapped"), "pile_mat": ("loose", "matted"),
+    "chaff": ("none", "lots"),
     "comb": ("every way", "combed"), "droop": ("upright", "drooping"), "blade_width": ("thin", "wide"),
     "leaves": ("sparse", "packed"), "piles": ("sparse", "packed"), "pile_size": ("small", "big"), "leaf_size": ("small", "big"),
     "curl": ("flat", "curled"), "tufts": ("sparse", "packed"), "tuft_size": ("small", "big"), "specks": ("sparse", "packed"),
@@ -45668,7 +45908,8 @@ SC_LAYOUT = {  # type -> [(section title or "" for the main grid, expanded, keys
              ("UVs", False, ["uv_tile", "stacks", "stack_layout"])],
     "Grass": [("", True, ["detail", "coverage", "spread", "grass", "grass_strays", "bunch_size", "grass_length",
                           "fullness", "grass_pile"]),
-              ("Shape and scatter", True, ["bunch_var", "pile_var", "bunch_shape", "blade_scatter",
+              ("Blades and bits", True, ["blade_straight", "blade_broken", "chaff"]),
+              ("Shape and scatter", True, ["bunch_var", "pile_var", "pile_mat", "bunch_shape", "blade_scatter",
                                            "bunch_blades"]),
               ("Clumping strays", True, ["stray_clump", "stray_clump_size", "stray_buildup", "stray_heaps"]),
               ("Where it gathers", True, _SC_WHERE + ["mess"]),

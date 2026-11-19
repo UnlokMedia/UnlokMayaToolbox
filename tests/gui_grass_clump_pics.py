@@ -4,7 +4,8 @@ up and heaped, each on its own floor by a wall: run inside an interactive
 Maya.
 
 UNLOK_TEST_OUT picks the folder (default tests/_out/grass_clump_pics);
-UNLOK_PIC_ONLY=name,... picks scenes.
+UNLOK_PIC_ONLY=name,... picks scenes; UNLOK_PIC_EXTRA=name:key=v;up.key=v|...
+adds scenes (up.<key>: a second Grass layer on top, On layers below, greener).
 
     maya.exe -script tests/run_gui_grass_clump_pics.mel
 """
@@ -104,12 +105,22 @@ def main():
         wall = box("wall_" + name, (40, 8, 1), (x, 4, -20.5), div=4.0)
         shade([flr, wall], "pic_ground", (0.36, 0.33, 0.30))
         t0 = time.time()
+        upper = dict((kk[3:], v) for kk, v in over.items() if kk.startswith("up."))  # a second layer on top
+        over = dict((kk, v) for kk, v in over.items() if not kk.startswith("up."))
         rep = ns["create_scatter_group"]([flr, wall], "Grass", dict(strays, **over), select=False)
+        if upper:
+            got, lid = ns["sc_add_layer"](rep["root"], "Grass", dict(strays, **dict(over, seed=11, **upper)),
+                                          top=True)
+            rep = dict(rep, bunches="%s + %s" % (rep.get("bunches"), (got or {}).get("bunches")))
         log.write("%s %.2fs %s\n" % (name, time.time() - t0, dict((kk, rep.get(kk)) for kk in
                                                                    ("bunches", "strays", "faces"))))
         log.flush()
+        first = ns["sc_data"](rep["root"])["layers"][-1]["id"] if upper else None
         for key, node in ns["sc_parts"](rep["root"]).items():
-            shade(node, "pic_grass", (0.80, 0.66, 0.36))
+            if upper and not key.startswith(first + "/"):  # the top layer greener, to tell them apart
+                shade(node, "pic_grass_top", (0.55, 0.66, 0.30))
+            else:
+                shade(node, "pic_grass", (0.80, 0.66, 0.36))
     cmds.select(clear=True)
     for k, (name, _) in enumerate(scenes):
         x = k * 100.0

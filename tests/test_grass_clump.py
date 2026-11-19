@@ -14,6 +14,7 @@ Heaps on clumps adds bundles only there, nothing goes into the surfaces, and
 the cost.
 """
 
+import math
 import os
 import sys
 import time
@@ -23,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLBOX = os.path.join(os.path.dirname(HERE), "UnlokToolbox.py")
 OLD = os.environ.get("UNLOK_OLD_TOOLBOX")
 NEW_KEYS = ("stray_clump", "stray_clump_size", "stray_buildup", "stray_heaps")
+REAL_KEYS = ("blade_straight", "blade_broken", "pile_mat", "chaff")  # 2026-11-19, after reference photos
 
 import maya.standalone  # noqa: E402
 
@@ -104,7 +106,7 @@ def main():
               "%d vs %d points" % (len(a["grass"][0]), len(b["grass"][0])))
     else:
         print("(UNLOK_OLD_TOOLBOX not set: old-toolbox comparison skipped)")
-    bare = dict((k, v) for k, v in base.items() if k not in NEW_KEYS + ("pile_var",))
+    bare = dict((k, v) for k, v in base.items() if k not in NEW_KEYS + REAL_KEYS + ("pile_var",))
     ref = tb["debris_build"](nodes, base)
     others = tb["debris_build"](nodes, dict(base, stray_clump_size=3.0, stray_buildup=2.0, stray_heaps=1.0))
     check("... and without the keys, and with the other three set while Clumping is 0",
@@ -195,9 +197,133 @@ def main():
         return hs[int(0.1 * (len(hs) - 1))], hs[int(0.9 * (len(hs) - 1))]
     lo0, hi0 = tops(blades(p0["grass"]))
     lo1, hi1 = tops(blades(p1["grass"]))
+    realism(tb, nodes, m)
     check("Height variation 1 spreads pile heights (10th-90th percentile tops further apart)",
           (hi1 - lo1) > 1.3 * (hi0 - lo0) and p1["bunches"] == p0["bunches"],
           "%.3f-%.3f vs %.3f-%.3f dm, %d vs %d bunches" % (lo1, hi1, lo0, hi0, p1["bunches"], p0["bunches"]))
+
+
+def bend_stats(bl):
+    """Per blade the sharpest turn between segments (degrees) and its longest segment over its mean: the
+    99th percentiles."""
+    bends, stretch = [], []
+    for b in bl:
+        worst = 0.0
+        for i in range(1, len(b) - 1):
+            d0 = [b[i][j] - b[i - 1][j] for j in range(3)]
+            d1 = [b[i + 1][j] - b[i][j] for j in range(3)]
+            l0, l1 = math.sqrt(sum(x * x for x in d0)), math.sqrt(sum(x * x for x in d1))
+            if l0 > 1e-9 and l1 > 1e-9:
+                c = sum(x * y for x, y in zip(d0, d1)) / (l0 * l1)
+                worst = max(worst, math.degrees(math.acos(max(-1.0, min(1.0, c)))))
+        bends.append(worst)
+        segs = [math.sqrt(sum((b[i + 1][j] - b[i][j]) ** 2 for j in range(3))) for i in range(len(b) - 1)]
+        if segs and min(segs) > 1e-9:
+            stretch.append(max(segs) / (sum(segs) / len(segs)))
+    bends.sort()
+    stretch.sort()
+    b99 = bends[int(0.99 * (len(bends) - 1))] if bends else 0.0
+    s99 = stretch[int(0.99 * (len(stretch) - 1))] if stretch else 0.0
+    return b99, s99
+
+
+def length(b):
+    return sum(math.sqrt(sum((b[i + 1][j] - b[i][j]) ** 2 for j in range(3))) for i in range(len(b) - 1))
+
+
+def twisted(mesh):
+    """Ribbon rows standing on edge (the two edge points' height difference over the width > 0.95)."""
+    pts, n = mesh[0], 0
+    for i in range(0, len(pts) - 1, 2):
+        p, q = pts[i], pts[i + 1]
+        w = math.sqrt(sum((p[j] - q[j]) ** 2 for j in range(3)))
+        if w > 1e-9 and abs(p[1] - q[1]) / w > 0.95:
+            n += 1
+    return n
+
+
+def realism(tb, nodes, m):
+    """Straightness, Broken bits, Chaff, Matted (the user, 2026-11-19: "Improve controls and logic to achieve
+    more realistic scattered looks easier"), and grass over a lower grass layer ("the top layer warps over the
+    bottom in weird ways")."""
+    D = tb["DEBRIS_DEFAULTS"]
+    check("the realism settings are Grass settings, off by default, with fields and panel rows",
+          all(D.get(k) == 0.0 and k in tb["SC_TYPES"]["Grass"]["keys"] and k in tb["SC_FIELDS"] and
+              any(k in sec[2] for sec in tb["SC_LAYOUT"]["Grass"]) for k in REAL_KEYS))
+    st = dict(grass=0.0, grass_strays=150.0, grass_pile=0.0)
+    a = blades(tb["debris_build"](nodes, settings(tb, **st))["grass"])
+    b = blades(tb["debris_build"](nodes, settings(tb, blade_straight=1.0, **st))["grass"])
+
+    def turn(bl):
+        """Mean total turning in plan along a blade on the floor (degrees)."""
+        tot = []
+        for x in bl:
+            if max(p[1] for p in x) > 0.3 or len(x) < 3:
+                continue
+            s = 0.0
+            for i in range(1, len(x) - 1):
+                d0 = (x[i][0] - x[i - 1][0], x[i][2] - x[i - 1][2])
+                d1 = (x[i + 1][0] - x[i][0], x[i + 1][2] - x[i][2])
+                s += abs(math.degrees(math.atan2(d0[0] * d1[1] - d0[1] * d1[0], d0[0] * d1[0] + d0[1] * d1[1])))
+            tot.append(s)
+        return sum(tot) / max(1, len(tot))
+    check("Straightness 1: the blades curve far less", turn(b) < 0.3 * turn(a) and len(b) == len(a),
+          "%.1f vs %.1f degrees a blade" % (turn(b), turn(a)))
+    c = blades(tb["debris_build"](nodes, settings(tb, blade_broken=0.6, **st))["grass"])
+    la, lc = sorted(length(x) for x in a), sorted(length(x) for x in c)
+    short = sum(1 for x in lc if x < 0.5 * la[len(la) // 2])
+    check("Broken bits 0.6: about that share of blades snapped short", 0.4 * len(lc) < short < 0.8 * len(lc),
+          "%d of %d under half the usual length" % (short, len(lc)))
+    got = tb["debris_build"](nodes, settings(tb, chaff=1000.0, **st))
+    d = blades(got["grass"])
+    tiny = [x for x in d if length(x) < 0.25 * float(D["grass_length"]) / m]
+    check("Chaff adds tiny bits on top of the strays",
+          got["chaff"] > 0 and len(d) - len(a) >= 2 * got["chaff"] and len(tiny) >= 2 * got["chaff"],
+          "%d chaff spots, %d tiny bits" % (got["chaff"], len(tiny)))
+    cl = dict(st, stray_clump=1.0, stray_clump_size=1.5, stray_buildup=1.0, stray_heaps=1.0)
+    k0 = tb["debris_build"](nodes, settings(tb, **cl))
+    k1 = tb["debris_build"](nodes, settings(tb, chaff=1000.0, **cl))
+    check("... and it doesn't change which clumps get heaps", k0["bunches"] == k1["bunches"],
+          "%d vs %d" % (k0["bunches"], k1["bunches"]))
+    pl = dict(grass=1.2, grass_strays=0.0, grass_pile=0.8, bunch_var=0.0)
+
+    def steep(bl):
+        """Share of pile blade ends (blades off the floor) poking up: an end higher than the blade's middle
+        by over a sixth of its length (matted blades lie round the heap, ends down)."""
+        n = tot = 0
+        for x in bl:
+            mid = x[len(x) // 2]
+            if mid[1] < 0.05 / m:
+                continue
+            L = length(x)
+            for e in (x[0], x[-1]):
+                tot += 1
+                if e[1] - mid[1] > L / 6.0:
+                    n += 1
+        return n / float(max(1, tot))
+    p0 = blades(tb["debris_build"](nodes, settings(tb, **pl))["grass"])
+    p1 = blades(tb["debris_build"](nodes, settings(tb, pile_mat=1.0, **pl))["grass"])
+    check("Matted 1: denser piles with fewer blade ends poking up",
+          len(p1) > 1.5 * len(p0) and steep(p1) < 0.7 * steep(p0),
+          "%d vs %d blades, %.2f vs %.2f steep" % (len(p1), len(p0), steep(p1), steep(p0)))
+
+    # --- grass over a grass layer (On layers below)
+    two = dict(grass=1.5, grass_strays=40.0, grass_pile=0.6, coverage=0.9)
+    low = tb["debris_build"](nodes, settings(tb, **two))
+    up = settings(tb, **dict(two, seed=11))
+    alone = tb["debris_build"](nodes, up)
+    t0 = time.time()
+    over = tb["debris_build"](nodes, up, rest_on=[(low["grass"], 0.0, True)])
+    took = time.time() - t0
+    ba, sa = bend_stats(blades(alone["grass"]))
+    bo, so = bend_stats(blades(over["grass"]))
+    check("grass over grass: no kinked or stretched blades (99th percentile bend and stretch near its own)",
+          bo < ba + 25.0 and so < 1.4, "bend %.0f vs %.0f deg alone, stretch %.2f vs %.2f" % (bo, ba, so, sa))
+    check("... no ribbons twisted on edge", twisted(over["grass"]) <= twisted(alone["grass"]) * 1.05 + 5,
+          "%d vs %d alone" % (twisted(over["grass"]), twisted(alone["grass"])))
+    lifted = sum(1 for p, q in zip(over["grass"][0], alone["grass"][0]) if p[1] > q[1] + 0.005 / m)
+    check("... and it does lie on the layer under it (points lifted)", lifted > 0.05 * len(over["grass"][0]),
+          "%d of %d points, %.2fs" % (lifted, len(over["grass"][0]), took))
 
 
 try:

@@ -2627,6 +2627,42 @@
       height by 2^(1.6 v (2u - 1)) (a third to three times at 1, capped 4),
       own randoms (18, 131), in `_bunch_lump` and on each heap lump. 0 =
       bit-identical.
+    - **Realism settings** (the user, same day, after I compared the renders
+      with reference photos of raked hay, mown clippings and straw on barn
+      floors: piles too bristly, strays too curvy, no fine bits; "Improve
+      controls and logic to achieve more realistic scattered looks
+      easier"). Grass section "Blades and bits": `blade_straight`
+      (Straightness: `_blade` / pile curl x (1 - 0.9 s)), `blade_broken`
+      (Broken bits: `_snap`, that share of blades 15-45% long, randoms 19 /
+      137), `chaff` (Chaff / m2: bits, not spots; `_chaff` makes 2-4 straight
+      2-segment bits of 6-20% Grass length a spot, kind 8, randoms 20 / 139,
+      pulled into stray clumps without counting towards Heaps on clumps).
+      Shape and scatter: `pile_mat` (Matted: piles x (1 + 1.2 m) blades,
+      0.65 x narrower and shorter, tipped off the dome x (1 - 0.85 m), most
+      in the dome's skin, and each walk bends round the heap's curve, `sg`).
+      All 0 = bit-identical. New layers / "Dry grass": Straightness 0.6,
+      Broken 0.2 (free); Matted only in heap presets (it costs blades: a new
+      layer's 0.5 leaked into the quick picks, +60% verts). Presets Strewn
+      hay, Mown clippings, Matted heaps; Gathered strays / Strays into heaps
+      / Scattered blades got straightness and broken bits; quick pick
+      "Grass: strays gathering into heaps" (light: Gathered strays, no
+      chaff: chaff took it past 4 s).
+    - **Grass over grass** (On layers below; the user: "if you do 2 layers
+      of grass, the top layer warps over the bottom in weird ways"):
+      `_grass_over` lifted each blade point alone to the highest lower point
+      in its 1 cm cell (tips of lower blades standing up included): bends
+      to 125 deg, ribbons on edge, segments stretched 1.9x, big flat sheets
+      in the viewport. Now lower grass is a body: `_mat_thickness` (2 cm
+      cells, opened 3 x 3 then smoothed, a thickness over the ground under
+      it by a ray down); a blade row over that same ground (a ray down
+      from it: not one on a step over a floor mat) rises by it, plus <= 1.2
+      cm onto a lone lower blade; other lower parts (leaves; `_rest_on`
+      entries now carry the part name) are sheets it rises right onto, as
+      before. Per blade the rises are eased (`max_j rise_j - 0.7 |arc|`,
+      ramps not steps) and both ribbon edges of a row move together
+      (`self.ribs`: first point and rows per blade). Bends p99 72 vs 61
+      alone, stretch 1.28, no extra twisted rows (`test_grass_clump`);
+      pictures `UNLOK_PIC_EXTRA` `up.<key>` = a second Grass layer on top.
     - **Grass inside boxes** (the user asked, 2026-11-06): the floor under a
       box standing on it is sampled like any other, so bunches grew inside
       the box (test_grass_pile's yard: ~2k points in the step), and blades
