@@ -44574,14 +44574,16 @@ SC_ADD_TOP_VAR = "unlokScatterAddTop"  # optionVar: 0 when Add Layer puts new la
 
 
 def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_of=None, drawing=None,
-                 draw_of=None, top=False):
+                 draw_of=None, top=False, at=None):
     """Add a layer (one Ctrl+Z): a type's defaults (or settings), or a copy
     of another layer (copy_of: its id; a new seed); drawing: strokes it goes
     along (meshes they're on that the group doesn't scatter onto yet are
     added); draw_of: another layer's id, whose strokes it goes along too
     (Add Layer with a drawn layer picked: the user, 2026-11-12, "is that
     other layer on the same strokes?"); top: first in the list (on top of
-    the others, On layers below), else last. Returns (report, id)."""
+    the others, On layers below), else last; at: its index in the list
+    instead (Add Above / Add Below, a duplicate next to its source; the
+    list is the build order, so it's that too). Returns (report, id)."""
     made = []
 
     def edit(data):
@@ -44607,7 +44609,9 @@ def sc_add_layer(root, layer_type, settings=None, points=None, faces=None, copy_
                 src = sc_layer(data, draw_of)
                 if src is not None and src.get("draw"):
                     layer["draw"] = json.loads(json.dumps(src["draw"]))
-        if top:
+        if at is not None:
+            data["layers"].insert(max(0, min(int(at), len(data["layers"]))), layer)
+        elif top:
             data["layers"].insert(0, layer)
         else:
             data["layers"].append(layer)
@@ -44995,7 +44999,15 @@ def sc_selection():
 
 
 SC_PRESETS = {
-    "Moss": MI_PRESETS["Moss"],
+    # Light moss (the user, 2026-11-19: "moss option is the heaviest one that takes a while to load, even if you want
+    # something lighter"): the Mat with bigger cells, no shoots / strands / capsules, a little bumpy. On a 40 x 40 dm
+    # yard with a wall ring: ~1.5 s and 2k verts, against the full Moss mat's ~5 s and 99k (most of that is the
+    # field's analysis, which scales with 1 / clump size squared, not the shoots)
+    "Moss": collections.OrderedDict([("Light moss", {"style": "Mat", "coverage": 0.65, "render_as": "GED",
+                                                     "lumps": 0.5, "clump_size": 0.1, "creases": 0.3,
+                                                     "strands": 0.0, "capsules": 0.0, "bumps": 0.5,
+                                                     "growths": 0.2, "cage_detail": 0.3})]
+                                    + list(MI_PRESETS["Moss"].items())),
     "Ivy": MI_PRESETS["Ivy"],
     "Grass": collections.OrderedDict([
         ("Dry grass", {"grass_pile": 0.6}),  # what a new Grass layer gets
@@ -45040,8 +45052,46 @@ SC_PRESETS = {
         ("Crevice tufts", {"tufts": 25.0, "tuft_size": 0.03, "crevices": 1.0, "patchiness": 0.8})])}
 
 
+# Add Layer's menu (the user, 2026-11-19: "more options for layer types, I don't see a grass scattered blades
+# option ... Each layer option should build with a light preset, then the user can bump up or select a more
+# detailed preset if needed"): (label, type, preset it starts as, the fuller preset to step up to); None = a
+# separator. Presets of the existing types, no new engines; each starts light (fast to grow).
+SC_QUICK = (
+    ("Moss: light (bed only)", "Moss", "Light moss", "Moss mat"),
+    ("Moss: full (shoots and strands)", "Moss", "Moss mat", "Lumpy mat"),
+    None,
+    ("Grass: scattered blades", "Grass", "Scattered blades", "Loose wisps"),
+    ("Grass: bunches", "Grass", "Sparse tufts", "Dry grass"),
+    ("Grass: small messy piles", "Grass", "Small messy piles", "Loose piles"),
+    None,
+    ("Leaves", "Leaves", "Dead leaves", "Autumn carpet"),
+    ("Leaf piles", "Leaf piles", "Leaf piles", "Gutters and wall bases"),
+    ("Jungle leaves", "Jungle leaves", "Fallen jungle leaves", "Fresh and green"),
+    None,
+    ("Moss tufts", "Moss tufts", "Moss tufts", "Crevice tufts"),
+    ("Specks and dirt", "Specks", "A few specks", "Moss and dirt specks"),
+    ("Ivy", "Ivy", "Young shoots", "Climbing ivy"))
+SC_LIGHT = {}  # type -> the preset a new layer of it starts as (its first quick pick)
+for _q in SC_QUICK:
+    if _q:
+        SC_LIGHT.setdefault(_q[1], _q[2])
+del _q
+SC_ADD_WHERE = ("top", "bottom", "above", "below")  # where Add Layer puts a new layer
+SC_ADD_WHERE_VAR = "unlokScatterAddWhere"  # optionVar: one of SC_ADD_WHERE (SC_ADD_TOP_VAR read when unset)
+
+
+def sc_quick_settings(typ, preset=None):
+    """A new layer's settings as a preset (default: the type's light one,
+    SC_LIGHT): its new look (sc_start_settings) with the preset over it."""
+    typ = sc_type(typ)
+    s = sc_start_settings(typ)
+    over = SC_PRESETS[typ].get(preset or SC_LIGHT.get(typ, "")) or {}
+    s.update({k: v for k, v in over.items() if k in s})
+    return s
+
+
 def sc_user_presets(typ):
-    var = "unlokScatter%sPresets" % sc_type(typ).replace(" ", "")
+    var ="unlokScatter%sPresets" % sc_type(typ).replace(" ", "")
     if not cmds.optionVar(exists=var):
         return {}
     try:
@@ -46213,8 +46263,9 @@ class ScatterPanel(QtWidgets.QWidget):
         self.start_type = _Combo()
         _guard_focus(self.start_type)
         self.start_type.addItems(list(SC_TYPES))
-        self.start_type.setToolTip("What a new group grows first (add more layers in step 2). Its settings are "
-                                   "in step 3: set them up before pressing New if you like.")
+        self.start_type.setToolTip("What a new group grows first (add more layers in step 2). It starts light "
+                                   "(quick to grow; Moss as Light moss, Grass as Scattered blades). Its settings "
+                                   "are in step 3: pick a fuller preset there before pressing New if you like.")
         self.start_type.activated.connect(lambda *_: self._show_layer())
         rl.addWidget(lbl)
         rl.addWidget(self.start_type, 1)
@@ -46313,25 +46364,45 @@ class ScatterPanel(QtWidgets.QWidget):
         self.layer_list.setItemDelegate(_ScLayerNameDelegate(self.layer_list))
         self.layer_list.itemChanged.connect(lambda item: self._layer_item_changed(item))
         self.layer_list.currentItemChanged.connect(lambda *_: self._layer_picked())
+        self.layer_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.layer_list.customContextMenuRequested.connect(lambda pos: self._layer_menu(pos))
+        self.layer_list.setToolTip("Right-click a layer: add a layer above or below it, duplicate, move, delete.")
         card.add(self.layer_list)
-        add_l = self.add_btn = secondary_button("Add Layer", "Add a layer to the group: pick what it grows. With "
-                                                             "faces / vertices picked it grows only there. With a "
-                                                             "drawn layer picked in the list it goes along the same "
-                                                             "strokes (Clear Area: everywhere).")
+        add_l = self.add_btn = secondary_button("Add Layer", "Add a layer to the group: pick what it grows. Each "
+                                                             "starts light (quick to grow); step up with its "
+                                                             "Presets or Detail in step 3. With faces / vertices "
+                                                             "picked it grows only there. With a drawn layer picked "
+                                                             "in the list it goes along the same strokes (Clear "
+                                                             "Area: everywhere).")
         menu = QtWidgets.QMenu(add_l)
-        for t in SC_TYPES:
-            menu.addAction(t).triggered.connect(lambda *_, t=t: self.add_layer(t))
-        menu.addSeparator()
-        # the user, 2026-11-12: leaves added over a few grass layers went to the bottom, and each Move Up regrew
-        self.add_top = menu.addAction("New layers go on top")
-        self.add_top.setCheckable(True)
-        self.add_top.setToolTip("On: a new layer goes to the top of the list, on top of the others (On layers "
-                                "below). Off: to the bottom. Remembered.")
         menu.setToolTipsVisible(True)
-        self.add_top.setChecked(not cmds.optionVar(exists=SC_ADD_TOP_VAR) or bool(cmds.optionVar(q=SC_ADD_TOP_VAR)))
-        self.add_top.toggled.connect(lambda on: cmds.optionVar(intValue=(SC_ADD_TOP_VAR, int(bool(on)))))
+        self._quick_actions(menu, None)
+        menu.addSeparator()
+        # where it goes (the user, 2026-11-12: leaves added over a few grass layers went to the bottom, and each
+        # Move Up regrew; 2026-11-19: "add layer somewhere specific in the stack (add below, add above, etc.)")
+        where = cmds.optionVar(q=SC_ADD_WHERE_VAR) if cmds.optionVar(exists=SC_ADD_WHERE_VAR) else None
+        if where not in SC_ADD_WHERE:
+            where = "top" if (not cmds.optionVar(exists=SC_ADD_TOP_VAR) or
+                              bool(cmds.optionVar(q=SC_ADD_TOP_VAR))) else "bottom"
+        self.add_where = {}
+        for key, text, tip in (("top", "New layers go on top", "A new layer goes to the top of the list, on top "
+                                                               "of the others (On layers below)."),
+                               ("bottom", "New layers go at the bottom", "A new layer goes to the bottom of the "
+                                                                         "list, under the others."),
+                               ("above", "New layers go above the picked layer", "Right above the layer picked "
+                                                                                 "in the list (on top of it)."),
+                               ("below", "New layers go below the picked layer", "Right under the layer picked "
+                                                                                 "in the list.")):
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(key == where)
+            act.setToolTip(tip + " Remembered. Right-click a layer to add one above or below it once.")
+            act.toggled.connect(lambda on, key=key: self._set_add_where(key, on))
+            self.add_where[key] = act
+        self.add_top = self.add_where["top"]
         add_l.setMenu(menu)
-        dup = secondary_button("Duplicate", "Copy the layer (a new seed): e.g. a second, sparser moss.")
+        dup = secondary_button("Duplicate", "Copy the layer, right above it (a new seed): e.g. a second, sparser "
+                                            "moss.")
         dup.clicked.connect(lambda *_: self.duplicate_layer())
         dele = secondary_button("Delete", "Remove the layer and its meshes (one Ctrl+Z).")
         dele.clicked.connect(lambda *_: self.delete_layer())
@@ -46432,7 +46503,7 @@ class ScatterPanel(QtWidgets.QWidget):
             self.box[typ] = self._type_box(typ)
             card.add(self.box[typ])
             for key, widget in self.f[typ].items():
-                widget.setValue(sc_start_settings(typ)[key])
+                widget.setValue(sc_quick_settings(typ)[key])
                 widget.changed.connect(lambda k=key, t=typ: self._queue(t, k))
             for key in ("style", "render_as", "fade", "fade_by"):
                 if key in self.f[typ]:
@@ -46627,7 +46698,7 @@ class ScatterPanel(QtWidgets.QWidget):
             if sc_settings(layer).get("fade", "Off") != "Off" and typ in self.fade_sec:
                 self.fade_sec[typ].header.setChecked(True)  # a faded layer shows its fade
         else:
-            self._show(typ, self._next.get(typ) or sc_start_settings(typ))
+            self._show(typ, self._next.get(typ) or sc_quick_settings(typ))  # light first (SC_LIGHT)
             self.step_look.title.setText("Settings for the next group's first layer (%s)" % typ)
         self._style_rows(typ)
         self._fill_presets()
@@ -46991,6 +47062,7 @@ class ScatterPanel(QtWidgets.QWidget):
         return ", ".join(bits)
 
     def _report(self, verb, rep, t0):
+        hint, self._hint = getattr(self, "_hint", ""), ""  # (once: Add Layer's step-up tip)
         if rep.get("stopped"):
             self.set_status("Paused: %s %s, but %s. Your edits are kept: lower Coverage or Detail, or press "
                             "<b>Play</b> to grow it anyway (Esc cancels)." % (
@@ -47014,6 +47086,8 @@ class ScatterPanel(QtWidgets.QWidget):
         elif rep.get("capped"):
             msg += " Capped at %s vertices per part: lower the amount or the Detail." % format(MI_MAX_VERTS, ",")
             level = "warn"
+        if level == "info":
+            msg += hint
         self.set_status(msg, level)
         self._mark_paused()
 
@@ -47223,26 +47297,107 @@ class ScatterPanel(QtWidgets.QWidget):
         else:
             self.set_status("No blockers to select.", level="warn")
 
+    def _quick_actions(self, menu, where):
+        """Fill a menu with the quick layer picks (SC_QUICK); where: as
+        add_layer's (None = the remembered choice)."""
+        for q in SC_QUICK:
+            if q is None:
+                menu.addSeparator()
+                continue
+            label, typ, preset, more = q
+            act = menu.addAction(label)
+            act.setToolTip("A %s layer, starting as the light '%s' preset (quick to grow). For more: '%s' in its "
+                           "Presets (step 3), or a higher Detail." % (typ.lower(), preset, more))
+            act.triggered.connect(lambda *_, q=q: self.add_layer(q[1], q[2], where=where, label=q[0]))
+
+    def _set_add_where(self, key, on):
+        """The add menu's where-it-goes choice: one at a time; none = bottom."""
+        if on:
+            for k, act in self.add_where.items():
+                if k != key and act.isChecked():
+                    act.blockSignals(True)
+                    act.setChecked(False)
+                    act.blockSignals(False)
+        now = self._add_where_now()
+        try:
+            cmds.optionVar(stringValue=(SC_ADD_WHERE_VAR, now))
+            cmds.optionVar(intValue=(SC_ADD_TOP_VAR, int(now == "top")))
+        except Exception:
+            pass
+
+    def _add_where_now(self):
+        return next((k for k in SC_ADD_WHERE if self.add_where[k].isChecked()), "bottom")
+
+    def _add_index(self, where):
+        """Where in the list a new layer goes (None: last)."""
+        data = sc_data(self._root)
+        ids = [l.get("id") for l in data["layers"]]
+        i = ids.index(self._lid) if self._lid in ids else None
+        if where == "top" or (where == "above" and i is None):
+            return 0
+        if where == "above":
+            return i
+        if where == "below" and i is not None:
+            return i + 1
+        return len(ids)
+
     @ui_safe
-    def add_layer(self, typ):
+    def _layer_menu(self, pos):
+        """Right-click on the layer list: add above / below that layer,
+        duplicate, move, delete."""
+        if not self._alive():
+            return
+        item = self.layer_list.itemAt(pos)
+        if item is not None:
+            self.layer_list.setCurrentItem(item)  # (picks the layer)
+        menu = QtWidgets.QMenu(self.layer_list)
+        menu.setToolTipsVisible(True)
+        if item is not None:
+            self._quick_actions(menu.addMenu("Add Above"), "above")
+            self._quick_actions(menu.addMenu("Add Below"), "below")
+            menu.addSeparator()
+            menu.addAction("Duplicate").triggered.connect(lambda *_: self.duplicate_layer())
+            menu.addAction("Move Up").triggered.connect(lambda *_: self.move_layer(-1))
+            menu.addAction("Move Down").triggered.connect(lambda *_: self.move_layer(1))
+            menu.addSeparator()
+            menu.addAction("Delete").triggered.connect(lambda *_: self.delete_layer())
+        else:
+            self._quick_actions(menu.addMenu("Add Layer"), None)
+        menu.exec_(self.layer_list.viewport().mapToGlobal(pos))
+
+    @ui_safe
+    def add_layer(self, typ, preset=None, where=None, label=None):
+        """Add a layer of a type, starting as a preset (default: the type's
+        light one, SC_LIGHT); where: top / bottom / above / below the picked
+        layer (None: the add menu's choice)."""
         if not self._alive():
             self.set_status("Select a scatter group (click its box) first.", level="warn")
             return
+        typ = sc_type(typ)
+        preset = preset or SC_LIGHT.get(typ)
         sel = sc_selection()
         src = sc_layer(sc_data(self._root), self._lid) if self._lid else None
         n = sc_area(src)[2] if src is not None and src.get("draw") else 0
-        verb = "Added %s to" % typ.lower()
+        what = (label or typ).lower()
+        verb = "Added %s to" % what
         if n:
             verb = "Added %s along %s's %d stroke%s to" % (
-                typ.lower(), src.get("name", src["type"]), n, "" if n == 1 else "s")
-        top = self.add_top.isChecked()
-        self._structural(verb, lambda: sc_add_layer(self._root, typ, None, sel["points"], sel["faces"],
-                                                    draw_of=self._lid if n else None, top=top))
+                what, src.get("name", src["type"]), n, "" if n == 1 else "s")
+        at = self._add_index(where or self._add_where_now())
+        s = sc_quick_settings(typ, preset)
+        more = next((q[3] for q in SC_QUICK if q and q[1] == typ and q[2] == preset), None)
+        if more:
+            self._hint = " It starts light ('%s'): for more, pick <b>%s</b> in its Presets (step 3)%s." % (
+                preset, more, " or raise Detail" if typ != "Ivy" else "")
+        self._structural(verb, lambda: sc_add_layer(self._root, typ, s, sel["points"], sel["faces"],
+                                                    draw_of=self._lid if n else None, at=at))
 
     @ui_safe
     def duplicate_layer(self):
         if self._alive() and self._lid:
-            self._structural("Duplicated a layer in", lambda: sc_add_layer(self._root, None, copy_of=self._lid))
+            at = self._add_index("above")  # right above its source (on top of it)
+            self._structural("Duplicated a layer in", lambda: sc_add_layer(self._root, None, copy_of=self._lid,
+                                                                           at=at))
 
     @ui_safe
     def delete_layer(self):

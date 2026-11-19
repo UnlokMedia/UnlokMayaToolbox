@@ -1355,6 +1355,30 @@
   `ScatterPanel._next` (set by edits, presets and Randomize with no layer),
   so a new group never picks up the last layer looked at. Note the fields'
   `setValue` doesn't emit `changed`: a test emits it to act like a user.
+  - **Add Layer, light first (2026-11-19;** the user: "add layer somewhere
+    specific in the stack (add below, add above, etc.) ... I don't see a
+    grass scattered blades option, moss option is the heaviest ... Each
+    layer option should build with a light preset"): Add Layer's menu is
+    `SC_QUICK` (label, type, preset, fuller preset): presets of the
+    existing types, no new engines. `SC_LIGHT` (type -> its first quick
+    pick) is what `add_layer(typ)` and step 1's first layer start as
+    (`sc_quick_settings`: `sc_start_settings` + the preset; "Moss mat"
+    through it = the old new moss layer exactly). "Light moss" (first in
+    `SC_PRESETS["Moss"]`): Mat, clump 0.1, creases 0.3, no strands /
+    capsules: 1.6 s / 2k verts vs Moss mat's 5.4 s / 99k on the yard (the
+    field's analysis scales with 1 / clump size^2; shoots are the
+    smaller part). Debris types cost ~2 s there, nearly all the shared
+    coverage field (`_debris_field`, fixed `DEBRIS_FIELD_R`, cached
+    across layers with the same seed). The status gets a step-up tip
+    (`_hint`, appended once by `_report`). Where it goes: `add_where`
+    actions (`SC_ADD_WHERE` top / bottom / above / below the picked layer,
+    `SC_ADD_WHERE_VAR`; `add_top` is the "top" one, `SC_ADD_TOP_VAR` still
+    written); `sc_add_layer(at=)` inserts at an index. Right-click a layer
+    (`_layer_menu`): Add Above / Add Below submenus, Duplicate (right
+    above its source), Move, Delete. The list is the build order: a layer
+    added under layers with On layers below makes them grow again on it.
+    `tests/test_scatter_add_layers.py` (timings and menu pictures in
+    `tests/_out/scatter_add`).
   - **Scene:** `scatteredObjects####_GRP` (transforms free: `_rope_fill`
     writes parts through their inclusive matrix, so they sit on the
     surfaces under any parent; locked, Maya's parent couldn't compensate
