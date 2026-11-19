@@ -1,0 +1,2 @@
+// Launch: set UNLOK_TEST_DIR to this folder, then  maya.exe -script <this file>
+python("import os; exec(compile(open(os.path.join(os.environ['UNLOK_TEST_DIR'], 'gui_grass_clump_pics.py')).read(), 'gui_grass_clump_pics.py', 'exec'), {'__name__': 'gui_grass_clump_pics'})");

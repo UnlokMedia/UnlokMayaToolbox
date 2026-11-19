@@ -2594,6 +2594,39 @@
       engine clamps widened to match). Presets Scattered blades (Bunches
       0, strays 60), Loose wisps, Small messy piles. Pictures:
       `tests/run_gui_grass_pics.mel` (`UNLOK_PIC_ONLY=scattered,...`).
+    - **Clumping strays** (the user, 2026-11-19: "piles of grass that have
+      falloff, so a lot of stray blades building up to a pile that a few
+      bundles might be piled onto ... a broad coverage of stray blades and
+      then controlling how much they clump together and attract to each
+      other"): Grass section "Clumping strays", `stray_clump` (Clumping
+      0..2), `stray_clump_size` (m), `stray_buildup` (Build-up 0..3),
+      `stray_heaps` (Heaps on clumps, share 0..1); Clumping 0 = the strays
+      exactly as before (the other three do nothing then). Clumps
+      (`_clump_at`): one per cell of a 3D grid of Clump size (walls, floors
+      and the step each their own), 1 in 6 cells empty, centre snapped to
+      the surface, reach 0.5 size (0.6-1.4x), strength 0.45-1.35, stretched
+      1-2.5x along a random axis (drifts); own randoms (14, 107).
+      `_clump_pull` (in `_strays`): the nearest clump (27 cells, normals
+      agreeing) by the stretched distance d / reach; inside, d^(1 + 3 pull)
+      (pull = Clumping x strength, capped 1), outside pulled in a little
+      (out to 2.5 reach), re-snapped, dropped if a wall stands between
+      (`_blocked`) or in a blocker. The blades then go through `_blade` with
+      the clump's mound (centre, 0.9 x reach, Build-up x 0.12 x reach high):
+      each at its own layer, so they pile up over each other. Heaps
+      (`_clump_heaps`, after the strays): clumps that pulled 4+ strays, that
+      share of them, 1-3 `_grass_pile` lumps (Bunch size, at most 0.4 reach,
+      fullness 0.55, irregular shape, Pile height >= 0.6) lifted onto the
+      mound, `_heap_scatter` 0.7 so they shed blades into the strays (the
+      first try, full-density domes at 0.5 reach, read as neat round blobs).
+      Presets Gathered strays, Strays into heaps. Test
+      `tests/test_grass_clump.py`; pictures `tests/run_gui_grass_clump_pics.mel`
+      (`UNLOK_PIC_ONLY`, `UNLOK_PIC_EXTRA=name:key=v;key=v|...`).
+    - **Height variation** (`pile_var` 0..2, Shape and scatter; the user,
+      same day: "pile height variation"; before it, pile height only varied
+      with bunch size): `_DebrisBuild._pile_var` scales each pile's Pile
+      height by 2^(1.6 v (2u - 1)) (a third to three times at 1, capped 4),
+      own randoms (18, 131), in `_bunch_lump` and on each heap lump. 0 =
+      bit-identical.
     - **Grass inside boxes** (the user asked, 2026-11-06): the floor under a
       box standing on it is sampled like any other, so bunches grew inside
       the box (test_grass_pile's yard: ~2k points in the step), and blades
