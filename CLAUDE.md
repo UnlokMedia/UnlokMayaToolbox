@@ -2711,8 +2711,15 @@
       an underside after it ignored) -> per row the middle and 2 x the
       farthest point (width). `strand_curves` makes one transform
       (`STRAND_TAG` = the part key, name `..._CRV`) with a linear
-      nurbsCurve shape per strand and a doubleArray `width` per CV
-      (AbcExport writes it), all API (~90 us a curve: 20k blades ~2 s).
+      nurbsCurve shape per strand, root first (CV 0 = where it's pinned),
+      a doubleArray `width` per CV (AbcExport writes it on its own) and a
+      vectorArray `N` per CV (the strip's face normal, across x the
+      central-difference tangent: how a ribbon faces; export with `-attr
+      N`; round trip checked by AbcImport). One attribute definition is
+      added to every shape (~12% quicker than one each). All API, ~2.5-4 s
+      per 20k curves. A random / id per strand was dropped: one more
+      attribute cost ~1 s per 20k, and Houdini has @primnum and the root's
+      P (bunch blades share a root, so a root hash repeated anyway).
       Scatter: `_sc_strands` in `_sc_write` (the mesh part is deleted,
       rewritten only when the grass changed, `_SC_WROTE` key + "#curves");
       `_sc_layer_core` drops `curves`, so switching never regrows;

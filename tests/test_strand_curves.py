@@ -81,11 +81,11 @@ def main():
     t = time.time()
     st = tb["strand_spines"](g)
     dt = time.time() - t
-    rows = sum(len(line) for line, _ in st)
+    rows = sum(len(x[0]) for x in st)
     # each blade's rows: its two ribbon points, in order: the strand point is their middle
     a = 0
     worst = 0.0
-    for line, wide in st:
+    for line, wide, _ in st:
         for k, p in enumerate(line):
             l_, r_ = g[0][a + 2 * k], g[0][a + 2 * k + 1]
             worst = max(worst, max(abs(p[j] - 0.5 * (l_[j] + r_[j])) for j in range(3)),
@@ -127,6 +127,45 @@ def main():
           max(abs(cvs[k][j] - st[0][0][k][j]) for k in range(len(cvs)) for j in range(3)) < 1e-6 and
           len(width) == len(cvs) and abs(width[0] - st[0][1][0]) < 1e-9,
           "%d CVs, width %.4f" % (len(cvs), width[0]))
+    # N across the strip: unit, square to the curve (central difference, as it's worked out)
+    worst = 0.0
+    for line, wide, nrm in st:
+        last = len(line) - 1
+        for k in range(last + 1):
+            t = [line[min(last, k + 1)][j] - line[max(0, k - 1)][j] for j in range(3)]
+            lt = sum(x * x for x in t) ** 0.5
+            ln = sum(x * x for x in nrm[k]) ** 0.5
+            if lt > 1e-9:
+                worst = max(worst, abs(sum(a * b for a, b in zip(t, nrm[k]))) / lt, abs(ln - 1.0))
+    up = sum(1 for _, _, nrm in st if abs(nrm[0][1]) > 0.5) / float(len(st))
+    check("... a normal per point: unit, square to the blade, facing up / down on most (blades lie flat-ish)",
+          worst < 1e-6 and up > 0.5, "worst %.1e, %.0f%% face up or down at the root" % (worst, 100 * up))
+    grp = tb["strand_groups"](root)[lid + "/grass"]
+    s0 = shapes[0]
+    n0 = cmds.getAttr(s0 + ".N")
+    check("... on each curve shape: N per CV", len(n0) == len(cvs))
+    import tempfile
+    abc = os.path.join(tempfile.gettempdir(), "unlok_grass_curves.abc").replace("\\", "/")  # (no spaces)
+    try:
+        cmds.loadPlugin("AbcExport", quiet=True)
+        cmds.loadPlugin("AbcImport", quiet=True)
+        t = time.time()
+        cmds.AbcExport(j="-frameRange 1 1 -attr N -root %s -file %s" % (grp, abc))
+        dt_abc = time.time() - t
+        had = set(cmds.ls(type="nurbsCurve", long=True) or [])
+        tops = set(cmds.ls(assemblies=True))
+        cmds.AbcImport(abc, mode="import")
+        back = [c for c in cmds.ls(type="nurbsCurve", long=True) or [] if c not in had]
+        b0 = back[0] if back else ""
+        attrs = cmds.listAttr(b0, userDefined=True) or [] if b0 else []
+        wb = cmds.getAttr(b0 + ".width") if cmds.attributeQuery("width", node=b0, exists=True) else None
+        nb = cmds.getAttr(b0 + ".N") if cmds.attributeQuery("N", node=b0, exists=True) else None
+        check("Alembic: AbcExport -attr N writes every curve with its width and N",
+              len(back) == len(shapes) and wb is not None and nb is not None,
+              "%d curves back, attrs on one: %s, export %.2f s" % (len(back), attrs, dt_abc))
+        cmds.delete([n for n in cmds.ls(assemblies=True) if n not in tops])
+    except Exception as exc:
+        check("Alembic round trip", False, str(exc))
     tb["sc_update"](root, lid, {"curves": False})
     parts = tb["sc_parts"](root)
     after = mesh_pts(list(parts.values())[0]) if parts else []

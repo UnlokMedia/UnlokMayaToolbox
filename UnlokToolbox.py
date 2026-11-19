@@ -19335,9 +19335,10 @@ def strand_spines(mesh):
     """The strands in a mesh of strips (grass blades, straw planes and
     bundles, leaf panels, palm leaflets): each laid out as rows of w points
     one after another (w from its first quad), maybe a tip point (a fan of
-    triangles) and an underside after it. [(points, widths)]: each row's
-    middle and twice its farthest point from it (0 at a tip). A piece that
-    isn't such a strip gives nothing."""
+    triangles) and an underside after it. [(points, widths, normals)],
+    root first: each row's middle, twice its farthest point from it (0 at a
+    tip) and the strip's face normal there (across x along: the way a flat
+    ribbon faces). A piece that isn't such a strip gives nothing."""
     pts, counts, conn = mesh[0], mesh[1], mesh[2]
     out = []
     nf = len(counts)
@@ -19367,7 +19368,8 @@ def strand_spines(mesh):
         end = tip if tip is not None else hi + 1
         if w < 1 or (end - lo) % w or (end - lo) // w < 2:
             continue
-        line, wide = [], []
+        line, wide, sides = [], [], []
+        h = max(1, w // 2)  # across: a ribbon's two edges, a curled leaf's edge to middle, a tube's diameter
         for a in range(lo, end, w):
             row = pts[a:a + w]
             cx = sum(p[0] for p in row) / w
@@ -19375,10 +19377,17 @@ def strand_spines(mesh):
             cz = sum(p[2] for p in row) / w
             line.append((cx, cy, cz))
             wide.append(2.0 * math.sqrt(max((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2 for p in row)))
+            sides.append(_rl_sub(row[h], row[0]))
         if tip is not None:
             line.append(tuple(pts[tip]))
             wide.append(0.0)
-        out.append((line, wide))
+            sides.append(sides[-1])
+        last = len(line) - 1
+        nrm = []
+        for k in range(last + 1):
+            t = _rl_sub(line[min(last, k + 1)], line[max(0, k - 1)])
+            nrm.append(_rl_norm(_rl_cross(sides[k], t), nrm[-1] if nrm else (0.0, 1.0, 0.0)))
+        out.append((line, wide, nrm))
     return out
 
 
@@ -19393,9 +19402,14 @@ def strand_groups(parent):
 
 def strand_curves(parent, name, strands, tag, old=None):
     """A curves group under parent (in place of old): one linear curve
-    shape per strand (world points), each with a "width" per point, the
-    group tagged (STRAND_TAG). API, outside the undo queue like the meshes.
-    Returns the group."""
+    shape per strand (world points, root first: CV 0 is where it's
+    pinned), each with per point "width" and "N" (the strip's face normal:
+    how a ribbon faces; Houdini orients ribbons by it), the group tagged
+    (STRAND_TAG). AbcExport writes width itself, N with -attr N (a point
+    attribute in Houdini). An id or random per strand is Houdini's own
+    (@primnum, the root's P): one more attribute here cost ~1 s per 20k
+    curves. API, outside the undo queue like the meshes. Returns the
+    group."""
     if old and cmds.objExists(old):
         cmds.delete(old)
     pdag = get_dag_path(parent)
@@ -19414,16 +19428,22 @@ def strand_curves(parent, name, strands, tag, old=None):
     stem = dn.name() + "Shape"
     fn = om.MFnNurbsCurve()
     dad = om.MFnDoubleArrayData()
-    for k, (line, wide) in enumerate(strands):
+    vad = om.MFnVectorArrayData()
+    wa = ta.create("width", "width", om.MFnData.kDoubleArray)  # one definition added to every shape (~12% quicker)
+    na = ta.create("N", "N", om.MFnData.kVectorArray)
+    for k, (line, wide, nrm) in enumerate(strands):
         n = len(line)
         pa = om.MPointArray(line) if same else om.MPointArray([om.MPoint(p[0], p[1], p[2]) * inv for p in line])
+        nv = om.MVectorArray([om.MVector(*v) for v in nrm]) if same else \
+            om.MVectorArray([(om.MVector(*v) * inv).normal() for v in nrm])
         obj = fn.create(pa, om.MDoubleArray([float(x) for x in range(n)]), 1, om.MFnNurbsCurve.kOpen, False, False,
                         xf)
         dn.setObject(obj)
         dn.setName("%s%d" % (stem, k + 1))
-        wa = ta.create("width", "width", om.MFnData.kDoubleArray)
         dn.addAttribute(wa)
-        dn.findPlug(wa, False).setMObject(dad.create(om.MDoubleArray(wide)))
+        dn.findPlug("width", False).setMObject(dad.create(om.MDoubleArray(wide)))
+        dn.addAttribute(na)
+        dn.findPlug("N", False).setMObject(vad.create(nv))
     return group
 
 
